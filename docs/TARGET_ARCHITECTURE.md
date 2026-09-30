@@ -155,9 +155,8 @@ Skill не должен зависеть от конкретного Python-кл
 | `temperature`, `max_tokens` для SQL-генерации | `skills.<name>.llm` (или `skills.<name>.generation`) | Execution policy skill'а (доменное решение) |
 | Модель / провайдер LLM | `config.json` (`agents.defaults.*`) | Выбор провайдера — это свойство инфраструктуры, не домена skill'а |
 | Ollama URL / `auth_token` для эмбеддера | hardcoded в `cache_provider_impl` + `EMBED_TOKEN` env | Embedding service — общий runtime, не домен skill'а (см. Phase Resource Model Refactoring) |
-| DuckDB snapshot path | `table_registry.snapshot_path()` | Cache path — общий runtime |
+| Кэш: путь к файлу | `gateway.cache.local_path` | Cache path — общий runtime |
 | FAISS root / backend / storage_table | `gateway.vector.index.*` | FAISS-инфраструктура — общий runtime |
-| PG → DuckDB sync интервал | `gateway.sync.*` | Sync — общий runtime |
 | Список таблиц skill'а | `skills.<name>.tables[]` | Какие PG-ресурсы — часть домена skill'а |
 | Список vector-индексов skill'а | `skills.<name>.vector_indexes[]` | Какие индексы использует skill (только имена) |
 | Параметры CLI навыка (`default_mode`, `timeout_sec`) | `skills.<name>.cli` | Специфика CLI-интерфейса skill'а |
@@ -620,18 +619,17 @@ DuckDB не должен становиться authoritative database.
 
 ---
 
-# 15. AuditSync
+# 15. Загрузка кэша
 
-`PgDuckDbSyncService` (ранее `AuditSyncService`) является
-domain/infrastructure integration component.
+`CacheLoadService` является domain/infrastructure integration component.
 
 Целевая цепочка:
 
 ```mermaid
 flowchart LR
-    PG[("PostgreSQL")] --> SYNC["PgDuckDbSyncService - синхронизация"]
-    SYNC --> SNAP["DuckDB snapshot / cache.duckdb"]
-    SYNC --> VIDX["FAISS индекс (build_vectors.py)"]
+    PG[("PostgreSQL")] --> SYNC["CacheLoadService - разовая загрузка"]
+    SYNC --> SNAP["локальный снимок / cache.duckdb"]
+    SNAP --> VIDX["FAISS индекс (build_vectors.py)"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class SYNC core
@@ -644,7 +642,7 @@ flowchart LR
 
 Он не должен быть Skill.
 
-Он должен работать как самостоятельная service/background capability.
+Он — самостоятельный компонент composition root, вызываемый синхронно на старте.
 
 ---
 

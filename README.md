@@ -202,7 +202,7 @@ cross-user выдачи; без identity-store возвращается `missing
 sync-а падал с `IO Error: Could not set lock on file cache.duckdb.tmp:
 Conflicting lock is held in PID 0` (DuckDB `ATTACH` берёт эксклюзивный
 `flock`, который NFS `lockd` не отдаёт). Теперь:
-- **единый механизм** `resolve_publish_path()` — вызывается и из
+- **единый механизм** `resolve_cache_path()` — вызывается и из
   gateway, и из CLI/skill/vector_index_service; путь записи и путь
   чтения **всегда совпадают** (`b1d2e21`, fix от расхождения после
   коммита `85cad2a`);

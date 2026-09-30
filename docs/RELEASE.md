@@ -63,7 +63,7 @@ git diff --check
 **Полный аудит** документации на ссылки, которые могли устареть:
 
 - пути к файлам (`workspace/data_store/duckdb/cache.duckdb`, `~/.cache/...`, `data_store/...`);
-- имена секций в `project.json` (`gateway.cache.local_path`, `gateway.sync.*`);
+- имена секций в `project.json` (`gateway.cache.local_path`);
 - имена CLI-флагов, опций конфига, переменных окружения;
 - ссылки на коммиты (`605660b`) и PR.
 

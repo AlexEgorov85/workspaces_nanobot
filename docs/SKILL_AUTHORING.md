@@ -97,7 +97,7 @@ workspace/skills/<skill_name>/
 ├── predefined/               # пакет режима "predefined" (если есть)
 │   ├── __init__.py           # public API (run, list_scripts, ScriptDefinition, ...)
 │   ├── builder.py            # сборка SQL из шаблона (DynamicQueryBuilder)
-│   ├── mode.py               # режим (run/list_*/DuckDBServiceProtocol)
+│   ├── mode.py               # режим (run/list_*/CacheQueryService)
 │   ├── models.py             # ScriptDefinition / ParamDefinition
 │   ├── scripts.py            # реестр SQL (Python-литералы)
 │   └── validator.py          # валидация параметров
@@ -327,7 +327,7 @@ LLM-генерация SELECT», а не «работа с аудитами».
 |---|---|
 | `embedding.*` | — (удалён; hardcoded в `cache_provider_impl`) |
 | `cache.*` (был мёртвым) | — (удалён) |
-| `sync.*` | → `gateway.sync.*` |
+| `sync.*` | **удалена** (поллинга и пересинхронизации больше нет) |
 | `vector_index.*` | → `gateway.vector.index.*` |
 | `vector_indexes[].source` | → `gateway.vector.index.indexes.<name>.table` |
 
@@ -490,10 +490,11 @@ Tool **не импортирует** Skill (TARGET §22.1,
 
 ### 7.1.1 Два пути к одной инфраструктуре
 
-Кэш и векторный поиск живут в **общем runtime** (`lib/services/cache_provider_impl.py`):
-DuckDB-снапшот (по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb`,
-см. `_resolve_publish_path()`) синхронизируется с PG (`PgDuckDbSyncService`),
-FAISS-индексы строятся на его основе.
+Кэш и векторный поиск живут в **общем runtime** (`lib/services/cache_provider.py`):
+локальный снимок (по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb`,
+см. `resolve_cache_path()`) наполняется разовой загрузкой при старте
+(`CacheLoadService`), FAISS-индексы строятся на его основе и живут в памяти.
+Снимок актуален на момент загрузки; обновляется перезапуском процесса.
 
 К этому runtime подключаются **две независимые поверхности**:
 

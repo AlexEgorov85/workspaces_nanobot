@@ -7,11 +7,11 @@
 
 ## Зачем это нужно
 
-Каждый skill читает свои данные через общий DuckDB-снапшот
-(`resolve_publish_path()`: `project.json::gateway.cache.local_path` либо
-`~/.cache/nanobot/duckdb/cache.duckdb`). Чтобы snapshot содержал нужные
-таблицы, sync-слой (`PgDuckDbSyncService` + `DuckDbCacheStore`) должен знать,
-что именно синхронизировать. Раньше это знание было разбросано:
+Каждый skill читает свои данные через общий локальный снимок кеша
+(`resolve_cache_path()`: `project.json::gateway.cache.local_path` либо
+`~/.cache/nanobot/duckdb/cache.duckdb`). Чтобы снимок содержал нужные
+таблицы, загрузчик (`CacheLoadService`) должен знать,
+что именно грузить. Раньше это знание было разбросано:
 
 - по плоским полям skill'а (`db_tables`, `db_additional_tables`, `mode_vector_*`,
   `track_column_overrides`);
@@ -77,13 +77,16 @@ Resource Model решает это так: skill — это **деклараци
 
 ### TableResource
 
-Описание одной PostgreSQL-таблицы, которую skill хочет видеть в DuckDB-кэше.
-Ресурс ничего не открывает, не выполняет и не знает о DuckDB — это DTO,
-которым sync-слой пользуется как входными данными.
+Описание одной PostgreSQL-таблицы, которую skill хочет видеть в локальном кеше.
+Ресурс ничего не открывает, не выполняет и не знает о хранилище — это DTO,
+которым загрузка пользуется как входными данными.
 
 - `name` — полное имя таблицы в формате `schema.table` (всегда fully qualified).
 - `tracking_column` — колонка для инкрементального отслеживания изменений.
-  Если не задана, sync-слой использует generic-дефолт `updated_at`.
+  Если не задана, загрузка использует generic-дефолт `updated_at`.
+  С момента перехода к снимку колонка ни на что не влияет: загрузка
+  безусловно берёт таблицу целиком, и удалённые в PG строки корректно
+  исчезают из следующего снимка. Поле сохранено как DTO-описание источника.
 - `label` — опциональная opaque-метка. Если задана, таблица исключается
   из описания схемы для LLM (см. `skill_config.get_db_tables()`) и
   доступна только через `TableRegistry.resources_by_label()`. Типичный
@@ -409,24 +412,24 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 3. Если ресурс не найден или это `TableResource` без `tracking_column` —
    вернуть `updated_at` как generic-дефолт.
 
-## Контроль синхронизации: gateway.sync.*
+## Контроль загрузки
 
-Все sync-параметры (`poll_interval_sec`, `full_resync_every`,
-`max_queue_size`, `reconnect_backoff_sec`, `reconnect_backoff_max_sec`)
-живут в `gateway.sync.*` (глобальные, не per-skill).
-Определены в `GatewaySettings.sync` (`lib/core/project_settings.py`).
+Секция `gateway.sync.*` **удалена** вместе с фоновой синхронизацией: поллинга,
+дельт и очереди задач больше нет, настраивать нечего. Загрузка разовая и
+синхронная; единственный параметр, влияющий на неё, — `channels.postgres.pool.max_conn`,
+который ограничивает число потоков загрузки.
 
 Наблюдаемость:
 
-- `PgDuckDbSyncService.get_stats()` — `polls`, `full_resyncs`, `reconnects`,
-  `errors`, размер очереди;
+- `CacheLoadService.get_stats()` — `tables`, `loaded_at`, `loaded_ok`, `errors`,
+  `missing_tables`, `rows_total`, `max_workers`;
 - отключить skill без удаления конфига: `"enabled": false` в
   корне секции `skills.<name>`.
 
 ## Где лежит снапшот
 
 Единый файл для всех skill'ов; путь вычисляется через **единую**
-`resolve_publish_path()` (`lib/core/application_context.py`):
+`resolve_cache_path()` (`lib/core/application_context.py`):
 
   1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
   2. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`
@@ -488,4 +491,4 @@ Legacy `TableRegistry.snapshot_path(workspace_path)` через
   `build_resources_for_skill`.
 - `lib/core/application_context.py` — `_auto_register_skills`.
 - `docs/skill-tool-architecture.md` — контракт Skill ↔ Tool.
-- `docs/DATABASE.md` — § PgDuckDbSyncService / DuckDbCacheStore и § «Конфигурация навыка».
+- `docs/DATABASE.md` — § «Жизненный цикл кеша» и § «Конфигурация навыка».

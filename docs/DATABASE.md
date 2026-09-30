@@ -5,45 +5,57 @@
 
 ## 🔌 Универсальный слой данных lib/services
 
-**Интерфейс** — `lib/services/cache_provider.py`:
+**Интерфейс** — `lib/services/cache_provider.py`, три роли в одном модуле:
 
-- `CacheProvider` (ABC): `is_ready()`, `refresh()`, `check_stale()`,
-  `preload_indexes()`, `search_vector()`, `query_sql()`, `explain()`,
-  `get_schema()`, `close()`.
+- `CacheProvider` (ABC) — **роль чтения**: `is_ready()`, `preload_indexes()`,
+  `search_vector()`, `query_sql()`, `explain()`, `get_schema()`, `close()`.
+  Ни одного write-метода здесь нет: потребитель не пишет в кэш.
+- `CacheIngestion` (ABC) — **роль записи**: `upsert_records()`,
+  `replace_records()`, `ensure_schema()`. Её получает только
+  `CacheLoadService` — единственный writer, он же владелец файла на
+  время загрузки.
+- `CacheStore(CacheProvider, CacheIngestion)` — полный контракт единственного
+  хранилища; именно он лежит в `ApplicationContext.cache_provider` и его
+  возвращает точка создания. Наружу (DI project tools, skill-CLI) отдаётся
+  `CacheProvider`, то есть только чтение.
 - `SearchResult` (dataclass): `content`, `score`, `source`, `table`, `pk_value`,
   `chunk`, `matched_chunks`, `row`.
 
-**Реализация** — `lib/services/cache_provider_impl.py`:
+**Реализация** — `lib/services/duckdb_cache_store.py`:
 
-- `PostgresDuckDbProvider` — единый провайдер: DuckDB-кеш + векторные индексы.
-  Конструктор принимает только конфигурацию (схему, таблицы, пути, модель
-  эмбеддинга) — без привязки к «аудиту».
-- Модульные функции: `get_embedding()` (Ollama `/api/embed`),
-  `load_cache_from_postgres(cache_path, db_config)`, `check_cache_stale(...)`,
-  `read_vector_index_config(cfg)` (конфиг индексов — из
-  `project.json::gateway.vector.index.indexes`, PG-реестр не читается),
-  `read_embedding_config()` (параметры эмбеддинга захардкожены, токен из
-  окружения `EMBED_TOKEN`), `build_cache_provider(cfg, base_dir)` (фабрика
-  провайдера из конфиг-секции).
+- `DuckDbCacheStore` — **единственная** concrete-реализация `CacheStore`:
+  DuckDB-файл кэша + векторные индексы в памяти. Создаётся только через
+  `open_cache_provider(*, mode)`; конструктор и `connect()` напрямую
+  оставлены для тестов реализации, не для production-кода.
+- Неудачное открытие файла — всегда исключение: `CacheBusyError` (файл держит
+  другой процесс, в сообщении указан PID держателя), `CacheOpenError`
+  (любая другая причина), `UnsupportedFilesystemError` (network FS).
+  «Полуготовый» провайдер с `is_ready() == False` наружу не возвращается.
+- Процесс **не удерживает** файл между операциями: каждый read-метод открывает
+  соединение на время вызова и закрывает сразу после. Writer'ом (а он
+  блокирует и остальных) является только загрузка.
+- Репликация PG → кэш в интерфейсе **не** участвует: её владеет
+  `CacheLoadService`, который и вызывает роли записи.
+
+**Общие помощники** — `lib/services/cache_provider_impl.py` (не реализация
+интерфейса, а то, что нужно и реализации, и потребителям конфигурации):
+
+- `get_embedding()` (Ollama `/api/embed`), `read_embedding_config()`,
+  `read_embedding_defaults()`, `read_vector_index_config()` (конфиг индексов —
+  из `project.json::gateway.vector.index.indexes`, PG-реестр не читается),
+  `list_runtime_vector_indexes(provider=...)` — читает состав runtime-индексов
+  **через интерфейс** провайдера и сама файл кэша не открывает.
 - Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pyarrow`, `httpx`)
-  импортируются **лениво** внутри методов — импорт модуля остаётся лёгким,
+  импортируются **лениво** внутри функций — импорт модуля остаётся лёгким,
   и gateway может управлять жизненным циклом без побочных эффектов.
-- Если передан `dsn` — провайдер сам вызывает `utils.db.configure(dsn)`
-  (идемпотентно), поэтому пригоден для использования автономно.
 
-**Единый интерфейс запросов к кешу.** `CacheProvider` (ABC в
-`lib/services/cache_provider.py`) задаёт контракт
-`get_schema / query_sql / explain / search_vector / preload_indexes / refresh /
-check_stale / is_ready / close`; его реализуют `PostgresDuckDbProvider`
-(`cache_provider_impl.py`) и `DuckDbCacheStore` (`duckdb_cache_store.py`).
-Прямого PostgreSQL-бэкенда вида `Database`/`QueryBackend` больше нет: CLI-режимы
-`predefined`/`generated_sql` работают только по DuckDB-снимку, опубликованному
-gateway (`FileNotFoundError`, если файла кеша нет).
-
-**Фабрика провайдера** — `lib/services/cache_provider_impl.build_cache_provider(cfg, base_dir)`
-собирает провайдера из конфиг-секции (`gateway.vector.*`). Навык делегирует ей
-через `scripts/skill_config.build_cache_provider()`, тот же набор настроек
-использует индексатор `tools/build_vectors.py`.
+**Точка создания провайдера** — `lib/services/cache_provider.py::open_cache_provider(*, mode)`,
+единственная в рантайме. Она сама резолвит путь (`resolve_cache_path()`),
+настраивает экземпляр и открывает файл; вызывающий код получает `CacheStore`
+и не знает, какая реализация стоит за интерфейсом. Навык делегирует ей через
+`lib/core/skill_config.build_cache_provider()` (skill-side —
+`scripts/skill_config.build_cache_provider()`), тот же путь использует
+`tools/build_vectors.py`.
 
 ## 🔌 Единый пул соединений PostgreSQL (`workspace/utils/db.py`)
 
@@ -121,11 +133,12 @@ gateway (`FileNotFoundError`, если файла кеша нет).
   секцию и применяет через `set_pool_config()`; `ctx.start()/stop()` вызывают
   `utils.db.start()/shutdown()`.
 
-**Кто ходит в БД через пул:** `DbLoggingService`, `PgDuckDbSyncService`,
-`PGSessionManager`, `PostgresChannel`, `session_storage`, `streamlit_app.py`,
-инструменты и `cache_provider_impl` (bulk-load снимает соединение пула на всё
-время копирования). Ни один сервис-поток не держит собственного psycopg2-
-соединения — соединение выдаёт пул на время запроса/транзакции.
+**Кто ходит в БД через пул:** `DbLoggingService`, `CacheLoadService` (только на
+время стартовой загрузки), `PGSessionManager`, `PostgresChannel`,
+`session_storage`, `streamlit_app.py` и инструменты. Ни один сервис-поток не
+держит собственного psycopg2-соединения — соединение выдаёт пул на время
+запроса/транзакции. Чтение кэша в рабочем режиме пул **не занимает вовсе**:
+это и есть смысл кэша.
 
 **Санитизация NUL-байта.** PostgreSQL не принимает NUL (0x00) в text-литералах,
 а psycopg2 не любит литеральные escape `\u0000`..`\u0003` — такой контент
@@ -156,7 +169,8 @@ gateway (`FileNotFoundError`, если файла кеша нет).
 | `gateway.vector.index.storage_table` | Таблица сырых эмбеддингов; регистрируется через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` | `oarb.audit_vectors` |
 | `gateway.vector.index.default_root` | Каталог FAISS-индексов (в runtime не персистится — FAISS в памяти) | `data_store/vectors` |
 | `gateway.vector.index.indexes.<name>` | Декларативный конфиг индексов (`table`, `pk`, `source_table`, `content_columns`, `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`, `enabled`) — единственный источник; PG-реестр не читается | `audits_index`, `violations_index`, `audit_reports_index` |
-| `gateway.sync.poll_interval_sec` / `full_resync_every` | Интервал инкрементального полла / полная пересинхронизация | `14400` / `10` |
+| `gateway.sync.*` | **удалена** — поллинга и пересинхронизации больше нет | — |
+| `gateway.cache.local_path` | Каталог файла кэша (имя `cache.duckdb` добавляется внутри `resolve_cache_path()`) | `~/.cache/nanobot/duckdb` |
 
 Декларация — единый источник истины. `ApplicationContext._auto_register_skills` (см. `lib/core/application_context.py`) читает эту секцию при старте и автоматически создаёт `TableResource`/`VectorResource` в `table_registry`. Никакого `register.py` не требуется. Для добавления нового skill достаточно добавить секцию `skills.<name>` в `project.json`. DoD-проверка — `tests/test_resource_universality.py`.
 
@@ -175,37 +189,48 @@ DSN подключается только через `channels.postgres.dsn` в 
 
 ## 🔄 Жизненный цикл кеша
 
-**Владелец файла кеша навыка — `gateway.py`.** Навык (CLI) про создание и
-обновление кеша больше не знает: `--force` удалён.
+**Кеш — снимок, а не зеркало.** Он наполняется один раз при старте процесса и
+больше не обращается к PostgreSQL. Дельт, фонового поллинга, очереди задач и
+механизма координации писателей не существует. Свежесть обеспечивается
+перезапуском процесса, а не фоном.
 
-Пара сервисов строится в `ApplicationContext._make_sync_services`
-(см. `lib/core/application_context.py:596`) при старте gateway (возвращает
-`(None, None)`, если реестр таблиц пуст или нет DSN; сконфигурированные
-`gateway.sync.*` лишь управляют параметрами, а не фактом запуска):
+Пара сервисов строится в `ApplicationContext._init_cache_runtime`
+(`lib/core/application_context.py`) внутри `create()` — там же, где поднимается
+пул и проверяется схема. Возвращает `(None, None)`, если реестр таблиц пуст или
+нет DSN.
 
-- **`PgDuckDbSyncService`** — единственный владелец подключения к PostgreSQL
-  (worker-поток). При старте выполняет полную загрузку таблиц, далее каждые
-  `gateway.sync.poll_interval_sec` (по умолч. 14400 с) инкрементально опрашивает таблицы по
-  track-колонке (`updated_at`; для `audit_vectors` — `id`). Новые/изменённые
-  строки передаёт в callback `on_new_records` → `DuckDbCacheStore.upsert_records`.
-  Структуру таблиц собирает из PG `information_schema` (+ `pg_description`):
-  колонки, типы, NOT NULL, комментарии → callback `on_schema` →
-  `DuckDbCacheStore.ensure_schema` (создание пустых таблиц, типы из PG).
-  Каждые `full_resync_every` циклов (по умолч. 10) делает полную перезагрузку
-  таблицы через `on_replace_records` → `DuckDbCacheStore.replace_records`
-  (сверка удалённых строк; курсор поллинга не откатывается).
-- **`DuckDbCacheStore`** — живое зеркало в чисто in-memory DuckDB
-  (`cache_path=""`) + FAISS-индексы. `ensure_schema()` создаёт таблицы с типами
-  из PG и сохраняет комментарии + исходные PG-типы в мета-таблицу
-  `__nanobot_meta.__schema_meta` (входит в снимок). `get_schema()` возвращает
-  исходные PG-типы и комментарии (без них — DuckDB-тип из information_schema).
-  `publish()` атомарно записывает снимок таблиц (ATTACH во временный файл →
-  `os.replace`) в `publish_path`, который вычисляется через
-  `resolve_publish_path()` (`lib/core/application_context.py`) —
-  **единый механизм**, общий для gateway и CLI/skill:
+- **`CacheLoadService`** (`lib/services/cache_load_service.py`) — единственный
+  владелец подключения к PostgreSQL и единственный writer. Держит
+  `CacheStore` напрямую (без колбэков — колбэки были лишним посредником между
+  единственным писателем и его же хранилищем), выполняет **синхронную** загрузку
+  и не порождает потоков. Для каждой таблицы из реестра:
+  - `_fetch_schema()` — структура из PG `information_schema.columns` +
+    `pg_description` (колонки, типы, NOT NULL, комментарии);
+  - `store.ensure_schema()` — создаёт таблицу **с типами из PG** (включая пустые);
+  - `_fetch_all()` → `store.replace_records()` — таблица пишется целиком.
+
+  Именно `replace_records`, а не `upsert_records`: батч — полный снимок
+  таблицы, поэтому строки, удалённые в PostgreSQL, корректно исчезают, а не
+  остаются в кэше навсегда. `upsert_records` остаётся примитивом хранилища и
+  из рантайм-пути не вызывается.
+
+  Число потоков загрузки ограничено `channels.postgres.pool.max_conn`: каждый
+  поток берёт слот общего пула на время запроса, поэтому больше потоков, чем
+  слотов, означало бы драку за слоты. Ошибка соединения — `CacheLoadError`
+  (громко); отсутствующая в PG таблица — запись в `missing_tables` без
+  исключения.
+- **`DuckDbCacheStore`** — DuckDB-файл кэша + FAISS-индексы в памяти.
+  `ensure_schema()` создаёт таблицы с типами из PG и сохраняет комментарии +
+  исходные PG-типы в мета-таблицу `__nanobot_meta.__schema_meta` (входит в
+  снимок). `get_schema()` возвращает исходные PG-типы и комментарии (без них —
+  DuckDB-тип из information_schema).
+
+  Путь файла вычисляется через `resolve_cache_path()`
+  (`lib/core/application_context.py`) — **единый механизм**, общий для runtime и
+  навыка:
 
   1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
-  2. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`.
+  2. **default** → `~/.cache/nanobot/duckdb/cache.duckdb`.
      DuckDB ATTACH flock не работает на NFS, поэтому default — локальная ФС,
      чтобы не падать с «Conflicting lock is held in PID 0».
 
@@ -213,129 +238,108 @@ DSN подключается только через `channels.postgres.dsn` в 
   `<workspace>/data_store/duckdb/` через `gateway.cache.use_workspace_path`
   удалён (это была compat-ветка, которая расходилась с CLI).
 
-  Без изменений (`_dirty` = False) файл не перезаписывается; если снимок занят читателем
-  (CLI) — публикация откладывается до следующего цикла, ошибка не теряет данные.
+**Файл не удерживается.** Загрузка открывает его на запись, пишет и **закрывает**
+в `finally`. Затем провайдер на всё время жизни процесса открывает файл только на
+время конкретной операции (`query_sql`, `search_vector`, `get_schema`) и закрывает
+сразу после. Между запросами процесс файла не касается, поэтому файл физически
+свободен всегда — в том числе для навыка, запущенного в отдельном процессе.
 
-Схема в `gateway.py::main()` (callbacks между сервисами — `main()` 77-124):
+Схема в `gateway.py::main()`:
 
 ```mermaid
 flowchart LR
-    BUILD["Инициализация сервисов кеша"] --> SYNC["sync_service"]
-    SYNC -->|upsert / replace / schema| STORE["DuckDbCacheStore"]
-    SYNC -->|publish| DUCK[("cache.duckdb")]
-    SYNC -->|preload| FAISS["FAISS в память"]
+    CREATE["ApplicationContext.create()"] --> LOAD["CacheLoadService.load()"]
+    LOAD -->|ensure_schema + upsert, синхронно| RW["CacheStore (READ_WRITE)"]
+    RW -->|close| FREE[("cache.duckdb свободен")]
+    FREE -->|preload, один раз| FAISS["FAISS в память"]
+    FAISS --> PROV["CacheProvider (READ_ONLY)"]
+    PROV -->|открытие на время операции| QUERY["query_sql / search_vector"]
+    QUERY -->|close| FREE
+    PROV --> SKILL["навык (отдельный процесс)"]
+    SKILL -->|открытие на время операции| FREE
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
-    class BUILD,SYNC,STORE core
-    class DUCK,FAISS infra
+    class CREATE,LOAD,RW core
+    class FREE,FAISS,PROV,QUERY,SKILL infra
 ```
 
 **Правило одного писателя.** DuckDB допускает только один процесс-писатель на
-файл, поэтому gateway никогда не открывает целевой файл на запись: он пишет во
-временный файл и атомарно подменяет его `os.replace()`. Навык (CLI) открывает
-опубликованный снимок только на чтение и видит целостные данные в любой момент.
+файл, поэтому запись идёт только на стадии загрузки в том же процессе, который
+и читает файл. Плата за решение: DuckDB блокирует **и читателей**, пока держит
+writer; поскольку writer'ом является только загрузка, а она завершается до
+того, как процесс начнёт читать, конкуренции не возникает. Навык открывает файл
+только на чтение и видит целостные данные в любой момент.
 
-**cli_agent.py** по-прежнему содержит унаследованную фоновую загрузку/свежесть
-кеша (`load_cache_from_postgres` / `check_cache_stale`) как резерв; основной
-владелец и источник снимка — `gateway.py`.
+### 🔧 Управление загрузкой
 
-### 🔧 Управление синхронизацией
+#### Полный цикл (что происходит по шагам)
 
-#### Полный цикл обновления данных (что происходит по шагам)
+1. **Старт** (`gateway.py::main()`): `ApplicationContext.create()` читает
+   секции `skills.*` и `gateway.vector` из `project.json`, регистрирует ресурсы
+   в `TableRegistry`, поднимает пул и проверяет схему, затем
+   `_init_cache_runtime()`.
+2. **Стадия 1 — запись.** `open_cache_provider(mode=READ_WRITE)`;
+   `CacheLoadService.load()` синхронно тянет все зарегистрированные таблицы
+   (таблицы скиллов + `gateway.vector.index.storage_table`); в `finally` файл
+   закрывается. Слоты пула освобождаются сразу после возврата.
+3. **Стадия 2 — чтение.** `open_cache_provider(mode=READ_ONLY)` возвращает
+   провайдера, который держит в памяти прогретые FAISS-индексы, но не держит
+   файл.
+4. **Ошибка соединения** поднимает `CacheLoadError` и прерывает старт: молча
+   работать на пустом кэше хуже, чем не стартовать.
+5. **Завершение**: при остановке провайдер закрывается. Перезагрузки кэша без
+   перезапуска процесса нет.
 
-1. **Старт gateway** (`gateway.py::main()`): `ApplicationContext.create()` читает
-   секции `skills.*` и `gateway.vector`/`gateway.sync` из `project.json`, затем
-   `_make_sync_services()` (application_context.py:596) строит сервисы.
-   Сервисы создаются, только если задан DSN и в `TableRegistry` зарегистрированы
-   таблицы (skills + infra, напр. `gateway.vector.index.storage_table`); иначе —
-   `(None, None)` и синхронизация не запускается.
-2. **Initial load**: `PgDuckDbSyncService._do_initial_load()` для каждой таблицы из
-   `skills.audit_analyzer.tables` (+ таблица векторов `gateway.vector.index.storage_table`) делает:
-   - `_fetch_schema()` — запрос структуры из PG `information_schema.columns`
-     + `pg_description` (колонки, типы, NOT NULL, комментарии таблиц/колонок);
-   - `_ensure_table_schema()` → колбека `on_schema` → `store.ensure_schema()` —
-     создаёт таблицу в in-memory DuckDB **с типами из PG** (включая пустые);
-   - `_fetch_all()` → `SELECT *` → колбека `on_new_records` → `store.upsert_records()`.
-3. **Поллинг**: worker-поток каждые `gateway.sync.poll_interval_sec` вызывает
-   `_poll_table()`: `SELECT * WHERE "<track>" > <последняя_метка>`. Track-колонка:
-   `updated_at` (доменные таблицы) или `id` (`audit_vectors`). Новые/изменённые
-   строки → `upsert_records()` (upsert по `id`: DELETE + INSERT).
-4. **Публикация снимка**: после initial load и каждого цикла поллинга
-   `_fire_sync_callback()` → `store.publish()` — атомарный снимок (ATTACH во
-   временный файл → `os.replace`) в файл кеша навыка. `publish()` — no-op, если
-   данных не менялось (`_dirty = False`) или `publish_path` пуст.
-5. **Полная пересинхронизация** (сверка удалений): каждые `full_resync_every`
-   циклов поллинга `_poll_table()` вместо инкрементального запроса делает
-   `_fetch_all()` + `_dispatch_replace()` → `store.replace_records()` — таблица
-   перезаписывается целиком (структура и типы сохраняются), удалённые в PG
-   строки исчезают. Курсор поллинга не откатывается (новое значение только если
-   больше текущего).
-6. **Завершение**: при остановке gateway `sync_service.stop()` дописывает
-   очередь, затем в `finally` — финальный `store.publish()` и `store.close()`.
+#### Время снимка
 
-#### Как связаны компоненты (callbacks)
+Загрузка фиксирует время завершения и публикует его как
+`cache_load_done.payload.loaded_at` в журнал `agent_gateway_logs` (плюс
+`started_at` и `duration_sec`); `CacheLoadService.get_stats()` отдаёт то же.
+С ним сверяются, чтобы не выдать устаревший снимок за «текущие» данные.
 
-Колбеки подключаются в `gateway.py::main()` (строки ~77-124) — это единственная
-точка связывания `PgDuckDbSyncService` и `DuckDbCacheStore`:
-
-| Событие в PgDuckDbSyncService | Колбека | Метод store | Что делает |
-|---------------------------|---------|-------------|-----------|
-| новые/изменённые строки | `set_on_new_records_callback` | `upsert_records` | инкрементальный апдейт |
-| полная перезагрузка таблицы | `set_on_replace_records_callback` | `replace_records` | сверка удалений |
-| структура из PG | `set_on_schema_callback` | `ensure_schema` | типы, NOT NULL, комментарии |
-| завершение цикла | `set_on_sync_callback` | `publish` | публикация снимка для CLI |
-
-Чтобы изменить поведение (например, публиковать снимок реже или дополнительно
-инвалидировать индексы) — правишь именно эту секцию `gateway.py`.
-
-#### Управляющие ключи (`gateway.sync` / `gateway.vector.index` в `project.json`)
+#### Управляющие ключи (`gateway.vector.index` / `gateway.cache` в `project.json`)
 
 > Имена таблиц/индексов не зашиты: они берутся из `skills.audit_analyzer.tables[*].name`,
-> `skills.audit_analyzer.vector_indexes[*].name` и `gateway.vector.index.*`. Ниже — только
-> параметры режима синхронизации и кеша.
+> `skills.audit_analyzer.vector_indexes[*].name` и `gateway.vector.index.*`.
 
 | Ключ | По умолч. | Эффект |
 |------|-----------|--------|
-| `gateway.sync.poll_interval_sec` | `14400` | Частота инкрементального поллинга PG, сек. Меньше → свежее кеш, больше запросов к PG |
-| `gateway.sync.full_resync_every` | `10` | Полная перезагрузка таблиц каждые N циклов поллинга. `0` — отключить (удалённые строки останутся в кеше) |
-| `gateway.sync.max_queue_size` | `10000` | Максимальный размер очереди синхронизации |
-| `gateway.sync.reconnect_backoff_sec` / `_max_sec` | `1.0` / `60.0` | Backoff реконнекта воркера к PG |
-| `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Таблица векторов, включается в синхронизацию и прогревается в FAISS (имя настраивается) |
+| `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Таблица векторов, включается в загрузку и прогревается в FAISS (имя настраивается) |
 | `gateway.vector.index.indexes` | `{}` | Декларация индексов (`<name>` → `VectorIndexConfig`); единственный источник конфигурации индексов (реестр `agent_vector_index_config` не читается) |
-| `gateway.cache.local_path` | `~/.cache/nanobot/duckdb/cache.duckdb` | Путь публикации DuckDB-снапшота (`resolve_publish_path()`); legacy `<workspace>/data_store/duckdb/` не поддерживается |
+| `gateway.cache.local_path` | `~/.cache/nanobot/duckdb/cache.duckdb` | Путь файла кэша (`resolve_cache_path()`); legacy `<workspace>/data_store/duckdb/` не поддерживается |
+| `channels.postgres.pool.max_conn` | `4` | Число слотов пула; оно же ограничивает число потоков загрузки |
 
-`config.py` мержит `project.json` в `SETTINGS`; после правки `project.json`
-перезапуск gateway обязателен.
+Секции `gateway.sync.*` **удалена**: поллинга и пересинхронизации больше нет,
+настраивать нечего. `config.py` мержит `project.json` в `SETTINGS`; после правки
+`project.json` перезапуск обязателен.
 
 #### Требования к таблицам источника
 
-- Колонка `id` (для upsert `DELETE + INSERT` по ключу; если её нет — таблица
+- Колонка `id` (upsert по ключу: `DELETE + INSERT`; если её нет — таблица
   пересоздаётся из батча целиком).
-- Колонка `updated_at` (инкрементальный поллинг). Для `audit_vectors` — `id`.
-  Тип track-колонки должен быть сравнимым (`>`) — `timestamp`/`bigint`.
-- Безопасность поллинга: строки, изменённые **и** удалённые между циклами,
-  подхватятся полной пересинхронизацией (`full_resync_every`).
+- Тип колонок должен быть читаем движком кэша. Отдельной track-колонки для
+  инкрементального отслеживания больше не требуется: загрузка безусловно берёт
+  всю таблицу, поэтому исчезновение строки из PostgreSQL корректно отражается в
+  следующем снимке само по себе.
 
 #### Практические сценарии
 
-- **Свежее кеш, чаще опрос**: `gateway.sync.poll_interval_sec: 15`.
-- **Меньше нагрузки на PG**: `gateway.sync.poll_interval_sec: 300`, `gateway.sync.full_resync_every: 5`
-  (реже опрос, но регулярная сверка удалений).
-- **Не нужна сверка удалений / большие таблицы**: `gateway.sync.full_resync_every: 0`.
-- **Добавить таблицу в анализ**: добавить её в `skills.audit_analyzer.tables` и перезапустить
-  gateway.
+- **Обновить данные в PostgreSQL**: перезапустить процесс. Ничего другого нет.
+- **Добавить таблицу в анализ**: добавить её в `skills.audit_analyzer.tables` и
+  перезапустить процесс.
+- **Сомнение в свежести кэша**: сверить `loaded_at` в `cache_load_done` с
+  временем последней правки данных в PostgreSQL.
 
 #### Мониторинг
 
-- `DuckDbCacheStore.get_stats()`: `tables` (кол-во строк), `dirty`,
-  `upserts`, `publishes`, `publish_errors`, `last_upsert_at`, `last_publish_at`,
-  `last_error`, `indexes_in_memory`, `vector_sources`.
-- `PgDuckDbSyncService.get_stats()`: `polls`, `full_resyncs`, `reconnects`,
-  `errors`, `queue_size`, `last_sync` (метка на таблицу), `connected`.
-- Внешние признаки работы: mtime файла кеша (по умолчанию
-  `~/.cache/nanobot/duckdb/cache.duckdb`; см. `_resolve_publish_path()`)
-  обновляется после каждого publish; лог gateway:
-  `[memory_store] cache snapshot -> <path>`.
+- `CacheLoadService.get_stats()`: `tables`, `loaded_at`, `loaded_ok`, `errors`,
+  `missing_tables`, `rows_total`, `max_workers`.
+- `DuckDbCacheStore.get_stats()`: `tables` (кол-во строк), `upserts`,
+  `last_upsert_at`, `last_error`, `indexes_in_memory`, `vector_sources`.
+- Журнал `agent_gateway_logs`: события `cache_load_started` и `cache_load_done`
+  (время снимка, пропущенные таблицы, ошибки).
+- Внешний признак актуальности: mtime файла кеша (по умолчанию
+  `~/.cache/nanobot/duckdb/cache.duckdb`; см. `resolve_cache_path()`).
 
 ---
 

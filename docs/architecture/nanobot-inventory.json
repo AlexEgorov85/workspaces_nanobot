@@ -3,7 +3,7 @@
     "description": "Инвентаризация зависимостей workspaces_nanobot от nanobot-ai",
     "nanobot_version_pinned": "0.3.0",
     "nanobot_version_installed": "0.3.0",
-    "scan_date": "2026-09-14",
+    "scan_date": "2026-09-29",
     "scanner": "tools/scan_nanobot_inventory.py",
     "legend": {
       "GREEN": "public/stable extension point",
@@ -13,14 +13,15 @@
     }
   },
   "summary": {
-    "files_scanned": 177,
-    "total_imports": 48,
+    "files_scanned": 188,
+    "total_imports": 65,
     "by_classification": {
-      "GREEN": 38,
-      "RED": 5,
-      "ORANGE": 5
+      "RED": 6,
+      "GREEN": 49,
+      "YELLOW": 1,
+      "ORANGE": 9
     },
-    "getattr_private_total": 19,
+    "getattr_private_total": 22,
     "setattr_total": 1
   },
   "files": [
@@ -28,7 +29,16 @@
       "file": "cli_agent.py",
       "imports": [
         {
-          "line": 132,
+          "line": 123,
+          "statement": "from nanobot.cli.commands import __version__",
+          "module": "nanobot.cli.commands",
+          "names": [
+            "__version__"
+          ],
+          "classification": "RED"
+        },
+        {
+          "line": 235,
           "statement": "from nanobot.config.paths import get_cron_dir  # type: ignore",
           "module": "nanobot.config.paths",
           "names": [
@@ -44,7 +54,7 @@
       "file": "gateway.py",
       "imports": [
         {
-          "line": 65,
+          "line": 133,
           "statement": "from nanobot.cli.commands import __logo__, __version__",
           "module": "nanobot.cli.commands",
           "names": [
@@ -54,14 +64,7 @@
           "classification": "RED"
         }
       ],
-      "getattr_private": [
-        {
-          "line": 103,
-          "expr": "getattr(ctx.sync_service, \"_on_sync_callback\"",
-          "object": "ctx.sync_service",
-          "attr": "_on_sync_callback"
-        }
-      ],
+      "getattr_private": [],
       "setattr_calls": []
     },
     {
@@ -113,6 +116,36 @@
           "classification": "GREEN"
         }
       ],
+      "getattr_private": [
+        {
+          "line": 1585,
+          "expr": "getattr(self, \"_compaction_event_subscriber\"",
+          "object": "self",
+          "attr": "_compaction_event_subscriber"
+        }
+      ],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/channels/priority_commands.py",
+      "imports": [
+        {
+          "line": 22,
+          "statement": "import nanobot.agent  # noqa: F401  # фикс circular import в nanobot 0.3.0",
+          "module": "nanobot.agent",
+          "names": [],
+          "classification": "GREEN"
+        },
+        {
+          "line": 24,
+          "statement": "from nanobot.command.router import CommandRouter",
+          "module": "nanobot.command.router",
+          "names": [
+            "CommandRouter"
+          ],
+          "classification": "GREEN"
+        }
+      ],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -160,7 +193,7 @@
       "file": "lib/cli/console_loop.py",
       "imports": [
         {
-          "line": 177,
+          "line": 167,
           "statement": "from nanobot.bus.events import InboundMessage",
           "module": "nanobot.bus.events",
           "names": [
@@ -169,21 +202,25 @@
           "classification": "GREEN"
         },
         {
-          "line": 178,
-          "statement": "from nanobot.cli.commands import (",
-          "module": "nanobot.cli.commands",
+          "line": 168,
+          "statement": "from nanobot.bus.outbound_events import (",
+          "module": "nanobot.bus.outbound_events",
           "names": [
             "(",
-            "__logo__",
-            "__version__",
-            "_init_prompt_session",
-            "_is_exit_command",
-            "_model_display",
-            "_read_interactive_input_async",
-            "_restore_terminal",
-            "_sanitize_surrogates"
+            "StreamDeltaEvent",
+            "StreamedResponseEvent",
+            "StreamEndEvent"
           ],
-          "classification": "RED"
+          "classification": "GREEN"
+        },
+        {
+          "line": 203,
+          "statement": "from nanobot.cli.stream import StreamRenderer as _StreamRenderer",
+          "module": "nanobot.cli.stream",
+          "names": [
+            "StreamRenderer as _StreamRenderer"
+          ],
+          "classification": "GREEN"
         }
       ],
       "getattr_private": [],
@@ -199,7 +236,7 @@
       "file": "lib/cli/hook_loader.py",
       "imports": [
         {
-          "line": 41,
+          "line": 56,
           "statement": "from nanobot.agent import AgentHook",
           "module": "nanobot.agent",
           "names": [
@@ -212,16 +249,14 @@
       "setattr_calls": []
     },
     {
-      "file": "lib/commands/compact_command.py",
+      "file": "lib/cli/nanobot_cli_compat.py",
       "imports": [
         {
-          "line": 39,
-          "statement": "from nanobot.bus.events import OutboundMessage",
-          "module": "nanobot.bus.events",
-          "names": [
-            "OutboundMessage"
-          ],
-          "classification": "GREEN"
+          "line": 139,
+          "statement": "import nanobot",
+          "module": "nanobot",
+          "names": [],
+          "classification": "YELLOW"
         }
       ],
       "getattr_private": [],
@@ -237,11 +272,20 @@
       "file": "lib/core/agent_factory.py",
       "imports": [
         {
-          "line": 113,
+          "line": 114,
           "statement": "from nanobot.agent.loop import AgentLoop",
           "module": "nanobot.agent.loop",
           "names": [
             "AgentLoop"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 115,
+          "statement": "from nanobot.agent.tools.registry import ToolRegistry",
+          "module": "nanobot.agent.tools.registry",
+          "names": [
+            "ToolRegistry"
           ],
           "classification": "GREEN"
         }
@@ -253,7 +297,7 @@
       "file": "lib/core/application_context.py",
       "imports": [
         {
-          "line": 979,
+          "line": 1673,
           "statement": "from nanobot.cron.service import CronService",
           "module": "nanobot.cron.service",
           "names": [
@@ -306,16 +350,73 @@
       "setattr_calls": []
     },
     {
+      "file": "lib/events/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/events/subagent.py",
+      "imports": [
+        {
+          "line": 22,
+          "statement": "from nanobot.events import AgentEvent",
+          "module": "nanobot.events",
+          "names": [
+            "AgentEvent"
+          ],
+          "classification": "GREEN"
+        }
+      ],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
       "file": "lib/hooks/__init__.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
     {
-      "file": "lib/hooks/base_tool_tracking_hook.py",
+      "file": "lib/hooks/database_logging_hook.py",
       "imports": [
         {
-          "line": 18,
+          "line": 25,
+          "statement": "from nanobot.agent import AgentHook",
+          "module": "nanobot.agent",
+          "names": [
+            "AgentHook"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 28,
+          "statement": "from nanobot.agent import AgentHookContext, AgentRunHookContext",
+          "module": "nanobot.agent",
+          "names": [
+            "AgentHookContext",
+            "AgentRunHookContext"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 238,
+          "statement": "from nanobot.agent.tools.context import current_request_context",
+          "module": "nanobot.agent.tools.context",
+          "names": [
+            "current_request_context"
+          ],
+          "classification": "ORANGE"
+        }
+      ],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/hooks/terminal_tool_print_hook.py",
+      "imports": [
+        {
+          "line": 30,
           "statement": "from nanobot.agent import AgentHook",
           "module": "nanobot.agent",
           "names": [
@@ -328,37 +429,14 @@
       "setattr_calls": []
     },
     {
-      "file": "lib/hooks/database_logging_hook.py",
-      "imports": [
-        {
-          "line": 30,
-          "statement": "from nanobot.agent import AgentHookContext, AgentRunHookContext",
-          "module": "nanobot.agent",
-          "names": [
-            "AgentHookContext",
-            "AgentRunHookContext"
-          ],
-          "classification": "GREEN"
-        }
-      ],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "lib/hooks/terminal_tool_print_hook.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
       "file": "lib/hooks/tool_audit_hook.py",
       "imports": [
         {
-          "line": 14,
-          "statement": "from nanobot.agent import AgentHookContext",
+          "line": 17,
+          "statement": "from nanobot.agent import AgentHook",
           "module": "nanobot.agent",
           "names": [
-            "AgentHookContext"
+            "AgentHook"
           ],
           "classification": "GREEN"
         }
@@ -386,6 +464,18 @@
     },
     {
       "file": "lib/services/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/cache_engine.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/cache_load_service.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -419,10 +509,26 @@
       "setattr_calls": []
     },
     {
+      "file": "lib/services/compaction_event_subscriber.py",
+      "imports": [
+        {
+          "line": 77,
+          "statement": "from nanobot.events import ContextCompactionEvent",
+          "module": "nanobot.events",
+          "names": [
+            "ContextCompactionEvent"
+          ],
+          "classification": "GREEN"
+        }
+      ],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
       "file": "lib/services/config_service.py",
       "imports": [
         {
-          "line": 115,
+          "line": 142,
           "statement": "from nanobot.cli.commands import _load_runtime_config",
           "module": "nanobot.cli.commands",
           "names": [
@@ -431,7 +537,7 @@
           "classification": "RED"
         },
         {
-          "line": 116,
+          "line": 143,
           "statement": "from nanobot.utils.helpers import sync_workspace_templates",
           "module": "nanobot.utils.helpers",
           "names": [
@@ -463,20 +569,20 @@
       "file": "lib/services/context_compaction.py",
       "imports": [
         {
-          "line": 142,
-          "statement": "from nanobot.session.manager import replay_max_messages_for_context",
-          "module": "nanobot.session.manager",
-          "names": [
-            "replay_max_messages_for_context"
-          ],
-          "classification": "GREEN"
-        },
-        {
-          "line": 280,
+          "line": 290,
           "statement": "from nanobot.agent.tools.context import current_request_session_key",
           "module": "nanobot.agent.tools.context",
           "names": [
             "current_request_session_key"
+          ],
+          "classification": "ORANGE"
+        },
+        {
+          "line": 585,
+          "statement": "from nanobot.agent.tools.context import current_request_context",
+          "module": "nanobot.agent.tools.context",
+          "names": [
+            "current_request_context"
           ],
           "classification": "ORANGE"
         }
@@ -501,7 +607,7 @@
       "imports": [],
       "getattr_private": [
         {
-          "line": 1155,
+          "line": 1272,
           "expr": "getattr(self, \"_preload_errors\"",
           "object": "self",
           "attr": "_preload_errors"
@@ -522,8 +628,43 @@
       "setattr_calls": []
     },
     {
-      "file": "lib/services/pg_duckdb_sync_service.py",
-      "imports": [],
+      "file": "lib/services/llm_observer.py",
+      "imports": [
+        {
+          "line": 28,
+          "statement": "from nanobot.providers.base import LLMProvider",
+          "module": "nanobot.providers.base",
+          "names": [
+            "LLMProvider"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 67,
+          "statement": "from nanobot.providers.fallback_provider import FallbackProvider",
+          "module": "nanobot.providers.fallback_provider",
+          "names": [
+            "FallbackProvider"
+          ],
+          "classification": "GREEN"
+        }
+      ],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/llm_usage_store_factory.py",
+      "imports": [
+        {
+          "line": 67,
+          "statement": "from nanobot.llm_usage.store import LLMUsageStore",
+          "module": "nanobot.llm_usage.store",
+          "names": [
+            "LLMUsageStore"
+          ],
+          "classification": "GREEN"
+        }
+      ],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -534,93 +675,10 @@
       "setattr_calls": []
     },
     {
-      "file": "lib/services/runtime_health.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "lib/services/runtime_patcher.py",
+      "file": "lib/services/project_tool_loader.py",
       "imports": [
         {
-          "line": 634,
-          "statement": "from nanobot.agent.context_governance import ContextGovernor",
-          "module": "nanobot.agent.context_governance",
-          "names": [
-            "ContextGovernor"
-          ],
-          "classification": "ORANGE"
-        },
-        {
-          "line": 635,
-          "statement": "from nanobot.utils.runtime import ensure_nonempty_tool_result",
-          "module": "nanobot.utils.runtime",
-          "names": [
-            "ensure_nonempty_tool_result"
-          ],
-          "classification": "GREEN"
-        },
-        {
-          "line": 838,
-          "statement": "from nanobot.utils import document as _document_mod",
-          "module": "nanobot.utils",
-          "names": [
-            "document as _document_mod"
-          ],
-          "classification": "GREEN"
-        },
-        {
-          "line": 903,
-          "statement": "import nanobot.agent.loop as _loop_mod  # type: ignore",
-          "module": "nanobot.agent.loop",
-          "names": [],
-          "classification": "GREEN"
-        },
-        {
-          "line": 939,
-          "statement": "from nanobot.session.manager import Session",
-          "module": "nanobot.session.manager",
-          "names": [
-            "Session"
-          ],
-          "classification": "GREEN"
-        },
-        {
-          "line": 990,
-          "statement": "from nanobot.session.manager import Session",
-          "module": "nanobot.session.manager",
-          "names": [
-            "Session"
-          ],
-          "classification": "GREEN"
-        },
-        {
-          "line": 1280,
-          "statement": "from nanobot.bus.events import OutboundMessage",
-          "module": "nanobot.bus.events",
-          "names": [
-            "OutboundMessage"
-          ],
-          "classification": "GREEN"
-        },
-        {
-          "line": 1402,
-          "statement": "from nanobot.agent.subagent import _SubagentHook",
-          "module": "nanobot.agent.subagent",
-          "names": [
-            "_SubagentHook"
-          ],
-          "classification": "RED"
-        },
-        {
-          "line": 1606,
-          "statement": "import nanobot.agent.subagent as _subagent_mod",
-          "module": "nanobot.agent.subagent",
-          "names": [],
-          "classification": "ORANGE"
-        },
-        {
-          "line": 1699,
+          "line": 119,
           "statement": "from nanobot.agent.tools.base import Tool as _T",
           "module": "nanobot.agent.tools.base",
           "names": [
@@ -629,7 +687,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 1729,
+          "line": 160,
           "statement": "from nanobot.agent.tools.context import ToolContext",
           "module": "nanobot.agent.tools.context",
           "names": [
@@ -640,73 +698,245 @@
       ],
       "getattr_private": [
         {
-          "line": 102,
-          "expr": "getattr(agent, \"_last_usage\"",
-          "object": "agent",
-          "attr": "_last_usage"
-        },
-        {
-          "line": 570,
-          "expr": "getattr(agent, \"_state_build\"",
-          "object": "agent",
-          "attr": "_state_build"
-        },
-        {
-          "line": 720,
-          "expr": "getattr(agent, \"_save_turn\"",
-          "object": "agent",
-          "attr": "_save_turn"
-        },
-        {
-          "line": 1258,
-          "expr": "getattr(agent, \"_assemble_outbound\"",
-          "object": "agent",
-          "attr": "_assemble_outbound"
-        },
-        {
-          "line": 1715,
+          "line": 135,
           "expr": "getattr(cls, \"__abstractmethods__\"",
           "object": "cls",
           "attr": "__abstractmethods__"
         },
         {
-          "line": 1737,
+          "line": 168,
           "expr": "getattr(agent, \"_exec_session_manager\"",
           "object": "agent",
           "attr": "_exec_session_manager"
         },
         {
-          "line": 1743,
-          "expr": "getattr(\n                    agent, \"_image_generation_provider_configs\"",
+          "line": 174,
+          "expr": "getattr(\n            agent, \"_image_generation_provider_configs\"",
           "object": "agent",
           "attr": "_image_generation_provider_configs"
         },
         {
-          "line": 1758,
-          "expr": "getattr(ctx, \"_agent_ref\"",
-          "object": "ctx",
-          "attr": "_agent_ref"
-        },
-        {
-          "line": 1932,
-          "expr": "getattr(auto, \"_archive\"",
-          "object": "auto",
-          "attr": "_archive"
-        },
-        {
-          "line": 2022,
-          "expr": "getattr(auto, \"_ttl\"",
-          "object": "auto",
-          "attr": "_ttl"
+          "line": 184,
+          "expr": "getattr(agent, \"_runtime_control\"",
+          "object": "agent",
+          "attr": "_runtime_control"
         }
       ],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/runtime_events_subscriber.py",
+      "imports": [
+        {
+          "line": 51,
+          "statement": "from nanobot.bus.runtime_events import TurnCompleted, TurnRuntimeAdmitted",
+          "module": "nanobot.bus.runtime_events",
+          "names": [
+            "TurnCompleted",
+            "TurnRuntimeAdmitted"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 70,
+          "statement": "from nanobot.agent.subagent import _SubagentHook",
+          "module": "nanobot.agent.subagent",
+          "names": [
+            "_SubagentHook"
+          ],
+          "classification": "RED"
+        },
+        {
+          "line": 89,
+          "statement": "from nanobot.agent.subagent import _SubagentHook",
+          "module": "nanobot.agent.subagent",
+          "names": [
+            "_SubagentHook"
+          ],
+          "classification": "RED"
+        }
+      ],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/runtime_health.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/runtime_inventory.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/runtime_patcher.py",
+      "imports": [
+        {
+          "line": 725,
+          "statement": "from nanobot.agent.context_governance import ContextGovernor",
+          "module": "nanobot.agent.context_governance",
+          "names": [
+            "ContextGovernor"
+          ],
+          "classification": "ORANGE"
+        },
+        {
+          "line": 726,
+          "statement": "from nanobot.utils.runtime import ensure_nonempty_tool_result",
+          "module": "nanobot.utils.runtime",
+          "names": [
+            "ensure_nonempty_tool_result"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 948,
+          "statement": "from nanobot.utils import document as _document_mod",
+          "module": "nanobot.utils",
+          "names": [
+            "document as _document_mod"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 1054,
+          "statement": "from nanobot.session.manager import Session",
+          "module": "nanobot.session.manager",
+          "names": [
+            "Session"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 1105,
+          "statement": "from nanobot.session.manager import Session",
+          "module": "nanobot.session.manager",
+          "names": [
+            "Session"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 1501,
+          "statement": "from nanobot.bus.events import OutboundMessage",
+          "module": "nanobot.bus.events",
+          "names": [
+            "OutboundMessage"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 1705,
+          "statement": "from nanobot.bus.events import OutboundMessage",
+          "module": "nanobot.bus.events",
+          "names": [
+            "OutboundMessage"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 1852,
+          "statement": "from nanobot.agent.subagent import _SubagentHook",
+          "module": "nanobot.agent.subagent",
+          "names": [
+            "_SubagentHook"
+          ],
+          "classification": "RED"
+        },
+        {
+          "line": 1978,
+          "statement": "from nanobot.agent.tools.context import current_request_context",
+          "module": "nanobot.agent.tools.context",
+          "names": [
+            "current_request_context"
+          ],
+          "classification": "ORANGE"
+        },
+        {
+          "line": 2242,
+          "statement": "import nanobot.agent.subagent as _subagent_mod",
+          "module": "nanobot.agent.subagent",
+          "names": [],
+          "classification": "ORANGE"
+        }
+      ],
+      "getattr_private": [
+        {
+          "line": 811,
+          "expr": "getattr(agent, \"_save_turn\"",
+          "object": "agent",
+          "attr": "_save_turn"
+        },
+        {
+          "line": 1200,
+          "expr": "getattr(sessions, \"_session_dir_watch_patched\"",
+          "object": "sessions",
+          "attr": "_session_dir_watch_patched"
+        },
+        {
+          "line": 1479,
+          "expr": "getattr(agent, \"_assemble_outbound\"",
+          "object": "agent",
+          "attr": "_assemble_outbound"
+        },
+        {
+          "line": 1692,
+          "expr": "getattr(self, \"_failure_error_kind\"",
+          "object": "self",
+          "attr": "_failure_error_kind"
+        },
+        {
+          "line": 1922,
+          "expr": "getattr(\n                    _SubagentLoggingHook, \"_default_bus\"",
+          "object": "_SubagentLoggingHook",
+          "attr": "_default_bus"
+        },
+        {
+          "line": 2131,
+          "expr": "getattr(\n                    _SubagentLoggingHook, \"_subscriber_registered\"",
+          "object": "_SubagentLoggingHook",
+          "attr": "_subscriber_registered"
+        }
+      ],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/schema_validation.py",
+      "imports": [],
+      "getattr_private": [
+        {
+          "line": 76,
+          "expr": "getattr(settings, \"_inner_dict\"",
+          "object": "settings",
+          "attr": "_inner_dict"
+        }
+      ],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/session_cold_sync_service.py",
+      "imports": [
+        {
+          "line": 52,
+          "statement": "from nanobot.session.manager import SessionManager",
+          "module": "nanobot.session.manager",
+          "names": [
+            "SessionManager"
+          ],
+          "classification": "GREEN"
+        }
+      ],
+      "getattr_private": [],
       "setattr_calls": []
     },
     {
       "file": "lib/services/session_storage.py",
       "imports": [
         {
-          "line": 152,
+          "line": 137,
           "statement": "from nanobot.session.manager import SessionManager",
           "module": "nanobot.session.manager",
           "names": [
@@ -758,15 +988,14 @@
       "file": "lib/session/pg_session_manager.py",
       "imports": [
         {
-          "line": 34,
-          "statement": "from nanobot.session.manager import Session, SessionManager, _message_preview_text",
+          "line": 33,
+          "statement": "from nanobot.session.manager import Session, SessionManager",
           "module": "nanobot.session.manager",
           "names": [
             "Session",
-            "SessionManager",
-            "_message_preview_text"
+            "SessionManager"
           ],
-          "classification": "RED"
+          "classification": "GREEN"
         }
       ],
       "getattr_private": [],
@@ -807,16 +1036,7 @@
       "file": "lib/utils/outbound_meta.py",
       "imports": [
         {
-          "line": 71,
-          "statement": "from nanobot.bus.outbound_events import outbound_event_from_message",
-          "module": "nanobot.bus.outbound_events",
-          "names": [
-            "outbound_event_from_message"
-          ],
-          "classification": "GREEN"
-        },
-        {
-          "line": 95,
+          "line": 88,
           "statement": "from nanobot.bus.outbound_events import StreamedResponseEvent",
           "module": "nanobot.bus.outbound_events",
           "names": [
@@ -825,7 +1045,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 114,
+          "line": 107,
           "statement": "from nanobot.bus.outbound_events import (",
           "module": "nanobot.bus.outbound_events",
           "names": [
@@ -872,6 +1092,19 @@
       "setattr_calls": []
     },
     {
+      "file": "lib/utils/windows_terminal.py",
+      "imports": [],
+      "getattr_private": [
+        {
+          "line": 129,
+          "expr": "getattr(sys.stdout, \"_nanobot_ansi_stripped\"",
+          "object": "sys.stdout",
+          "attr": "_nanobot_ansi_stripped"
+        }
+      ],
+      "setattr_calls": []
+    },
+    {
       "file": "streamlit_app.py",
       "imports": [],
       "getattr_private": [],
@@ -886,6 +1119,22 @@
     {
       "file": "workspace/hooks/__init__.py",
       "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/hooks/debug_stream_diag.py",
+      "imports": [
+        {
+          "line": 13,
+          "statement": "from nanobot.agent.hook import AgentHook",
+          "module": "nanobot.agent.hook",
+          "names": [
+            "AgentHook"
+          ],
+          "classification": "GREEN"
+        }
+      ],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -1500,7 +1749,7 @@
       "file": "workspace/tools/compact_context.py",
       "imports": [
         {
-          "line": 34,
+          "line": 40,
           "statement": "from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters",
           "module": "nanobot.agent.tools.base",
           "names": [
@@ -1513,22 +1762,28 @@
       ],
       "getattr_private": [
         {
-          "line": 104,
+          "line": 110,
           "expr": "getattr(ctx, \"_settings_ref\"",
           "object": "ctx",
           "attr": "_settings_ref"
         },
         {
-          "line": 121,
+          "line": 127,
           "expr": "getattr(ctx, \"_agent_ref\"",
           "object": "ctx",
           "attr": "_agent_ref"
         },
         {
-          "line": 122,
+          "line": 128,
           "expr": "getattr(ctx, \"_settings_ref\"",
           "object": "ctx",
           "attr": "_settings_ref"
+        },
+        {
+          "line": 129,
+          "expr": "getattr(ctx, \"_db_logging_service\"",
+          "object": "ctx",
+          "attr": "_db_logging_service"
         }
       ],
       "setattr_calls": []
@@ -1561,7 +1816,7 @@
       "file": "workspace/tools/history_search_tool.py",
       "imports": [
         {
-          "line": 36,
+          "line": 72,
           "statement": "from nanobot.agent.tools.base import Tool, tool_parameters",
           "module": "nanobot.agent.tools.base",
           "names": [
@@ -1571,18 +1826,27 @@
           "classification": "GREEN"
         },
         {
-          "line": 375,
+          "line": 552,
           "statement": "from nanobot.agent.tools.context import current_request_session_key",
           "module": "nanobot.agent.tools.context",
           "names": [
             "current_request_session_key"
           ],
           "classification": "ORANGE"
+        },
+        {
+          "line": 576,
+          "statement": "from nanobot.agent.tools.context import current_request_context",
+          "module": "nanobot.agent.tools.context",
+          "names": [
+            "current_request_context"
+          ],
+          "classification": "ORANGE"
         }
       ],
       "getattr_private": [
         {
-          "line": 155,
+          "line": 209,
           "expr": "getattr(ctx, \"_settings_ref\"",
           "object": "ctx",
           "attr": "_settings_ref"
@@ -1594,7 +1858,7 @@
       "file": "workspace/tools/legal_summarizer_query.py",
       "imports": [
         {
-          "line": 48,
+          "line": 93,
           "statement": "from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters",
           "module": "nanobot.agent.tools.base",
           "names": [
@@ -1607,7 +1871,7 @@
       ],
       "getattr_private": [
         {
-          "line": 133,
+          "line": 178,
           "expr": "getattr(ctx, \"_settings_ref\"",
           "object": "ctx",
           "attr": "_settings_ref"
@@ -1629,12 +1893,6 @@
     },
     {
       "file": "workspace/utils/db.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "workspace/utils/event_log.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []

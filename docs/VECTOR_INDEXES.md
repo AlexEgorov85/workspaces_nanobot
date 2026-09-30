@@ -10,8 +10,8 @@ flowchart LR
     CFG["project.json<br/>gateway.vector.index.indexes"] --> BL["tools/build_vectors.py<br/>чанкование + эмбеддинг"]
     SRC["Источники<br/>(table из конфига)"] --> BL
     BL --> PG["PG: storage_table<br/>сырые эмбеддинги"]
-    PG --> SYNC["PgDuckDbSyncService"]
-    SYNC --> SNAP["DuckDB-снапшот<br/>(resolve_publish_path)"]
+    PG --> LOAD["CacheLoadService<br/>разовая загрузка"]
+    LOAD --> SNAP["локальный кэш<br/>(resolve_cache_path)"]
     SNAP --> PRE["preload_indexes()<br/>при старте gateway"]
     PRE --> MEM["in-memory FAISS<br/>_index_cache"]
     MEM --> SE["search_vector()"]
@@ -29,8 +29,8 @@ DuckDB-снапшота (или лениво, при первом `search_vector
 
 | Объект | Назначение | Кто пишет | Кто читает |
 |--------|-----------|-----------|-----------|
-| `oarb.audit_vectors` (значение `gateway.vector.index.storage_table`) | Сырые эмбеддинги `REAL[]` + метаданные (`chunk_index`/`chunk_count`, `content_hash`, `row_data` JSONB, `synced_at`) | `tools/build_vectors.py` | `PgDuckDbSyncService` → DuckDB-снапшот → `PostgresDuckDbProvider` |
-| DuckDB-снапшот (`resolve_publish_path()`) | Локальная реплика PG-таблиц для чтения агентом | `lib/services/duckdb_cache_store.py` | `cache_provider_impl.PostgresDuckDbProvider` |
+| `oarb.audit_vectors` (значение `gateway.vector.index.storage_table`) | Сырые эмбеддинги `REAL[]` + метаданные (`chunk_index`/`chunk_count`, `content_hash`, `row_data` JSONB, `synced_at`) | `tools/build_vectors.py` | `CacheLoadService` → локальный кэш → `DuckDbCacheStore` |
+| Локальный снимок кэша (`resolve_cache_path()`) | Локальная реплика PG-таблиц для чтения агентом; снимок на момент загрузки | `lib/services/cache_load_service.py` | `lib/services/duckdb_cache_store.py::DuckDbCacheStore` |
 | FAISS-индекс в памяти | Поисковый индекс (`IndexFlatIP`) | `provider.preload_indexes()` / `_load_index_from_cache()` | `provider.search_vector()` |
 
 DDL: `sql/audit_analyzer/create_oarb_audit_vectors.sql`. Таблица
@@ -39,7 +39,7 @@ DDL: `sql/audit_analyzer/create_oarb_audit_vectors.sql`. Таблица
 `public.agent_vector_index_config` — legacy-артефакт, который кодом не читается
 (`sql/vectors/*` на новых инстансах не применяются).
 
-Путь к DuckDB-снапшоту: `resolve_publish_path()` в
+Путь к файлу DuckDB-кэша: `resolve_cache_path()` в
 `lib/core/application_context.py` — `project.json::gateway.cache.local_path`
 либо дефолт `~/.cache/nanobot/duckdb/cache.duckdb`.
 
@@ -273,7 +273,7 @@ DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 | Что сделали | Что делать |
 |-------------|-----------|
 | Удалили вектора (`DELETE`/`TRUNCATE` по `storage_table`) | `python tools/build_vectors.py --full-rebuild` |
-| Удалили/испортили DuckDB-снапшот | `python tools/build_vectors.py --full-rebuild` + перезапуск gateway (снапшот пересобирается `PgDuckDbSyncService`) |
+| Удалили/испортили локальный снимок кэша | `python tools/build_vectors.py --full-rebuild` + перезапуск gateway (снимок пересобирается `CacheLoadService` при старте) |
 | Удалили индекс из `project.json` | Вернуть объект, затем `--full-rebuild` |
 
 ## Сборка одного индекса

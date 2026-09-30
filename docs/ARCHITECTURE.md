@@ -1,4 +1,4 @@
-﻿# 🏗 Архитектура и сервисный слой
+# 🏗 Архитектура и сервисный слой
 
 > Навигационный индекс каталога `docs/` — в [`README.md`](README.md). Этот документ —
 > самодостаточное описание подсистемы.
@@ -43,16 +43,16 @@ flowchart LR
 
 **Потоки данных**
 
-- `gateway.py` — единственный владелец файла кеша навыка. `PgDuckDbSyncService`
-  (worker-поток, единственное подключение к PG) инкрементально синхронизирует
-  таблицы в `DuckDbCacheStore` (чисто in-memory DuckDB), а после каждого цикла
-  `store.publish()` атомарно записывает снимок (temp + `os.replace`) в файл
-  кеша навыка (`in_memory_cache_path`).
-- Навык CLI (`predefined` / `generated_sql`) — запросы выполняются по опубликованному
-  кешу (или напрямую по PG, если кеш выключен). Создание/обновление кеша его не
-  касается. Единый интерфейс бэкенда: `get_schema / query_sql / explain`.
+- `gateway.py` — единственный владелец файла кеша навыка. `CacheLoadService`
+  (единственное подключение к PG, синхронная разовая загрузка, без фонового
+  потока) наполняет `DuckDbCacheStore`, закрывает файл и отпускает его; провайдер
+  на всё время работы процесса открывает файл только на время операции.
+- Навык CLI (`predefined` / `generated_sql`) — запросы выполняются по локальному
+  снимку кеша, открывая его на время операции в режиме `READ_ONLY`. Создание и
+  обновление кеша его не касается. Единый интерфейс бэкенда:
+  `get_schema / query_sql / explain`.
 - `--mode vector` — семантический поиск: FAISS-индекс собирается **в памяти**
-  из DuckDB-снапшота `gateway.vector.index.storage_table` при старте gateway
+  из локального снимка `gateway.vector.index.storage_table` при старте gateway
   (`PreloadService.preload_vector_indexes`), эмбеддинг запроса получает через Ollama.
 
 ---
@@ -132,7 +132,7 @@ flowchart LR
 | `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
 | `subprocess_manager.py` | Streamlit spawn + terminate/kill. |
-| `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычисляется через единый `resolve_publish_path()` (`lib/core/application_context.py`) — default `~/.cache/nanobot/duckdb/cache.duckdb` или override `gateway.cache.local_path`. CLI/skill/vector_index_service вызывают ту же функцию, так что расхождение невозможно. |
+| `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычисляется через единый `resolve_cache_path()` (`lib/core/application_context.py`) — default `~/.cache/nanobot/duckdb/cache.duckdb` или override `gateway.cache.local_path`. CLI/skill/vector_index_service вызывают ту же функцию, так что расхождение невозможно. |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
 | `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает схему из `SKILL.md` (секция «Схема домена», см. `workspace/skills/audit_analyzer/SKILL.md`). |
@@ -179,16 +179,21 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 Так смена модели/провайдера/ключа агента автоматически меняет LLM и в
 навыке, и в бенчмарке — без дублирования секретов в трёх местах.
 
-### Race-condition fix: callbacks ДО `ctx.start()`
+### Гонка за загрузкой устранена структурно
 
-`PgDuckDbSyncService` — worker-поток, который делает `initial_load` сразу
-после `start()`. Если `set_on_new_records_callback(upsert_records)` ещё
-не вызван к этому моменту, `_dispatch` скипает записи → DuckDB остаётся
-пустым → `preload_vector_indexes` видит "нет данных" несмотря на
-данные в `oarb.audit_vectors`. **Fix:** в `gateway.py:main()` callbacks
-устанавливаются **ДО** `ctx.start()`. Тогда worker-тред при первом
-`_do_initial_load` уже видит настроенные callbacks → `upsert_records`
-вызывается → FAISS preload находит данные.
+Раньше `PgDuckDbSyncService` был worker-потоком, который делал `initial_load`
+сразу после `start()`, а привязка колбэков шла отдельным шагом. Если
+`set_on_new_records_callback` ещё не был вызван, `_dispatch` скипал записи →
+DuckDB оставался пустым → `preload_vector_indexes` видел «нет данных» несмотря
+на данные в `oarb.audit_vectors`. Обходной путь был один: в `gateway.py:main()`
+колбэки ставились **ДО** `ctx.start()`, и гонка была лишь «не проявляется».
+
+Сейчас гонки нет вовсе, а не «не проявляется»: `CacheLoadService.load()`
+выполняется **синхронно внутри `ApplicationContext.create()`** и завершается до
+того, как начнётся `preload_indexes()`. Колбэков у загрузчика нет — он держит
+`CacheStore` напрямую, потому что он и есть единственный writer. Порядок
+«загрузка → close → открытие на чтение» закреплён тестом
+`tests/test_application_context_cache_lifecycle.py`.
 
 ### Конкурентно-безопасное БД-логирование: per-turn инстанс `DatabaseLoggingHook`
 
@@ -256,7 +261,7 @@ Producer'ы (с обязательным keyword-only DI через `db_logging_
 | Producer | События | DI |
 |---|---|---|
 | `ContextCompactionService` | `context_compacted` | через `RuntimePatcher.patch_compact_command(partial(...))` или `run_repl(...)` параметр |
-| `PgDuckDbSyncService` | `sync_service_started`, `sync_initial_load_*`, `sync_table_loaded`, `sync_lag_exceeded`, `session_stale_detected` | kwarg `db_logging_service` |
+| `CacheLoadService` | `cache_load_started`, `cache_load_done` | kwarg `db_logging_service` |
 | `DuckDbCacheStore` | `sync_publish_ok`/`_failed`/`_empty`, `vector_preload_error`, `vector_index_build_failed` | kwarg `db_logging_service` |
 | `PreloadService` | `vector_index_preload_health` | kwarg `db_logging_service` |
 | `ApplicationContext._make_sync_services` | `sync_skipped_*` | inline `try_log_event` |
@@ -1541,8 +1546,8 @@ nanobot/
 │   │   ├── db_logging_service.py         #    worker, batch INSERT, без JSONL-fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
 │   │   ├── llm_config.py                 #    resolve_llm_config() — общий резолв LLM для навыка/бенчмарка
-│   │   ├── duckdb_cache_store.py         #     in-memory DuckDB-зеркало + атомарный publish()
-│   │   ├── pg_duckdb_sync_service.py     #     фоновый поллинг PG (worker-поток)
+│   │   ├── duckdb_cache_store.py         #     локальный кэш + FAISS-индексы в памяти
+│   │   ├── cache_load_service.py         #     разовая синхронная загрузка кэша из PG
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов

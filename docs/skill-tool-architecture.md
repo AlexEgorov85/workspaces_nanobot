@@ -246,8 +246,8 @@ CLI — **операционный** интерфейс доставки capabil
 реального имени в PostgreSQL. Поле объявлено в `lib/services/table_registry.py`,
 заполняется из `project.json::skills.<name>.tables[]` (объектная форма).
 
-Runtime-sync (`PgDuckDbSyncService`, `DuckDbCacheStore`) **игнорирует** `label` —
-это **не** routing marker и **не** влияет на cache/DuckDB. Значение label —
+Загрузка кэша (`CacheLoadService`, `DuckDbCacheStore`) **игнорирует** `label` —
+это **не** routing marker и **не** влияет на кэш. Значение label —
 domain knowledge конкретного skill'а; `lib/` не содержит конкретных констант
 label.
 
@@ -256,7 +256,7 @@ label.
 - `TableResource.label: str | None = None` — поле dataclass, **opaque для runtime**.
 - Задаётся через `tables[]` в `project.json` в объектной форме: `{"name": "...", "label": "..."}`
   (см. `TableEntry` в `lib/core/project_settings.py`).
-- Runtime-sync (`PgDuckDbSyncService`, `DuckDbCacheStore`) **игнорирует** label —
+- Загрузка кэша (`CacheLoadService`, `DuckDbCacheStore`) **игнорирует** label —
   это **не** routing marker.
 
 ### Lookup
@@ -323,7 +323,7 @@ Skill может объявить свою метку и находить соо
 | `tests/test_skill_config_api.py::TestPredefinedScripts::test_lookup_from_table_registry` | end-to-end через `skill_config.get_predefined_scripts_table()` (lookup через registry) |
 
 Любое использование `label` в `lib/services/runtime`-слое (`cache_provider_impl.py`,
-`duckdb_cache_store.py`, `pg_duckdb_sync_service.py`) — архитектурная регрессия.
+`duckdb_cache_store.py`, `cache_load_service.py`) — архитектурная регрессия.
 
 ---
 
