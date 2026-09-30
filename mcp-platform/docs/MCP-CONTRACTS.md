@@ -1,7 +1,7 @@
 # Контракты вызовов MCP
 
 **Сервер:** `enterprise-mcp` — один процесс, capability-каталоги внутри.
-**Ветка:** `refactor/mcp-platform` · **Коммит:** `4f4e8a8`
+**Ветка:** `refactor/mcp-platform` · **Коммит:** `776593e`
 **Связанные документы:** `TARGET-ARCHITECTURE.md` (что и почему), `design.md`
 (решения), `../openspec/changes/enterprise-mcp-platform/specs/` (WHEN/THEN).
 

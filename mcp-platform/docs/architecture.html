@@ -92,7 +92,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
   <p class="sec-sub">Цепочка данных потеряла один hop: векторы идут из PostgreSQL прямо в FAISS, без снапшота на диске. Capability — каталог, а не процесс, поэтому добавление домена не трогает ни реестр, ни сборку.</p>
 
   <div class="diagram">
-  <svg viewBox="0 0 960 530" role="img" aria-label="Nanobot обращается по MCP к одному серверу enterprise-mcp; внутри capability data, vectors, llm, audit, legal и общие библиотеки; сервер работает поверх PostgreSQL и LLM-провайдера">
+  <svg viewBox="0 0 960 530" role="img" aria-label="Nanobot обращается по MCP к одному серверу enterprise-mcp; внутри capability data (инфраструктура), audit (весь запрос к данным: list_scripts, run_script, generate_sql — SQL от модели не идёт), vectors, llm, legal и общие библиотеки, каждая из которых единственный владелец своего ресурса; сервер работает поверх PostgreSQL и LLM-провайдера">
     <defs>
       <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M0 0 L10 5 L0 10 z" fill="#2f6f5e"/>
@@ -122,10 +122,10 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
 
     <rect x="55" y="204" width="160" height="100" rx="11" fill="#fbfaf7" stroke="#e9e3d6"/>
     <text x="68" y="226" font-family="'JetBrains Mono',monospace" font-size="12.5" fill="#14171e">data</text>
-    <text x="68" y="246" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">query_sql (ro)</text>
+    <text x="68" y="246" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">log_event</text>
     <text x="68" y="263" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">history_search</text>
-    <text x="68" y="280" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">log_event</text>
-    <text x="68" y="297" font-family="'Outfit',sans-serif" font-size="10" fill="#a9a391">пул, очередь, sql_safety</text>
+    <text x="68" y="280" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">schema_check</text>
+    <text x="68" y="297" font-family="'Outfit',sans-serif" font-size="10" fill="#a9a391">инфраструктура, не данные</text>
 
     <rect x="227" y="204" width="160" height="100" rx="11" fill="#fbfaf7" stroke="#e9e3d6"/>
     <text x="240" y="226" font-family="'JetBrains Mono',monospace" font-size="12.5" fill="#14171e">vectors</text>
@@ -140,11 +140,12 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <text x="412" y="266" font-family="'Outfit',sans-serif" font-size="10.5" fill="#a9a391">доменный вызов</text>
     <text x="412" y="283" font-family="'Outfit',sans-serif" font-size="10.5" fill="#a9a391">провайдеру</text>
 
-    <rect x="571" y="204" width="160" height="100" rx="11" fill="#fbfaf7" stroke="#e9e3d6"/>
+    <rect x="571" y="204" width="160" height="100" rx="11" fill="rgba(168,102,47,.06)" stroke="rgba(168,102,47,.32)"/>
     <text x="584" y="226" font-family="'JetBrains Mono',monospace" font-size="12.5" fill="#14171e">audit</text>
-    <text x="584" y="249" font-family="'Outfit',sans-serif" font-size="10.5" fill="#3a4256">tools/ · skill/</text>
-    <text x="584" y="266" font-family="'Outfit',sans-serif" font-size="10.5" fill="#3a4256">service/</text>
-    <text x="584" y="290" font-family="'Outfit',sans-serif" font-size="10" fill="#a9a391">без связности с агентом</text>
+    <text x="584" y="246" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#a8662f">list_scripts</text>
+    <text x="584" y="263" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#a8662f">run_script</text>
+    <text x="584" y="280" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#a8662f">generate_sql</text>
+    <text x="584" y="297" font-family="'Outfit',sans-serif" font-size="10" fill="#a9a391">SQL от модели не идёт</text>
 
     <rect x="743" y="204" width="160" height="100" rx="11" fill="#fbfaf7" stroke="#e9e3d6"/>
     <text x="756" y="226" font-family="'JetBrains Mono',monospace" font-size="12.5" fill="#14171e">legal</text>
@@ -168,6 +169,8 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <text x="713" y="335" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">libs/llm</text>
     <text x="713" y="353" font-family="'Outfit',sans-serif" font-size="10.5" fill="#3a4256">клиент провайдера</text>
 
+    <text x="35" y="381" font-family="'Outfit',sans-serif" font-size="11.5" fill="#2f6f5e">Пул и очередь PostgreSQL, векторные индексы и LLM-клиент — по одному владельцу: capability получают сервис, обход запрещён стражем</text>
+
     <line x1="200" y1="386" x2="200" y2="410" stroke="#2f6f5e" stroke-width="2" marker-end="url(#ar)"/>
     <line x1="700" y1="386" x2="700" y2="410" stroke="#2f6f5e" stroke-width="2" marker-end="url(#ar)"/>
     <text x="716" y="404" font-family="'Outfit',sans-serif" font-size="10.5" fill="#7c7a72">исходящий вызов</text>
@@ -185,7 +188,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <text x="35" y="512" font-family="'Outfit',sans-serif" font-size="12" fill="#a8662f">DuckDB удаляется целиком: ~2 600 строк кода, 10 тестовых модулей, весь снимок на диске и класс операционных проблем с ним</text>
   </svg>
   </div>
-  <p class="caption">Домены audit и legal — capability, а не процессы: у них нет собственного протокола, только операции и инструкция для агента.</p>
+  <p class="caption">Домены audit и legal — capability, а не процессы: у них нет собственного протокола, только операции и инструкция для агента. <code>data</code> — инфраструктура, <code>audit</code> — весь запрос к данным, и SQL от модели не проходит ни через одну операцию.</p>
 </section>
 
 <section>
@@ -228,7 +231,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
 
     <rect x="514" y="98" width="402" height="114" rx="9" fill="#ffffff" stroke="#2f6f5e"/>
     <text x="530" y="122" font-family="'JetBrains Mono',monospace" font-size="12.5" fill="#14171e">enterprise-mcp</text>
-    <text x="530" y="146" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">data · vectors · llm · audit · legal</text>
+    <text x="530" y="146" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">data · audit · vectors · llm · legal</text>
     <text x="530" y="168" font-family="'Outfit',sans-serif" font-size="11.5" fill="#3a4256">пул PostgreSQL и FAISS живут в одном процессе —</text>
     <text x="530" y="186" font-family="'Outfit',sans-serif" font-size="11.5" fill="#3a4256">join данных и векторов выполняется на месте</text>
     <text x="530" y="204" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">индекс FAISS грузится лениво, по первому запросу</text>
@@ -248,7 +251,8 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
       <tr><td class="blk">Топология</td><td>Один процесс <code>enterprise-mcp</code>. Capability — каталоги, а не серверы</td><td>Крах одной capability валит все. Возврат к разделению остаётся возможным: это правка списка каталогов, не кода операций</td></tr>
       <tr><td class="blk">Индекс FAISS</td><td>Ленивая сборка по первому векторному запросу, лок на прогрев, наблюдаемое состояние</td><td>Первый <code>vector_search</code> ждёт десятки секунд. <code>list_indexes</code> и <code>index_stats</code> отвечают сразу — из конфигурации</td></tr>
       <tr><td class="blk">Документы</td><td>Нативный tool агента, <code>office_files.py</code> не переезжает</td><td>Офисные пакеты остаются в <code>requirements.txt</code> агента — сознательное исключение из цели «Nanobot не тянет enterprise-стек»</td></tr>
-      <tr><td class="blk">Поверхность <code>data</code></td><td>Произвольный read-only SQL под AST-валидацией плюс именованные операции</td><td>Оба предохранителя <strong>вносятся до выдачи модели</strong>: старт без <code>sqlglot</code> запрещён — без него guard пропускает <code>pg_sleep</code> и DML после <code>--</code>-комментария. Предел стоимости запроса в коде отсутствует</td></tr>
+      <tr><td class="blk">Доступ к данным</td><td><strong>Модель не пишет SQL.</strong> Три входа: <code>run_script</code> — шаблон из реестра, <code>generate_sql</code> — LLM внутри сервера, <code>history_search</code> — код платформы. Запрос к данным живёт в capability <code>audit</code></td><td>Новый вопрос без подходящего скрипта идёт через LLM и стоит вызова провайдера. Взамен граница изоляции <code>history_search</code> перестаёт обходиться, а список таблиц становится границей, а не подсказкой в промпте</td></tr>
+      <tr><td class="blk">Владение ресурсами</td><td>Пул и очередь PostgreSQL, векторные индексы и LLM-клиент — по одному владельцу. Capability получают сервис</td><td>Ничего, кроме одного стражем проверяемого запрета. Вторая копия индекса — это вторая сотня тысяч векторов в памяти, а второй пул — второе число соединений против той же базы</td></tr>
       <tr><td class="blk">LLM-выход</td><td>Операция <code>complete</code> в capability <code>llm</code>; <code>llm_client.py</code> и <code>llm_config.py</code> уходят из агента</td><td>Домены ходят в <code>libs/llm</code> напрямую в своём процессе — MCP-поверхность нужна модели, а не домену</td></tr>
       <tr><td class="blk"><code>media</code> и <code>_tool_audit</code></td><td>События: хук публикует через <code>turn_context.events</code>, канал читает</td><td>Вложение появляется у пользователя на этапе обработки события, а не на сборке outbound</td></tr>
     </tbody>
@@ -511,27 +515,28 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
 
 <section>
   <div class="sec-head"><span class="sec-num">06</span><h2>Порядок работ</h2></div>
-  <p class="sec-sub">Исправлен после аудита <code>lib/</code>: FAISS собирается из снапшота, поэтому capability <code>vectors</code> обязана читать из PostgreSQL раньше, чем снапшот исчезнет. Один механизм за раз, старая реализация удаляется только после прохождения интеграционных тестов.</p>
+  <p class="sec-sub">Исправлен дважды. После аудита <code>lib/</code>: FAISS собирается из снапшота, поэтому capability <code>vectors</code> обязана читать из PostgreSQL раньше, чем снапшот исчезнет. После разведки <code>audit_analyzer</code>: <code>db_loader</code> тоже читает реестр из снапшота, поэтому capability <code>audit</code> обязана переехать на PostgreSQL до его удаления. Один механизм за раз, старая реализация удаляется только после прохождения интеграционных тестов.</p>
 
   <ol class="timeline">
     <li><div class="who">ШАГ 0</div><p><strong>Принятые удаления:</strong> <code>agent_worker_claims</code> с протоколом аренды, <code>benchmarks/</code>, <code>streamlit</code> вместе с <code>subprocess_manager.py</code>, <code>example.py</code>, сломанный и мёртвый код. Каждый набор — отдельный коммит с DROP-миграциями и пересборкой baseline.</p></li>
     <li><div class="who">ШАГ 1</div><p><strong>Реестр:</strong> <code>ToolDefinition</code>, <code>ToolRegistry</code>, загрузчик <code>capabilities/*/tools/*.py</code>, fail-fast на любом нарушении. Идёт раньше любой capability, иначе состав придётся перечислять руками.</p></li>
     <li><div class="who">ШАГ 2</div><p><code>libs/enterprise_data</code> ← <code>workspace/utils/db.py</code> + <code>sql_safety</code> + <code>jsonb</code> + <code>clean_text</code>. Это перенос готового модуля, а не постройка.</p></li>
-    <li><div class="who">ШАГ 3</div><p>Capability <code>data</code>: операции поверх библиотеки. Обязательные предохранители: запрет старта без <code>sqlglot</code> и серверный предел стоимости запроса, которого в коде нет.</p></li>
+    <li><div class="who">ШАГ 3</div><p>Capability <code>data</code> — инфраструктура: <code>log_event</code>, <code>history_search</code>, <code>schema_check</code>. Обязательные предохранители: запрет старта без <code>sqlglot</code>, серверный предел стоимости запроса, которого в коде нет, и архитектурный страж, валящий сборку при обходе сервисов.</p></li>
     <li><div class="who">ШАГ 4</div><p>Capability <code>vectors</code>: сборка FAISS напрямую из PostgreSQL <strong>и лениво</strong> — по первому векторному запросу, с локом на прогрев и наблюдаемым состоянием. Векторы документов предрассчитаны, но вектор запроса эмбедится в рантайме: зависимость от сервиса эмбеддингов остаётся. Переносит <code>build_faiss_index</code>, <code>group_vector_hits</code> и векторную половину <code>cache_provider_impl.py</code>.</p></li>
     <li><div class="who">ШАГ 5</div><p>Capability <code>llm</code>: <code>libs/llm</code> + операция <code>complete</code>. Убирает 287 строк LLM-клиента из агента.</p></li>
-    <li><div class="who">ШАГ 6</div><p><strong>Удаление DuckDB</strong> одним коммитом, без MCP-работы. Векторный поиск к этому моменту уже не зависит от снапшота. Baseline пересобирается здесь, не раньше.</p></li>
-    <li><div class="who">ШАГ 7</div><p>Логирование через <code>enterprise-mcp: log_event</code>: буфер в агенте, батчевый flush, дроп при переполнении. <code>db_logging_bus.py</code> остаётся в агенте — он знает форму сообщений Nanobot.</p></li>
-    <li><div class="who">ШАГ 8</div><p>Патчи → хуки и события. <code>assemble_outbound</code> уходит первым, у него все три обязанности уже выразимы событиями. Проверяется реальным ходом с вложением, заполняется ли вообще слот <code>media</code>.</p></li>
-    <li><div class="who">ШАГ 9</div><p>Document-tool агента и перенос <code>legal_summarizer</code> — 30 000 строк с нулевой связностью. Сначала проверяется, что парсер не расходится на две копии.</p></li>
-    <li><div class="who">ШАГ 10</div><p>Capability <code>audit</code> поверх <code>data</code> и <code>vectors</code>. CLI-граница уже существует. Не забыть резолв <code>scripts_registry</code> из <code>TableRegistry</code>.</p></li>
-    <li><div class="who">ШАГ 11</div><p>Разделение зависимостей: из <code>requirements.txt</code> агента уходят <code>sqlglot</code>, <code>duckdb</code>, <code>pyarrow</code>, <code>faiss</code> и клиентский LLM-пакет. Офисные остаются — решение принято осознанно.</p></li>
+    <li><div class="who">ШАГ 6</div><p>Capability <code>audit</code> на PostgreSQL: <code>db_loader</code> напрямую вместо снапшота, плейсхолдеры под <code>psycopg2</code>, схема по умолчанию <code>public</code>, проверка списка таблиц в коде, потолок строк, без <code>context</code> от вызывающей стороны. Убирает последнюю зависимость от снапшота.</p></li>
+    <li><div class="who">ШАГ 7</div><p><strong>Удаление DuckDB</strong> одним коммитом, без MCP-работы. К этому моменту ни векторный поиск, ни реестр скриптов от снапшота не зависят. Baseline пересобирается здесь, не раньше.</p></li>
+    <li><div class="who">ШАГ 8</div><p>Логирование через <code>enterprise-mcp: log_event</code>: буфер в агенте, батчевый flush, дроп при переполнении. Журнал не встаёт в общую очередь за <code>generate_sql</code> — у сервиса два входа. <code>db_logging_bus.py</code> остаётся в агенте — он знает форму сообщений Nanobot.</p></li>
+    <li><div class="who">ШАГ 9</div><p>Патчи → хуки и события. <code>assemble_outbound</code> уходит первым, у него все три обязанности уже выразимы событиями. Проверяется реальным ходом с вложением, заполняется ли вообще слот <code>media</code>.</p></li>
+    <li><div class="who">ШАГ 10</div><p>Document-tool агента и перенос <code>legal_summarizer</code> — 30 000 строк с нулевой связностью. Сначала проверяется, что парсер не расходится на две копии.</p></li>
+    <li><div class="who">ШАГ 11</div><p>Остатки <code>audit_analyzer</code> в агенте: <code>SKILL.md</code> под три операции, удаление <code>scripts/cli.py</code> и <code>predefined/</code>, разбор расхождения каталога скриптов между текстом и базой.</p></li>
+    <li><div class="who">ШАГ 12</div><p>Разделение зависимостей: из <code>requirements.txt</code> агента уходят <code>sqlglot</code>, <code>duckdb</code>, <code>pyarrow</code>, <code>faiss</code> и клиентский LLM-пакет. Офисные остаются — решение принято осознанно.</p></li>
   </ol>
 </section>
 
 <footer>
-  <div class="mono" style="color:var(--ink)">refactor/mcp-platform · 3184543</div>
-  <div style="margin-top:10px">Аудит: 73 файла <span class="mono">lib/</span> · <span class="mono">workspace/</span>, <span class="mono">tools/</span>, <span class="mono">benchmarks/</span> · 64 из 159 тестовых файлов затрагиваются. Основной проект не изменён: 4 101 тест на месте. Источник решений — <span class="mono">design.md</span> §2.1, §2.7, §7 и спецификации в <span class="mono">openspec/changes/enterprise-mcp-platform/specs/</span>.</div>
+  <div class="mono" style="color:var(--ink)">refactor/mcp-platform · 776593e</div>
+  <div style="margin-top:10px">Аудит: 73 файла <span class="mono">lib/</span> · <span class="mono">workspace/</span>, <span class="mono">tools/</span>, <span class="mono">benchmarks/</span> · 64 из 159 тестовых файлов затрагиваются. Основной проект не изменён: 4 101 тест на месте. Источник решений — <span class="mono">design.md</span> §2.1, §2.4, §2.7, §2.8, §7, контракты в <span class="mono">MCP-CONTRACTS.md</span> и спецификации в <span class="mono">openspec/changes/enterprise-mcp-platform/specs/</span>.</div>
 </footer>
 
 </div>
