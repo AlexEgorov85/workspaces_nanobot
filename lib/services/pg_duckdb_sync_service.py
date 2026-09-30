@@ -64,6 +64,9 @@ class PgDuckDbSyncService:
         reconnect_backoff_max: float = 0.0,
         full_resync_every: int = 0,
         db_logging_service: Any | None = None,
+        *,
+        ownership_coordinator: Any | None = None,
+        cache_provider: Any | None = None,
     ) -> None:
         self._dsn = dsn
         self._schema = schema
@@ -78,25 +81,39 @@ class PgDuckDbSyncService:
         self._full_resync_every = max(0, int(full_resync_every))
         self._resync_counter = 0
         # Опциональный sink в ``agent_gateway_logs`` (через ``DbLoggingService``,
-        # async/пул). Если None — события идут через ``event_log.record_sync_event``
-        # (sync, всегда работает при logging.db.enabled+DSN). См. ``_log_sync_event``.
+        # async/пул). Если None — no-op for business + operational WARNING внутри
+        # ``DbLoggingService.try_log_event``. См. ``_log_sync_event``.
         self._db_logging_service = db_logging_service
 
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=max_queue_size)
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
 
+        # Stage E (change ``unify-cli-gateway-architecture``):
+        # ownership_coordinator + cache_provider — fencing integration.
+        # Если переданы, каждый sync-cycle оборачивается в
+        # ``coord.acquire_write_fence()`` (PG advisory lock + generation
+        # check) перед тем, как сообщать cache_provider о новых записях.
+        # При takeover (другой OWNER с большим generation) sync останавливается
+        # с ``OwnershipLostError``, освобождает claim, и не пишет в stale cache.
+        self._ownership_coordinator = ownership_coordinator
+        self._cache_provider = cache_provider
+
         self._conn: psycopg2.extensions.connection | None = None
         self._thread: threading.Thread | None = None
         self._running = False
         self._initial_load = True
 
-        # РРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Р№ РїРѕР»Р»РёРЅРі: {table: РїРѕСЃР»РµРґРЅРµРµ Р·РЅР°С‡РµРЅРёРµ track-РєРѕР»РѕРЅРєРё}
+        # РРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Р№ РїРѕР»Р»РёРЅРі: {table: РїРѕСЃР»РµРґРЅРµРµ Р·РЅР°С‡РµРЅРёРµ track-РєРѕР»РѕРЅРєРё}
         self._last_sync: dict[str, Any] = {}
-        # Batch-prefetch: {table: track-РєРѕР»РѕРЅРєР°}. Р—Р°РїРѕР»РЅСЏРµС‚СЃСЏ РїСЂРё РїРµСЂРІРѕРј РѕРїСЂРѕСЃРµ,
+        # Batch-prefetch: {table: track-РєРѕР»РѕРЅРєР°}. Р—Р°РїРѕР»РЅСЏРµС‚СЃСй РїСЂРё РїРµСЂРІРѕРј РѕРїСЂРѕСЃРµ,
         # РґР°Р»РµРµ С‡РёС‚Р°РµС‚СЃСЏ Р·Р° O(1). РЈСЃС‚СЂР°РЅСЏРµС‚ РїРѕРІС‚РѕСЂРЅС‹Р№ lookup С‡РµСЂРµР· table_registry
         # РЅР° РєР°Р¶РґРѕРј poll-С†РёРєР»Рµ.
         self._column_cache: dict[str, str] = {}
+        # PK-колонки таблиц (для DELETE+INSERT upsert в DuckDB-кэше).
+        # Отличается от ``_column_cache``: track-колонка отвечает за
+        # инкрементальный polling, PK — за идентификацию строки при upsert.
+        self._pk_cache: dict[str, str | None] = {}
         self._on_new_records: Callable[[str, list[dict]], None] | None = None
         self._on_replace_records: Callable[[str, list[dict]], None] | None = None
         self._on_schema: Callable[[str, list[dict]], None] | None = None
@@ -261,8 +278,8 @@ class PgDuckDbSyncService:
         """РџСЃРµРІРґРѕРЅРёРј ``get_stats`` (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ РјРѕРЅРёС‚РѕСЂРёРЅРіРµ/Р»РѕРіР°С…)."""
         return self.get_stats()
 
-    # ------------------------------------------------------------------
-    # Worker-С†РёРєР»
+# ------------------------------------------------------------------
+    # Worker-цикл
     # ------------------------------------------------------------------
 
     def _worker(self) -> None:
@@ -275,18 +292,59 @@ class PgDuckDbSyncService:
                 self._drain_queue()
                 if not self._running:
                     break
-                self._poll_changes()
+                # Fencing boundary: внутри одного PG-цикла с advisory
+                # lock + generation check. При takeover (другой OWNER,
+                # generation изменился) — ловим ``OwnershipLostError`` и
+                # останавливаем worker. coord.release() ещё нет смысла
+                # — пусть стейт-машина реклеймит при следующем старте
+                # (это Stage F-плюс task; сейчас — fail-soft воркер-стоп).
+                self._sync_cycle_with_fence()
+                if not self._running:
+                    break
                 self._fire_sync_callback()
-                # Р–РґС‘Рј РёРЅС‚РµСЂРІР°Р» РїРѕР»Р»РёРЅРіР° РёР»Рё СЃРёРіРЅР°Р» РѕСЃС‚Р°РЅРѕРІРєРё
+                # Ждём интервал поллинга или сигнал остановки
                 self._stop_event.wait(self._poll_interval)
         finally:
             self._running = False
-            # Р¤РёРЅР°Р»СЊРЅР°СЏ РїРѕРїС‹С‚РєР° РґРѕРїРёСЃР°С‚СЊ РѕСЃС‚Р°РІС€РёРµСЃСЏ Р·Р°РїРёСЃРё
+            # Финальная попытка дописать оставшиеся записи
             try:
                 self._drain_queue()
             except Exception:
                 pass
             self._close_connection()
+
+    def _sync_cycle_with_fence(self) -> None:
+        """Stage E: fencing-wrapped sync cycle.
+
+        Если coordinator не передан — старый путь (без fencing). Если
+        передан — внутри ``coord.acquire_write_fence()`` выполняется
+        PG-координация с advisory lock + generation check. При успехе —
+        ``_poll_changes()`` + ``_fire_sync_callback()``. При
+        ``OwnershipLostError`` — sync-cycle прерывается, логируется,
+        worker выходит из run-цикла.
+        """
+        if self._ownership_coordinator is None:
+            self._poll_changes()
+            return
+        try:
+            with self._ownership_coordinator.acquire_write_fence():
+                self._poll_changes()
+        except Exception as exc:
+            from lib.services.cache_ownership import OwnershipLostError
+            if isinstance(exc, OwnershipLostError):
+                logger.warning(
+                    "PgDuckDbSyncService: ownership lost (%s); stopping worker",
+                    exc,
+                )
+                self._log_sync_event(
+                    event_type="sync_ownership_lost",
+                    summary=f"ownership lost during sync cycle: {exc}",
+                    payload={"reason": str(exc)},
+                    level="WARN",
+                )
+                self._running = False
+                return
+            raise
 
     def _fire_sync_callback(self) -> None:
         """Уведомить о завершении цикла синхронизации (после load/поллинга)."""
@@ -370,6 +428,55 @@ class PgDuckDbSyncService:
         col = "id" if table == self._vector_table else "updated_at"
         self._column_cache[table] = col
         return col
+
+    def key_column_for(self, table: str) -> str | None:
+        """PK-колонка таблицы для upsert в DuckDB-кэше (``None`` — нет PK).
+
+        Нужна, потому что ``DuckDbCacheStore.upsert_records`` умеет делать
+        инкрементальный DELETE+INSERT только по ключу, а дефолтно ищет
+        колонку ``id``. Таблицы вида ``public.agent_predefined_scripts``
+        имеют PK ``name`` и без явной передачи ключа попадали в ветку
+        ``CREATE OR REPLACE TABLE`` — а батчи от ``_fetch_incremental``
+        являются ДЕЛЬТОЙ, поэтому несвязанные строки молча терялись.
+
+        Резолвится один раз на таблицу и кэшируется (в т.ч. ``None``).
+        Составной PK не поддерживается — для таких таблиц нужен
+        отдельный contract; здесь возвращается ``None`` и store
+        пересоздаёт таблицу (как раньше).
+        """
+        if table in self._pk_cache:
+            return self._pk_cache[table]
+
+        pk: str | None = None
+
+        def _work(conn: Any) -> list[tuple[str, ...]]:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT a.attname FROM pg_index i "
+                    "JOIN pg_attribute a "
+                    "  ON a.attrelid = i.indrelid "
+                    " AND a.attnum = ANY(i.indkey) "
+                    "WHERE i.indrelid = %s::regclass AND i.indisprimary "
+                    "ORDER BY a.attnum",
+                    [self._fq_table(table)],
+                )
+                return cur.fetchall()
+            finally:
+                cur.close()
+
+        try:
+            rows = self._db_run(_work)
+            if len(rows) == 1:
+                pk = str(rows[0][0])
+        except Exception as exc:
+            logger.warning(
+                "PgDuckDbSyncService.key_column_for(%s): PK lookup failed (%s) "
+                "— upsert пойдёт через пересоздание таблицы",
+                table, exc,
+            )
+        self._pk_cache[table] = pk
+        return pk
 
     def _do_initial_load(self) -> None:
         """РџР°СЂР°Р»Р»РµР»СЊРЅР°СЏ РЅР°С‡Р°Р»СЊРЅР°СЏ Р·Р°РіСЂСѓР·РєР° РІСЃРµС… С‚Р°Р±Р»РёС† С‡РµСЂРµР· thread-pool.

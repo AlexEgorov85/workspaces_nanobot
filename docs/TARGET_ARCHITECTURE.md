@@ -209,10 +209,10 @@ workspace/tools/
 
 В будущем допустимы другие независимые Tools, если они представляют самостоятельную generic capability.
 
-> **Фаза 8:** generic tools `duckdb_query_tool.py` / `vector_search_tool.py`
-> **удалены**. Капабилити «свободный SQL» и «semantic search» больше не
-> являются Agent-facing tools — они доступны только через CLI skill'а
-> `audit_analyzer` (`scripts/cli.py --mode predefined / generated_sql / vector`).
+> **Generic tools `duckdb_query_tool.py` / `vector_search_tool.py` не
+> существуют.** Капабилити «свободный SQL» и «semantic search» не являются
+> Agent-facing tools — они доступны только через CLI skill'а `audit_analyzer`
+> (`scripts/cli.py --mode predefined / generated_sql / vector`).
 > Прямой доступ агента к свободному SQL и vector-search демонтирован.
 
 ---
@@ -261,7 +261,7 @@ flowchart TD
 ```
 
 Skill не вызывает Tool программно. (Generic tools `duckdb_query` /
-`vector_search` удалены в фазе 8 — Agent не имеет к ним доступа.)
+`vector_search` отсутствуют — Agent не имеет к ним доступа.)
 
 ---
 
@@ -308,7 +308,7 @@ python scripts/cli.py --mode predefined --script <name> [--params '{...}']
 Назначение:
 
 > Выполнить безопасный read-only SQL запрос в доступном DuckDB источнике.
-> В фазе 8 публичный Agent-facing tool `duckdb_query` удалён; свободный
+> Публичного Agent-facing tool `duckdb_query` нет; свободный
 > SQL — только внутри CLI skill'а (predefined scripts / `generated_sql`).
 
 Skill не знает конкретную реализацию Core, но вызывает её через
@@ -351,7 +351,7 @@ python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
 Назначение:
 
 > Выполнить semantic search по указанному vector index.
-> В фазе 8 публичный Agent-facing tool `vector_search` удалён; доступ —
+> Публичного Agent-facing tool `vector_search` нет; доступ —
 > только через CLI skill'а.
 
 Пример:
@@ -401,7 +401,7 @@ workspace/skills/audit_analyzer/
     SKILL.md           (единственный источник документации; self-contained)
     scripts/
         ...
-    # references/ удалены в Phase 8 — SKILL.md self-contained.
+    # Каталог references/ у audit_analyzer отсутствует — SKILL.md self-contained.
     # Другие skills (например, legal_summarizer) могут хранить references/
     # если их SKILL.md < 2000 символов и нужны длинные reference-docs.
     assets/
@@ -476,7 +476,7 @@ Script не должен регистрировать Tool и не должен 
 Большие знания не следует целиком помещать в `SKILL.md`.
 
 SKILL.md — единственный источник документации по skill'у (self-contained,
-progressive disclosure отключён в Phase 8):
+progressive disclosure отключён):
 
 ```mermaid
 flowchart TD
@@ -589,7 +589,7 @@ DuckDB не должен становиться authoritative database.
 
 # 15. AuditSync
 
-`PgDuckDbSyncService` (ранее `AuditSyncService`, переименован в Фазе 6) является
+`PgDuckDbSyncService` (ранее `AuditSyncService`) является
 domain/infrastructure integration component.
 
 Целевая цепочка:
@@ -717,6 +717,18 @@ test
 Если upstream предоставляет официальный extension point, patch должен быть заменён на него.
 
 Если patch пока необходим, он должен находиться в одном чётко обозначенном compatibility layer.
+
+## Error fallback (TurnDelivery.fail)
+
+`AgentLoop._process_message` ловит любой `Exception` (кроме `asyncio.CancelledError`) и зовёт `TurnDelivery.fail(publish_completion=...)`. Upstream-`TurnDelivery.fail` (`nanobot.agent.turn_delivery.TurnDelivery.fail`) публикует хардкод `"Sorry, I encountered an error."` — это и есть «кривой финал», который видит пользователь при любой необработанной ошибке.
+
+Контракт замены описан в `openspec/specs/runtime/error-fallback/spec.md`:
+
+- **Single source of truth** — `gateway.error_messages.internal_error` в `project.json` (default `"Я не справился с вашим вопросом. Попробуйте, пожалуйста, переформулировать конкретнее — например, уточните ключевую часть или приведите пример."`); pydantic-валидация в `lib/core/project_settings.py::ErrorMessagesSettings`.
+- **Patch** — `RuntimePatcher.patch_turn_delivery_fail` (на уровне класса, не инстанса) подменяет `TurnDelivery.fail` обёрткой: формирует `OutboundMessage(content=internal_error, metadata={"_error_kind": "internal", "_final_turn": True})`, при `log_to_db=true` (default) пишет `event_type="turn_failed"` в `agent_gateway_logs` через `try_log_event`, затем вызывает оригинальный `fail` для финализации `turn_completed` event.
+- **No-leak boundary** — `OutboundMessage.content` НЕ содержит ни типа исключения, ни str(exc), ни пути к исходнику. Детали остаются только в БД (для `history_search`) и в `loguru`.
+- **No regression** — `asyncio.CancelledError`-ветка (`abort_stream` + `restore_runtime_checkpoint`) не задета; `turn_completed` event по-прежнему публикуется с `outcome="failed"` и `failure_kind="internal"`; каналы (`PostgresChannel`, `RedisChannel`, `ConsoleLoop`, `Streamlit`) не меняются.
+- **Fail-open** — отсутствие `DbLoggingService` (юнит-тесты, профиль `test` без логирования) → fallback-сообщение всё равно уходит; отсутствие `settings` → default-текст.
 
 ---
 

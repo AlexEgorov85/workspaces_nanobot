@@ -67,9 +67,10 @@ DuckDB-кеш публикуется **только gateway'ом** через `D
   2. **default** (v2.5.2+): `~/.cache/nanobot/duckdb/cache.duckdb`
      (POSIX `fcntl` работает там штатно)
 
-Запустите `python gateway.py` и подождите первого цикла синхронизации. Старый путь
+Запустите `python gateway.py --profile=prod` и подождите первого цикла
+синхронизации. Старый путь
 `workspace/skills/audit_analyzer/cache/audit_cache.duckdb` из
-`project.json:in_memory_cache_path` больше не используется.
+`project.json::in_memory_cache_path` больше не используется.
 
 ### `IO Error: Could not set lock on file .../cache.duckdb.tmp: Conflicting lock is held in PID 0`
 
@@ -148,8 +149,49 @@ PowerShell интерпретирует `=` по-своему. Использу�
 |---|---|
 | `python tools/check_worker_pool_integrity.py` | Проверка orphan-claims в `agent_worker_claims` (имя настраивается через `channels.postgres.claims_table`) |
 | `python tools/check_worker_pool_integrity.py --fix` | Возврат задач «мёртвых» воркеров в `pending` + снятие claim |
+| `python tools/diagnose_startup.py --log <PATH>` | Парсер startup-лога gateway/CLI: извлекает секции `Hooks connected` / `Registered N tools` / `Custom (project) tools` / `Runtime patches`, сверяет с каноническими списками из `lib/services/runtime_inventory.py`. Печатает OK / DRIFT / CRITICAL по хукам/project tools/runtime patches. Exit 0 (ОК), 1 (critical), 2 (drift). Опции: `--strict` (warning → exit 1), `--json` (для CI), `--no-color`. См. «Startup-inventory drift» ниже. |
+| `python tools/diagnose_startup.py` (без `--log`) | Читает startup-лог из stdin — удобно для pipe: `python gateway.py --profile=prod 2>&1 \| python tools/diagnose_startup.py --no-color` |
 | `PgDuckDbSyncService.get_stats()` | `polls`, `full_resyncs`, `reconnects`, `errors`, размер очереди |
 | `DbLoggingService.get_stats()` | `written`, `failed`, `queued`, `queue_size`, `batch_count`, `queue_full`, `connected`, `last_error`, `question_runs`, `last_purge_*` |
+
+## Startup-inventory drift
+
+В startup-логе gateway/CLI `ApplicationContext` после `_log_connected_hooks()`
+и `apply_all()` автоматически выводит **prominent-баннер** (`rich.Panel`,
+stderr), если фактический инвентарь расходится с каноном:
+
+```
+┌─ HOOK INVENTORY: critical drift detected ──────────────────────────────┐
+│ MISSING REQUIRED: SessionFileRedirectHook, RecentFilesHook              │
+│ MISSING FACTORY: DatabaseLoggingHook                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─ RUNTIME PATCH INVENTORY: critical drift ──────────────────────────────┐
+│ FAILED REQUIRED: subagent_logging                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─ PROJECT TOOLS INVENTORY: critical drift ──────────────────────────────┐
+│ MISSING REQUIRED: legal_summarizer_query                                │
+│ FAILED: legal_summarizer_query                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Что означают категории:
+
+* **MISSING REQUIRED** — обязательный хук/tool/патч не зарегистрирован. Как правило, runtime сломан (подагент не пишется в БД, файлы сессии не перенаправляются, и т.п.).
+* **MISSING FACTORY** — `DatabaseLoggingHook` не зарегистрирован как per-turn factory. Tool/llm-события не попадают в `agent_gateway_logs`.
+* **FAILED REQUIRED** — патч пытался примениться, но упал (изменился upstream API, ImportError, и т.п.). См. деталь в `Runtime patches:` блоке выше.
+* **UNEXPECTED** — лишний хук/tool, которого нет в каноне. Может быть диагностическим (`StreamDiagnosisHook`) или следствием ручного monkey-patch.
+* **MISSING OPTIONAL** — хук не критичный, но ожидался. Например, `StreamDiagnosisHook` после REMOVED-разметки.
+
+Типовые причины MISSING REQUIRED/FAILED:
+
+1. **`subagent_logging` failed** — `ImportError` в `RuntimePatcher.patch_subagent_logging`. Часто из-за отсутствия `_usage_to_dict` (см. CHANGELOG v2.5.3 — фикс в `lib/hooks/database_logging_hook.py`).
+2. **`exec_timeout_cap`/`turn_delivery_fail` failed** — модуль shell / TurnDelivery не загружен (smoke-режим, или upstream-переименование).
+3. **`session_content_cleanup` failed** — workspace не добавлен в `sys.path` (см. `gateway.py:571`).
+4. **Плагин `workspace/hooks/*.py` MISSING** — `lib.cli.hook_loader._allowed_hook_names()` не знает про новый плагин, или `workspace/hooks/__init__.py` пуст.
+
+Для автономной диагностики по уже существующему лог-файлу — `python tools/diagnose_startup.py --log gateway.log`.
 
 См. также: [docs/ARCHITECTURE.md](ARCHITECTURE.md) — разделы по сервисам,
 [docs/architecture/runtime-patcher-inventory.md](architecture/runtime-patcher-inventory.md)

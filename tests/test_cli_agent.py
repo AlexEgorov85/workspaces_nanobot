@@ -35,6 +35,10 @@ def _setup_fake_modules():
     loop.AgentLoop.from_config = MagicMock()
     sys.modules["nanobot.agent.loop"] = loop
 
+    hook_mod = types.ModuleType("nanobot.agent.hook")
+    hook_mod.AgentHook = type("AgentHook", (), {"__init__": lambda self, reraise=False: None})
+    sys.modules["nanobot.agent.hook"] = hook_mod
+
     bus = types.ModuleType("nanobot.bus")
     queue = types.ModuleType("nanobot.bus.queue")
     queue.MessageBus = MagicMock()
@@ -255,13 +259,14 @@ class TestHookLoader:
 
 
 class TestTypewriter:
-    @pytest.mark.asyncio
-    async def test_zero_speed_prints(self):
-        from lib.cli.console_loop import _typewriter
+    """DEPRECATED: ``_typewriter`` удалён из console_loop.py после перехода
+    на upstream ``nanobot.cli.terminal``. Reasoning/печать управляются
+    ``cli_terminal._ReasoningBuffer`` и ``cli_terminal._print_agent_response``.
+    Этот класс оставлен пустым как маркер миграции; удалить в следующем релизе.
+    """
 
-        with patch("lib.cli.console_loop.console") as mc:
-            await _typewriter("hello", "bold", 0)
-            mc.print.assert_called_once()
+    def test_marker(self):
+        pass
 
 
 # =================================================================
@@ -273,34 +278,141 @@ class TestParseArgs:
     def test_defaults(self):
         from cli_agent import _parse_args
 
-        # После Phase B ``--profile`` обязателен (whitelist {"prod","test"}).
-        with patch("sys.argv", ["cli_agent.py", "--profile=test"]):
+        # Stage F (change ``unify-cli-gateway-architecture``, design D8):
+        # CLI = фиксированный профиль ``test``, ``--profile`` НЕ
+        # принимается. Тест вызывает _parse_args без ``--profile``.
+        with patch("sys.argv", ["cli_agent.py"]):
             args = _parse_args()
             assert args.patched is False
             assert args.storage == "auto"
             assert args.session is None
+            assert args.profile == "test"
 
     def test_patched_flag(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "--profile=test", "--patched"]):
+        with patch("sys.argv", ["cli_agent.py", "--patched"]):
             args = _parse_args()
             assert args.patched is True
+            assert args.profile == "test"
 
     def test_storage_postgres(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "--profile=test", "-P", "-S", "postgres"]):
+        with patch("sys.argv", ["cli_agent.py", "-P", "-S", "postgres"]):
             args = _parse_args()
             assert args.patched is True
             assert args.storage == "postgres"
+            assert args.profile == "test"
 
     def test_session_key(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "--profile=test", "-s", "my-session"]):
+        with patch("sys.argv", ["cli_agent.py", "-s", "my-session"]):
             args = _parse_args()
             assert args.session == "my-session"
+            assert args.profile == "test"
+
+
+class TestRunVanillaForwardsStorageAndSession:
+    """Stage F contract: ``_run_vanilla`` MUST передавать ``storage_override``
+    и ``session_override`` в ``ApplicationContext.create()``.
+
+    Регрессия: до правки ``_run_vanilla`` теряла ``args.storage`` — CLI
+    принимал ``--storage=file``, но пробрасывал его только в
+    ``_run_patched``. Это нарушало спецификацию
+    (``openspec/specs/runtime/entrypoints/spec.md``: «CLI entrypoint MUST
+    принимать runtime-флаги ``--storage`` и ``--session``») и приводило к
+    тихой потере режима хранилища при vanilla-запуске.
+    """
+
+    def _capture_create_kwargs(self, monkeypatch):
+        """Подменить ``ApplicationContext.create`` через ``__new__``
+        construction-time shim нельзя (это classmethod). Используем
+        прямой monkeypatch на ``ApplicationContext.create``."""
+        captured: dict = {}
+
+        def _fake_create(cls, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            # Возвращаем мок-инстанс, чтобы _run_vanilla мог позвать .stop()
+            mock = MagicMock()
+            mock.settings = {"logging": {"db": {"table_name": "agent_gateway_logs_test"}}}
+            mock.config = MagicMock()
+            mock.config_service = MagicMock()
+            mock.config_service.settings_section.return_value = {}
+            return mock
+
+        from lib.core import application_context as ac
+
+        monkeypatch.setattr(ac.ApplicationContext, "create", classmethod(_fake_create))
+        return captured
+
+    def test_vanilla_passes_storage_override(self, monkeypatch) -> None:
+        from argparse import Namespace
+        import cli_agent
+
+        captured = self._capture_create_kwargs(monkeypatch)
+
+        args = Namespace(
+            smoke=False,
+            session=None,
+            storage="file",
+            patched=False,
+        )
+        # Run до первой ``await`` в run_repl — нам нужно только убедиться,
+        # что ctx создан с правильным kwargs. Используем прямой вызов
+        # внутренней логики, минуя asyncio.run/run_repl.
+        cli_agent._configure_logging({"cli": {}})
+        # Без запуска REPL напрямую подменим порядок: вызываем тело
+        # _run_vanilla до asyncio.run, отлавливая kwargs.
+        # Для этого выдёргиваем ApplicationContext.create уже подменённым.
+
+        # Простой способ: запустить _run_vanilla в фоне, перехватив
+        # ApplicationContext.create — мокинстанс не блокирует REPL,
+        # потому что REPL вызовет ``asyncio.run(run_repl(ctx.agent, ...))``
+        # и провалится на MagicMock.agent. Поэтому прервём выполнение
+        # через monkeypatch на asyncio.run.
+        from unittest.mock import patch as _patch
+        with _patch("cli_agent.asyncio.run", side_effect=SystemExit(0)):
+            try:
+                cli_agent._run_vanilla(args)
+            except SystemExit:
+                pass
+
+        assert "kwargs" in captured, "ApplicationContext.create не был вызван"
+        assert captured["kwargs"].get("storage_override") == "file", (
+            f"_run_vanilla не пробросил --storage=file в create(); "
+            f"kwargs={captured['kwargs']}"
+        )
+        assert captured["kwargs"].get("role") == "cli"
+        assert "profile" not in captured["kwargs"], (
+            "_run_vanilla не должен передавать profile — "
+            "профиль уже разрешён через _initialize_settings"
+        )
+
+    def test_vanilla_passes_session_override(self, monkeypatch) -> None:
+        from argparse import Namespace
+        import cli_agent
+        from unittest.mock import patch as _patch
+
+        captured = self._capture_create_kwargs(monkeypatch)
+        args = Namespace(
+            smoke=False,
+            session="my-session",
+            storage="auto",
+            patched=False,
+        )
+        with _patch("cli_agent.asyncio.run", side_effect=SystemExit(0)):
+            try:
+                cli_agent._run_vanilla(args)
+            except SystemExit:
+                pass
+
+        assert captured["kwargs"].get("session_override") == "my-session", (
+            f"_run_vanilla не пробросил --session=my-session; "
+            f"kwargs={captured['kwargs']}"
+        )
 
 
 # =================================================================
@@ -309,8 +421,20 @@ class TestParseArgs:
 
 
 class TestPatchAssembleOutbound:
-    def test_wraps_and_injects_audit(self):
+    def test_wraps_and_injects_audit(self, monkeypatch):
+        from lib.hooks.database_logging_hook import (
+            _CONTEXT_BRIDGE,
+            _CONTEXT_BRIDGE_LOCK,
+            seed_context_window,
+        )
         from lib.services.runtime_patcher import RuntimePatcher
+
+        session_key = "test:cli:patch_assemble_outbound"
+        seed_context_window(session_key, limit=40000, model="test-model")
+        monkeypatch.setattr(
+            "lib.services.runtime_patcher._session_key_of",
+            lambda msg: session_key,
+        )
 
         agent = MagicMock()
         original = MagicMock()
@@ -320,8 +444,11 @@ class TestPatchAssembleOutbound:
         hook.drain.return_value = [{"name": "read"}]
 
         RuntimePatcher().patch_assemble_outbound(agent, hook)
-        result = agent._assemble_outbound(MagicMock(), "content", [], "stop", False, None)
+        result = agent._assemble_outbound(MagicMock(), "content", "stop", False)
         assert result.metadata["_tool_audit"] == [{"name": "read"}]
+
+        with _CONTEXT_BRIDGE_LOCK:
+            _CONTEXT_BRIDGE.pop(session_key, None)
 
 
 # =================================================================

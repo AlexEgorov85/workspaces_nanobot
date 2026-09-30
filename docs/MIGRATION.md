@@ -6,39 +6,178 @@
 
 ---
 
-## v2.5.2 → v2.5.3 (текущая) — Профили конфигурации (prod / test)
+## Незарелизованное (`master`, CHANGELOG → [Unreleased](../CHANGELOG.md)) — векторные индексы и изоляция `history_search`
+
+⚠️ **Breaking change** в подсистеме векторных индексов: persisted FAISS-кеш
+удалён, таблица-сигнатура и настройка `signature_table` больше не существуют.
+
+**Автоматические изменения**:
+
+- FAISS-индексы собираются **в памяти** при старте gateway
+  (`PreloadService.preload_vector_indexes`) из DuckDB-снапшота
+  `gateway.vector.index.storage_table`; persisted-артефактов в PG больше нет.
+- `tools/build_vectors.py` пишет векторы в `storage_table` и пересобирает
+  FAISS в памяти; настройки `gateway.vector.index.signature_table` и
+  `config_table` удалены из `VectorIndexSettings` (их наличие в `project.json`
+  — fail-fast на старте).
+- `--list-indexes` (CLI `audit_analyzer`) и `tools/check_indexes.py` читают
+  runtime-состояние из того же снапшота, а не из PG-таблицы.
+- `history_search(session_scope="all")` изолирован по `user_id` (security):
+  колонка `agent_gateway_logs.user_id` + индекс `(user_id, "timestamp" DESC)`.
+  Семантика `scope="all"` — «все сессии текущего пользователя», а не глобальная
+  выборка; при отсутствии identity-store возвращается `missing_user_identity` /
+  `missing_session_identity` **без** обращения к БД.
+
+**Ручные действия**:
+
+1. **Удалить legacy-таблицу FAISS-кэша.** Миграция `V003__drop_vector_index_store.sql`
+   содержит **шаблон**: `DROP TABLE IF EXISTS "<signature_table>";` — runner
+   (`tools/migrate.py`) выполняет SQL как есть, без подстановок, поэтому при
+   `--apply` это no-op. Оператор подставляет реальное имя (в существующих
+   инстансах — `public.agent_vector_index_store`) и выполняет DROP вручную:
+
+   ```sql
+   DROP TABLE IF EXISTS public.agent_vector_index_store;
+   ```
+
+   `V004__agent_gateway_logs_user_id.sql` (колонка `user_id` + backfill из
+   `agent_question_runs.user_id` + индекс) — обычная, применяется через
+   `python tools/migrate.py --apply`.
+
+   Не редактируйте уже применённые миграции: изменение содержимого ломает
+   checksum (`--verify` → DRIFT). Для отката — `DROP TABLE IF EXISTS ...`
+   вручную и `--force` при повторном применении.
+
+2. **Пересобрать векторные индексы**: `python tools/build_vectors.py --full-rebuild`.
+   До пересборки поиск в `--mode vector` вернёт пустую выдачу — runtime
+   получает векторы из снапшота `storage_table`, который наполняется этой
+   командой.
+
+3. **Проверить согласованность декларации и runtime**:
+   `python tools/check_indexes.py` (exit 0 — согласовано, 1 — divergence,
+   2 — инфраструктурная ошибка).
+
+4. **Аудит вызовов `history_search`**: агент, полагавшийся на глобальную выдачу
+   по `session_scope="all"`, теперь получает события только своего пользователя
+   либо `missing_user_identity`, если identity-store не заполнен.
+
+---
+
+## v3.x.x — Storage hybridization (upstream SessionManager + cold PG mirror + LLMUsageStore)
+
+⚠️ **Breaking change** в архитектуре хранения сессий и LLM usage:
+
+- Hot-path запись/чтение сессий — теперь через upstream
+  `nanobot.session.manager.SessionManager` (JSONL),
+  `PGSessionManager` стал compatibility layer (см.
+  [docs/architecture/storage-layers.md](architecture/storage-layers.md)).
+- PostgreSQL остаётся как **cold-storage mirror** через
+  фоновый `SessionColdSyncService` (см.
+  [docs/architecture/storage-layers.md](architecture/storage-layers.md)).
+- LLM usage теперь идёт в upstream `LLMUsageStore` (SQLite WAL)
+  через observer-pipeline (см.
+  [docs/architecture/usage-tracking.md](architecture/usage-tracking.md));
+  `DbLoggingService` больше НЕ пишет `event_type="llm_usage"`.
+
+**Автоматические изменения** (ничего делать не нужно для greenfield):
+
+- Добавлен `SessionColdSyncService` в
+  `lib/services/session_cold_sync_service.py` — фоновый daemon-поток
+  с per-transaction advisory lock, батчами по 50 сессий.
+- Добавлен `lib/services/llm_usage_store_factory.py` — фабрика
+  `LLMUsageStore` с дефолтом
+  `<get_runtime_subdir("usage")>/usage.db`.
+- Добавлен `lib/services/llm_observer.py` —
+  `wrap_provider_snapshot_loader` подключает observer-pipeline.
+- `PGSessionManager` теперь — тонкий compatibility layer
+  (hot-path → `super()`); никаких прямых `INSERT/UPDATE` в
+  `agent_session_meta` / `agent_session_messages`.
+- Добавлены секции `gateway.usage_store.*` и
+  `gateway.session_cold_sync.*` в `project.json`.
+- Новые contract tests: `tests/contract/test_session_manager_api.py`,
+  `tests/contract/test_usage_store_api.py`,
+  `tests/contract/test_llm_observer_api.py`.
+- Архитектурный гард `tests/test_storage_hybridization.py` ловит
+  прямой SQL в `agent_session_*` и создание новых psycopg2-пулов.
+
+**Ручные действия** (ОБЯЗАТЕЛЬНО для проектов с историческими сессиями):
+
+1. **Миграция исторических PG-сессий в JSONL (до deploy).**
+   Если в вашем проекте в `agent_session_meta` /
+   `agent_session_messages` есть исторические сессии, написанные
+   старой версией `PGSessionManager` — перенесите их в upstream
+   JSONL отдельным скриптом **до** deploy
+   `storage-hybridization`. Без этого:
+
+   - история пользователей будет потеряна (sync удалит PG-строки
+     без upstream-двойника первым же циклом);
+   - UI покажет пустую историю для этих сессий.
+
+   Миграционный скрипт вне scope этого change; см. обсуждение в
+   архивированном proposal
+   [openspec/changes/archive/2026-09-27-storage-hybridization/proposal.md](../openspec/changes/archive/2026-09-27-storage-hybridization/proposal.md).
+
+2. **Передача DSN в pool.** Убедитесь, что `channels.postgres.dsn`
+   настроен — иначе `SessionColdSyncService` не запустится (см.
+   `gateway.session_cold_sync.enabled=true` дефолт).
+
+3. **Для multi-instance deploy**: `pg_try_advisory_xact_lock`
+   автоматически делает leader-election; никакой внешней
+   координации не требуется. Если хотите отключить sync на
+   конкретной реплике (по политике) — установите
+   `gateway.session_cold_sync.enabled=false`.
+
+**Rollback**: `git revert <commit-hash>` откатывает все изменения;
+PG-таблицы `agent_session_meta` / `agent_session_messages`
+остаются нетронутыми (sync-сервис только зеркалирует upstream,
+не удаляет PG-таблицу). SQLite-файлы
+`<get_runtime_subdir("usage")>/usage.db` также остаются
+(additive, не destructive).
+
+Если что-то пошло совсем не так (например, observer-pipeline ломает
+LLM-вызовы в production):
+
+1. `git revert <commit-hash>`;
+2. перезапустить gateway;
+3. LLM-вызовы восстановятся, `LLMUsageStore` отключится
+   (без observer нет записей);
+4. сессии останутся в JSONL (upstream hot path не трогали).
+
+---
+
+## v2.5.2 → v2.5.3 — Профили конфигурации (prod / test)
 
 ⚠️ **Breaking change** в порядке запуска: `python gateway.py` без флагов
-теперь стартует в **test-режиме** (раньше — в проде). Все prod-деплои
-**обязаны** явно указать профиль.
+больше **не стартует** — падает с `ConfigurationError` и `exit 2`. Профиль
+обязателен и передаётся только CLI-флагом `--profile` (whitelist: `prod` /
+`test`). Env-передача профиля не читается runtime-кодом: **ни одна**
+переменная окружения не участвует в выборе профиля.
 
 **Автоматические изменения** (ничего делать не нужно):
 
 - Добавлен `ConfigurationResolver` в `config.py` (см. [docs/PROFILES.md](PROFILES.md)).
 - Добавлен файл `profiles/test.jsonc` (в репозитории) — оверлей для test-режима.
-- Добавлен `--profile` CLI-флаг в `gateway.py` и `cli_agent.py`.
+- Добавлен `--profile` CLI-флаг в `gateway.py`.
 - Баннер теперь содержит `profile=<mode>` (`profile=test` или `profile=prod`).
 - Удалён параметр `session_manager_json` из `SessionStorageService.__init__()` — теперь override из `session_manager.json` применяется централизованно в `ConfigurationResolver`.
 
 **Ручные действия** (ОБЯЗАТЕЛЬНО для prod-деплоев):
 
-1. **Явно указать профиль в проде.** Добавьте в systemd unit / docker-compose /
-   k8s manifest:
+1. **Явно указать профиль в проде.** Передайте `--profile` в точке входа:
 
-   ```yaml
-   environment:
-     - NANOBOT_PROFILE=prod
+   ```bash
+   command: python gateway.py --profile=prod
    ```
 
-   или запускайте с `python gateway.py --profile=prod`.
+   Передача профиля через env runtime-кодом **не читается** —
+   деплой с ней завершится с `exit 2`.
 
 2. **Проверить баннер.** При старте в терминале должно быть:
    `Starting nanobot gateway · project v… · profile=prod...`
    Если видите `profile=test` в проде — это ошибка деплоя, алертите.
 
-3. **Проверить наличие `profiles/test.jsonc`.** Должен быть в репозитории
-   (коммитится в составе плана). Без него `python gateway.py` без флагов
-   выбросит `ConfigurationError`.
+3. **Проверить наличие `profiles/test.jsonc`.** Должен быть в репозитории.
+   Без него `python gateway.py --profile=test` выбросит `ConfigurationError`.
 
 **Что НЕ изменилось:**
 
@@ -218,7 +357,9 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 **Что НЕ изменилось:**
 
-- API точек входа: `python gateway.py`, `python cli_agent.py -P`.
+- API точек входа: `python gateway.py --profile=<prod|test>`
+  (флаг `--profile` обязателен) и `python cli_agent.py -P`
+  (CLI — фиксированный профиль `test`, флаг не принимается).
 - Имена таблиц БД.
 - `benchmarks/items/*.yaml` — формат совместим.
 - `audit_analyzer` режимы `predefined` / `sql` / `vector`.

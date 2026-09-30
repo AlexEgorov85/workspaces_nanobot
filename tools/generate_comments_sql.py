@@ -1,4 +1,14 @@
-"""Генератор apply_all_comments.sql из schema.json + extra описаний."""
+"""Генератор apply_all_comments.sql из schema.json + extra описаний.
+
+Требует на входе ``workspace/skills/audit_analyzer/cache/schema.json`` —
+это внешний дамп схемы домена. Штатного runtime-производителя дампа в репозитории
+нет: skill читает схему из DuckDB в рантайме (``db.get_schema()``), поэтому
+перед запуском скрипта файл нужно положить вручную.
+
+Запуск (из корня репо)::
+
+    python tools/generate_comments_sql.py
+"""
 import json
 from pathlib import Path
 
@@ -82,18 +92,17 @@ audit_vectors = {
     )
 }
 
-# 4. vector_index_config
+# 4. vector_index_config (LEGACY: кодом не читается — конфиг в project.json)
 vector_index_config = {
     "public.agent_vector_index_config": (
-        "КОНФИГУРАЦИЯ сборки векторных индексов. "
-        "Описывает ЧТО строить: имя индекса, исходная таблица, колонки для content/embedding, "
-        "колонка-маркер изменений. Не содержит самих векторов — только метаданные сборки. "
-        "Используется tools/build_vectors.py.",
+        "LEGACY. КОНФИГУРАЦИЯ сборки векторных индексов. Кодом не читается: "
+        "источник истины — project.json::gateway.vector.index.indexes. "
+        "Оставлена как артефакт SQL (и цель для V002__vector_chunk_params.sql).",
         {
-            "index_name": "PK — уникальное имя индекса (= source в audit_vectors, = source в agent_vector_index_store).",
+            "index_name": "PK — уникальное имя индекса (= source в audit_vectors).",
             "source_table": "Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.",
             "src_table": "Исходная таблица (schema.table), из которой берутся строки для эмбеддинга.",
-            "pk_column": "Колонка первичного ключа в исходной таблице (для join с agent_vector_index_store.metadata).",
+            "pk_column": "Колонка первичного ключа в исходной таблице.",
             "content_cols": "TEXT[] — колонки исходной таблицы, которые попадают в audit_vectors.content (для отображения).",
             "embedding_cols": "JSONB — словарь {col_name: {chunk: bool}} — какие колонки эмбеддингить и чанковать ли.",
             "track_column": "Колонка исходной таблицы для инкрементальных обновлений (обычно updated_at).",
@@ -104,32 +113,12 @@ vector_index_config = {
     )
 }
 
-# 5. vector_index_store
-vector_index_store = {
-    "public.agent_vector_index_store": (
-        "СЕРИАЛИЗОВАННЫЕ FAISS-ИНДЕКСЫ (binary blob + metadata). "
-        "Одна строка на source (= index_name из agent_vector_index_config). "
-        "Строится из audit_vectors инструментами build_vectors.py: "
-        "собираются все векторы одного source в faiss.IndexFlatIP/IVFFlat, "
-        "сериализуются в BYTEA. Загружается lib.services.cache_provider_impl при search_vector. "
-        "Контраст с audit_vectors: audit_vectors — это сырьё (по чанкам с метаданными), "
-        "agent_vector_index_store — готовый поисковый индекс (быстрый ANN).",
-        {
-            "source": "PK — имя индекса (= index_name из agent_vector_index_config, = source в audit_vectors).",
-            "index_binary": "Сериализованный FAISS-индекс (pickle/bytes). Десериализуется при search_vector.",
-            "metadata": "JSONB: {pk_value: {source, chunk_index, row_id, ...}} — связь FAISS-индекса с audit_vectors.",
-            "dimension": "Размерность векторов (должна совпадать с embedding в audit_vectors).",
-            "vector_count": "Количество векторов в индексе (контроль согласованности с audit_vectors).",
-            "updated_at": "Время последней пересборки индекса.",
-        },
-    )
-}
-
-# 6. session_*
+# 5. session_*
 session = {
     "public.agent_session_meta": (
-        "Метаданные сессий nanobot. Заменяет JSONL-файлы в workspace/sessions/. "
-        "Управляется PGSessionManager (lib/session/pg_session_manager.py). "
+        "Метаданные сессий nanobot. Cold-storage mirror upstream JSONL-стора "
+        "SessionManager (storage-hybridization). Управляется "
+        "SessionColdSyncService (lib/services/session_cold_sync_service.py). "
         "Таблица агента (префикс agent_).",
         {
             "session_key": 'PK — уникальный ключ сессии (например, "telegram:12345").',
@@ -293,11 +282,10 @@ lines.append("-- ===============================================================
 lines.append("")
 
 for full, (comment, columns) in {**audit_tables, **predefined_scripts, **audit_vectors,
-                                   **vector_index_config, **vector_index_store,
-                                   **session, **logs, **benchmark}.items():
+                                   **vector_index_config, **session, **logs, **benchmark}.items():
     lines.append("")
     lines.append(f"-- ---- {full} ----")
     lines.extend(render_table(full, full, comment, columns))
 
 out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-print(f"Written: {out_path} ({len(lines)} lines, {len(audit_tables) + len(predefined_scripts) + len(audit_vectors) + len(vector_index_config) + len(vector_index_store) + len(session) + len(logs) + len(benchmark)} tables)")
+print(f"Written: {out_path} ({len(lines)} lines, {len(audit_tables) + len(predefined_scripts) + len(audit_vectors) + len(vector_index_config) + len(session) + len(logs) + len(benchmark)} tables)")

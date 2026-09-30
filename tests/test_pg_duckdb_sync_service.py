@@ -138,7 +138,6 @@ class TestLifecycle:
         assert s._track_column_for(TEST_VECTOR_TABLE) == "id"
 
     def test_track_column_from_registry_resources(self):
-        """Per-table tracking_column читается из ресурсов skill'а."""
         from lib.services.table_registry import (
             SkillRegistration,
             TableResource,
@@ -317,6 +316,65 @@ def _schema_and_rows_for(sql, params):
         comment = _TABLE_COMMENTS.get(tbl)
         return [(comment,)] if comment else []
     return _standard_rows_for(sql, params)
+
+
+class TestKeyColumnFor:
+    """``key_column_for`` резолвит PK источника для upsert в DuckDB-кэше.
+
+    Нужен, потому что ``DuckDbCacheStore._upsert_locked`` дефолтно ищет
+    колонку ``id``. Таблицы с другим PK (``public.agent_predefined_scripts``
+    → ``name``) без явного ключа уходят в ``CREATE OR REPLACE TABLE``, а
+    батчи от ``_fetch_incremental`` — дельта, поэтому несвязанные строки
+    молча терялись.
+    """
+
+    def _service_with_pk(self, mock_pool, pk_rows):
+        conn = ScriptedConn(rows_for=lambda sql, params: pk_rows)
+        mock_pool["conn"] = conn
+        s = PgDuckDbSyncService(dsn="postgresql://u@h/db")
+        return s, conn
+
+    def test_single_column_pk_returned(self, mock_pool):
+        s, conn = self._service_with_pk(mock_pool, [("name",)])
+        assert s.key_column_for("public.agent_predefined_scripts") == "name"
+        assert len(conn.executed) == 1
+
+    def test_composite_pk_returns_none(self, mock_pool):
+        """Составной PK не поддерживается → None (store пересоздаст таблицу)."""
+        s, _ = self._service_with_pk(mock_pool, [("a",), ("b",)])
+        assert s.key_column_for("oarb.some_table") is None
+
+    def test_no_pk_returns_none(self, mock_pool):
+        s, _ = self._service_with_pk(mock_pool, [])
+        assert s.key_column_for("oarb.no_pk") is None
+
+    def test_result_is_cached(self, mock_pool):
+        """PK резолвится один раз на таблицу, включая кэш отрицания."""
+        s, conn = self._service_with_pk(mock_pool, [("name",)])
+        assert s.key_column_for("public.agent_predefined_scripts") == "name"
+        assert s.key_column_for("public.agent_predefined_scripts") == "name"
+        assert len(conn.executed) == 1, "повторный вызов не должен ходить в PG"
+
+    def test_lookup_failure_does_not_raise(self, monkeypatch, mock_pool):
+        def _boom(fn):
+            raise RuntimeError("pg down")
+
+        monkeypatch.setattr("utils.db.run", _boom)
+        s = PgDuckDbSyncService(dsn="postgresql://u@h/db")
+        assert s.key_column_for("oarb.audits") is None
+
+    def test_negative_result_is_cached(self, monkeypatch, mock_pool):
+        calls = {"n": 0}
+
+        def _run(fn):
+            calls["n"] += 1
+            return fn(ScriptedConn(rows_for=lambda sql, params: []))
+
+        monkeypatch.setattr("utils.db.run", _run)
+        s = PgDuckDbSyncService(dsn="postgresql://u@h/db")
+        assert s.key_column_for("oarb.audits") is None
+        assert s.key_column_for("oarb.audits") is None
+        assert calls["n"] == 1
 
 
 class TestSchemaAndResync:

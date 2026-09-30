@@ -4,8 +4,10 @@
 Сравнивает:
   * ``project.json::gateway.vector.index.indexes.*`` — декларация
     (что должно быть построено);
-  * ``public.agent_vector_index_store`` (PG) — runtime-артефакты
-    (что реально собрано и доступно ``search_vector``).
+  * runtime-состояние, которое видит ``search_vector`` — индексы,
+    перечисленные ``list_runtime_vector_indexes`` из
+    ``lib.services.cache_provider_impl`` по данным DuckDB-снапшота
+    ``gateway.vector.index.storage_table`` (что реально собрано).
 
 Используется как точка входа для CI / pre-deploy / при ручной проверке.
 
@@ -14,23 +16,19 @@ Exit codes
 * ``0`` — нет расхождений;
 * ``1`` — есть расхождение (declared-but-missing / orphan / stale /
   invalid signature);
-* ``2`` — инфраструктурная ошибка (PG недоступна, project.json не
+* ``2`` — инфраструктурная ошибка (DuckDB-снапшот недоступен, project.json не
   валиден и т.п.).
 
 Зачем
 ----
-До v2.5.3 ``--list-indexes`` в ``workspace/skills/audit_analyzer/scripts/cli.py``
-читал **только** декларацию из JSON и возвращал «обещания». Было
-непонятно, что реально доступно в runtime — FAISS-blob'ы лежали
-в PG отдельно и могли разойтись с конфигом (MISSING/ORPHAN/STALE).
-CLI теперь показывает **runtime** (``list_runtime_vector_indexes``
-из ``lib.services.cache_provider_impl``); этот скрипт делает diff
-между декларацией и runtime.
+Раньше ``--list-indexes`` в ``workspace/skills/audit_analyzer/scripts/cli.py``
+читал **только** декларацию из JSON и возвращал «обещания» — было непонятно,
+что реально доступно в runtime. CLI теперь показывает **runtime**
+(``list_runtime_vector_indexes``); этот скрипт делает diff между
+декларацией и runtime:
 
-См. коммит ``fix(vector): align index discovery with runtime artifacts``
-и план из архитектурного обсуждения:
-  * декларация (JSON) — desired state;
-  * runtime (PG store) — actual state;
+  * декларация (``project.json``) — desired state;
+  * runtime (DuckDB-снапшот ``storage_table``) — actual state;
   * этот скрипт — контроль расхождения.
 """
 from __future__ import annotations
@@ -158,12 +156,12 @@ def _diff(
 
     return {
         "declared": {"source": "json", "items": sorted(declared_map.keys())},
-        "runtime": {"source": "pg", "items": sorted(runtime_by_name.keys())},
+        "runtime": {"source": "duckdb_snapshot", "items": sorted(runtime_by_name.keys())},
         "status": status,
         "divergence": {
-            "missing_in_runtime": missing_in_runtime,  # declared but no blob → runtime fail
-            "orphan_in_runtime": orphan_in_runtime,    # blob exists, но в JSON не объявлен → мусор
-            "stale_or_invalid": stale_or_invalid,      # blob есть, но signature не совпадает → search даст STALE/INVALID hits
+            "missing_in_runtime": missing_in_runtime,  # объявлен, но векторов нет → search ничего не вернёт
+            "orphan_in_runtime": orphan_in_runtime,    # векторы есть, но в JSON не объявлены → мусор
+            "stale_or_invalid": stale_or_invalid,      # векторы есть, но сигнатура не совпадает → search даст STALE/INVALID hits
         },
     }
 
@@ -202,12 +200,12 @@ def _format_text(result: dict[str, Any]) -> str:
     lines.append("")
     div = result["divergence"]
     if div.get("missing_in_runtime"):
-        lines.append("MISSING (declared, but no PG store entry — search will fail):")
+        lines.append("MISSING (declared, but no vectors in storage snapshot — search will return nothing):")
         for item in div["missing_in_runtime"]:
             lines.append(f"  ! {item['name']}  source={item.get('source_table')}  chunk={item.get('chunk_size')}")
         lines.append("")
     if div.get("orphan_in_runtime"):
-        lines.append("ORPHAN (blob exists in PG store, but not declared — dead data):")
+        lines.append("ORPHAN (vectors exist in storage snapshot, but not declared — dead data):")
         for item in div["orphan_in_runtime"]:
             lines.append(f"  ! {item['name']}  vectors={item.get('vectors')}  dim={item.get('dimension')}")
         lines.append("")

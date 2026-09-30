@@ -21,7 +21,7 @@
 > `project.json`. Они могут отличаться в других развёртываниях. Ключи конфигурации:
 > `channels.postgres.table_name` / `messages_table` / `meta_table` / `claims_table`,
 > `skills.audit_analyzer.tables[*].name` / `vector_indexes[*].name`,
-> `gateway.vector.index.storage_table` / `config_table` / `signature_table`,
+> `gateway.vector.index.storage_table`,
 > `logging.db.table_name` / `question_runs_table`,
 > `benchmark.runs_table` / `results_table`. Точный список и дефолты — в
 > [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) и [AGENTS.md](../AGENTS.md).
@@ -48,12 +48,12 @@ flowchart LR
   таблицы в `DuckDbCacheStore` (чисто in-memory DuckDB), а после каждого цикла
   `store.publish()` атомарно записывает снимок (temp + `os.replace`) в файл
   кеша навыка (`in_memory_cache_path`).
-- Навык CLI (`predefined`/`sql`) — запросы выполняются по опубликованному кешу
-  (или напрямую по PG, если кеш выключен). Создание/обновление кеша его не
+- Навык CLI (`predefined` / `generated_sql`) — запросы выполняются по опубликованному
+  кешу (или напрямую по PG, если кеш выключен). Создание/обновление кеша его не
   касается. Единый интерфейс бэкенда: `get_schema / query_sql / explain`.
-- `--mode vector` — семантический поиск по FAISS-индексу: провайдер загружает
-  индекс из `public.agent_vector_index_store` (BYTEA), при промахе пересобирает из
-  `oarb.audit_vectors`, эмбеддинг запроса получает через Ollama.
+- `--mode vector` — семантический поиск: FAISS-индекс собирается **в памяти**
+  из DuckDB-снапшота `gateway.vector.index.storage_table` при старте gateway
+  (`PreloadService.preload_vector_indexes`), эмбеддинг запроса получает через Ollama.
 
 ---
 
@@ -127,7 +127,8 @@ flowchart LR
 |--------|---------------------------|
 | `config_service.py` | Дубликат `_load_runtime_config` + `SETTINGS`-аксессора между gateway и cli. Pre-resolve `${PROVIDER_API_KEY}` от .secrets.env (см. ниже). |
 | `session_storage.py` | Выбор `PGSessionManager` / `SessionManager` (auto / postgres / file) с поддержкой `session_manager.json` override. |
-| `runtime_patcher.py` | Все monkey-patch'и фреймворка в одном классе с fallback при изменении API nanobot: `ContextGovernor.normalize_tool_result` (persist больших результатов), `AgentLoop._save_turn` (архивация вместо усечения, см. «Ликвидация потери данных»), ограничения вывода exec/tool (`patch_exec_limits`/`patch_tool_limits`), `agent._assemble_outbound` (внедрение `_tool_audit`). |
+| `runtime_patcher.py` | Все 12 monkey-patch'ей upstream `nanobot.agent.loop.AgentLoop` в одном классе с fallback при изменении API nanobot. Применяется через `apply_all()` из `ApplicationContext.create()`. **НЕ** занимается регистрацией project tools (вынесено в `project_tool_loader.py`). Полный каталог — `docs/architecture/runtime-patcher-inventory.md`. |
+| `project_tool_loader.py` | Stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(...) -> ProjectToolsLoadResult`. Вызывается из `ApplicationContext.create()` сразу после `apply_all()` как независимый stage composition root'а. **НЕ** компонент (нет lifecycle/state/config — критерии `openspec/specs/architecture/component-model/spec.md`). |
 | `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
 | `subprocess_manager.py` | Streamlit spawn + terminate/kill. |
@@ -225,38 +226,70 @@ TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 (переплетение двух сессий → `log_tool_result`/`after_run` несут свой
 `request_id`).
 
-### Единый конвейер sync-событий (`emit_sync_event`)
+### Единый конвейер structured-логирования (`DbLoggingService`)
 
 PG→DuckDB sync-путь пишет события (`sync_service_started`,
 `sync_initial_load_done`, `sync_table_loaded`, `sync_publish_ok`/
-`sync_publish_empty`/`sync_publish_failed`, …) в `agent_gateway_logs`
-единым способом — через helper
-`workspace.utils.event_log.emit_sync_event(event_type, summary, payload,
-*, name, level, service)` (dual-sink):
+`sync_publish_empty`/`sync_publish_failed`, …) и compaction-события
+(`context_compacted`) в `agent_gateway_logs` **единым способом** —
+через `DbLoggingService` (см. `lib/services/db_logging_service.py`).
 
-1. если передан запущенный `service` (`DbLoggingService`) — событие
-   идёт через пул-воркер (async, `timestamp` проставляется на flush);
-2. иначе — синхронный fallback `event_log.record_sync_event` (прямой
-   INSERT с `NOW()`): standalone-утилиты, ранние стадии старта, тесты,
-   где `DbLoggingService` ещё не создан/не запущен.
+**`DbLoggingService` — единственный runtime writer
+`agent_gateway_logs` и `agent_question_runs`.** Любой structured event
+передаётся через:
 
-Ошибки обеих веток глотаются — sync-код не падает из-за логирования.
+- `db_logging_service.log_event(LogEvent(...))` — основной путь
+  (асинхронный, через пул-воркер; `timestamp` проставляется на flush,
+  `flush_interval_sec=5`);
+- `DbLoggingService.try_log_event(svc, log_event, *, producer, event_type)`
+  — defensive helper для producer'ов (контракт WARNING при
+  недоступности сервиса, no-op for business). Это контрактно
+  единый уровень для всех producer'ов — никаких per-producer уровней
+  или fallback-INSERT'ов.
 
-`service` инжектится в оба писателя sync-конвейера при сборке в
-`ApplicationContext._make_sync_services`:
-`PgDuckDbSyncService(db_logging_service=...)` и
-`DuckDbCacheStore(db_logging_service=...)` (publish-события из
-worker-потока). В юнит-тестах store создаётся без сервиса →
-автоматический fallback на `record_sync_event`.
+**Прямой SQL INSERT в журнал запрещён** — это invariant архитектуры,
+защищён `tests/test_unified_event_logging_pipeline.py::TestNoProductionDirectWriters`
+(AST + ownership guard).
+
+Producer'ы (с обязательным keyword-only DI через `db_logging_service=`):
+
+| Producer | События | DI |
+|---|---|---|
+| `ContextCompactionService` | `context_compacted` | через `RuntimePatcher.patch_compact_command(partial(...))` или `run_repl(...)` параметр |
+| `PgDuckDbSyncService` | `sync_service_started`, `sync_initial_load_*`, `sync_table_loaded`, `sync_lag_exceeded`, `session_stale_detected` | kwarg `db_logging_service` |
+| `DuckDbCacheStore` | `sync_publish_ok`/`_failed`/`_empty`, `vector_preload_error`, `vector_index_build_failed` | kwarg `db_logging_service` |
+| `PreloadService` | `vector_index_preload_health` | kwarg `db_logging_service` |
+| `ApplicationContext._make_sync_services` | `sync_skipped_*` | inline `try_log_event` |
+| `DatabaseLoggingHook` (AgentLoop) | `tool_call`/`tool_result`/`llm_call`/`run_finished`/`turn_failed` | kwarg `db_logging_service` |
+
+DI поднимается через `functools.partial` (`RuntimePatcher.patch_compact_command`)
+и параметры composition root'ов (`run_repl(...)` в `lib/cli/console_loop.py`).
+**Никаких DI-полей на `agent`** (ни `_db_logging_service`, ни
+`db_logging_service`) — это историческая ошибка, исправленная в коммите
+`1893b17`.
+
+**Skill invocation is out of scope.** Skills не имеют dedicated
+runtime `event_type`; загрузка `SKILL.md` в context не порождает event;
+вызов Skill-скриптов через `tools.exec` логируется как штатная пара
+`tool_call`/`tool_result`; `DbLoggingService.log_skill_call` НЕ
+вводится; `event_type="skill_call"` НЕ эмитится. См.
+`openspec/specs/logging-db/spec.md` requirement «Skill invocation
+is out of scope».
 
 **Зачем единый конвейер (историческая проблема).** Раньше события
 писались двумя путями с разной семантикой времени: `DbLoggingService`
 буферизовал батчи и проставлял `timestamp` на flush
-(`flush_interval_sec=5`), а `DuckDbCacheStore._emit_sync_event` делал
-прямой INSERT с мгновенным `NOW()`. Из-за этого
+(`flush_interval_sec=5`), а `workspace.utils.event_log.record_sync_event`
+делал прямой INSERT с мгновенным `NOW()`. Из-за этого
 `sync_publish_ok` мог получить время РАНЬШЕ `sync_service_started` —
-ложная хронология в журнале. После перевода всех sync-событий на
-`emit_sync_event` хронология идёт одним потоком.
+ложная хронология в журнале. После унификации (change
+`unify-agent-event-logging-pipeline`) все события идут через
+`DbLoggingService`/`try_log_event`, хронология — одним потоком.
+
+**Удалённый модуль.** `workspace/utils/event_log.py` (197 строк,
+`record_event`/`record_sync_event`/`emit_sync_event`) удалён в коммите
+`1893b17`. Прямой INSERT bypass ликвидирован. Тесты
+`tests/test_event_log.py` (83 строки) тоже удалены.
 
 ### Видимость «тихих» ошибок: preload векторов и канал
 
@@ -276,9 +309,9 @@ dim-«нет данных в кэше», неотличимо от реальн�
 * пишет события `vector_preload_error` (ошибка чтения `source` из
   таблицы хранения, `index_name=None`) и `vector_index_build_failed`
   (ошибка построения конкретного индекса) через
-  `_emit_sync_event(..., service=self._db_logging_service)` — в
-  журнал, при `None` — standalone-fallback; дополнительно дублирует
-  warning в терминал (`logger.warning`, stdlib-logging).
+  `DbLoggingService.try_log_event(...)` — в журнал; при недоступности
+  сервиса — no-op + WARNING внутри `try_log_event`; дополнительно
+  дублирует warning в терминал (`logger.warning`, stdlib-logging).
 * `PreloadService.preload_vector_indexes` логирует
   `logger.warning` (loguru) при собственном исключении вместо тихого
   `None`;
@@ -294,20 +327,21 @@ dim-«нет данных в кэше», неотличимо от реальн�
 (`store → vdb → cache → files`), без какого-либо указания, что на
 самом деле расхождение есть. Теперь `PreloadService.preload_vector_indexes`
 после прогона считает явное расхождение между **declared** (JSON,
-`project.json::gateway.vector.index.indexes.*`) и **runtime** (PG
-`public.agent_vector_index_store`), классифицируя каждое имя
-индекса в одну из категорий:
+`project.json::gateway.vector.index.indexes.*`) и **runtime** (DuckDB-снапшот
+таблицы-хранилища `gateway.vector.index.storage_table`,
+`cache_provider_impl.list_runtime_vector_indexes()`), классифицируя каждое
+имя индекса в одну из категорий:
 
-  * `missing` — объявлен в JSON, но не загружен / не найден в PG store;
-  * `orphan` — blob в PG store, но не объявлен в JSON (мёртвые данные);
-  * `stale` — blob есть, но signature не совпадает с текущим cfg
+  * `missing` — объявлен в JSON, но не найден в снапшоте-хранилище;
+  * `orphan` — есть строки в снапшоте-хранилище, но индекс не объявлен в JSON;
+  * `stale` — строки есть, но сигнатура не совпадает с текущим cfg
     (помечается как `STALE` или `INVALID`).
 
 Сводка печатается в **stderr** (multi-line, без ANSI) и пишется в
-`agent_gateway_logs` через `emit_sync_event` (event_type
-`vector_index_preload_health`, level=`WARN` если есть divergence,
-иначе `INFO`). Ошибки любого этапа (PG недоступна, config parse
-failed) глотаются — summary **никогда** не валит startup gateway.
+`agent_gateway_logs` через `DbLoggingService.try_log_event`
+(event_type `vector_index_preload_health`, level=`WARN` если есть
+divergence, иначе `INFO`). Ошибки любого этапа (PG недоступна, config
+parse failed) глотаются — summary **никогда** не валит startup gateway.
 
 Чистая логика вычисления — в pure-функции `compute_index_health()`
 в `preload_service.py`, отделена от I/O и эмита; тестируема без mock'ов
@@ -433,8 +467,8 @@ flowchart LR
 **Точки входа:**
 
 1. **Настоящая slash-команда ``/compact``** —
-   `lib/commands/compact_command.py::cmd_compact`, регистрируется
-   `RuntimePatcher.patch_compact_command` в `agent.commands`
+   upstream `nanobot/command/builtin.py::cmd_compact`, расширяется
+   `RuntimePatcher.patch_compact_command` (fail-soft обёртка) в `agent.commands`
    (`CommandRouter`), где это единственный путь, общий для всех каналов
    (postgres, streamlit, telegram). В `run()` зарегистрированные команды
    перехватываются **до** LLM (``_dispatch_command_inline`` /
@@ -1334,8 +1368,9 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 обязан ставить в `metadata` `FINAL_TURN_KEY="_final_turn"` (из `lib/utils/outbound_meta.py`).
 Иначе `postgres_channel.send()` трактует ответ как промежуточную публикацию и НЕ
 финализирует оборот → `status='completed'` не ставится, claim/слот не освобождаются,
-чата блокируется. Пример корректного паттерна — `lib/commands/compact_command.py`
-(ставит `_final_turn` во все свои `OutboundMessage`).
+чата блокируется. Пример корректного паттерна — обработчик compact-команды
+(`RuntimePatcher.patch_compact_command`, ставит `_final_turn` во все свои
+`OutboundMessage`).
 
 ### Lifecycle-инвариант оборота (PostgresChannel)
 
@@ -1361,8 +1396,7 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
    `_msg_ctx`, `_leases`, `_release_slot`. Раньше `pop`/`release` шли
    до транзакции, и при ошибке БД локальное состояние рассинхронизировалось
    с БД.
-2. **Единый резолвер `_resolve_turn_context`** (Phase 2 плана фикса
-   lifecycle deadlock). Один источник истины для `user_msg_id` /
+2. **Единый резолвер `_resolve_turn_context`**. Один источник истины для `user_msg_id` /
    `assistant_msg_id` / `chat_id`:
    `origin_message_id` → `message_id` → `_msg_ctx` →
    `answer_id → SELECT assistant.reply_to`. Заменяет разбросанные fallback'ы.
@@ -1475,7 +1509,8 @@ streamlit-UI, аварийными script'ами после deploy.
 nanobot/
 ├── docs/                                  # каталог технической документации (навигация — docs/README.md)
 ├── tools/                                # инфраструктурные CLI-утилиты
-│   └── build_vectors.py                  #   сборка векторных индексов (вне навыка)
+│   ├── build_vectors.py                  #   сборка векторных индексов (вне навыка)
+│   └── check_indexes.py                  #   declared-vs-runtime diff по векторным индексам
 ├── sql/                                  # DDL сгруппированы по доменам
 │   ├── README.md                          #   порядок применения, каталог
 │   ├── session/                           #   session_meta + session_messages
@@ -1489,11 +1524,16 @@ nanobot/
 │   ├── core/                             #   bootstrap ApplicationContext + фабрики
 │   │   ├── application_context.py        #     create/start/stop, связывает все общие сервисы
 │   │   ├── agent_factory.py              #     AgentLoop + ToolAudit hook + фабрика DatabaseLogging (per-turn)
-│   │   └── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
+│   │   ├── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
+│   │   ├── project_settings.py           #     pydantic-валидация merged SETTINGS (fail-fast)
+│   │   ├── skill_config.py               #     параметризованный runtime API для skill'ов
+│   │   ├── skill_registration.py         #     декларативная регистрация skill-ресурсов
+│   │   └── infra_registration.py         #     регистрация инфраструктурных ресурсов (vector storage)
 │   ├── services/                         #   сервисный слой
 │   │   ├── config_service.py             #    SETTINGS-аксессор + pre-resolve env + таймауты
 │   │   ├── session_storage.py            #    выбор PGSessionManager / SessionManager
-│   │   ├── runtime_patcher.py            #    все monkey-patch'и (ContextGovernor + _assemble_outbound)
+│   │   ├── runtime_patcher.py            #    12 monkey-patch'ей upstream nanobot.agent.loop.AgentLoop
+│   │   ├── project_tool_loader.py        #    stateless loader project tools (workspace/tools/*.py)
 │   │   ├── channel_factory.py            #    ChannelManager + Redis/Postgres каналы
 │   │   ├── transcription_service.py      #    openai/groq key/URL/language
 │   │   ├── subprocess_manager.py         #    Streamlit spawn + terminate/kill
@@ -1506,11 +1546,16 @@ nanobot/
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
-│   │   ├── vector_index_service.py       #     VectorIndexBuildService — инкрементальная сборка FAISS
+│   │   ├── vector_index_service.py       #     VectorIndexBuildService — build-слой (провайдер + эмбеддинг)
 │   │   ├── table_registry.py             #     pluggable-реестр ресурсов (skill + infra namespaces)
 │   │   ├── context_compaction.py         #     ContextCompactionService — единая точка сжатия контекста
 │   │   ├── consolidator_locale.py        #     monkeypatch Jinja2-шаблонов из workspace/overrides/
 │   │   ├── runtime_health.py             #     RuntimeHealth/RuntimeReadiness (liveness + readiness)
+│   │   ├── runtime_events_subscriber.py  #     подписка на runtime-события → turn-метрики
+│   │   ├── compaction_event_subscriber.py#     событие context_compacted → шина
+│   │   ├── session_cold_sync_service.py  #     daemon: upstream JSONL → PG cold-storage mirror
+│   │   ├── llm_observer.py               #     обёртки observer-pipeline (fail-soft)
+│   │   ├── llm_usage_store_factory.py    #     фабрика upstream LLMUsageStore
 │   │   └── llm_client.py                 #     call_llm / call_llm_async (OpenAI-compatible HTTP)
 │   │   # DDL для DbLoggingService (agent_gateway_logs, имя через logging.db.table_name) — в sql/logs/
 │   ├── cli/                              #  вынесено из cli_agent.py
@@ -1518,7 +1563,6 @@ nanobot/
 │   │   ├── display_config.py             #   DisplayConfig
 │   │   └── hook_loader.py                #   сканирование workspace/hooks/*.py
 │   ├── hooks/                            #  фреймворковые хуки (не плагины)
-│   │   ├── base_tool_tracking_hook.py    #     общий каркас для tool-хуков
 │   │   ├── tool_audit_hook.py            #     хук аудита вызовов инструментов
 │   │   ├── database_logging_hook.py      #     AgentHook для tool-событий + run_finished в БД; per-turn инстанс через make_db_logging_hook_factory
 │   │   └── terminal_tool_print_hook.py   #     вывод результатов tool'ов в терминал (gateway.print_tools)
@@ -1528,9 +1572,10 @@ nanobot/
 │   ├── channels/                         #   каналы
 │   │   ├── postgres_channel.py           #     канал через таблицу agent_conversation_messages
 │   │   ├── redis_channel.py              #     канал через Redis-очереди (BRPOP/LPUSH)
+│   │   ├── priority_commands.py          #     команды с приоритетом над обычной очередью
 │   │   └── message_exchange.py           #     общий формат сообщений каналов (MessageExchange)
 │   ├── session/                          #   хранилище сессий
-│   │   └── pg_session_manager.py         #     хранение сессий в PostgreSQL (без JSONL)
+│   │   └── pg_session_manager.py         #     cold-storage mirror поверх upstream JSONL SessionManager
 │   └── utils/                            #   утилиты сервисного слоя
 │       ├── sql_safety.py                 #     SQL Security Guard (read-only AST-политика)
 │       ├── outbound_meta.py              #     фильтрация служебных outbound
@@ -1541,12 +1586,12 @@ nanobot/
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
 │   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/cache/sessions/
 │   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
-│   │   └── active_files_hook.py          #     side-channel активных файлов через session.metadata
+│   │   └── debug_stream_diag.py          #     диагностика стриминга
 │   ├── tools/                            # кастомные tool'ы (auto-discover через patch_project_tools)
 │   │   ├── compact_context.py, history_search_tool.py,
 │   │   │   legal_summarizer_query.py, example.py
 │   ├── utils/                            # утилиты workspace
-│   │   ├── db.py, media.py, jsonb.py, event_log.py, session_file_store.py,
+│   │   ├── db.py, media.py, jsonb.py, session_file_store.py,
 │   │   │   session_key.py, clean_text.py, office_files.py, structure_cache.py
 │   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │   │   ├── SKILL.md                      #   пользовательская документация

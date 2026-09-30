@@ -32,12 +32,16 @@ __all__ = [
     "SkillLlmSettings",
     "SkillSettings",
     "SkillsSettings",
+    "StartupSchemaValidationSettings",
+    "StartupSettings",
     "SyncSettings",
     "TableEntry",
     "VectorIndexConfig",
     "VectorIndexEntry",
     "GatewaySettings",
     "VectorInfrastructureSettings",
+    "UsageStoreSettings",
+    "SessionColdSyncSettings",
     "validate_project_settings",
 ]
 
@@ -63,6 +67,65 @@ class CompactSettings(_StrictOptional):
     enabled: bool | None = None
     notify_in_history: bool | None = None
     print_to_terminal: bool | None = None
+
+
+class StartupSchemaValidationSettings(_StrictOptional):
+    """Pre-startup проверка наличия обязательных runtime-таблиц.
+
+    При ``enabled=True`` (по умолчанию) ``ApplicationContext.start()``
+    выполняет один ``SELECT`` к ``information_schema.tables`` для 6
+    таблиц из ``SETTINGS["channels"]["postgres"]`` и
+    ``SETTINGS["logging"]["db"]`` (те же ключи, что проходят
+    ``validate_runtime_isolation``). При отсутствии любой из них —
+    ``SchemaValidationError`` (наследник ``ConfigurationError``) →
+    ``exit 2`` через ``gateway.main()`` / ``cli_agent.main()``.
+
+    Attributes:
+        enabled: включить проверку (по умолчанию ``True``).
+        timeout_sec: верхняя граница ожидания запроса к БД
+            (по умолчанию ``5.0``, диапазон ``0.1 ≤ value ≤ 60.0``).
+
+    См. спеку ``openspec/specs/runtime/startup-schema-validation``.
+    """
+
+    enabled: bool = True
+    timeout_sec: float = Field(default=5.0, gt=0.0, le=60.0)
+
+
+class StartupSettings(_StrictOptional):
+    """Секция ``gateway.startup.*`` — параметры pre-startup валидации."""
+
+    schema_validation: StartupSchemaValidationSettings | None = None
+
+
+class ErrorMessagesSettings(_StrictOptional):
+    """Заготовленные ответы при internal-ошибке ``AgentLoop._process_message``.
+
+    Используется патчем ``RuntimePatcher.patch_turn_delivery_fail`` (см.
+    спеку ``openspec/specs/runtime/error-fallback``): при любом
+    ``Exception`` в upstream-``AgentLoop`` пользователь получает
+    ``gateway.error_messages.internal_error`` вместо захардкоженного
+    англоязычного литерала из upstream-``TurnDelivery.fail``. Детали
+    исключения (тип + текст) пишутся в ``agent_gateway_logs`` при
+    ``log_to_db=true``.
+
+    Attributes:
+        internal_error: текст, который видит пользователь вместо upstream
+            ``"Sorry, I encountered an error."``. По умолчанию — русская
+            формулировка без раскрытия внутренних деталей.
+        log_to_db: писать ли ``event_type="turn_failed"`` в
+            ``agent_gateway_logs`` через ``DbLoggingService.try_log_event``
+            (см. ``lib/services/db_logging_service.py:34``). При
+            ``False`` — детали остаются только в ``loguru``. По умолчанию
+            ``True`` (оператор видит, что сломалось, через
+            ``history_search``).
+
+    Unknown keys разрешены (``_StrictOptional(extra="allow")``) —
+    forward-compat по будущим per-channel/per-language формулировкам.
+    """
+
+    internal_error: str | None = None
+    log_to_db: bool | None = None
 
 
 # DuckDbQuerySettings / VectorSearchSettings удалены (этап 18):
@@ -123,6 +186,35 @@ class HeartbeatSettings(_StrictOptional):
     intervalS: int | None = Field(default=None, gt=0)
 
 
+class UsageStoreSettings(_StrictOptional):
+    """Параметры upstream ``LLMUsageStore`` (``gateway.usage_store.*``).
+
+    ``sqlite_path`` — путь к SQLite-файлу (по умолчанию —
+    ``<get_runtime_subdir("usage")>/usage.db``). ``enabled=False``
+    отключает запись LLM-usage (graceful degradation).
+
+    См. спеку ``openspec/specs/storage/usage-store/spec.md``.
+    """
+
+    sqlite_path: str | None = None
+    enabled: bool | None = True
+
+
+class SessionColdSyncSettings(_StrictOptional):
+    """Параметры ``SessionColdSyncService`` (``gateway.session_cold_sync.*``).
+
+    Cold-storage mirror upstream JSONL → PG. Все ключи опциональны.
+    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
+    и design D23 (stale-detection + reverse-lag detection).
+    """
+
+    enabled: bool | None = True
+    sync_interval_sec: float | None = Field(default=None, gt=0)
+    batch_size: int | None = Field(default=None, gt=0)
+    stale_tolerance_seconds: int | None = Field(default=None, ge=0)
+    sync_lag_threshold_seconds: int | None = Field(default=None, ge=0)
+
+
 class GatewaySettings(_StrictOptional):
     print_llm_calls: bool | None = None
     print_worker_activity: bool | None = None
@@ -130,11 +222,15 @@ class GatewaySettings(_StrictOptional):
     llm_timeout: int | None = Field(default=None, gt=0)
     exec_timeout: int | None = Field(default=None, ge=0)
     compact: CompactSettings | None = None
+    error_messages: ErrorMessagesSettings | None = None
     # duckdb_query / vector_search: Agent-facing tools удалены (этап 18).
     vector: VectorInfrastructureSettings | None = None
     heartbeat: HeartbeatSettings | None = None
     sync: SyncSettings | None = None
     cache: CacheSettings | None = None
+    usage_store: UsageStoreSettings | None = None
+    session_cold_sync: SessionColdSyncSettings | None = None
+    startup: StartupSettings | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -171,8 +267,8 @@ class GatewaySettings(_StrictOptional):
 class SyncSettings(_StrictOptional):
     """Параметры фоновой синхронизации PG → DuckDB (PgDuckDbSyncService).
 
-    Глобальные runtime-параметры, общие для всех skills. До рефакторинга
-    жили в ``skills.audit_analyzer.sync.*``; вынесены в ``gateway.sync.*``,
+    Глобальные runtime-параметры, общие для всех skills. Раньше жили в
+    ``skills.audit_analyzer.sync.*``; вынесены в ``gateway.sync.*``,
     поскольку sync — это свойство runtime infrastructure, а не skill-домена.
     """
 
@@ -470,7 +566,7 @@ class SkillExecutionSettings(_StrictOptional):
     Управляет подтверждением длинных операций (``confirmation_required``),
     оценкой длительности (``estimated_chunk_duration_sec``),
     safety net (``max_chunks_for_execution``) и параметрами
-    context batching (Phase 2B для ``legal_summarizer``).
+    context batching (используются ``legal_summarizer``).
     """
 
     confirmation_threshold_sec: float | None = Field(default=None, gt=0)

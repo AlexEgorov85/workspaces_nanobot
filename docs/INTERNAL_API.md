@@ -5,12 +5,18 @@
 
 ## 🚦 Передача профиля в application subprocess
 
-После [`config-profile-cli-flag`](../openspec/changes/config-profile-cli-flag)
+Согласно спецификации
+[`openspec/specs/configuration/profiles`](../openspec/specs/configuration/profiles/spec.md),
 единственный канал передачи профиля конфигурации в subprocess —
-**argv `--profile=<value>`**. Env vars (исторически —
-`NANOBOT_PROFILE=prod`) больше **не используются**: ни runtime-код,
+**argv `--profile=<value>`** (для `cli_agent.py` — фиксированный
+профиль `test`, флаг не принимается). Переменные окружения
+**не используются** как источник профиля: ни runtime-код,
 ни deployment descriptors, ни документация. Это закрытый источник
 истины.
+
+> Environment остаётся легитимным каналом для **секретов**,
+> `${VAR}`-подстановки и внешних URL — запрет касается только
+> выбора профиля.
 
 ### Application subprocess
 
@@ -37,19 +43,23 @@ proc = subprocess.Popen(
 
 ### Deployment descriptors
 
-| Категория | Было | Стало |
+| Категория | Было (env-based) | Стало |
 |---|---|---|
-| `docker-compose.yml` | `environment: NANOBOT_PROFILE=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
-| Kubernetes Deployment | `env: NANOBOT_PROFILE=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
-| systemd unit | `Environment=NANOBOT_PROFILE=prod` | `ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod` |
-| GitHub Actions | `env: NANOBOT_PROFILE: prod` | `run: python gateway.py --profile=prod` |
+| `docker-compose.yml` | `environment: <PROFILE_ENV_VAR>=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
+| Kubernetes Deployment | `env: <PROFILE_ENV_VAR>=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
+| systemd unit | `Environment=<PROFILE_ENV_VAR>=prod` | `ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod` |
+| GitHub Actions | `env: <PROFILE_ENV_VAR>: prod` | `run: python gateway.py --profile=prod` |
+
+`<PROFILE_ENV_VAR>` — плейсхолдер: runtime не читает **никакую**
+env-переменную для выбора профиля, поэтому конкретное историческое
+имя несущественно.
 
 Подробности и обоснование — `docs/PROFILES.md` (§ «Migration»).
 
 ### Runtime sanitization
 
-**Не вводится.** Приложение просто не работает с устаревшими env
-var'ами — их игнорирование это отсутствие кода, который их читает,
+**Не вводится.** Приложение просто не работает с env var'ами выбора
+профиля — их игнорирование это отсутствие кода, который их читает,
 а не активный sanitization-механизм.
 
 ## ⚙️ Конфигурация `tools.exec` (запуск команд)
@@ -276,14 +286,13 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 | `legal_summarizer_query` | `workspace/tools/legal_summarizer_query.py` | follow-up по saved `operation_id` для `legal_summarizer` | `tools.legal_summarizer_query.*` (config.json) |
 | `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
 
-Tools `duckdb_query` / `vector_search` **удалены** в фазе 8 (см.
+Tools `duckdb_query` / `vector_search` **не существуют** (см.
 `skill-tool-inventory.md`). Доступ к `audit_analyzer` — только через
 CLI skill'а (`scripts/cli.py --mode predefined`).
 
 `audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql`
-**удалены** в рефакторинге `refactor/skills-tools-cleanup`
-(коммиты `593d509`, `7d8f6b0`). Они нарушали §3, §22.1, §22.2
-TARGET_ARCHITECTURE.md (импортировали skill через `importlib`); заменены на:
+**отсутствуют** — они нарушали §3, §22.1, §22.2 TARGET_ARCHITECTURE.md
+(импортировали skill через `importlib`); заменены на:
 
 - predefined — CLI-режим skill'а (`scripts/cli.py --mode predefined`);
 - vector search — CLI-режим skill'а (`scripts/cli.py --mode vector`);
@@ -331,7 +340,7 @@ audit_analyze --mode vector --query 'статусы аудитов' --index-name
 Прямого PostgreSQL-бэкенда у CLI нет (см. [DATABASE.md](DATABASE.md)). Кеш создаёт и обновляет
 **gateway** (см. [DATABASE.md](DATABASE.md#-жизненный-цикл-кеша)); CLI про это не знает. Если файла
 кеша нет — CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
-gateway автоматически — запустите его (python gateway.py)».
+gateway автоматически — запустите его (python gateway.py --profile=prod)».
 
 Векторный поиск — параметр `--index-name` (по умолчанию `audits_index`).
 Строковые параметры predefined-скриптов передаются как есть (после
@@ -373,8 +382,10 @@ python tools/build_vectors.py --index audits_index
 python tools/build_vectors.py --dry-run
 
 # Параметры эмбеддинга (пауза между запросами + ожидание перед повтором при ошибке)
-python tools/build_vectors.py --batch-size 32 --chunk-size 500 --chunk-overlap 80
-python tools/build_vectors.py --pause-sec 3 --embedding-retry-wait 5
+python tools/build_vectors.py --batch-size 32 --pause-sec 3 --embedding-retry-wait 5
+
+# Проверка конфигурации без записи (валидация project.json + индексов)
+python tools/build_vectors.py --validate-only
 
 # Другая таблица векторов
 python tools/build_vectors.py --db-table my_app.vectors
@@ -386,18 +397,22 @@ python tools/build_vectors.py --verbose
 | Флаг | Дефолт | Описание |
 |------|--------|----------|
 | *(без флагов)* | — | Инкрементальная синхронизация (NEW / CHANGED / DELETED) |
-| `--full-rebuild` | — | Полная перестройка (TRUNCATE индекса + все строки) |
-| `--check` | — | Сравнить сигнатуру (count distinct pk + max track); синхронизировать только при diff |
+| `--full-rebuild` | — | Полная перестройка (все строки, не только новые) |
+| `--check` | — | Сравнить сигнатуру (COUNT DISTINCT pk + MAX track); синхронизировать только при diff |
 | `--status` | — | Сводное состояние индексов без синхронизации |
 | `--dry-run` | — | План без записей в БД |
+| `--validate-only` | — | Валидация конфигурации (`project.json::gateway.vector.index`) без записи в БД |
 | `--index <name>` | все | Собрать только индекс `name` |
-| `--db-table` | `oarb.audit_vectors` | Таблица сырых векторов |
+| `--db-table` | `gateway.vector.index.storage_table` | Таблица сырых векторов |
 | `--batch-size` | 10 | Батч эмбеддинга |
-| `--chunk-size` | 500 | Размер чанка в символах |
-| `--chunk-overlap` | 80 | Перекрытие чанков |
 | `--pause-sec` | 5.0 | Пауза между батчами эмбеддинга (сек) |
 | `--embedding-retry-wait` | 5 | При ошибке получения эмбеддинга: ждать это время (сек) и повторить один раз |
 | `--verbose` | — | Подробный лог каждого чанка/строки (уровень DEBUG) |
+
+Размер чанка и перекрытие **не управляются флагами** — они берутся из
+декларации индекса (`gateway.vector.index.indexes.<name>.chunk_size` /
+`chunk_overlap`, fallback 500/80). Аналогично `metric` и состав
+`embedding_columns`.
 
 **Логирование.** Все сообщения идут через `loguru` в stderr (без ANSI-цветов,
 удобно при `>> build.log 2>&1`) и разбиты по этапам: конфиг → состояние
@@ -419,8 +434,8 @@ python tools/build_vectors.py --verbose
 
 **Важно:** при первом запуске проверить, что установлены зависимости FAISS:
 `pip install faiss-cpu numpy`. Без них вектора вставляются в `audit_vectors`,
-но `public.agent_vector_index_store` остаётся пустой, и `--mode vector` поиск
-через `lib/services/cache_provider_impl.py` не работает.
+но поиск `--mode vector` через `lib/services/cache_provider_impl.py` не работает
+(индекс FAISS собирается в памяти).
 
 **Типичные сценарии:**
 - **После изменений в DDL таблиц** — `--full-rebuild`.

@@ -46,11 +46,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Detect code blocks without language
+      - name: Detect opening code blocks without language
         run: |
           python3 - <<'PY'
           import os, re, sys
-          pattern = re.compile(r'^```\s*$')
+          # Только OPENING fences должны иметь info string. Закрывающий fence
+          # по CommonMark 0.31.2 не может содержать ничего, кроме
+          # fence-символов и пробелов/табов (см. https://spec.commonmark.org/0.31.2/).
+          #
+          # Алгоритм: для каждой ``` строки определяем, opening она или
+          # closing — opening, если fence в этой позиции не закрывает
+          # предыдущий открытый блок. Стандартный парсинг через state
+          # machine. Если строка — opening без info string → ошибка.
+          opening_bare = re.compile(r'^```\s*$')
+          fence = re.compile(r'^```')
           bad = []
           for root, _, files in os.walk('.'):
               if any(p in root for p in ('.git', '.venv', 'node_modules')):
@@ -60,12 +69,23 @@ jobs:
                       continue
                   path = os.path.join(root, fn)
                   with open(path, encoding='utf-8') as f:
+                      in_block = False
                       for n, line in enumerate(f, 1):
-                          if pattern.match(line):
-                              bad.append(f'{path}:{n}: fenced block without language')
+                          stripped = line.lstrip()
+                          if not fence.match(stripped):
+                              continue
+                          # Это fence-строка. Определяем, opening или closing.
+                          if in_block:
+                              # Строка закрывает текущий блок.
+                              in_block = False
+                          else:
+                              # Строка открывает новый блок.
+                              in_block = True
+                              if opening_bare.match(stripped):
+                                  bad.append(f'{path}:{n}: opening fenced block without language')
           if bad:
               for b in bad:
                   print(f'::error::{b}')
               sys.exit(1)
-          print('All code blocks have language hints.')
+          print('All opening code blocks have language hints.')
           PY

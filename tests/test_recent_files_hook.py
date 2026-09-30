@@ -26,6 +26,42 @@ for p in (str(_PROJECT_ROOT), str(_WORKSPACE)):
         sys.path.insert(0, p)
 
 
+@pytest.fixture(autouse=True)
+def _auto_seed_context_bridge(monkeypatch):
+    """Автоматически засеять ``DatabaseLoggingContextBridge`` для всех
+    тестов в этом файле (они вызывают ``patch_assemble_outbound``,
+    который внутри вызывает ``_attach_context_window``).
+
+    Контракт: в production-flow seed делается через
+    ``RuntimeEventsSubscriber.start()`` (подписка на
+    ``TurnRuntimeAdmitted``). Здесь симулируем это явно через
+    ``seed_context_window`` + cleanup после теста.
+
+    Также подменяем ``_session_key_of`` чтобы возвращать ключ,
+    который посеян в bridge (тесты передают разные session_key
+    через ``msg.session_key`` или ``msg.metadata`` — мы
+    унифицируем для текущего теста).
+
+    См. ``tests/_patcher_fixtures.py`` для переиспользуемых фикстур.
+    """
+    from lib.hooks.database_logging_hook import (
+        _CONTEXT_BRIDGE,
+        _CONTEXT_BRIDGE_LOCK,
+        seed_context_window,
+    )
+    from lib.services import runtime_patcher as _rp
+
+    session_key = "test:recent_files"
+    seed_context_window(session_key, limit=40000, model="test-model")
+
+    # Подменить ``_session_key_of`` чтобы возвращал наш ключ.
+    monkeypatch.setattr(_rp, "_session_key_of", lambda msg: session_key)
+
+    yield session_key
+    with _CONTEXT_BRIDGE_LOCK:
+        _CONTEXT_BRIDGE.pop(session_key, None)
+
+
 class _MockCtx:
     def __init__(self, session_key: str) -> None:
         self.session_key = session_key
@@ -176,7 +212,7 @@ def test_patcher_auto_attaches_recent_files_when_media_empty(tmp_path):
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
 
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert result.media == [str(p)], (
         f"Файл должен быть auto-attached в media, получили: {result.media!r}"
     )
@@ -205,7 +241,7 @@ def test_patcher_skips_recent_files_that_dont_exist(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
 
     assert str(existing) in result.media
     assert str(missing) not in result.media, (
@@ -244,7 +280,7 @@ def test_patcher_replaces_stale_redirected_path(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "postgres_streamlit"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
 
     assert result.media == [str(real)], (
         f"Устаревший путь должен быть заменён реальным: {result.media!r}"
@@ -274,7 +310,7 @@ def test_patcher_does_not_duplicate_existing_media(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
 
     # Дубль по basename отброшен; существующий остался
     assert result.media == [str(p)]
@@ -295,7 +331,7 @@ def test_patcher_no_recent_hook_is_noop():
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert result.media == ["/tmp/already.md"]
 
 
@@ -323,7 +359,7 @@ def test_patcher_appends_after_existing(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert result.media == [str(explicit), str(auto)]
 
 
@@ -351,6 +387,6 @@ def test_patcher_tool_audit_still_added(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert str(p) in result.media
     assert "_tool_audit" in result.metadata

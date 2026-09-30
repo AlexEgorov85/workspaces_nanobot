@@ -123,7 +123,7 @@ def _make_audit_db() -> _DBService:
 
 
 class TestAuditAnalyerPredefinedScripts:
-    """Этап 24/Phase 7: predefined — DB-source (public.agent_predefined_scripts).
+    """Predefined-режим: DB-source (public.agent_predefined_scripts).
 
     Канонический источник SQL — таблица ``public.agent_predefined_scripts``
     в PostgreSQL, читается через DuckDB-PG-снимок в ``predefined.run()``
@@ -455,7 +455,7 @@ class TestAuditAnalyerSkillToolSet:
     def test_skill_md_is_self_contained(self) -> None:
         """SKILL.md — единственный источник документации по skill'у.
 
-        ``references/`` удалены (Phase 8): весь релевантный контент
+        ``references/`` отсутствуют: весь релевантный контент
         (каталог скриптов, описание индексов, бизнес-глоссарий, SQL guidance)
         перенесён в SKILL.md.
 
@@ -485,12 +485,12 @@ class TestAuditAnalyerSkillToolSet:
         )
 
     def test_references_dir_not_required(self) -> None:
-        """``references/`` удалён — SKILL.md self-contained (Phase 8)."""
+        """``references/`` отсутствует — SKILL.md self-contained."""
         ref_dir = SKILL_DIR / "references"
         if ref_dir.exists():
             md_files = list(ref_dir.glob("*.md"))
             assert not md_files, (
-                f"references/*.md должны быть удалены (Phase 8): {md_files}"
+                f"references/*.md должны отсутствовать: {md_files}"
             )
 
     def test_skill_predefined_module_exists(self) -> None:

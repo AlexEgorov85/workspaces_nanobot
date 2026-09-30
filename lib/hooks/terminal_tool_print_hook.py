@@ -27,8 +27,7 @@ import time
 from typing import Any
 
 from loguru import logger
-
-from .base_tool_tracking_hook import BaseToolTrackingHook
+from nanobot.agent import AgentHook
 
 # Метка канала: «tools» — конкретный подсистемный канал для живого вывода
 # tool-вызовов, чтобы не уезжать в общий fallback (``__main__``/модуль).
@@ -102,7 +101,7 @@ def _format_result(result: Any) -> str:
     return text
 
 
-class TerminalToolPrintHook(BaseToolTrackingHook):
+class TerminalToolPrintHook(AgentHook):
     """Живой терминальный вызов для каждого ``tool_call`` итерации.
 
     Печатает результат сразу в ``after_iteration``: ошибки — подробно
@@ -121,20 +120,20 @@ class TerminalToolPrintHook(BaseToolTrackingHook):
     async def before_execute_tools(self, ctx: Any) -> None:
         key = self._bucket_key(ctx)
         self._starts[key] = [
-            time.monotonic() for _ in self._iter_tool_calls(ctx)
+            time.monotonic() for _ in (getattr(ctx, "tool_calls", None) or [])
         ]
 
     async def after_iteration(self, ctx: Any) -> None:
         key = self._bucket_key(ctx)
         starts = self._starts.pop(key, [])
-        calls = self._iter_tool_calls(ctx)
+        calls = list(getattr(ctx, "tool_calls", None) or [])
         events = getattr(ctx, "tool_events", None) or []
         results = getattr(ctx, "tool_results", None) or []
         for i, ev in enumerate(events):
             if i >= len(calls):
                 continue
-            name = self._tool_call_name(calls[i])
-            args = self._tool_call_arguments(calls[i])
+            name = str(getattr(calls[i], "name", "?"))
+            args = getattr(calls[i], "arguments", None)
             status = ev.get("status", "unknown")
             detail = ev.get("detail", "")
             dur_ms = (

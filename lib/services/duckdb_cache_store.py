@@ -40,42 +40,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from lib.services.cache_ownership import CacheAccessMode
+from lib.services.cache_provider import ReadOnlyAssertionError, UnsupportedSqlError
+from lib.services.db_logging_service import LogEvent, try_log_event
+
 logger = logging.getLogger(__name__)
 
 
-def _emit_sync_event(
-    event_type: str,
-    summary: str,
-    payload: dict[str, Any] | None = None,
-    *,
-    level: str = "INFO",
-    service: Any | None = None,
-) -> None:
-    """Тонкая обёртка для sync-событий в ``agent_gateway_logs``.
-
-    Единственный writer — ``DbLoggingService`` (через
-    :func:`lib.services.db_logging_service.try_log_event`).
-    """
-    from lib.services.db_logging_service import LogEvent, try_log_event
-
-    log_event = LogEvent(
-        event_type=event_type,
-        level=level,
-        session_id="gateway:sync",
-        channel=None,
-        actor="sync",
-        name=event_type,
-        summary=summary,
-        payload=payload,
-    )
-    try_log_event(
-        service,
-        log_event,
-        producer="DuckDbCacheStore",
-        event_type=event_type,
-    )
-
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime
+# (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
 # (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
 
 
@@ -154,6 +127,124 @@ def _safe_str(v: Any) -> str | None:
     if isinstance(v, (dict, list, tuple)):
         return json.dumps(v, ensure_ascii=False, default=str)
     return str(v)
+
+
+class UnsupportedFilesystemError(RuntimeError):
+    """Concrete cache storage MUST reject unsupported network/shared filesystem.
+
+    D11 / design D12: ``DuckDbCacheStore.open(path, mode)`` (и будущие
+    SQLite/SQL-реализации) MUST проверить, что ``path`` лежит на
+    локальной FS (ext4/APFS/NTFS). NFS / SMB / network filesystems
+    MUST быть rejected ДО открытия storage — DuckDB ATTACH с
+    ``read_only=True`` всё равно упадёт с «Conflicting lock is held
+    in PID 0», но лучше fail-fast.
+    """
+
+
+def _reject_unsupported_filesystem(path: str) -> None:
+    """Поднять ``UnsupportedFilesystemError``, если ``path`` на network FS.
+
+    Работает через ``/proc/mounts`` (только Linux). Windows / macOS —
+    no-op. Через symlink ``path`` разрешается (``Path.resolve``).
+    """
+    import platform
+
+    if platform.system().lower() not in ("linux", "linux2"):
+        return
+
+    mounts_path = Path("/proc/mounts")
+    if not mounts_path.exists():
+        return
+
+    try:
+        target = str(Path(path).resolve())
+    except OSError:
+        return
+
+    try:
+        for raw in mounts_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            parts = raw.split()
+            if len(parts) < 3:
+                continue
+            mount_point, fstype = parts[1], parts[2]
+            if (
+                target == mount_point
+                or target.startswith(mount_point.rstrip("/") + "/")
+            ):
+                if (
+                    "nfs" in fstype.lower()
+                    or "smb" in fstype.lower()
+                    or "cifs" in fstype.lower()
+                ):
+                    raise UnsupportedFilesystemError(
+                        f"cache path {path!r} is on {fstype} ({mount_point}); "
+                        "concrete cache storage rejects unsupported "
+                        "network/shared filesystems (see design D12). "
+                        "Use a local filesystem for gateway.cache.local_path."
+                    )
+                return
+    except UnsupportedFilesystemError:
+        raise
+    except OSError:
+        return
+
+
+_DDL_KEYWORDS = (
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "TRUNCATE",
+)
+
+
+_DML_KEYWORDS = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "REPLACE",
+)
+
+
+def _classify_sql(sql: str) -> str:
+    """Классифицировать SQL statement type для ``query_sql`` валидации.
+
+    Returns:
+        Один из ``"SELECT" / "DML" / "DDL" / "OTHER"``.
+
+    Raises:
+        UnsupportedSqlError: явный DDL (``CREATE/ALTER/DROP/TRUNCATE``).
+        ReadOnlyAssertionError: ``DML`` при ``mode=READ_ONLY``.
+    """
+    if not isinstance(sql, str):
+        raise UnsupportedSqlError(str(sql), reason="non-string SQL not supported")
+
+    stripped = sql.strip().lstrip("(").lstrip()
+    head = stripped.split(None, 1)[0].upper() if stripped else ""
+
+    if head in _DDL_KEYWORDS:
+        raise UnsupportedSqlError(
+            sql, reason=f"DDL ({head}) is not supported by CacheProvider"
+        )
+
+    if head in _DML_KEYWORDS:
+        return "DML"
+
+    if head == "SELECT" or head.startswith("SELECT"):
+        return "SELECT"
+
+    if head == "WITH":
+        return "SELECT"
+
+    if head == "EXPLAIN":
+        return "SELECT"
+
+    if head == "PRAGMA":
+        return "SELECT"
+
+    return "OTHER"
 
 
 # Внутренняя таблица метаданных схемы (комментарии таблиц/колонок).
@@ -251,14 +342,22 @@ class DuckDbCacheStore:
         self._embedding_timeout_sec = float(embedding_timeout_sec)
         # Единый sink для sync-событий (publish OK/empty/failed): тот же
         # ``DbLoggingService``, что использует ``PgDuckDbSyncService``, — чтобы
-        # все события одного sync-пути шли одним конвейером (см.
-        # ``_emit_sync_event`` через ``DbLoggingService.try_log_event``).
-        # ``None`` (например, в юнит-тестах) → синхронный fallback
-        # ``record_sync_event``.
+        # все события одного sync-пути шли одним конвейером через
+        # ``DbLoggingService.try_log_event``. ``None`` (например, в юнит-тестах)
+        # → no-op for business + operational WARNING внутри ``try_log_event``.
         self._db_logging_service = db_logging_service
 
         self._lock = threading.RLock()
         self._conn: Any = None            # DuckDB (read-write)
+        # Cache access mode — задаётся через ``DuckDbCacheStore.open(path, mode)``
+        # или явно через ``_mode = ...``. ``None`` указывает на legacy ``__init__``
+        # path (back-compat для callers, которые создавали ``DuckDbCacheStore``
+        # напрямую, без ``.open()`` — этот путь считается RW по умолчанию).
+        self._mode: CacheAccessMode | None = None
+        # Реальное read-only открытие DuckDB connection: при ``mode=READ_ONLY``
+        # DuckDB физически блокирует INSERT/UPDATE/DELETE (первый уровень
+        # защиты по design D12). Default ``False`` — backward-compat.
+        self._duckdb_read_only: bool = False
         self._is_ready = False
         self._index_cache: dict[str, tuple[Any, dict | None]] = {}
         self._dirty_sources: set[str] = set()
@@ -280,7 +379,19 @@ class DuckDbCacheStore:
     # ------------------------------------------------------------------
 
     def open(self) -> bool:
-        """Открыть (создать при отсутствии) DuckDB-кэш."""
+        """Открыть (создать при отсутствии) DuckDB-кэш.
+
+        DEPRECATED имя: для нового кода используйте ``connect()`` —
+        имя ``open`` зарезервировано за classmethod-factory в Stage D.
+        Сохранён как alias ``open()`` для back-compat с gateway.py и
+        benchmarks/runner.py — они вызывают ``cache_store.open()``.
+        После change ``unify-cli-gateway-architecture`` alias может быть
+        удалён; новый код MUST использовать ``connect()``.
+        """
+        return self.connect()
+
+    def connect(self) -> bool:
+        """Открыть DuckDB connection через ``_open_locked`` (post-Stage D)."""
         with self._lock:
             try:
                 self._open_locked()
@@ -296,14 +407,56 @@ class DuckDbCacheStore:
 
         if self._conn is not None:
             return
+        # Определяем реальный read-only режим — либо из explicit mode
+        # (через ``DuckDbCacheStore.open(path, mode)``), либо из
+        # legacy __init__ path с ``_duckdb_read_only`` (default False).
+        if self._mode is not None:
+            self._duckdb_read_only = bool(self._mode == CacheAccessMode.READ_ONLY)
+        elif not self._duckdb_read_only:
+            self._duckdb_read_only = False
+
         if self._cache_path:
             p = Path(self._cache_path)
             p.parent.mkdir(parents=True, exist_ok=True)
-            conn = duckdb.connect(str(p))
+            conn = duckdb.connect(str(p), read_only=self._duckdb_read_only)
         else:
-            conn = duckdb.connect()
-        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
+            conn = duckdb.connect(read_only=self._duckdb_read_only)
+        # CREATE SCHEMA только в RW mode — DuckDB read-only connection
+        # физически запрещает любые мутации, включая CREATE SCHEMA IF NOT
+        # EXISTS. Schema MUST уже существовать из предыдущего RW-сеанса
+        # (OWNER процесс создал при первом открытии).
+        if not self._duckdb_read_only:
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
         self._conn = conn
+
+    @classmethod
+    def open(
+        cls,
+        path: str,
+        mode: CacheAccessMode,
+    ) -> DuckDbCacheStore:
+        """Concrete factory — создать ``DuckDbCacheStore`` с заданным access mode.
+
+        Является единственным путём для открытия cache storage через
+        ``CacheProvider`` runtime. ``CacheProvider`` ABC НЕ имеет метода
+        ``open()`` — это ответственность concrete factory (см.
+        ``lib/services/cache_provider.py``).
+
+        ``path`` — путь к ``cache.duckdb``. Должен быть на локальной FS:
+        NFS / SMB / network filesystem MUST быть rejected ДО открытия
+        storage (см. ``_reject_unsupported_filesystem``).
+        ``mode=CacheAccessMode.READ_ONLY`` → DuckDB открывается с
+        ``read_only=True`` (первый уровень защиты по design D12).
+        ``mode=CacheAccessMode.READ_WRITE`` → обычное открытие.
+
+        Raises:
+            UnsupportedFilesystemError: ``path`` лежит на network/
+                shared filesystem. Storage НЕ открывается — fail-fast.
+        """
+        _reject_unsupported_filesystem(path)
+        instance = cls(cache_path=path)
+        instance._mode = mode
+        return instance
 
     def is_ready(self) -> bool:
         return self._is_ready
@@ -330,16 +483,34 @@ class DuckDbCacheStore:
     # Приём данных (вызывается из PgDuckDbSyncService/worker-потока)
     # ------------------------------------------------------------------
 
-    def upsert_records(self, table: str, records: list[dict[str, Any]]) -> bool:
+    def upsert_records(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        *,
+        key_column: str | None = None,
+    ) -> bool:
         """Добавить/обновить строки таблицы в локальный кэш.
 
-        Батч заменяет существующие записи с теми же id (upsert по ключу),
-        новые id — добавляются. Если в записях нет колонки ``id``, таблица
+        Батч заменяет существующие записи с тем же ключом (upsert),
+        новые — добавляются. Ключ: явный ``key_column`` (PK источника,
+        резолвится в ``PgDuckDbSyncService.key_column_for``), иначе
+        колонка ``id``, иначе — если в записях нет колонки ``id``, таблица
         целиком пересоздаётся из батча (с предупреждением).
+
+        ВАЖНО про пересоздание: оно деструктивно для частичного батча.
+        ``_fetch_incremental`` отдаёт ДЕЛЬТУ (``WHERE track_col > last``),
+        поэтому без ключа несвязанные строки были бы потеряны. Таблицам
+        без PK нужен ``key_column`` от sync service, а не дефолт ``id``.
 
         Если таблица является векторной (``vector_db_table``), источники
         (source) из батча помечаются грязными — индекс перестроится лениво
         при следующем search_vector.
+
+        Args:
+            table: ``schema.table`` (или ``table`` в схеме store).
+            records: батч строк (dict).
+            key_column: PK-колонка источника; ``None`` → ``id`` → recreate.
 
         Returns:
             True при успешном сохранении, False при ошибке.
@@ -349,7 +520,7 @@ class DuckDbCacheStore:
         with self._lock:
             try:
                 self._open_locked()
-                self._upsert_locked(table, records)
+                self._upsert_locked(table, records, key_column)
                 self._upserts += 1
                 self._last_upsert_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 self._dirty = True
@@ -564,7 +735,12 @@ class DuckDbCacheStore:
             result[(table, column)] = (comment, pg_type)
         return result
 
-    def _upsert_locked(self, table: str, records: list[dict[str, Any]]) -> None:
+    def _upsert_locked(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        key_column: str | None = None,
+    ) -> None:
         schema, name = _split_table(table)
         schema = schema or self._schema
         if not name:
@@ -626,14 +802,18 @@ class DuckDbCacheStore:
             'WHERE table_schema = ? AND table_name = ?', [schema, name]
         ).fetchall()]
 
-        key_col = "id" if "id" in df_cols else None
+        key_col = key_column or ("id" if "id" in df_cols else None)
         insert_cols = [c for c in df_cols if c in existing_cols]
 
-        # Если нет ключа — DROP (DDL), дальше _ingest_arrow сделает CREATE OR REPLACE.
+        # Ключ не найден — DROP (DDL), дальше _ingest_arrow сделает
+        # CREATE OR REPLACE. Деструктивно для дельты, поэтому warning
+        # должен быть громким, а не информационным.
         if not (key_col and key_col in existing_cols):
             print(
-                f"[memory_store] Таблица {full}: нет колонки 'id', "
-                "таблица пересоздаётся из батча",
+                f"[memory_store] ВНИМАНИЕ: {full}: нет ключа upsert "
+                f"(id_column='{key_column}', нет 'id') — таблица "
+                "ПЕРЕСОЗДАЁТСЯ из батча. Для дельты это удаляет "
+                "несвязанные строки; укажите PK через key_column.",
                 file=sys.stderr,
             )
             self._ingest_arrow(table, records, insert_cols, create_table=True)
@@ -800,17 +980,25 @@ class DuckDbCacheStore:
                         "(NFS lockd / crashed peer?). Skip cycle.",
                         tmp, e,
                     )
-                    _emit_sync_event(
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="sync_publish_failed",
+                            level="WARN",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="sync_publish_failed",
+                            summary=f"publish FAIL (stale .tmp): {e}",
+                            payload={
+                                "publish_path": str(target),
+                                "tmp_path": str(tmp),
+                                "error_type": "OSError",
+                                "error": str(e),
+                            },
+                        ),
+                        producer="DuckDbCacheStore",
                         event_type="sync_publish_failed",
-                        summary=f"publish FAIL (stale .tmp): {e}",
-                        payload={
-                            "publish_path": str(target),
-                            "tmp_path": str(tmp),
-                            "error_type": "OSError",
-                            "error": str(e),
-                        },
-                        level="WARN",
-                        service=self._db_logging_service,
                     )
                     return False
 
@@ -886,7 +1074,32 @@ class DuckDbCacheStore:
                         )
                 finally:
                     self._conn.execute("DETACH __out")
-                os.replace(tmp, target)
+                # ``os.replace`` на Windows не может перезаписать файл, пока
+                # на нём открыт handle (ERROR_SHARING_VIOLATION → WinError 5),
+                # в т.ч. на собственное RW-соединение OWNER'а. На Unix
+                # replace поверх открытого файла разрешён, поэтому баг был
+                # невидим. Закрываем соединение → подменяем → открываем заново.
+                #
+                # Порядок важен и для консистентности: DuckDB на ``close()``
+                # делает checkpoint и УДАЛЯЕТ ``<target>.wal``. Если бы replace
+                # шёл до close, на диске остался бы ``cache.duckdb.wal`` от
+                # старого файла, а сам target был бы уже новым — DuckDB
+                # подхватил бы чужой WAL при следующем открытии.
+                live_conn = self._conn
+                self._conn = None
+                if live_conn is not None:
+                    try:
+                        live_conn.close()
+                    except Exception:
+                        pass
+                try:
+                    os.replace(tmp, target)
+                finally:
+                    if live_conn is not None:
+                        # reopen по тому же cache_path; индексы/метки не
+                        # сбрасываем (close() их затирает, а данные прежние).
+                        self._open_locked()
+                        self._is_ready = True
                 self._dirty = False
                 self._publishes += 1
                 self._last_publish_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -912,20 +1125,28 @@ class DuckDbCacheStore:
                         len(counts),
                         sum(counts.values()),
                     )
-                    _emit_sync_event(
-                        event_type="sync_publish_ok",
-                        summary=(
-                            f"cache snapshot -> {target} "
-                            f"({len(counts)} tables, {sum(counts.values())} rows)"
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="sync_publish_ok",
+                            level="INFO",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="sync_publish_ok",
+                            summary=(
+                                f"cache snapshot -> {target} "
+                                f"({len(counts)} tables, {sum(counts.values())} rows)"
+                            ),
+                            payload={
+                                "publish_path": str(target),
+                                "tables": {k: int(v) for k, v in counts.items()},
+                                "total_tables": len(counts),
+                                "total_rows": int(sum(counts.values())),
+                            },
                         ),
-                        payload={
-                            "publish_path": str(target),
-                            "tables": {k: int(v) for k, v in counts.items()},
-                            "total_tables": len(counts),
-                            "total_rows": int(sum(counts.values())),
-                        },
-                        level="INFO",
-                        service=self._db_logging_service,
+                        producer="DuckDbCacheStore",
+                        event_type="sync_publish_ok",
                     )
                 else:
                     logger.warning(
@@ -934,19 +1155,27 @@ class DuckDbCacheStore:
                         "не существует во in-memory DuckDB — sync возможно не доставил данные).",
                         target,
                     )
-                    _emit_sync_event(
-                        event_type="sync_publish_empty",
-                        summary=(
-                            f"publish OK, но 0 таблиц скопировано в {target} "
-                            f"(sync не доставил данные)"
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="sync_publish_empty",
+                            level="WARN",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="sync_publish_empty",
+                            summary=(
+                                f"publish OK, но 0 таблиц скопировано в {target} "
+                                f"(sync не доставил данные)"
+                            ),
+                            payload={
+                                "publish_path": str(target),
+                                "tables_in_store": list(self._tables or []),
+                                "vector_db_table": self._vector_db_table or None,
+                            },
                         ),
-                        payload={
-                            "publish_path": str(target),
-                            "tables_in_store": list(self._tables or []),
-                            "vector_db_table": self._vector_db_table or None,
-                        },
-                        level="WARN",
-                        service=self._db_logging_service,
+                        producer="DuckDbCacheStore",
+                        event_type="sync_publish_empty",
                     )
                 return True
             except OSError as e:
@@ -960,17 +1189,25 @@ class DuckDbCacheStore:
                     target,
                     tmp,
                 )
-                _emit_sync_event(
+                try_log_event(
+                    self._db_logging_service,
+                    LogEvent(
+                        event_type="sync_publish_failed",
+                        level="WARN",
+                        session_id="gateway:sync",
+                        channel=None,
+                        actor="sync",
+                        name="sync_publish_failed",
+                        summary=f"publish FAIL (OSError при replace): {e}",
+                        payload={
+                            "publish_path": str(target),
+                            "tmp_path": str(tmp),
+                            "error_type": "OSError",
+                            "error": str(e),
+                        },
+                    ),
+                    producer="DuckDbCacheStore",
                     event_type="sync_publish_failed",
-                    summary=f"publish FAIL (OSError при replace): {e}",
-                    payload={
-                        "publish_path": str(target),
-                        "tmp_path": str(tmp),
-                        "error_type": "OSError",
-                        "error": str(e),
-                    },
-                    level="WARN",
-                    service=self._db_logging_service,
                 )
                 return False
             except Exception as e:
@@ -981,17 +1218,25 @@ class DuckDbCacheStore:
                     e,
                     exc_info=True,
                 )
-                _emit_sync_event(
+                try_log_event(
+                    self._db_logging_service,
+                    LogEvent(
+                        event_type="sync_publish_failed",
+                        level="WARN",
+                        session_id="gateway:sync",
+                        channel=None,
+                        actor="sync",
+                        name="sync_publish_failed",
+                        summary=f"publish FAIL: {e}",
+                        payload={
+                            "publish_path": str(target),
+                            "tmp_path": str(tmp),
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                        },
+                    ),
+                    producer="DuckDbCacheStore",
                     event_type="sync_publish_failed",
-                    summary=f"publish FAIL: {e}",
-                    payload={
-                        "publish_path": str(target),
-                        "tmp_path": str(tmp),
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                    },
-                    level="WARN",
-                    service=self._db_logging_service,
                 )
                 return False
 
@@ -1020,9 +1265,40 @@ class DuckDbCacheStore:
                 return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                         "error": "DuckDbCacheStore is not ready"}
 
+            self._assert_query_sql_allowed_locked(sql)
+
             from lib.utils.duckdb_query import run_query
 
             return run_query(self._conn, sql, params)
+
+    def _assert_query_sql_allowed_locked(self, sql: str) -> None:
+        """Второй уровень защиты (assertion guard) для ``query_sql``.
+
+        Первый уровень — DuckDB connection opened с ``read_only=True``
+        для ``mode=READ_ONLY`` (физический bar). Этот guard закрывает
+        случай, когда ``_conn`` (как-то) был переоткрыт в RW или user
+        пишет из другого процесса.
+
+        Семантика:
+
+          * DDL (``CREATE/ALTER/DROP/TRUNCATE``) → ``UnsupportedSqlError``
+            в любом mode;
+          * ``SELECT`` → всегда разрешён;
+          * ``INSERT/UPDATE/DELETE`` при ``mode=READ_ONLY`` →
+            ``ReadOnlyAssertionError``;
+          * ``mode`` неизвестен (``None`` через legacy ``__init__`` path
+            без ``DuckDbCacheStore.open``) → cache открыт в RW по
+            default (back-compat).
+        """
+        sql_kind = _classify_sql(sql)
+        if sql_kind == "OTHER":
+            raise UnsupportedSqlError(
+                sql, reason="only SELECT/INSERT/UPDATE/DELETE are supported"
+            )
+        if sql_kind == "DML" and (
+            self._mode == CacheAccessMode.READ_ONLY or self._duckdb_read_only
+        ):
+            raise ReadOnlyAssertionError(sql)
 
     def explain(self, sql: str) -> dict[str, Any]:
         with self._lock:
@@ -1103,15 +1379,23 @@ class DuckDbCacheStore:
                     "error_type": type(exc).__name__,
                 }
                 self._preload_errors.append(err)
-                _emit_sync_event(
-                    event_type="vector_preload_error",
-                    summary=(
-                        f"не удалось получить список source из "
-                        f"{schema}.{name}: {exc}"
+                try_log_event(
+                    self._db_logging_service,
+                    LogEvent(
+                        event_type="vector_preload_error",
+                        level="WARN",
+                        session_id="gateway:sync",
+                        channel=None,
+                        actor="sync",
+                        name="vector_preload_error",
+                        summary=(
+                            f"не удалось получить список source из "
+                            f"{schema}.{name}: {exc}"
+                        ),
+                        payload=err,
                     ),
-                    payload=err,
-                    level="WARN",
-                    service=self._db_logging_service,
+                    producer="DuckDbCacheStore",
+                    event_type="vector_preload_error",
                 )
                 logger.warning("vector_preload_error: %s", exc)
                 return loaded
@@ -1132,14 +1416,22 @@ class DuckDbCacheStore:
                         "error_type": type(exc).__name__,
                     }
                     self._preload_errors.append(err)
-                    _emit_sync_event(
-                        event_type="vector_index_build_failed",
-                        summary=(
-                            f"ошибка построения FAISS-индекса '{src}': {exc}"
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="vector_index_build_failed",
+                            level="WARN",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="vector_index_build_failed",
+                            summary=(
+                                f"ошибка построения FAISS-индекса '{src}': {exc}"
+                            ),
+                            payload=err,
                         ),
-                        payload=err,
-                        level="WARN",
-                        service=self._db_logging_service,
+                        producer="DuckDbCacheStore",
+                        event_type="vector_index_build_failed",
                     )
                     logger.warning(
                         "vector_index_build_failed (%s): %s", src, exc,

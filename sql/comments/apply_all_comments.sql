@@ -86,11 +86,11 @@ COMMENT ON COLUMN oarb.audit_vectors."synced_at" IS 'Время последне
 COMMENT ON COLUMN oarb.audit_vectors."created_at" IS 'Время создания записи в этой таблице.';
 
 -- ---- public.agent_vector_index_config ----
-COMMENT ON TABLE public.agent_vector_index_config IS 'КОНФИГУРАЦИЯ сборки векторных индексов. Описывает ЧТО строить: имя индекса, исходная таблица, колонки для content/embedding, колонка-маркер изменений. Не содержит самих векторов — только метаданные сборки. Используется tools/build_vectors.py.';
-COMMENT ON COLUMN public.agent_vector_index_config."index_name" IS 'PK — уникальное имя индекса (= source в audit_vectors, = source в agent_vector_index_store).';
+COMMENT ON TABLE public.agent_vector_index_config IS 'LEGACY. КОНФИГУРАЦИЯ сборки векторных индексов. Кодом не читается: источник истины — project.json::gateway.vector.index.indexes. Оставлена как артефакт SQL (и цель для V002__vector_chunk_params.sql).';
+COMMENT ON COLUMN public.agent_vector_index_config."index_name" IS 'PK — уникальное имя индекса (= source в audit_vectors).';
 COMMENT ON COLUMN public.agent_vector_index_config."source_table" IS 'Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.';
 COMMENT ON COLUMN public.agent_vector_index_config."src_table" IS 'Исходная таблица (schema.table), из которой берутся строки для эмбеддинга.';
-COMMENT ON COLUMN public.agent_vector_index_config."pk_column" IS 'Колонка первичного ключа в исходной таблице (для join с agent_vector_index_store.metadata).';
+COMMENT ON COLUMN public.agent_vector_index_config."pk_column" IS 'Колонка первичного ключа в исходной таблице.';
 COMMENT ON COLUMN public.agent_vector_index_config."content_cols" IS 'TEXT[] — колонки исходной таблицы, которые попадают в audit_vectors.content (для отображения).';
 COMMENT ON COLUMN public.agent_vector_index_config."embedding_cols" IS 'JSONB — словарь {col_name: {chunk: bool}} — какие колонки эмбеддингить и чанковать ли.';
 COMMENT ON COLUMN public.agent_vector_index_config."track_column" IS 'Колонка исходной таблицы для инкрементальных обновлений (обычно updated_at).';
@@ -99,13 +99,9 @@ COMMENT ON COLUMN public.agent_vector_index_config."created_at" IS 'Время �
 COMMENT ON COLUMN public.agent_vector_index_config."updated_at" IS 'Время последнего изменения конфига.';
 
 -- ---- public.agent_vector_index_store ----
-COMMENT ON TABLE public.agent_vector_index_store IS 'СЕРИАЛИЗОВАННЫЕ FAISS-ИНДЕКСЫ (binary blob + metadata). Одна строка на source (= index_name из agent_vector_index_config). Строится из audit_vectors инструментами build_vectors.py: собираются все векторы одного source в faiss.IndexFlatIP/IVFFlat, сериализуются в BYTEA. Загружается lib.services.cache_provider_impl при search_vector. Контраст с audit_vectors: audit_vectors — это сырьё (по чанкам с метаданными), agent_vector_index_store — готовый поисковый индекс (быстрый ANN).';
-COMMENT ON COLUMN public.agent_vector_index_store."source" IS 'PK — имя индекса (= index_name из agent_vector_index_config, = source в audit_vectors).';
-COMMENT ON COLUMN public.agent_vector_index_store."index_binary" IS 'Сериализованный FAISS-индекс (pickle/bytes). Десериализуется при search_vector.';
-COMMENT ON COLUMN public.agent_vector_index_store."metadata" IS 'JSONB: {pk_value: {source, chunk_index, row_id, ...}} — связь FAISS-индекса с audit_vectors.';
-COMMENT ON COLUMN public.agent_vector_index_store."dimension" IS 'Размерность векторов (должна совпадать с embedding в audit_vectors).';
-COMMENT ON COLUMN public.agent_vector_index_store."vector_count" IS 'Количество векторов в индексе (контроль согласованности с audit_vectors).';
-COMMENT ON COLUMN public.agent_vector_index_store."updated_at" IS 'Время последней пересборки индекса.';
+-- Таблица удалена (миграция V003__drop_vector_index_store.sql): persisted
+-- FAISS-кеш больше не используется, индекс собирается в памяти из
+-- DuckDB-снапшота gateway.vector.index.storage_table. COMMENT-ы не выставляются.
 
 -- ---- public.agent_session_meta ----
 COMMENT ON TABLE public.agent_session_meta IS 'Метаданные сессий nanobot. Заменяет JSONL-файлы в workspace/sessions/. Управляется PGSessionManager (lib/session/pg_session_manager.py). Таблица агента (префикс agent_).';

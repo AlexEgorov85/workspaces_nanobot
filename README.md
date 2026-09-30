@@ -15,8 +15,9 @@ pip install nanobot-ai && pip install -r requirements.txt
 copy .secrets.env.example .secrets.env   # cp на Linux
 # Отредактируйте .secrets.env: DB_PASSWORD=... и # providers: llm / api_key=...
 python tools/migrate.py --apply         # применить миграции схемы
-python gateway.py                        # AgentLoop + Postgres/Redis каналы + Streamlit :8501
-# или:
+# --profile обязателен для gateway (prod | test), иначе ConfigurationError + exit 2:
+python gateway.py --profile=prod        # AgentLoop + Postgres/Redis каналы + Streamlit :8501
+# или (CLI — фиксированный профиль test, флаг --profile не принимается):
 python cli_agent.py -P -s dev           # REPL в patched-режиме (PostgreSQL)
 ```
 
@@ -33,19 +34,20 @@ psql -d nanobot -f sql/channels/create_public_agent_conversation_messages.sql
 ## 🛠 Команды
 
 ```bash
-python gateway.py                                                 # долгоживущий сервер
-python cli_agent.py                          # REPL vanilla (JSONL)
-python cli_agent.py -P -s my-session         # REPL patched (PGSessionManager + хуки)
-python benchmarks/runner.py --tags simple                         # оценка качества
-python tools/build_vectors.py --full-rebuild                      # перестроение FAISS-индексов
-python tools/build_vectors.py --status                            # текущее состояние
-python tools/check_worker_pool_integrity.py --fix                 # диагностика пула воркеров
-python tools/migrate.py --apply                                   # миграции схемы
+python gateway.py --profile=prod                              # долгоживущий сервер
+python cli_agent.py                                           # REPL vanilla (JSONL), профиль test
+python cli_agent.py -P -s my-session                          # REPL patched (PGSessionManager + хуки)
+python benchmarks/runner.py --tags simple                     # оценка качества
+python tools/build_vectors.py --full-rebuild                  # перестроение векторов в storage_table
+python tools/build_vectors.py --status                        # текущее состояние
+python tools/check_indexes.py                                 # declared vs runtime индексов
+python tools/check_worker_pool_integrity.py --fix             # диагностика пула воркеров
+python tools/migrate.py --apply                               # миграции схемы
 ```
 
 > **Навык `audit_analyzer`** предоставляет CLI `scripts/cli.py --mode <predefined | generated_sql | vector>`
 > (вызывается агентом через `exec`; также для бенчмарков/CI). Generic tools
-> `duckdb_query` / `vector_search` удалены в фазе 8 — агент работает только через CLI.
+> `duckdb_query` / `vector_search` отсутствуют — агент работает только через CLI.
 > LLM-генерация SQL — режим `generated_sql` (`scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client`).
 > Внешний контракт — `SKILL.md`.
 
@@ -103,7 +105,7 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 - **Канал:** `public.agent_conversation_messages`
 - **Журнал:** `public.agent_gateway_logs`, `public.agent_question_runs` (UUID + JSONB)
 - **Домен audit_analyzer:** `oarb.audits/violations/audit_reports/report_items` (REFERENCE)
-- **Векторы:** `oarb.audit_vectors` (эмбеддинги), `public.agent_vector_index_store` (FAISS BYTEA + signature); `public.agent_vector_index_config` — legacy SQL-артефакт (кодом не читается; конфиг индексов — в `project.json::gateway.vector.index.indexes`)
+- **Векторы:** `oarb.audit_vectors` (эмбеддинги, FAISS собирается в памяти из DuckDB-снапшота — таблица-хранилище задаётся `gateway.vector.index.storage_table`); `public.agent_vector_index_config` и `public.agent_vector_index_store` — legacy SQL-артефакты, кодом не читаются; конфиг индексов — в `project.json::gateway.vector.index.indexes`
 - **Predefined scripts:** `public.agent_predefined_scripts`
 - **Воркер-пул:** `public.agent_worker_claims` (UNIQUE PK, lease)
 - **Бенчмарки:** `public.agent_benchmark_runs/results`
@@ -115,7 +117,9 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 
 ## 🧪 Тестирование
 
-**2365 unit-тестов** (интеграционные пропускаются без живого PostgreSQL/LLM).
+**3603 теста собираются** (`python -m pytest tests/ -q --collect-only`); интеграционные
+падают без живого PostgreSQL/LLM. Зелёный прогон требует доступного PostgreSQL
+(test-профиль) и терминала с UTF-8.
 
 ```bash
 pytest tests/ -q
@@ -158,6 +162,39 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | **workspace/skills/*/SKILL.md** | Документация навыков |
 | **workspace/AGENTS.md** | Инструкции для агента |
 
+## 🆕 Что нового в [Unreleased]
+
+**MAJOR.** Session hot-path переведён на upstream `SessionManager` (JSONL) —
+единственный source of truth; PostgreSQL остаётся cold-storage mirror
+(`SessionColdSyncService`, per-transaction advisory lock, leader-election).
+`PGSessionManager` в hot path только делегирует `super()`; прямых SQL-операций
+в `agent_session_meta` / `agent_session_messages` нет. Исторические PG-сессии
+требуют разовой миграции в JSONL **до** деплоя (см. `docs/architecture/storage-layers.md`,
+`docs/MIGRATION.md` § «Storage hybridization»).
+
+**MAJOR.** Persisted FAISS-кеш удалён: единственный источник векторных данных —
+DuckDB-снапшот `gateway.vector.index.storage_table`, FAISS собирается в памяти
+при старте gateway. Таблица-сигнатура и настройка `signature_table` удалены
+(миграция `V003__drop_vector_index_store.sql`), `--list-indexes` и
+`tools/check_indexes.py` читают runtime из того же снапшота.
+
+**MAJOR.** Профиль конфигурации задаётся только CLI-флагом `--profile`
+(whitelist: `prod` / `test`); env-передача профиля больше не работает,
+`gateway.py` / `cli_agent.py` / `streamlit_app.py` без флага падают с
+`ConfigurationError` и `exit 2` (см. `docs/PROFILES.md`).
+
+**SECURITY.** `history_search(session_scope="all")` изолирован по `user_id`
+(новая колонка `agent_gateway_logs.user_id`, миграция `V004`): больше нет
+cross-user выдачи; без identity-store возвращается `missing_user_identity` /
+`missing_session_identity` без обращения к БД.
+
+**Changed.** Единый logging pipeline: `workspace/utils/event_log.py` удалён,
+`DbLoggingService` — единственный writer в `agent_gateway_logs` /
+`agent_question_runs`; `/compact` переведён на upstream-обработчик
+(`ContextCompactionService` + `RuntimePatcher.patch_compact_command`).
+
+Полный changelog — в [CHANGELOG.md → Unreleased](CHANGELOG.md#unreleased).
+
 ## 🆕 Что нового в v2.5.2
 
 **PATCH поверх v2.5.1, 2026-09-14.** Две группы доработок:
@@ -181,8 +218,8 @@ Conflicting lock is held in PID 0` (DuckDB `ATTACH` берёт эксклюзи�
   backoff на `ATTACH`, понятный `sync_publish_failed` вместо
   `except OSError: pass` (`605660b`, `652b09d`).
 
-**Observability sync-путей.** Единый конвейер `emit_sync_event` /
-`DbLoggingService` вместо ad-hoc `logger.warning` (`a1811c5`); ошибки
+**Observability sync-путей.** Единый конвейер `DbLoggingService.try_log_event`
+вместо ad-hoc `logger.warning` (`a1811c5`); ошибки
 `preload` векторов и `channel` lease-loop теперь попадают в долговечный
 `agent_gateway_logs` (`9fb88c4`, `48575e9`); `PG→DuckDB` sync-цикл
 (`initial_load` / `poll_cycle` / `claim` / `release` / `reconnect`)
@@ -204,11 +241,11 @@ CLI/skill) и `TestWarnIfPublishPathOnNfs` (2 кейса); все ранее
 агент получает явный `RuntimeError` с диагностикой, а не молчаливый
 переход на соседний режим.
 
-**Vector discovery: declared vs runtime (`61ead9b`).**
-`audit_analyzer/scripts/cli.py::_list_indexes()` теперь читает
-фактическое состояние FAISS-blob'ов из `public.agent_vector_index_store`
-(PG), а не декларативный JSON. Для сверки с декларацией
-(`project.json::gateway.vector.index.indexes.*`) добавлен
+**Vector discovery: declared vs runtime.**
+`audit_analyzer/scripts/cli.py::_list_indexes()` читает фактическое
+состояние индексов из DuckDB-снапшота таблицы-хранилища
+(`gateway.vector.index.storage_table`), а не декларативный JSON. Для сверки
+с декларацией (`project.json::gateway.vector.index.indexes.*`) добавлен
 `tools/check_indexes.py`: MISSING / ORPHAN / STALE / INVALID-signature,
 exit 0/1/2, `--json` для CI. См. `docs/VECTOR_INDEXES.md`.
 
@@ -216,7 +253,7 @@ exit 0/1/2, `--json` для CI. См. `docs/VECTOR_INDEXES.md`.
 `preload_vector_indexes()` gateway печатает в **stderr** многострочный
 summary (`declared/loaded/missing/orphan/stale` + счётчики vectors) и
 пишет одно событие `vector_index_preload_health` в `agent_gateway_logs`
-через `emit_sync_event`: `level="WARN"` при divergence, иначе `INFO`.
+через `DbLoggingService.try_log_event`: `level="WARN"` при divergence, иначе `INFO`.
 Конструктор `PreloadService(settings, db_logging_service)` —
 сервис логирования пробрасывается явно.
 
@@ -233,8 +270,7 @@ runtime), `test_preload_service` (+18 health summary, всего 22),
 
 **PATCH поверх v2.5.0, 2026-09-13.** Регрессии и доработки после MINOR-релиза — закрытие
 lifecycle-deadlock `postgres_channel` при `stream_end` с пустым delta (`71cfcde`),
-удаление agent-tools `duckdb_query` и `vector_search` (Phase 8 Resource Model
-Refactoring, `12bf182`), перенос конфига vector-индексов из PG-реестра
+удаление agent-tools `duckdb_query` и `vector_search` (`12bf182`), перенос конфига vector-индексов из PG-реестра
 `public.agent_vector_index_config` в `project.json::gateway.vector.index.indexes.*`
 + хардкод эмбеддинга (`bf59b5a`), DB-first `scripts/predefined` в `audit_analyzer`
 + удаление `tools/generate_predefined_scripts_sql.py` (`79e0e63`),
@@ -250,8 +286,8 @@ Refactoring, `12bf182`), перенос конфига vector-индексов �
 
 ## 🆕 Что нового в v2.5.0
 
-**MINOR поверх v2.4.0, 2026-09-11.** Крупный рефакторинг `legal_summarizer` (97-этапный
-план: layered package, document-level cache, brief как ровно один Chunk, structural
+**MINOR поверх v2.4.0, 2026-09-11.** Рефакторинг `legal_summarizer` (layered package,
+document-level cache, brief как ровно один Chunk, structural
 packing, вопрос-режим через document cache, e2e 3-mode CLI), переработка
 конфигурационного контракта skills ↔ runtime infrastructure (`TableRegistry.register_infra`,
 `gateway.vector.{embedding,index}.*`, `EmbeddingSettings`, hard validation legacy-ключей),

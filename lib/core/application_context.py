@@ -7,15 +7,118 @@
 
 Все тяжёлые зависимости (nanobot, psycopg2) импортируются лениво —
 модуль безопасно импортировать даже в тестовых средах.
+
+Composition contract
+====================
+
+``ApplicationContext.create()`` принимает ТОЛЬКО typed-параметры:
+
+  * обязательный ``role: Literal["gateway", "cli"]``;
+  * явные override-ключи ``storage_override``, ``session_override``;
+  * ``**kwargs`` — временная compatibility boundary для deprecated
+    ``enable_db_logging / enable_audit / enable_cron / print_llm_calls``
+    (см. AGENTS.md § «Working Conventions → Configuration»).
+    Любой другой ключ (включая ``profile``) отвергается ``TypeError``.
+
+``profile`` НЕ является параметром ``create()`` — профиль выбирается
+на границе запуска приложения (argv application entrypoint) и
+публикуется через ``config._initialize_settings(profile=...)``.
+Composition root читает его только из ``SETTINGS["profile"]``.
+
+``role`` определяет только composition инфраструктуры
+(``PostgresChannel``, ``CronService``); НЕ определяет cache owner/reader —
+это ответственность ``CacheOwnershipCoordinator`` (см.
+``lib/services/cache_ownership.py``).
+
+Cache owner/reader status — НЕ через ``role``:
+
+  * role="gateway" может быть OWNER (если пришёл первый к PG claim) или
+    READER (если первым пришёл CLI);
+  * role="cli" — то же самое;
+  * Оба процесса открывают ``cache.duckdb`` через concrete factory
+    ``DuckDbCacheStore.open(path, mode)`` с mode от ``coord.try_claim()``.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+
+# Deprecated kwargs, принимаются ТОЛЬКО через **kwargs до раскрытия
+# change ``remove-deprecated-enable-kwargs``. Production code MUST NOT
+# их использовать. См. openspec/changes/unify-cli-gateway-architecture
+# design D1 «Staged implementation» и Stage G.
+DEPRECATED_ENABLE_KWARGS = frozenset({
+    "enable_db_logging",
+    "enable_audit",
+    "enable_cron",
+    "print_llm_calls",
+})
+
+
+def _resolve_enable_kwargs(
+    kwargs: dict[str, Any],
+    *,
+    gateway_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Извлечь deprecated ``enable_*``/``print_llm_calls`` из ``**kwargs``.
+
+    Возвращает dict со всеми DEPRECATED_ENABLE_KWARGS (defaults из
+    ``gateway.*`` settings). При передаче kwarg — поднимает
+    ``DeprecationWarning`` (через ``warnings.warn`` с ``stacklevel=2``,
+    чтобы указывать на caller'а, а не на эту функцию).
+
+    ``DEPRECATED_ENABLE_KWARGS`` — allowlist: любой ключ, которого в нём
+    нет, отвергается ``TypeError``. Это делает ``profile=`` (и опечатки
+    вроде ``enable_aduit=``) явной ошибкой вместо молчаливого игнора.
+    ``profile`` намеренно отсутствует: у него нет migration path в
+    ``project.json`` — это не deprecated API, а состояние ``SETTINGS``,
+    определённое ДО ``create()``.
+
+    Production code MUST NOT передавать эти kwargs напрямую —
+    использовать вместо этого ``gateway.enable_*`` в SETTINGS.
+    """
+    import warnings
+
+    unknown = sorted(set(kwargs) - DEPRECATED_ENABLE_KWARGS)
+    if unknown:
+        raise TypeError(
+            "ApplicationContext.create() got an unexpected keyword "
+            f"argument(s): {', '.join(unknown)}. "
+            f"Accepted deprecated kwargs: "
+            f"{', '.join(sorted(DEPRECATED_ENABLE_KWARGS))}. "
+            "Profile MUST be resolved before create() via "
+            "config._initialize_settings(profile=...) and is read from "
+            "SETTINGS['profile']."
+        )
+
+    gateways = gateway_settings or {}
+    defaults = {
+        "enable_db_logging": bool(gateways.get("enable_db_logging", True)),
+        "enable_audit": bool(gateways.get("enable_audit", True)),
+        "enable_cron": bool(gateways.get("enable_cron", False)),
+        "print_llm_calls": bool(gateways.get("print_llm_calls", False)),
+    }
+
+    out = dict(defaults)
+    for key, value in kwargs.items():
+        if key in DEPRECATED_ENABLE_KWARGS:
+            warnings.warn(
+                f"ApplicationContext.create({key}={value!r}) is deprecated; "
+                f"configure gateway.{key} in project.json instead. "
+                "This compatibility boundary will be removed by change "
+                "remove-deprecated-enable-kwargs.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            out[key] = bool(value)
+    return out
 
 
 class ApplicationContext:
@@ -45,7 +148,20 @@ class ApplicationContext:
     # Сервисы (опциональные)
     db_logging_service: Any | None = None
     sync_service: Any | None = None
-    cache_store: Any | None = None
+    cache_provider: Any | None = None  # CacheProvider ABC instance (Stage D)
+    cache_store: Any | None = None  # legacy alias for cache_provider
+    ownership_coordinator: Any | None = None  # CacheOwnershipCoordinator (Stage C)
+
+    # Composition role (Stage A)
+    role: str = ""  # "gateway" | "cli"
+    enable_db_logging: bool = True
+    enable_audit: bool = True
+    enable_cron: bool = False
+    print_llm_calls: bool = False
+
+    # Storage-hybridization: cold-storage mirror для сессий + LLM usage.
+    session_cold_sync_service: Any | None = None
+    usage_store: Any | None = None
 
     # Помощники
     config_service: Any = None
@@ -66,6 +182,7 @@ class ApplicationContext:
     # Lifecycle
     _started: bool = False
     _shutdown: Any | None = None  # ShutdownCoordinator
+    runtime_events_subscriber: Any | None = None  # RuntimeEventsSubscriber
 
     @classmethod
     def create(
@@ -73,40 +190,68 @@ class ApplicationContext:
         script_dir: Path,
         workspace_dir: Path,
         *,
-        enable_db_logging: bool = True,
-        enable_audit: bool = True,
-        enable_cron: bool = False,
+        role: Literal["gateway", "cli"],
         storage_override: str | None = None,
         session_override: str | None = None,
-        print_llm_calls: bool = False,
-        profile: str | None = None,
+        **kwargs: Any,
     ) -> ApplicationContext:
         """Собрать контекст приложения.
 
         Args:
             script_dir: корень проекта (где лежит config.json).
             workspace_dir: корень workspace.
-            enable_db_logging: инициализировать DbLoggingService.
-            enable_audit: инициализировать PgDuckDbSyncService + DuckDbCacheStore.
-            enable_cron: подключить CronService (CLI).
+            role: точка входа (``"gateway"`` или ``"cli"``). Определяет
+                composition инфраструктуры (``PostgresChannel`` только в
+                gateway, ``CronService`` только в gateway). НЕ определяет
+                cache owner/reader — это ответственность
+                ``CacheOwnershipCoordinator``.
             storage_override: режим хранилища из CLI (auto/postgres/file).
             session_override: имя сессии (CLI).
-            print_llm_calls: выводить в терминал токены LLM-итераций
-                (включается только в CLI-REPL через DatabaseLoggingHook).
-            profile: активный профиль конфигурации (``"prod"`` / ``"test"``).
-                Должен совпадать с уже инициализированным через
-                ``config._initialize_settings(profile)`` из application
-                entrypoint. ``None`` — fallback на ``config.SETTINGS["profile"]``
-                (если ленивый proxy уже инициализирован entrypoint'ом).
+            **kwargs: deprecated compatibility boundary для
+
+                * ``enable_db_logging`` (bool);
+                * ``enable_audit`` (bool);
+                * ``enable_cron`` (bool);
+                * ``print_llm_calls`` (bool).
+
+                Принимаются с ``DeprecationWarning`` + применяются как
+                override над ``SETTINGS["gateway"].*``. После раскрытия
+                change ``remove-deprecated-enable-kwargs`` — ``TypeError``.
+
+                ``profile`` НЕ принимается: профиль определён ДО вызова
+                и читается из ``SETTINGS["profile"]``. Передача
+                ``profile=`` приводит к ``TypeError``.
 
         Raises:
             ConfigurationError: если ``_initialize_settings(profile)`` ещё не
                 выполнен (proxy остался uninitialized).
+            TypeError: если в ``**kwargs`` передан ключ вне
+                ``DEPRECATED_ENABLE_KWARGS`` (включая ``profile``).
         """
+        # Делегируем ``**kwargs`` валидацию/применение (с DeprecationWarning).
+        import config as _config
+        ctx_settings = _config.SETTINGS
+        # Touching ``["profile"]`` материализует ConfigurationError на
+        # uninitialized proxy, но не делает duplicated work в happy-path.
+        # Единственный канал получения профиля в composition root —
+        # resolved SETTINGS; способ выбора профиля entrypoint'а здесь
+        # неизвестен и не нужен.
+        resolved_profile = ctx_settings["profile"]
+
+        gateways = ctx_settings.get("gateway") or {}
+        enable_kwargs = _resolve_enable_kwargs(
+            kwargs, gateway_settings=gateways
+        )
+
         ctx = cls()
         ctx.script_dir = Path(script_dir)
         ctx.workspace_dir = Path(workspace_dir)
-        ctx.profile = profile
+        ctx.profile = resolved_profile
+        ctx.role = role
+        ctx.enable_db_logging = bool(enable_kwargs["enable_db_logging"])
+        ctx.enable_audit = bool(enable_kwargs["enable_audit"])
+        ctx.enable_cron = bool(enable_kwargs["enable_cron"])
+        ctx.print_llm_calls = bool(enable_kwargs["print_llm_calls"])
 
         # Сбросить ``TableRegistry`` — это singleton, и при повторном
         # ``create()`` в одном процессе (тесты, streamlit-reload, gateway
@@ -115,37 +260,6 @@ class ApplicationContext:
         # ниже заполнят реестр заново.
         from lib.services.table_registry import table_registry
         table_registry.clear()
-
-        # 1. ConfigService + загрузка конфига.
-        #
-        # Один источник истины — глобальный ``SETTINGS`` (``_LazySettings``),
-        # уже построенный через ``_initialize_settings(profile)`` из application
-        # entrypoint. ``ApplicationContext`` **не** делает повторный
-        # resolve/resolver; это просто читает опубликованный ``SETTINGS``
-        # и оборачивает его в ``ConfigService``.
-        #
-        # Если кто-то вызвал ``ApplicationContext.create`` без
-        # предварительного entrypoint init — proxy поднимет
-        # ``ConfigurationError`` через ``__getitem__`` ниже, и тест/
-        # caller увидит ту же ошибку, что и entrypoint нарушение
-        # lifecycle (fail-fast).
-        import config as _config
-        ctx_settings = _config.SETTINGS
-        # Touching ``["profile"]`` материализует ConfigurationError на
-        # uninitialized proxy, но не делает duplicated work в happy-path.
-        resolved_profile = ctx_settings["profile"]
-        if profile is not None and profile != resolved_profile:
-            # entrypoint передал ``profile``, отличный от уже
-            # инициализированного. Раньше это могло быть env → CLI;
-            # теперь это явное нарушение lifecycle — fail-fast.
-            from config import ConfigurationError
-            raise ConfigurationError(
-                f"ApplicationContext.create(profile={profile!r}) called "
-                f"but SETTINGS already initialized for profile={resolved_profile!r}. "
-                "Application entrypoint must pass the same --profile value as "
-                "was passed to config._initialize_settings()."
-            )
-        ctx.profile = resolved_profile
 
         ctx.config_service = _make_config_service(
             ctx.script_dir, ctx.workspace_dir, settings_override=ctx_settings
@@ -198,7 +312,7 @@ class ApplicationContext:
                 or ctx.config_service.get_str("gateway", "storage", default="auto"),
                 pg=pg_section,
                 configure_db=True,
-                return_file_manager=not enable_cron,
+                return_file_manager=not ctx.enable_cron,
             )
         except Exception as exc:
             logger.warning("SessionStorageService failed: %s", exc)
@@ -208,14 +322,35 @@ class ApplicationContext:
         ctx.session_manager = session_manager
 
         # 4. DbLoggingService
-        if enable_db_logging:
+        if ctx.enable_db_logging:
             ctx.db_logging_service = _make_db_logging(ctx)
 
-        # 5. PgDuckDbSyncService + DuckDbCacheStore
-        if enable_audit:
+        # 4a. LLMUsageStore (upstream observer storage).
+        # См. спеку ``storage/usage-store``. Всегда создаётся —
+        # фабрика вернёт ``None`` если конфиг отключён / nanobot
+        # не предоставляет класс.
+        ctx.usage_store = _make_usage_store(ctx)
+
+        # 4b. SessionColdSyncService (cold-storage mirror).
+        # Создаётся только при PG-конфиге. Sync стартует позже,
+        # в ``start()`` lifecycle.
+        ctx.session_cold_sync_service = _make_session_cold_sync_service(ctx)
+
+        # 5. CacheOwnershipCoordinator + cache_provider + sync service
+        if ctx.enable_audit:
             _auto_register_skills(ctx)
             _register_infra_resources(ctx)
-            ctx.sync_service, ctx.cache_store = _make_sync_services(ctx)
+            (
+                ctx.cache_provider,
+                ctx.sync_service,
+                _ownership_coord,
+            ) = _make_sync_services(ctx)
+            ctx.ownership_coordinator = _ownership_coord
+            # Back-compat alias — runtime code/project tools/runtime
+            # patches всё ещё ожидают ``ctx.cache_store`` (rename в
+            # Stage D). После migrate callers на новый interface alias
+            # может быть удалён.
+            ctx.cache_store = ctx.cache_provider
 
         # 6. BusFactory + AgentFactory
         from lib.core.bus_factory import BusFactory
@@ -241,8 +376,13 @@ class ApplicationContext:
 
         from lib.core.agent_factory import AgentFactory
 
+        # CronService — ТОЛЬКО для role="gateway". При role="cli" значение
+        # ``gateway.enable_cron`` MUST быть проигнорировано (см.
+        # openspec/changes/unify-cli-gateway-architecture design D7 —
+        # «Cron = gateway-only»). Решает проблему «два процесса выполняют
+        # один jobs.json дважды».
         cron_service = None
-        if enable_cron:
+        if ctx.enable_cron and ctx.role == "gateway":
             cron_service = _make_cron_service(ctx.config)
 
         # 6a. Auto-scan проектных хуков из ``workspace/hooks/*.py`` (ПЛАГИНЫ).
@@ -274,7 +414,8 @@ class ApplicationContext:
             db_logging_service=ctx.db_logging_service,
             agent_id=agent_id,
             project_hooks=project_hooks or None,
-            print_llm_calls=print_llm_calls,
+            print_llm_calls=ctx.print_llm_calls,
+            usage_store=ctx.usage_store,
         )
 
         # ToolAuditHook — фреймворковый, входит в ``ctx.hooks`` последним
@@ -337,6 +478,24 @@ class ApplicationContext:
                 len(patch_report.failed),
                 [name for name, _ in patch_report.failed],
             )
+        _emit_patch_inventory_banner(patch_report)
+
+        # 7a. Project tools registration — независимый stage composition
+        # root'а (см. openspec/changes/runtime-patcher-composition-cleanup,
+        # design Decision 3). ``register_project_tools`` НЕ вызывается из
+        # ``RuntimePatcher.apply_all()`` — это отдельный вызов, source
+        # of truth для ``_emit_project_tools_inventory_banner``.
+        from lib.services.project_tool_loader import register_project_tools
+
+        project_tools_result = register_project_tools(
+            agent=ctx.agent,
+            workspace_dir=ctx.workspace_dir,
+            settings=ctx.settings,
+            cache_store=ctx.cache_store,
+            db_logging_service=ctx.db_logging_service,
+        )
+        ctx.project_tools_result = project_tools_result
+        _emit_project_tools_inventory_banner(project_tools_result)
 
         # 8. Помощники
         ctx.transcription_service = _make_transcription(ctx.config)
@@ -374,6 +533,42 @@ class ApplicationContext:
         # первой задаче, но пул уже создан и подхватил pool-конфиг).
         _start_db_pool()
 
+        # Pre-startup проверка наличия обязательных runtime-таблиц
+        # (6 имён из SETTINGS["channels"]["postgres"] +
+        # SETTINGS["logging"]["db"]). При отсутствии любой — выброс
+        # SchemaValidationError (наследник ConfigurationError), который
+        # ловится в gateway.main() / cli_agent.main() → exit 2 + stderr.
+        # Без этой проверки gateway стартует, а сервисы падают уже
+        # на первой INSERT/SELECT в несуществующие таблицы.
+        # См. openspec/specs/runtime/startup-schema-validation.
+        self._validate_runtime_schema()
+
+        # Подписчик на runtime-события nanobot 0.3.5.
+        # Регистрируется ПОСЛЕ apply_all (если он активен) и ДО старта каналов,
+        # чтобы seed лимита окна/модели + метрики оборота были доступны
+        # для первого inbound-сообщения. Lifecycle:
+        # start() здесь → каналы стартуют → stop() в _stop_runtime_events_subscriber
+        # ДО MessageBus.drain() в shutdown-последовательности.
+        # См. openspec/changes/runtime-events-subscription.
+        try:
+            from lib.services.runtime_events_subscriber import (
+                RuntimeEventsSubscriber,
+            )
+            self.runtime_events_subscriber = RuntimeEventsSubscriber(
+                self.bus,
+                db_logging_service=self.db_logging_service,
+            )
+            self.runtime_events_subscriber.start()
+            if self._shutdown is not None:
+                self._shutdown.register(
+                    "runtime_events_subscriber",
+                    self.runtime_events_subscriber,
+                )
+        except Exception as exc:
+            logger.warning(
+                "RuntimeEventsSubscriber not started: %s", exc
+            )
+
         if self.db_logging_service is not None:
             self.db_logging_service.start()
             self._shutdown.register("db_logging_service", self.db_logging_service)
@@ -384,6 +579,18 @@ class ApplicationContext:
                 self._shutdown.register("sync_service", self.sync_service)
             except Exception as exc:
                 logger.warning("PgDuckDbSyncService not started: %s", exc)
+
+        if self.session_cold_sync_service is not None:
+            try:
+                self.session_cold_sync_service.start()
+                self._shutdown.register(
+                    "session_cold_sync_service",
+                    self.session_cold_sync_service,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "SessionColdSyncService not started: %s", exc
+                )
 
         self._started = True
 
@@ -409,11 +616,123 @@ class ApplicationContext:
             return
         if self._shutdown is not None:
             self._shutdown.shutdown_all()
+        # MessageBus.drain() ожидает завершения in-flight handler'ов
+        # (например, _handle_turn_completed ещё может писать в БД через
+        # DbLoggingService с батчевым flush). Вызываем ПОСЛЕ остановки
+        # сервисов (channels/sync) и ДО остановки RuntimeEventsSubscriber.
+        # Если bus не имеет drain() (защита от nanobot < 0.3.5) — no-op.
+        # См. openspec/changes/runtime-events-subscription/design.md D7.
+        bus = getattr(self, "bus", None)
+        if bus is not None and hasattr(bus, "drain"):
+            try:
+                drain = bus.drain
+                if inspect.iscoroutinefunction(drain):
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.ensure_future(drain())
+                        else:
+                            loop.run_until_complete(drain())
+                    except RuntimeError:
+                        pass
+                else:
+                    drain()
+            except Exception as exc:
+                logger.warning("MessageBus.drain failed: %s", exc)
+        # RuntimeEventsSubscriber.stop() — после drain, чтобы in-flight
+        # handler'ы гарантированно отработали.
+        if getattr(self, "runtime_events_subscriber", None) is not None:
+            try:
+                self.runtime_events_subscriber.stop()
+            except Exception as exc:
+                logger.warning(
+                    "RuntimeEventsSubscriber.stop failed: %s", exc
+                )
+        # Close LLM usage store (SQLite WAL).
+        if self.usage_store is not None:
+            try:
+                self.usage_store.close()
+            except Exception as exc:
+                logger.warning("usage_store.close failed: %s", exc)
+        # Cache storage close — DuckDB-коннект на ``cache.duckdb``.
+        # Без явного close() файл остаётся залоченным процессом на
+        # Windows (ERROR_SHARING_VIOLATION при попытке следующего
+        # инстанса открыть тот же путь в RW/RO режиме) — даже после
+        # ``os._exit(0)`` из-за mmapped-страниц. Дополнительно логируем:
+        # ``store.get_stats().publishes`` теперь уже не изменится.
+        if getattr(self, "cache_provider", None) is not None:
+            try:
+                self.cache_provider.close()
+            except Exception as exc:
+                logger.warning("cache_provider.close failed: %s", exc)
+        # Ownership release — Stage E. При shutdown coordinator.release()
+        # удаляет строку claim из ``agent_cache_ownership`` для
+        # следующего takeover'а (или kill -9 потом expire'нется).
+        if self.ownership_coordinator is not None:
+            try:
+                self.ownership_coordinator.release()
+            except Exception as exc:
+                logger.warning("ownership_coordinator.release failed: %s", exc)
         # После остановки сервисов закрываем общий пул соединений.
         _stop_db_pool()
         if self.runtime_health is not None:
             self.runtime_health.mark_stopped()
         self._started = False
+
+    def _validate_runtime_schema(self) -> None:
+        """Pre-startup проверка наличия обязательных runtime-таблиц.
+
+        Вызывается из ``start()`` сразу после ``_start_db_pool()`` и
+        до подъёма каналов/``db_logging_service``/``sync_service``.
+        Имена таблиц берутся из ``self.settings`` (6 ключей:
+        ``channels.postgres.{table_name,messages_table,meta_table,
+        claims_table}`` + ``logging.db.{table_name,question_runs_table}``)
+        — никаких литералов в коде.
+
+        При отсутствии любой таблицы — ``SchemaValidationError``
+        (наследник ``ConfigurationError``). Покрывается
+        ``gateway.main()`` / ``cli_agent.main()`` startup-boundary →
+        ``exit 2`` + ``stderr``.
+
+        Опциональный gate ``gateway.startup.schema_validation.enabled``
+        (``True`` по умолчанию) позволяет временно пропустить
+        проверку (например, при аварийном деплое).
+
+        См. ``openspec/specs/runtime/startup-schema-validation``.
+        """
+        try:
+            settings = self.settings or {}
+        except Exception:
+            settings = {}
+        gateway_cfg = settings.get("gateway") or {}
+        startup_cfg = gateway_cfg.get("startup") or {}
+        schema_cfg = startup_cfg.get("schema_validation") or {}
+        enabled = schema_cfg.get("enabled", True)
+        timeout_sec = float(schema_cfg.get("timeout_sec", 5.0))
+        if not enabled:
+            logger.warning(
+                "startup schema validation is disabled "
+                "(gateway.startup.schema_validation.enabled=false)"
+            )
+            return
+        try:
+            from utils.db import fetch as _db_fetch
+            from lib.services.schema_validation import SchemaValidationService
+        except Exception as exc:
+            # Если зависимости не загрузились — это серьёзная проблема,
+            # но не блокируем startup (раньше без этой проверки gateway
+            # всё равно бы упал позже). Логируем warning и пропускаем.
+            logger.warning("startup schema validation skipped: %s", exc)
+            return
+        # ``SchemaValidationService.validate`` бросает ``SchemaValidationError``
+        # (наследник ``ConfigurationError``) при missing — пусть поднимется
+        # до ``gateway.main()`` / ``cli_agent.main()``.
+        SchemaValidationService.validate(
+            settings,
+            fetch=_db_fetch,
+            timeout_sec=timeout_sec,
+        )
 
 
 # ----------------------------------------------------------------------
@@ -441,6 +760,244 @@ def _log_connected_hooks(ctx: ApplicationContext) -> None:
         # Старые Windows-консоли (cp1251) не умеют ✓ (U+2713) — выводим
         # тот же список обычным print, чтобы информация не пропадала.
         print(f"Hooks connected: {label}")
+    _emit_hook_inventory_banner(ctx)
+
+
+def _emit_hook_inventory_banner(ctx: ApplicationContext) -> None:
+    """Промпт-сводка по хукам через ``runtime_inventory.diff_hooks``.
+
+    Печатает:
+      * (нет вывода) — все required хуки на месте, нет unexpected;
+      * жёлтый блок — missing_optional / unexpected (не критично);
+      * красный блок — missing_required / missing_factory (нужно внимание).
+
+    Срабатывает ПОСЛЕ обычного ``Hooks connected: ...`` лога; использует
+    ``rich.console.Console`` с явными цветами/рамочкой, чтобы в глаза
+    бросалось даже если loguru/WARNING уровень подавлен.
+    """
+    from lib.services.runtime_inventory import collect_actual_hook_names, diff_hooks
+
+    actual_names, factory_count = collect_actual_hook_names(ctx)
+    diff = diff_hooks(actual_names, actual_factory_count=factory_count)
+
+    has_issue = (
+        diff["missing_required"] or diff["missing_factory"] or diff["unexpected"]
+    )
+    has_warn = diff["missing_optional"]
+    if not has_issue and not has_warn:
+        return
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console(stderr=True)
+        if has_issue:
+            style = "bold red"
+            header = "HOOK INVENTORY: critical drift detected"
+        else:
+            style = "bold yellow"
+            header = "HOOK INVENTORY: optional drift"
+
+        lines: list[str] = []
+        if diff["missing_required"]:
+            lines.append(
+                f"[red]MISSING REQUIRED:[/red] {', '.join(diff['missing_required'])}"
+            )
+        if diff["missing_factory"]:
+            lines.append(
+                f"[red]MISSING FACTORY:[/red] {', '.join(diff['missing_factory'])}"
+            )
+        if diff["unexpected"]:
+            lines.append(
+                f"[yellow]UNEXPECTED:[/yellow] {', '.join(diff['unexpected'])}"
+            )
+        if diff["missing_optional"]:
+            lines.append(
+                f"[yellow]MISSING OPTIONAL:[/yellow] {', '.join(diff['missing_optional'])}"
+            )
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=header,
+                border_style=style.replace("bold ", ""),
+                title_align="left",
+            )
+        )
+    except Exception as exc:
+        # Fallback на plain stderr, чтобы не потерять диагностику
+        # в средах без rich (например, при cp1251 + minimal Python).
+        import sys
+        sys.stderr.write(
+            f"HOOK INVENTORY: missing_required={diff['missing_required']} "
+            f"unexpected={diff['unexpected']} "
+            f"missing_factory={diff['missing_factory']} "
+            f"missing_optional={diff['missing_optional']} ({exc})\n"
+        )
+
+
+def _emit_patch_inventory_banner(patch_report: Any) -> None:
+    """Промпт-сводка по runtime-патчам через ``runtime_inventory.diff_runtime_patches``.
+
+    Печатает красный блок, если required-патч fail'ит или не запустился;
+    жёлтый — если есть failed optional (полезно видеть, но не ломает
+    runtime). Срабатывает ПОСЛЕ обычного ``Runtime patches:`` лога.
+    """
+    from lib.services.runtime_inventory import diff_runtime_patches
+
+    diff = diff_runtime_patches(
+        applied=list(patch_report.applied),
+        skipped=list(patch_report.skipped),
+        failed=list(patch_report.failed),
+    )
+
+    has_critical = diff["missing_required"] or diff["failed_required"]
+    has_warn = bool(patch_report.failed) and not has_critical
+    if not has_critical and not has_warn:
+        return
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console(stderr=True)
+        if has_critical:
+            style = "bold red"
+            header = "RUNTIME PATCH INVENTORY: critical drift"
+        else:
+            style = "bold yellow"
+            header = "RUNTIME PATCH INVENTORY: optional patches failed"
+
+        lines: list[str] = []
+        if diff["missing_required"]:
+            lines.append(
+                f"[red]MISSING REQUIRED:[/red] {', '.join(diff['missing_required'])}"
+            )
+        if diff["failed_required"]:
+            lines.append(
+                f"[red]FAILED REQUIRED:[/red] {', '.join(diff['failed_required'])}"
+            )
+        if has_warn:
+            failed_optional = [
+                n for n, _ in patch_report.failed
+                if n not in diff["failed_required"]
+            ]
+            if failed_optional:
+                lines.append(
+                    f"[yellow]FAILED OPTIONAL:[/yellow] {', '.join(failed_optional)}"
+                )
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=header,
+                border_style=style.replace("bold ", ""),
+                title_align="left",
+            )
+        )
+    except Exception as exc:
+        import sys
+        sys.stderr.write(
+            f"RUNTIME PATCH INVENTORY: missing_required={diff['missing_required']} "
+            f"failed_required={diff['failed_required']} "
+            f"failed={list(patch_report.failed)} ({exc})\n"
+        )
+
+
+def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
+    """Промпт-сводка по project tools через ``runtime_inventory``.
+
+    Использует **структурные поля** ``ProjectToolsLoadResult``
+    (``registered`` / ``disabled`` / ``duplicate`` / ``failed`` /
+    ``error``) **напрямую**, а не regex-парсинг ``detail``. Это:
+
+      * даёт корректный баннер при outer-loader failure (раньше
+        ``detail = "register_project_tools failed: RuntimeError: ..."``
+        парсился как ``failed=["RuntimeError: ..."]`` — мусор);
+      * отделяет ``loader-level error`` от ``per-tool failed``;
+      * сохраняет совместимость с ``diagnose_startup.py``, который
+        читает ``Custom (project) tools:`` из логов (там всё ещё
+        ``detail`` — ``runtime_inventory.parse_project_tools_detail``).
+
+    Печатает красный блок, если required tool не зарегистрировался
+    (missing или failed) или loader вернул ``error``; жёлтый — если
+    unexpected tool или failed optional.
+    """
+    if project_tools_result is None:
+        return
+    registered = list(getattr(project_tools_result, "registered", []) or [])
+    disabled = list(getattr(project_tools_result, "disabled", []) or [])
+    duplicate = list(getattr(project_tools_result, "duplicate", []) or [])
+    failed = list(getattr(project_tools_result, "failed", []) or [])
+    error = getattr(project_tools_result, "error", None)
+
+    # Раньше banner анализировал detail через regex, что для outer
+    # failure давало семантически неправильный результат
+    # (failed = ["RuntimeError: ...]"). Сейчас diff вычисляется из
+    # structured-полей напрямую.
+    from lib.services.runtime_inventory import diff_project_tools
+
+    diff = diff_project_tools(
+        registered=registered,
+        skipped_disabled=disabled,
+        failed=failed,
+    )
+
+    has_critical = bool(diff["missing_required"] or diff["failed"] or error)
+    has_warn = bool(diff["unexpected"] or diff["disabled_required"])
+    if not has_critical and not has_warn:
+        return
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console(stderr=True)
+        if has_critical:
+            style = "bold red"
+            header = "PROJECT TOOLS INVENTORY: critical drift"
+        else:
+            style = "bold yellow"
+            header = "PROJECT TOOLS INVENTORY: drift"
+
+        lines: list[str] = []
+        if error:
+            # Outer-loader failure (``_discover`` / ``ToolContext`` / etc.)
+            # — отдельная категория, не путать с per-tool failed.
+            lines.append(f"[red]LOADER ERROR:[/red] {error}")
+        if diff["missing_required"]:
+            lines.append(
+                f"[red]MISSING REQUIRED:[/red] {', '.join(diff['missing_required'])}"
+            )
+        if diff["failed"]:
+            lines.append(
+                f"[red]FAILED:[/red] {', '.join(diff['failed'])}"
+            )
+        if diff["disabled_required"]:
+            lines.append(
+                f"[red]DISABLED REQUIRED:[/red] {', '.join(diff['disabled_required'])}"
+            )
+        if diff["unexpected"]:
+            lines.append(
+                f"[yellow]UNEXPECTED:[/yellow] {', '.join(diff['unexpected'])}"
+            )
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=header,
+                border_style=style.replace("bold ", ""),
+                title_align="left",
+            )
+        )
+    except Exception as exc:
+        import sys
+        sys.stderr.write(
+            f"PROJECT TOOLS INVENTORY: error={error} "
+            f"missing_required={diff['missing_required']} "
+            f"failed={diff['failed']} unexpected={diff['unexpected']} ({exc})\n"
+        )
 
 
 def _register_readiness_checks(ctx: ApplicationContext) -> None:
@@ -836,26 +1393,56 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "или _register_infra_resources). "
             "Проверьте секции project.json::skills.* и gateway.vector.index.*."
         )
-        _record_sync_skipped(
+        from lib.services.db_logging_service import LogEvent, try_log_event
+        try_log_event(
             ctx.db_logging_service,
+            LogEvent(
+                event_type="sync_skipped_registry_empty",
+                level="WARN",
+                session_id="gateway:sync",
+                channel=None,
+                actor="sync",
+                name="sync_skipped_registry_empty",
+                summary="PgDuckDbSyncService skipped: TableRegistry пуст",
+                payload={
+                    "reason": "TableRegistry пуст",
+                    "detail": "Нет ни одной зарегистрированной таблицы — проверьте project.json::skills.* и gateway.vector.index.*",
+                },
+            ),
+            producer="ApplicationContext",
             event_type="sync_skipped_registry_empty",
-            reason="TableRegistry пуст",
-            detail="Нет ни одной зарегистрированной таблицы — проверьте project.json::skills.* и gateway.vector.index.*",
         )
-        return None, None
+        return None, None, None
     if not dsn:
         logger.warning(
             "PgDuckDbSyncService skipped: channels.postgres.dsn не задан "
             "(пустая строка или отсутствует ключ в project.json)."
         )
-        _record_sync_skipped(
+        from lib.services.db_logging_service import LogEvent, try_log_event
+        try_log_event(
             ctx.db_logging_service,
+            LogEvent(
+                event_type="sync_skipped_no_dsn",
+                level="WARN",
+                session_id="gateway:sync",
+                channel=None,
+                actor="sync",
+                name="sync_skipped_no_dsn",
+                summary="PgDuckDbSyncService skipped: channels.postgres.dsn не задан",
+                payload={
+                    "reason": "channels.postgres.dsn не задан",
+                    "detail": "DATABASE_URL пустой или отсутствует ключ в project.json — sync не сможет подключиться к PG",
+                },
+            ),
+            producer="ApplicationContext",
             event_type="sync_skipped_no_dsn",
-            reason="channels.postgres.dsn не задан",
-            detail="DATABASE_URL пустой или отсутствует ключ в project.json — sync не сможет подключиться к PG",
         )
-        return None, None
+        return None, None, None
 
+    from lib.services.cache_ownership import (
+        CacheAccessMode,
+        CacheOwnershipCoordinator,
+    )
     from lib.services.duckdb_cache_store import DuckDbCacheStore
     from lib.services.pg_duckdb_sync_service import PgDuckDbSyncService
 
@@ -867,13 +1454,26 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но ни одного "
             "имени в table_names()/vector_names() — несоответствие регистрации."
         )
-        _record_sync_skipped(
+        from lib.services.db_logging_service import LogEvent, try_log_event
+        try_log_event(
             ctx.db_logging_service,
+            LogEvent(
+                event_type="sync_skipped_no_table_names",
+                level="WARN",
+                session_id="gateway:sync",
+                channel=None,
+                actor="sync",
+                name="sync_skipped_no_table_names",
+                summary="PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
+                payload={
+                    "reason": "в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
+                    "detail": "Несоответствие регистрации — проверьте register() vs register_infra()",
+                },
+            ),
+            producer="ApplicationContext",
             event_type="sync_skipped_no_table_names",
-            reason="в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
-            detail="Несоответствие регистрации — проверьте register() vs register_infra()",
         )
-        return None, None
+        return None, None, None
 
     schemas: list[str] = []
     for r in (*table_registry.table_resources(), *table_registry.vector_resources()):
@@ -924,17 +1524,63 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     # при старте gateway).
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
-    store = DuckDbCacheStore(
-        cache_path="",
-        publish_path=publish_path,
-        schema=schemas[0] if schemas else "main",
-        tables=all_table_names or None,
-        vector_db_table=vector_names[0] if vector_names else "",
-        embedding_base_url=embedding_base_url,
-        embedding_model=embedding_model,
-        embedding_dimension=embedding_dimension,
-        db_logging_service=ctx.db_logging_service,
+    # ==== Stage C/D/B/E integration ====
+    # 1. CacheOwnershipCoordinator — координатор ownership для логического
+    #    cache resource ``local_cache`` через таблицу ``agent_cache_ownership``
+    #    (см. sql/migrations/V005__create_agent_cache_ownership.sql).
+    # 2. ``coord.try_claim()`` — atomic PG INSERT ... ON CONFLICT. Один процесс
+    #    получает acquired=True (OWNER), остальные — False (READER).
+    # 3. ``DuckDbCacheStore.open(path, mode)`` — concrete factory. mode
+    #    зависит от результата claim:
+    #      - acquired=True → READ_WRITE (OWNER может писать в cache);
+    #      - acquired=False → READ_ONLY (READER, через физический read-only
+    #        DuckDB connection + assertion guard в query_sql).
+    worker_id = f"{ctx.role}_{os.getpid()}"
+    coord = CacheOwnershipCoordinator(
+        worker_id=worker_id,
+        dsn=dsn,
+        resource_key="local_cache",
     )
+    claim = coord.try_claim()
+    logger.info(
+        "cache_ownership: role=%s worker_id=%s acquired=%s generation=%d "
+        "current_owner=%s",
+        ctx.role, worker_id, claim.acquired, claim.generation,
+        claim.current_owner_id or "(none)",
+    )
+
+    mode = CacheAccessMode.READ_WRITE if claim.acquired else CacheAccessMode.READ_ONLY
+
+    # Concrete factory — DuckDB connection opened с учётом ``mode``.
+    # Если path не на локальной FS — ``UnsupportedFilesystemError`` поднимается.
+    store = DuckDbCacheStore.open(
+        path=publish_path,
+        mode=mode,
+    )
+    # Конфигурируем store через конструктор args через post-init хак:
+    # factory ``open()`` принимает только path/mode. Другие поля
+    # (schema, tables, vector_db_table, embedding_*) настраиваются
+    # отдельным вызовом или через прямой dict.
+    store._publish_path = publish_path
+    store._schema = schemas[0] if schemas else "main"
+    store._tables = all_table_names or None
+    store._vector_db_table = vector_names[0] if vector_names else ""
+    store._embedding_base_url = embedding_base_url
+    store._embedding_model = embedding_model
+    store._embedding_dimension = embedding_dimension
+    store._db_logging_service = ctx.db_logging_service
+
+    # ``sync_service`` создаётся ТОЛЬКО если этот процесс — OWNER
+    # (claim.acquired=True). READER процессы НЕ sync'ят — только читают
+    # snapshot, который публикует OWNER.
+    if not claim.acquired:
+        logger.info(
+            "cache_ownership: role=%s worker_id=%s is READER; "
+            "sync_service NOT created (other process is OWNER gen=%d)",
+            ctx.role, worker_id, claim.generation,
+        )
+        return store, None, coord
+
     sync = PgDuckDbSyncService(
         dsn=dsn,
         schema=schemas[0] if schemas else "main",
@@ -946,8 +1592,35 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         reconnect_backoff_max=reconnect_backoff_max,
         full_resync_every=full_resync_every,
         db_logging_service=ctx.db_logging_service,
+        ownership_coordinator=coord,
+        cache_provider=store,
     )
-    return sync, store
+    # Callbacks MUST выставляться здесь, в composition root — иначе
+    # ``_dispatch`` молча уходит в ``if callback is None: return`` и данные
+    # из PG никогда не попадают в DuckDB-кэш. Раньше wiring жил в callers
+    # (gateway.py / benchmarks/runner.py) и потерялся при консолидации.
+    #
+    # Callers, которым нужен свой хук (например, benchmark ждёт первый
+    # sync через asyncio.Event), MUST chaining-ить предыдущий колбэк,
+    # а не затирать его — как это делал прежний benchmarks/runner.py.
+    sync.set_on_replace_records_callback(store.replace_records)
+    sync.set_on_sync_callback(store.publish)
+
+    # Upsert требует PK источника: без него store дефолтно ищет ``id`` и
+    # для таблиц с другим PK (напр. ``public.agent_predefined_scripts``
+    # с PK ``name``) уходит в CREATE OR REPLACE — деструктивно для
+    # дельты от ``_fetch_incremental``. PK резолвится лениво и кэшируется
+    # в sync service, поэтому лишних запросов к PG на старте нет.
+    def _upsert_with_pk(table: str, records: list[dict]) -> None:
+        try:
+            store.upsert_records(
+                table, records, key_column=sync.key_column_for(table)
+            )
+        except Exception as exc:
+            logger.warning("cache upsert(%s) failed: %s", table, exc)
+
+    sync.set_on_new_records_callback(_upsert_with_pk)
+    return store, sync, coord
 
 
 def _record_sync_skipped(
@@ -956,12 +1629,11 @@ def _record_sync_skipped(
     reason: str,
     detail: str,
 ) -> None:
-    """Записать в ``agent_gateway_logs`` причину, по которой sync не стартанул.
+    """DEPRECATED: инлайнен в ``_make_sync_services``.
 
-    Используется в ``_make_sync_services`` при ранних return'ах с тихими
-    причинами отказа. Идемпотентно и безопасно для вызова до старта
-    ``DbLoggingService`` — единый конвейер через
-    ``DbLoggingService.try_log_event``.
+    Оставлен как back-compat shim для возможных внешних callers'ов
+    (на данный момент ни одного нет). Использует
+    ``DbLoggingService.try_log_event`` — единый writer.
     """
     from lib.services.db_logging_service import LogEvent, try_log_event
 
@@ -1061,6 +1733,100 @@ def _make_cron_service(config: Any) -> Any:
     from nanobot.cron.service import CronService
 
     return CronService(config.workspace_path / "cron" / "jobs.json")
+
+
+def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
+    """Создать ``SessionColdSyncService`` (cold-storage mirror).
+
+    Сервис создаётся только если:
+
+    - есть ``session_manager`` (upstream JSONL);
+    - в PG-конфиге указан DSN (cold-storage нужен только при
+      PG-деплое).
+
+    Если условия не выполнены — возвращает ``None``.
+
+    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
+    requirement «Cold-storage mirror в PostgreSQL».
+    """
+    if ctx.session_manager is None:
+        return None
+    try:
+        from config import get_setting
+
+        pg_dsn = get_setting("channels", "postgres", "dsn", default="")
+    except Exception:
+        pg_dsn = ""
+    if not pg_dsn:
+        return None
+
+    try:
+        sync_cfg = ctx.config_service.settings_section("gateway").get(
+            "session_cold_sync", {}
+        )
+    except Exception:
+        sync_cfg = {}
+    if not isinstance(sync_cfg, dict):
+        sync_cfg = {}
+
+    enabled = bool(sync_cfg.get("enabled", True))
+    sync_interval_sec = float(sync_cfg.get("sync_interval_sec", 30.0))
+    batch_size = int(sync_cfg.get("batch_size", 50))
+    stale_tolerance_seconds = int(sync_cfg.get("stale_tolerance_seconds", 120))
+    sync_lag_threshold_seconds = int(
+        sync_cfg.get("sync_lag_threshold_seconds", 3600)
+    )
+
+    schema = get_setting("channels", "postgres", "schema", default="public")
+    meta_table = get_setting("channels", "postgres", "meta_table",
+                            default="agent_session_meta")
+    messages_table = get_setting("channels", "postgres", "messages_table",
+                                default="agent_session_messages")
+
+    from lib.services.session_cold_sync_service import SessionColdSyncService
+
+    logger.info(
+        'session_cold_sync: stale_tolerance=%ss, '
+        'sync_lag_threshold=%ss, sync_interval=%ss, batch=%d, enabled=%s',
+        stale_tolerance_seconds,
+        sync_lag_threshold_seconds,
+        sync_interval_sec,
+        batch_size,
+        enabled,
+    )
+
+    return SessionColdSyncService(
+        session_manager=ctx.session_manager,
+        pg_dsn=pg_dsn,
+        schema=schema,
+        meta_table=meta_table,
+        messages_table=messages_table,
+        sync_interval_sec=sync_interval_sec,
+        batch_size=batch_size,
+        enabled=enabled,
+        db_logging_service=ctx.db_logging_service,
+        stale_tolerance_seconds=stale_tolerance_seconds,
+        sync_lag_threshold_seconds=sync_lag_threshold_seconds,
+    )
+
+
+def _make_usage_store(ctx: ApplicationContext) -> Any | None:
+    """Создать ``LLMUsageStore`` (upstream nanobot) по конфигу.
+
+    Конфиг — ``gateway.usage_store.*`` (``sqlite_path``,
+    ``enabled``). Возвращает ``None`` если отключено.
+
+    См. спеку ``openspec/specs/storage/usage-store/spec.md``.
+    """
+    try:
+        usage_cfg = ctx.config_service.settings_section("gateway").get(
+            "usage_store", None
+        )
+    except Exception:
+        usage_cfg = None
+    from lib.services.llm_usage_store_factory import create_usage_store
+
+    return create_usage_store(usage_cfg)
 
 
 # ----------------------------------------------------------------------

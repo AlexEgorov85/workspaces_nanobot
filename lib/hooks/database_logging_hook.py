@@ -22,16 +22,12 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Console
-
-from .base_tool_tracking_hook import BaseToolTrackingHook
+from nanobot.agent import AgentHook
 
 if TYPE_CHECKING:
     from nanobot.agent import AgentHookContext, AgentRunHookContext
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 # ---------------------------------------------------------------------------
 # Мост per-iteration usage между хуком и патчами RuntimePatcher.
@@ -79,13 +75,20 @@ def seed_context_window(
         entry["model"] = model if isinstance(model, str) else ""
 
 
-def _store_iteration_usage(session_key: str | None, usage: dict | None) -> None:
-    """Записать по-итерационный usage оборота для сессии (неблокирующий)."""
+def _store_iteration_usage(session_key: str | None, usage: Any) -> None:
+    """Записать по-итерационный usage оборота для сессии (неблокирующий).
+
+    Принимает как ``dict`` (legacy), так и ``LLMUsage`` из nanobot 0.3.5+
+    (через ``_usage_to_dict``). Нормализует в dict на входе, чтобы
+    downstream-ридеры (``get_context_window``, ``get_iteration_usage``)
+    всегда видели dict-контракт.
+    """
     if not session_key:
         return
+    payload = _usage_to_dict(usage)
     with _CONTEXT_BRIDGE_LOCK:
         entry = _CONTEXT_BRIDGE.setdefault(session_key, {})
-        entry["usage"] = dict(usage or {})
+        entry["usage"] = dict(payload) if payload else {}
         entry["ts"] = time.time()
 
 
@@ -155,6 +158,7 @@ def make_db_logging_hook_factory(
     db_logging_service: Any,
     agent_id: str | None = None,
     print_llm_calls: bool = False,
+    get_model: Callable[[], str | None] | None = None,
 ) -> Callable[[Any], DatabaseLoggingHook]:
     """Фабрика: создать СВЕЖИЙ ``DatabaseLoggingHook`` на КАЖДЫЙ оборот.
 
@@ -170,6 +174,15 @@ def make_db_logging_hook_factory(
     Args:
         db_logging_service: ``DbLoggingService``.
         agent_id: id агента для колонки ``agent_id`` в логах.
+        print_llm_calls: печатать в терминал CLI токены каждой итерации.
+        get_model: опциональный callable для резолва текущего имени
+            модели в ``after_iteration``. Нужен потому что в nanobot
+            0.3.5+ ``LLMResponse.model`` удалён — ``getattr(response,
+            "model", None)`` всегда ``None``. ``AgentFactory``
+            замыкает ``get_model`` над ``lambda: agent.model``.
+            Если не передан — ``DatabaseLoggingHook.model`` остаётся
+            ``None``, и ``log_llm_call`` пишет ``name="llm"``
+            (как и до фикса).
 
     Returns:
         Фабрика ``def(turn_context) -> DatabaseLoggingHook``.
@@ -207,6 +220,7 @@ def make_db_logging_hook_factory(
             session_key=session_key,
             request_id=request_id,
             print_llm_calls=print_llm_calls,
+            get_model=get_model,
         )
 
     return _factory
@@ -236,7 +250,37 @@ def _current_request_sender_id() -> str | None:
     return None
 
 
-class DatabaseLoggingHook(BaseToolTrackingHook):
+def _usage_to_dict(usage: Any) -> dict | None:
+    """Унифицированный адаптер ``LLMUsage | dict | None -> dict | None``.
+
+    Возвращает ``dict`` с per-turn полями (``prompt_tokens``,
+    ``completion_tokens``, ``total_tokens``, ...) для записи в БД и
+    payload-события. Принимает как dataclass ``nanobot.llm_usage.models.LLMUsage``
+    (с методом ``to_turn_dict()``), так и legacy-``dict``. На любом
+    неожиданном типе или сбое конверсии — ``None`` (fail-soft).
+    """
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return dict(usage) if usage else None
+    to_turn = getattr(usage, "to_turn_dict", None)
+    if callable(to_turn):
+        try:
+            payload = to_turn()
+        except Exception:
+            return None
+        return dict(payload) if isinstance(payload, dict) and payload else None
+    to_dict = getattr(usage, "to_dict", None)
+    if callable(to_dict):
+        try:
+            payload = to_dict()
+        except Exception:
+            return None
+        return dict(payload) if isinstance(payload, dict) and payload else None
+    return None
+
+
+class DatabaseLoggingHook(AgentHook):
     """Агентский хук — пересылает tool- и run-события в DbLoggingService.
 
     Живёт в ``lib/hooks/``: это фреймворковый хук, а не плагин
@@ -271,12 +315,19 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         session_key: str | None = None,
         request_id: str | None = None,
         print_llm_calls: bool = False,
+        get_model: Callable[[], str | None] | None = None,
     ) -> None:
         super().__init__()
         self._service = db_logging_service
         self._tool_start_times: dict[str, float] = {}
         self._agent_id = agent_id
         self._print_llm_calls = print_llm_calls
+        # Closure для резолва текущей модели. Закрывается фабрикой
+        # (см. ``make_db_logging_hook_factory``). Вызывается в
+        # ``after_iteration`` — в nanobot 0.3.5+ ``LLMResponse.model``
+        # удалён, поэтому читать надо с ``agent.model`` (property
+        # ``nanobot/agent/loop.py:218`` → ``runtime_resolver.runtime.model``).
+        self._get_model: Callable[[], str | None] | None = get_model
         # Контекст текущего оборота/вопроса. Запекается в фабрике на оборот,
         # чтобы ``after_run`` (у которого в контексте нет session_key) знал
         # свой вопрос. ``_capture_context`` дополнительно перечитывает
@@ -316,13 +367,13 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         tool: Any,
         params: Any,
     ) -> None:
-        tool_call_id = self._tool_call_id(tool_call)
+        tool_call_id = str(getattr(tool_call, "id", None) or id(tool_call))
         self._tool_start_times[tool_call_id] = time.time()
         self._capture_context(context)
         try:
             self._service.log_tool_call(
                 session_id=context.session_key or "",
-                tool_name=self._tool_call_name(tool_call),
+                tool_name=str(getattr(tool_call, "name", "?")),
                 args=params if isinstance(params, dict) else {},
                 tool_call_id=tool_call_id,
                 request_id=self._request_id,
@@ -338,13 +389,13 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         params: Any,
         result: Any,
     ) -> None:
-        tool_call_id = self._tool_call_id(tool_call)
+        tool_call_id = str(getattr(tool_call, "id", None) or id(tool_call))
         start = self._tool_start_times.pop(tool_call_id, None)
         latency_ms = (time.time() - start) * 1000.0 if start is not None else 0.0
         try:
             self._service.log_tool_result(
                 session_id=context.session_key or "",
-                tool_name=self._tool_call_name(tool_call),
+                tool_name=str(getattr(tool_call, "name", "?")),
                 result=result,
                 latency_ms=latency_ms,
                 tool_call_id=tool_call_id,
@@ -362,13 +413,13 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         params: Any,
         error: Any,
     ) -> None:
-        tool_call_id = self._tool_call_id(tool_call)
+        tool_call_id = str(getattr(tool_call, "id", None) or id(tool_call))
         start = self._tool_start_times.pop(tool_call_id, None)
         latency_ms = (time.time() - start) * 1000.0 if start is not None else 0.0
         try:
             self._service.log_tool_result(
                 session_id=context.session_key or "",
-                tool_name=self._tool_call_name(tool_call),
+                tool_name=str(getattr(tool_call, "name", "?")),
                 result=None,
                 latency_ms=latency_ms,
                 tool_call_id=tool_call_id,
@@ -404,14 +455,27 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         try:
             from dataclasses import asdict
 
+            # Резолв имени модели: в nanobot 0.3.5+ ``LLMResponse.model``
+            # удалён — он теперь живёт на ``AgentLoop.model`` (свойство
+            # ``runtime_resolver.runtime.model``). Фабрика фабрики
+            # ``make_db_logging_hook_factory`` принимает опциональный
+            # ``get_model`` callable, закрывающийся над ``agent.model``
+            # (см. ``AgentFactory.create``). Если callable не передан
+            # (тесты, fallback) — пишем с ``model=None``, и
+            # ``log_llm_call`` ставит ``name="llm"``.
+            try:
+                model = self._get_model() if self._get_model else None
+            except Exception:
+                model = None
+
             self._service.log_llm_call(
                 session_id=self._run_session_key or "",
                 prompt=self._pending_prompt or [],
                 response=asdict(response),
                 iteration=self._pending_iteration or getattr(context, "iteration", None),
-                model=getattr(response, "model", None),
+                model=model,
                 finish_reason=getattr(response, "finish_reason", None),
-                usage=dict(getattr(context, "usage", None) or {}),
+                usage=_usage_to_dict(getattr(context, "usage", None)) or {},
                 request_id=self._request_id,
             )
         except Exception as exc:
@@ -420,8 +484,15 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
             self._print_llm_tokens(context)
 
     def _print_llm_tokens(self, context: Any) -> None:
-        """Вывести в терминал две строки о токенах итерации (CLI-режим)."""
-        usage = dict(getattr(context, "usage", None) or {})
+        """Вывести в терминал две строки о токенах итерации (CLI-режим).
+
+        Раньше использовался ``Rich Console.print("[dim]...")``, который на
+        legacy Windows-консоли (cmd/PowerShell ISE без VT) рендерил
+        ``?[2m→ LLM: ...?[0m`` из-за подмены ESC на ``?``. Эти строки —
+        debug-вывод; декоративный dim-стиль тут не нужен, важен сам факт
+        вывода. Используем ``print()`` напрямую — никакого ANSI.
+        """
+        usage = _usage_to_dict(getattr(context, "usage", None)) or {}
         if not usage:
             return
         prompt = usage.get("prompt_tokens")
@@ -429,9 +500,9 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         if prompt is None and completion is None:
             return
         if prompt is not None:
-            console.print(f"[dim]→ LLM: отправлен промпт ({prompt} токенов)[/dim]")
+            print(f"→ LLM: отправлен промпт ({prompt} токенов)")
         if completion is not None:
-            console.print(f"[dim]← LLM: получен ответ ({completion} токенов)[/dim]")
+            print(f"← LLM: получен ответ ({completion} токенов)")
 
     async def after_run(self, context: AgentRunHookContext) -> None:
         try:
@@ -463,6 +534,7 @@ def _make_run_event(
 
     final = context.final_content or ""
     tools = context.tools_used or []
+    usage_dict = _usage_to_dict(getattr(context, "usage", None)) or {}
     payload: dict[str, Any] = {
         "final_content": final,
         "tools_used": tools,
@@ -481,7 +553,7 @@ def _make_run_event(
         summary=final[:200],
         payload=payload,
         metadata={
-            "tokens_used": (context.usage or {}).get("total_tokens"),
+            "tokens_used": usage_dict.get("total_tokens"),
             "had_error": bool(context.error),
         },
     )

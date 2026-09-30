@@ -23,42 +23,55 @@
 sql/
 ├── README.md                                            # этот файл
 │
-├── session/                                             # PGSessionManager
+├── session/                                             # cold-storage mirror сессий
 │   ├── create_public_agent_session_meta.sql             #   public.agent_session_meta
-│   └── create_public_agent_session_messages.sql         #   public.agent_session_messages
+│   ├── create_public_agent_session_meta_test.sql        #   профиль test
+│   ├── create_public_agent_session_messages.sql         #   public.agent_session_messages
+│   └── create_public_agent_session_messages_test.sql    #   профиль test
 │
 ├── channels/                                            # PostgresChannel / Web UI
 │   ├── create_public_agent_conversation_messages.sql    #   public.agent_conversation_messages
+│   ├── create_public_agent_conversation_messages_test.sql
 │   └── seed_messages.sql                                #   тестовые сообщения
 │
 ├── logs/                                                # DbLoggingService
 │   ├── create_public_agent_question_runs.sql            #   public.agent_question_runs
-│   └── create_public_agent_gateway_logs.sql             #   public.agent_gateway_logs
+│   ├── create_public_agent_question_runs_test.sql       #   профиль test
+│   ├── create_public_agent_gateway_logs.sql             #   public.agent_gateway_logs
+│   └── create_public_agent_gateway_logs_test.sql        #   профиль test
 │
 ├── benchmarks/                                          # Benchmarks
 │   ├── create_public_agent_benchmark_runs.sql           #   public.agent_benchmark_runs
 │   └── create_public_agent_benchmark_results.sql        #   public.agent_benchmark_results
 │
 ├── workers/                                             # Мульти-машинный пул воркеров
-│   └── create_public_agent_worker_claims.sql            #   public.agent_worker_claims (аренда задач)
+│   ├── create_public_agent_worker_claims.sql            #   public.agent_worker_claims (аренда задач)
+│   └── create_public_agent_worker_claims_test.sql       #   профиль test
 │
-├── vectors/                                             # Generic FAISS infrastructure
-│   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config (+chunk_size/chunk_overlap/metric)
-│   └── create_vector_index_store.sql                    #   public.agent_vector_index_store (FAISS blob)
+├── vectors/                                             # legacy (кодом не читается)
+│   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config — LEGACY
+│   └── create_vector_index_store.sql                    #   public.agent_vector_index_store — DEPRECATED (V003)
+│
+├── comments/                                            # массовые COMMENT ON (сгенерировано)
+│   └── apply_all_comments.sql                           #   tools/generate_comments_sql.py
 │
 ├── migrations/                                          # версионные миграции схемы
 │   ├── schema_migrations.sql                            #   tracking-таблица public.schema_migrations
 │   ├── V001__baseline.sql                               #   базовая линия (штамп, без DDL)
-│   └── V002__vector_chunk_params.sql                    #   chunk_size/chunk_overlap/metric в agent_vector_index_config
+│   ├── V002__vector_chunk_params.sql                    #   chunk_size/chunk_overlap/metric в agent_vector_index_config
+│   ├── V003__drop_vector_index_store.sql                #   ШАБЛОН: DROP <signature_table> (подставить вручную)
+│   └── V004__agent_gateway_logs_user_id.sql             #   user_id + backfill + индекс в agent_gateway_logs
 │
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)
     ├── create_oarb_violations.sql                       #   oarb.violations      (REFERENCE)
     ├── create_oarb_audit_reports.sql                    #   oarb.audit_reports   (REFERENCE)
     ├── create_oarb_report_items.sql                     #   oarb.report_items    (REFERENCE)
-    ├── create_oarb_audit_vectors.sql                    #   oarb.audit_vectors
+    ├── create_oarb_audit_vectors.sql                    #   oarb.audit_vectors (= storage_table)
     ├── create_public_agent_predefined_scripts.sql       #   public.agent_predefined_scripts
-    └── seed_default_indexes.sql                         #   3 дефолтных индекса (audits/violations/reports)
+    ├── seed_predefined_scripts.sql                      #   наполнение реестра скриптов
+    ├── fix_audit_types_stats_avg.sql                    #   фикс типов (stats_avg)
+    └── seed_default_indexes.sql                         #   LEGACY-сид agent_vector_index_config
 ```
 
 ---
@@ -73,7 +86,7 @@ runner'ом (psycopg2, DSN: `DATABASE_URL` или `channels.postgres.dsn`):
 python tools/migrate.py --status            # состояние: PENDING/applied/DRIFT!
 python tools/migrate.py --dry-run           # показать SQL ожидающих
 python tools/migrate.py --apply             # применить ожидающие по порядку (транзакционно)
-python tools/migrate.py --apply --target 3  # до V003 включительно
+python tools/migrate.py --apply --target 4  # до V004 включительно
 python tools/migrate.py --verify            # сверить checksums применённых с файлами
 python tools/migrate.py --baseline          # штамповать существующие версии без выполнения
 ```
@@ -82,9 +95,13 @@ python tools/migrate.py --baseline          # штамповать сущест�
 - каждая применённая версия фиксируется в `public.schema_migrations`
   с SHA256-checksum содержимого; изменение применённого файла = DRIFT
   (ошибка при `--apply`, обход — осознанный `--force`);
+- runner выполняет SQL **как есть**, без подстановок плейсхолдеров:
+  миграция с шаблоном (`V003__drop_vector_index_store.sql` —
+  `DROP TABLE IF EXISTS "<signature_table>";`) применяется как no-op,
+  реальное имя таблицы оператор подставляет и выполняет DROP вручную;
 - существующая БД: после первой установки выполнить `--baseline`
   (V001 не содержит DDL — только точка отсчёта);
-- новые изменения схемы — новый файл `V002__*.sql` и далее; ретроактивно
+- новые изменения схемы — новый файл `V005__*.sql` и далее; ретроактивно
   менять применённые миграции нельзя.
 
 ---
@@ -136,20 +153,22 @@ psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_violations.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_reports.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_report_items.sql
 
-# 7. Generic FAISS infrastructure (vectors/) — обязательно до audit_analyzer
-psql "$DATABASE_URL" -f sql/vectors/create_vector_index_config.sql
-psql "$DATABASE_URL" -f sql/vectors/create_vector_index_store.sql
-
-# 8. Домен audit_analyzer — таблицы навыка
+# 7. Домен audit_analyzer — таблицы навыка
+#    (oarb.audit_vectors = storage_table из project.json::gateway.vector.index)
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_vectors.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_predefined_scripts.sql
+psql "$DATABASE_URL" -f sql/audit_analyzer/seed_predefined_scripts.sql
 
-# 9. Дефолтные индексы (3 шт.: audits_index, violations_index, audit_reports_index)
-psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql
-
-# 10. Сборка векторных индексов
+# 8. Сборка векторных индексов (конфиг — только project.json::gateway.vector.index.indexes)
 python tools/build_vectors.py --full-rebuild
 ```
+
+Векторная инфраструктура **не** требует DDL: FAISS собирается в памяти из
+DuckDB-снапшота `gateway.vector.index.storage_table`, а декларация индексов
+читается из `project.json`. Файлы `sql/vectors/*` — legacy (`agent_vector_index_config`
+кодом не читается, `agent_vector_index_store` удалён миграцией V003) и на
+новых инстансах не применяются. Аналогично `sql/audit_analyzer/seed_default_indexes.sql`
+сидит в legacy-таблицу; актуальные индексы объявлены в `project.json`.
 
 ---
 
@@ -162,8 +181,10 @@ python tools/build_vectors.py --full-rebuild
 | Доменная таблица для навыка                             | `sql/<skill>/create_<schema>_<table>.sql`                |
 | Тестовые данные                                         | `sql/<domain>/seed_<table>.sql`                          |
 
-**Один файл = одна таблица.** Все `COMMENT ON TABLE / COLUMN` живут прямо
-в файле создания таблицы — отдельный `comments/` каталог больше не нужен.
+**Один файл = одна таблица.** `COMMENT ON TABLE / COLUMN` пишутся прямо в
+файле создания таблицы; каталог `sql/comments/` содержит только сгенерированный
+сводный `apply_all_comments.sql` (генератор — `tools/generate_comments_sql.py`,
+применять вручную при необходимости).
 Индексы в create-скриптах не создаются — только таблица и комментарии.
 
 DDL **не хранится** рядом с кодом компонента (`lib/<component>/sql/`).

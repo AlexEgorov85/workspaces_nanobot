@@ -8,7 +8,7 @@
 Скрипты читаются из ``public.agent_predefined_scripts`` через preload-
 фикстуру в ``conftest.py`` — production runtime path (DB-first lookup
 через ``predefined_table=PREDEFINED_TABLE``). Python ``REGISTRY``
-больше не существует (Phase 7).
+(legacy) больше не существует.
 
 Не тестируют LLM-Agent — только Python-API ``predefined.run`` и
 ``DuckDBServiceProtocol``.
@@ -288,7 +288,7 @@ class TestPredefinedKnownScripts:
         assert "не найден" in result["data"]["message"]
 
     def test_no_fallback_without_predefined_table(self, db_service) -> None:
-        """Phase 7: без ``predefined_table`` нет fallback на Python REGISTRY.
+        """Без ``predefined_table`` нет fallback на Python REGISTRY.
 
         ``run()`` обязан вернуть error (``error_type="missing_predefined_table"``),
         а не пытаться найти скрипт в старом Python-литерале. Это контракт
@@ -304,7 +304,7 @@ class TestPredefinedKnownScripts:
         assert "REGISTRY" not in result["data"]["message"]
 
     def test_no_fallback_when_db_table_missing(self) -> None:
-        """Phase 7: если таблица registry отсутствует в DB — ошибка, не fallback.
+        """Если таблица registry отсутствует в DB — ошибка, не fallback.
 
         Даже при передаче ``predefined_table`` если таблицы нет в DuckDB —
         скрипт не находится (без скрытого перехода на Python REGISTRY).

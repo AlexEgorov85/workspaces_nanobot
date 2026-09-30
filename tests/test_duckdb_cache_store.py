@@ -83,7 +83,7 @@ def store(tmp_path):
         vector_db_table=TEST_VECTOR_TABLE,
         embedding_base_url="",
     )
-    assert st.open()
+    assert st.connect()
     yield st
     st.close()
 
@@ -123,6 +123,36 @@ class TestUpsert:
         ])
         r = store.query_sql(f"SELECT id, amount FROM {TEST_TABLE} WHERE id = 2")
         assert r["rows"][0]["amount"] == 100
+
+    def test_upsert_with_explicit_key_column(self, store):
+        """Явный ``key_column`` MUST использоваться вместо дефолта ``id``.
+
+        Таблицы вроде ``public.agent_predefined_scripts`` имеют PK ``name``,
+        а не ``id``. Без явного ключа store уходит в CREATE OR REPLACE,
+        что для дельты от ``_fetch_incremental`` удаляет несвязанные строки.
+        """
+        table = "test.script_registry"
+        assert store.upsert_records(
+            table,
+            [{"name": "a", "sql": "SELECT 1"}, {"name": "b", "sql": "SELECT 2"}],
+            key_column="name",
+        )
+        assert store.upsert_records(
+            table, [{"name": "a", "sql": "SELECT 3"}], key_column="name"
+        )
+        r = store.query_sql(
+            f"SELECT name, sql FROM {table} ORDER BY name"
+        )
+        assert [row["name"] for row in r["rows"]] == ["a", "b"]
+        assert r["rows"][0]["sql"] == "SELECT 3"
+
+    def test_upsert_without_key_recreates_table(self, store):
+        """Без ключа и без ``id`` — таблица пересоздаётся (documented fallback)."""
+        table = "test.keyless"
+        assert store.upsert_records(table, [{"x": 1}, {"x": 2}])
+        assert store.upsert_records(table, [{"x": 9}])
+        r = store.query_sql(f"SELECT x FROM {table}")
+        assert [row["x"] for row in r["rows"]] == [9]
 
     def test_empty_batch_is_noop(self, store):
         assert store.upsert_records(TEST_TABLE, []) is True
@@ -232,7 +262,7 @@ class TestSkillVectorFromCache:
             tables=["audits"],
             vector_db_table=TEST_VECTOR_TABLE,
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
@@ -256,7 +286,7 @@ class TestSkillVectorFromCache:
             tables=["audits"],
             vector_db_table=TEST_VECTOR_TABLE,
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
@@ -289,7 +319,7 @@ class TestSkillVectorFromCache:
             tables=["audits"],
             vector_db_table=TEST_VECTOR_TABLE,
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
@@ -323,7 +353,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits", "violations"],
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "П1", "status": "open"}])
         assert store.get_stats()["dirty"] is True
         assert store.publish() is True
@@ -347,7 +377,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits"],
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         store.publish()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "Б", "status": "open"}])
@@ -361,13 +391,74 @@ class TestPublish:
         assert store.get_stats()["publishes"] == 2
         store.close()
 
+    def test_publish_works_when_cache_path_equals_publish_path(self, tmp_path):
+        """Регрессия: OWNER держит RW-соединение на САМОМ publish-файле.
+
+        Реальная конфигурация (``DuckDbCacheStore.open(path, mode)`` +
+        ``store._publish_path = path``) открывает живое DuckDB-соединение
+        ровно на том файле, который ``publish`` подменяет через
+        ``os.replace``. На Windows replace падает с ``WinError 5``
+        (ERROR_SHARING_VIOLATION), пока на файле открыт handle — в т.ч.
+        собственное соединение. Остальные тесты класса используют
+        ``cache_path=""`` (in-memory) и этот случай не покрывают.
+        """
+        import duckdb
+
+        target = tmp_path / "cache.duckdb"
+        store = DuckDbCacheStore(
+            cache_path=str(target),
+            publish_path=str(target),
+            schema=_test_schema,
+            tables=["audits"],
+        )
+        store.connect()
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        assert store.publish() is True, store.get_stats().get("last_error")
+
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "Б", "status": "open"}])
+        assert store.publish() is True, store.get_stats().get("last_error")
+
+        # Соединение должно остаться рабочим после close/reopen в publish.
+        assert store.is_ready() is True
+        r = store.query_sql(f"SELECT title FROM {TEST_TABLE} WHERE id = 1")
+        assert r["rows"][0]["title"] == "Б"
+        assert store.get_stats()["publishes"] == 2
+
+        # Файл на диске читается отдельным подключением ПОСЛЕ закрытия
+        # живого: DuckDB запрещает два коннекта к одному файлу с разным
+        # config (read_only=True vs RW) в пределах процесса.
+        store.close()
+        ro = duckdb.connect(str(target), read_only=True)
+        try:
+            title = ro.execute(
+                f"SELECT title FROM {TEST_TABLE} WHERE id = 1"
+            ).fetchall()[0][0]
+        finally:
+            ro.close()
+        assert title == "Б"
+
+    def test_publish_leaves_no_tmp_files_behind(self, tmp_path):
+        """После успешного publish не остаётся осиротевших .tmp файлов."""
+        target = tmp_path / "cache.duckdb"
+        store = DuckDbCacheStore(
+            cache_path=str(target),
+            publish_path=str(target),
+            schema=_test_schema,
+            tables=["audits"],
+        )
+        store.connect()
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        assert store.publish() is True
+        leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp"))
+        assert leftovers == [], f" осиротевшие .tmp: {leftovers}"
+        store.close()
+
     def test_publish_noop_when_not_dirty(self, tmp_path):
         target = tmp_path / "out.duckdb"
         store = DuckDbCacheStore(cache_path="", publish_path=str(target), schema=_test_schema)
-        store.open()
+        store.connect()
         assert store.publish() is True
         assert not target.exists()
-        store.close()
 
     def test_publish_force_recreates_when_not_dirty(self, tmp_path):
         target = tmp_path / "out.duckdb"
@@ -377,7 +468,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits"],
         )
-        store.open()
+        store.connect()
         # нет данных (store не грязный) — обычный publish no-op, force — создаёт снимок
         assert store.publish() is True
         assert not target.exists()
@@ -388,7 +479,7 @@ class TestPublish:
 
     def test_publish_force_noop_without_publish_path(self):
         store = DuckDbCacheStore(cache_path="", schema=_test_schema)
-        store.open()
+        store.connect()
         assert store.publish(force=True) is True
         store.close()
 
@@ -400,7 +491,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits", "violations"],  # violations не заполнена
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         assert store.publish() is True
         import duckdb
@@ -414,7 +505,7 @@ class TestPublish:
 
     def test_publish_without_publish_path_is_noop(self):
         store = DuckDbCacheStore(cache_path="", schema=_test_schema)
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         assert store.publish() is True
         store.close()
@@ -523,7 +614,7 @@ class TestReplace:
         st = DuckDbCacheStore(
             cache_path="", publish_path=str(target), schema=_test_schema, tables=["audits"],
         )
-        st.open()
+        st.connect()
         st.ensure_schema(TEST_TABLE, _COLS)
         st.upsert_records(TEST_TABLE, [{"id": 1, "title": "П1", "amount": 1.5, "checked_on": "2024-05-21"}])
         assert st.publish() is True

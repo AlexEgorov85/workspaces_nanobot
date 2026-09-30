@@ -1,30 +1,28 @@
-"""Tests for lib/cli/console_loop helpers."""
+"""Tests for ``lib/cli/console_loop`` helpers (текущая версия).
+
+После рефакторинга CLI на upstream-модель (``nanobot.cli.terminal``)
+у нас осталось только 2 helper'а:
+
+  * ``_print_tool_events`` — рендер ``_tool_audit`` блока (наш runtime
+    patch кладёт его в ``metadata``).
+  * ``_print_context_window`` — рендер ``context_window`` блока (наш
+    runtime patch кладёт его в ``metadata``).
+
+``_print_reasoning_block`` и ``_typewriter`` УДАЛЕНЫ — теперь
+используются upstream ``cli_terminal._ReasoningBuffer`` и
+``cli_terminal._print_agent_response`` (см. ``run_repl``).
+
+Эти тесты проверяют только наши собственные хелперы. Reasoning и
+typewriter покрываются upstream'ом.
+"""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from lib.cli.display_config import DisplayConfig
-
-
-class TestPrintReasoningBlock:
-    @pytest.mark.asyncio
-    async def test_disabled_noop(self):
-        from lib.cli.console_loop import _print_reasoning_block
-
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
-            await _print_reasoning_block("text", DisplayConfig(show_reasoning=False))
-            tw.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_enabled_calls_typewriter(self):
-        from lib.cli.console_loop import _print_reasoning_block
-
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
-            await _print_reasoning_block("thinking", DisplayConfig())
-            tw.assert_called_once()
 
 
 class TestPrintToolEvents:
@@ -32,62 +30,62 @@ class TestPrintToolEvents:
     async def test_disabled_noop(self):
         from lib.cli.console_loop import _print_tool_events
 
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
+        with patch("lib.cli.console_loop.console") as console:
             await _print_tool_events([{"name": "read"}], DisplayConfig(show_tool_calls=False))
-            tw.assert_not_called()
+            console.print.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_skip_non_dict(self):
         from lib.cli.console_loop import _print_tool_events
 
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
+        with patch("lib.cli.console_loop.console") as console:
             await _print_tool_events(["string"], DisplayConfig())
-            tw.assert_not_called()
+            console.print.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ok_status(self):
         from lib.cli.console_loop import _print_tool_events
 
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
+        with patch("lib.cli.console_loop.console") as console:
             await _print_tool_events(
                 [{"name": "read", "status": "ok", "result_preview": "..."}],
                 DisplayConfig(),
             )
-            tw.assert_called_once()
+            console.print.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_error_status(self):
         from lib.cli.console_loop import _print_tool_events
 
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
+        with patch("lib.cli.console_loop.console") as console:
             await _print_tool_events(
                 [{"name": "write", "status": "error", "error": "denied"}],
                 DisplayConfig(),
             )
-            tw.assert_called_once()
-            assert "denied" in tw.call_args[0][0]
+            console.print.assert_called_once()
+            assert "denied" in console.print.call_args.args[0]
 
     @pytest.mark.asyncio
     async def test_end_status(self):
         from lib.cli.console_loop import _print_tool_events
 
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
+        with patch("lib.cli.console_loop.console") as console:
             await _print_tool_events(
                 [{"name": "exec", "status": "end", "result": "ok"}],
                 DisplayConfig(),
             )
-            tw.assert_called_once()
+            console.print.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_args_formatted(self):
         from lib.cli.console_loop import _print_tool_events
 
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
+        with patch("lib.cli.console_loop.console") as console:
             await _print_tool_events(
                 [{"name": "search", "status": "ok", "arguments": {"q": "hi", "n": 3}}],
                 DisplayConfig(show_tool_params=True),
             )
-            text = tw.call_args[0][0]
+            text = console.print.call_args.args[0]
             assert "q=hi" in text
             assert "n=3" in text
 
@@ -95,12 +93,12 @@ class TestPrintToolEvents:
     async def test_args_hidden_when_disabled(self):
         from lib.cli.console_loop import _print_tool_events
 
-        with patch("lib.cli.console_loop._typewriter", new_callable=AsyncMock) as tw:
+        with patch("lib.cli.console_loop.console") as console:
             await _print_tool_events(
                 [{"name": "search", "status": "ok", "arguments": {"q": "hi"}}],
                 DisplayConfig(show_tool_params=False, show_tool_results=False),
             )
-            text = tw.call_args[0][0]
+            text = console.print.call_args.args[0]
             assert "q=" not in text
             assert "→" not in text
 

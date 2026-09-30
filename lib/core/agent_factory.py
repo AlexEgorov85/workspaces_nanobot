@@ -73,6 +73,7 @@ class AgentFactory:
         agent_id: str | None = None,
         project_hooks: list[Any] | None = None,
         print_llm_calls: bool = False,
+        usage_store: Any | None = None,
     ) -> tuple[Any, list[Any], list[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
@@ -111,6 +112,7 @@ class AgentFactory:
             ``Registered N tools`` при старте).
         """
         from nanobot.agent.loop import AgentLoop
+        from nanobot.agent.tools.registry import ToolRegistry
 
         hooks: list[Any] = []
         # ToolAuditHook — обязателен: каналы и CLI рендерят его записи
@@ -141,22 +143,74 @@ class AgentFactory:
         # пропускаем без ошибки.
         hook_factories: list[Any] = []
         if db_logging_service is not None:
+            # ``get_model`` — closure для резолва текущего имени модели
+            # в nanobot 0.3.5+ (где ``LLMResponse.model`` удалён). На
+            # момент регистрации фабрики ``agent`` ещё не существует;
+            # кидаем изменяемый контейнер ``_agent_box``, который
+            # ``AgentLoop.from_config`` заполнит ссылкой. ``get_model``
+            # читается лениво на каждой итерации — после ``from_config``
+            # ``_agent_box[0]`` уже содержит ``agent``, свойство
+            # ``AgentLoop.model`` (``nanobot/agent/loop.py:218``) отдаёт
+            # текущее значение runtime_resolver.runtime.model.
+            _agent_box: list[Any] = []
+
+            def get_model() -> str | None:
+                if not _agent_box:
+                    return None
+                try:
+                    return getattr(_agent_box[0], "model", None)
+                except Exception:
+                    return None
+
             factory = self._build_database_logging_factory(
-                db_logging_service, agent_id, print_llm_calls=print_llm_calls
+                db_logging_service, agent_id,
+                print_llm_calls=print_llm_calls,
+                get_model=get_model,
             )
             if factory is not None:
                 hook_factories.append(factory)
+                # _populate_agent_box вызывается ПОСЛЕ ``from_config``,
+                # чтобы closure увидел agent.
+                _populate_box = lambda built: _agent_box.append(built)
+            else:
+                _populate_box = lambda built: None
 
         kwargs: dict = {
             "session_manager": session_manager,
             "hooks": hooks,
             "hook_factories": hook_factories,
+            "tool_registry": ToolRegistry(),
         }
         if cron_service is not None:
             kwargs["cron_service"] = cron_service
+        if usage_store is not None:
+            kwargs["provider_snapshot_loader"] = self._wrap_provider_snapshot_loader(
+                config, usage_store, bus
+            )
 
         agent = AgentLoop.from_config(config, bus, **kwargs)
+        # Backfill: теперь ``agent`` существует — закрыть closure.
+        if db_logging_service is not None:
+            _populate_box(agent)
         return agent, hooks, hook_factories
+
+    @staticmethod
+    def _wrap_provider_snapshot_loader(
+        config: Any,
+        usage_store: Any,
+        bus: Any | None,
+    ) -> Any:
+        """Build a ``provider_snapshot_loader`` that attaches the LLM observer.
+
+        Falls back to ``config.build_provider_snapshot`` when available;
+        otherwise returns ``None`` and the upstream default is used.
+        """
+        base_loader = getattr(config, "build_provider_snapshot", None)
+        if base_loader is None:
+            return None
+        from lib.services.llm_observer import wrap_provider_snapshot_loader
+
+        return wrap_provider_snapshot_loader(base_loader, usage_store, bus=bus)
 
     @staticmethod
     def _import_tool_audit_hook():
@@ -195,6 +249,7 @@ class AgentFactory:
         db_logging_service: Any,
         agent_id: str | None = None,
         print_llm_calls: bool = False,
+        get_model: Any = None,
     ) -> Any | None:
         """Создать фабрику оборота ``DatabaseLoggingHook``.
 
@@ -208,9 +263,15 @@ class AgentFactory:
         Args:
             db_logging_service: ``DbLoggingService``.
             agent_id: идентификатор агента (для колонки ``agent_id`` в логах).
+            print_llm_calls: печатать в CLI токены каждой итерации.
+            get_model: опциональный callable ``() -> str | None`` для
+                получения текущего имени модели (nanobot 0.3.5+ —
+                ``LLMResponse.model`` удалён, модель только на
+                ``AgentLoop.model``). Передаётся в ``DatabaseLoggingHook``
+                и вызывается в ``after_iteration``.
 
         Returns:
-            ``make_db_logging_hook_factory(db_logging_service, agent_id)``
+            ``make_db_logging_hook_factory(db_logging_service, agent_id, ...)``
             или ``None``, если модуль недоступен.
         """
         try:
@@ -220,5 +281,7 @@ class AgentFactory:
         except Exception:
             return None
         return make_db_logging_hook_factory(
-            db_logging_service, agent_id, print_llm_calls=print_llm_calls
+            db_logging_service, agent_id,
+            print_llm_calls=print_llm_calls,
+            get_model=get_model,
         )

@@ -13,7 +13,7 @@ import pytest
 
 @pytest.fixture
 def full_fake_modules(tmp_path):
-    """Подменяем ВСЕ модули, от которых зависит ApplicationContext.create()."""
+    """Подменяем ВСЕ модули, от которых зависит ApplicationContext.create(role='gateway', )."""
     with patch.dict("sys.modules"):
 
         # nanobot.agent
@@ -188,7 +188,7 @@ class TestCreate:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -210,7 +210,7 @@ class TestCreate:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -232,7 +232,7 @@ class TestCreate:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ApplicationContext.create(
+        ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -254,7 +254,7 @@ class TestCreate:
         full_fake_modules["settings"].gateway.storage = "file"
         # Override, но DSN пуст → SessionStorageService должен упасть,
         # но ApplicationContext делает fallback на "file".
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -267,7 +267,7 @@ class TestCreate:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -287,7 +287,7 @@ class TestCreate:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -320,7 +320,7 @@ class TestCreate:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ApplicationContext.create(
+        ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -342,7 +342,7 @@ class TestCreate:
 
 
 class TestTableRegistryReset:
-    """``ApplicationContext.create()`` сбрасывает singleton
+    """``ApplicationContext.create(role='gateway', )`` сбрасывает singleton
     ``table_registry`` в начале, чтобы при повторном создании context
     в одном процессе (тесты, streamlit-reload) не утекали ресурсы
     от предыдущего context.
@@ -368,7 +368,7 @@ class TestTableRegistryReset:
         assert "leftover_skill" in table_registry.names()
 
         script = Path(__file__).resolve().parent.parent
-        ApplicationContext.create(
+        ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -376,7 +376,7 @@ class TestTableRegistryReset:
         )
 
         assert "leftover_skill" not in table_registry.names(), (
-            "ApplicationContext.create() должен сбрасывать TableRegistry "
+            "ApplicationContext.create(role='gateway', ) должен сбрасывать TableRegistry "
             "в начале; остались ресурсы от предыдущего context"
         )
 

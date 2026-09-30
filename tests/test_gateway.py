@@ -60,6 +60,16 @@ def _setup_fake_modules():
     sys.modules["nanobot.bus.queue"] = bus
     sys.modules["nanobot.bus.events"] = events
 
+    # nanobot.agent.tools (для ``lib.core.agent_factory``: ``from nanobot.agent
+    # .tools.registry import ToolRegistry``). Без этого ``ApplicationContext
+    # .create`` падает на ``ModuleNotFoundError`` ещё до ``_check_websocket
+    # _port_available``.
+    sol.agent.tools = types.ModuleType("nanobot.agent.tools")
+    tools_registry = types.ModuleType("nanobot.agent.tools.registry")
+    tools_registry.ToolRegistry = MagicMock()
+    sys.modules["nanobot.agent.tools"] = sol.agent.tools
+    sys.modules["nanobot.agent.tools.registry"] = tools_registry
+
     # nanobot.channels
     sol.channels = types.ModuleType("nanobot.channels")
     cm = types.ModuleType("nanobot.channels.manager")
@@ -182,7 +192,7 @@ def _get_ctx():
     """Создать и вернуть ApplicationContext при уже настроенных mock'ах."""
     from lib.core.application_context import ApplicationContext
 
-    return ApplicationContext.create(
+    return ApplicationContext.create(role='gateway', 
         script_dir=_project_root,
         workspace_dir=_workspace_path,
         enable_db_logging=False,
@@ -216,19 +226,39 @@ class TestMain:
         # ``--profile=test`` нужен entrypoint'у (Phase B сделал его
         # обязательным).
         #
-        # Также мокаем ``RuntimePatcher.apply_all`` — он пытается
-        # patch'ить ``workspace/tools/*.py``, которые импортируют
-        # ``nanobot.agent.tools.base`` (не существует в mock setup);
-        # этот тест проверяет только ``GatewayRunner.run_forever``,
+        # Также мокаем ``RuntimePatcher.apply_all`` и
+        # ``register_project_tools`` — они пытаются patch'ить upstream
+        # API и загружать ``workspace/tools/*.py``, которые импортируют
+        # ``nanobot.agent.tools.base`` (не существует в mock setup).
+        # Этот тест проверяет только ``GatewayRunner.run_forever``,
         # а не логику runtime patching.
         from lib.services.runtime_patcher import RuntimePatcher
+        from lib.services.project_tool_loader import ProjectToolsLoadResult
+        # ``PatchReport.details`` пустой (никаких runtime-patches) и
+        # ``ProjectToolsLoadResult`` с пустым detail — оба компонента
+        # скипают свои баннеры, чтобы ``_emit_*_inventory_banner`` не
+        # пытались распарсить MagicMock'и.
+        fake_report = MagicMock()
+        fake_report.details = {}
+        fake_report.failed = []
+        fake_project_tools_result = ProjectToolsLoadResult(detail="")
         with patch("sys.argv", ["gateway.py", "--profile=test"]), \
              patch("lib.lifecycle.gateway_runner.GatewayRunner") as MockRunner, \
-             patch.object(RuntimePatcher, "apply_all", return_value=MagicMock(failed=[])):
+             patch.object(RuntimePatcher, "apply_all", return_value=fake_report), \
+             patch(
+                 "lib.services.project_tool_loader.register_project_tools",
+                 return_value=fake_project_tools_result,
+             ):
             MockRunner.return_value.run_forever = MagicMock()
             from gateway import main
 
-            main()
+            # ``ctx.config.channels.websocket`` остаётся MagicMock из conftest'а;
+            # ``_check_websocket_port_available`` делает ``int(getattr(ws_cfg,
+            # "port", port) or port)`` и падает на MagicMock (``int(MagicMock)``
+            # → TypeError). Этот тест проверяет только ``run_forever``, а не
+            # проверку порта — патчим её в no-op.
+            with patch("gateway._check_websocket_port_available", lambda ctx: None):
+                main()
             MockRunner.return_value.run_forever.assert_called_once()
 
     def test_storage_postgres_without_dsn_falls_back(self):

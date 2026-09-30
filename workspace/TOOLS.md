@@ -46,7 +46,11 @@ This file documents non-obvious constraints and usage patterns.
 
 - `query` (опц.) — подстрока для ILIKE-поиска по `summary` и `payload::text`.
 - `event_type` (опц.) — один из `context_compacted`, `tool_call`,
-  `tool_result`, `llm_call`, `run_finished`, `subagent_run_finished`, `inbound`.
+  `tool_result`, `llm_call`, `run_finished`, `turn_completed`,
+  `subagent_run_finished`, `inbound`.
+  * `turn_completed` — метрики оборота (latency_ms, outcome,
+    usage_tokens, runtime_model). НЕ содержит `final_content` —
+    только статистика; для контента используйте `run_finished`.
 - `tool_name` (опц.) — имя инструмента для фильтрации `tool_call` /
   `tool_result`. Удобно для поиска истории конкретного инструмента.
 - `since` / `until` (опц.) — ISO-8601 таймстамп.
@@ -182,6 +186,26 @@ JSON-string. Изменение формы данных требует отде�
 
 Все поля — простых типов или list/str. `tools_used` — список имён
 инструментов, использованных в прогоне.
+
+#### `turn_completed.payload`
+
+Метрики оборота (для observability, не пользовательского контента):
+
+```json
+{
+  "latency_ms": 1234,
+  "outcome": "completed",
+  "failure_kind": null,
+  "failure_error_kind": null,
+  "failure_attempts": null,
+  "usage_tokens": 128,
+  "runtime_model": "MiniMax-M3"
+}
+```
+
+НЕ содержит `final_content` / `tools_used` — это user-visible
+содержимое живёт в `run_finished`. Пишется через подписку на
+`TurnCompleted` в `RuntimeEventsSubscriber`.
 
 #### `subagent_run_finished.payload`
 

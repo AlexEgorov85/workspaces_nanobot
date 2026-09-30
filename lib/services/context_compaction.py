@@ -30,7 +30,8 @@ loguru INFO, опциональный Rich-вывод в терминал gatewa
 
 Заметка в ``agent_conversation_messages`` видна в UI-чате (Streamlit),
 но НЕ попадает в контекст промпта: контекст агента строится из
-``PGSessionManager`` (``agent_session_messages``), а таблица обмена —
+upstream JSONL-стора ``SessionManager`` (mirror в PG через
+``SessionColdSyncService``), а таблица обмена —
 транспорт показа сообщений.
 
 Импортируется без nanobot: тяжёлые зависимости резолвятся лениво.
@@ -144,14 +145,18 @@ class ContextCompactionService:
                 else:
                     summary = result
             else:
-                from nanobot.session.manager import replay_max_messages_for_context
-
-                await consolidator.maybe_consolidate_by_tokens(
-                    session,
-                    runtime=runtime,
-                    replay_max_messages=replay_max_messages_for_context(
-                        runtime.context_window_tokens
-                    ),
+                summarize_fn = getattr(
+                    consolidator, "summarize_provider_compaction", None,
+                )
+                if summarize_fn is None:
+                    return self._empty(
+                        "Consolidator не предоставляет summarize_provider_compaction",
+                    )
+                return self._empty(
+                    "token-budget компакция через ContextCompactionService.compact "
+                    "не поддержана в nanobot 0.3.5 — используйте /compact или "
+                    "upstream-событие ContextCompactionEvent через "
+                    "CompactionEventSubscriber",
                 )
         except Exception as exc:
             logger.opt(exception=exc).error(
@@ -429,6 +434,87 @@ class ContextCompactionService:
         except Exception as exc:
             logger.warning("Auto history notice for {} failed: {}", session_key, exc)
 
+    async def notify_session_compacted(
+        self,
+        *,
+        session_key: str,
+        phase: str,
+        compaction_id: str,
+    ) -> None:
+        """Записать факт compaction-фазы upstream (``ContextCompactionEvent``).
+
+        Вызывается из ``CompactionEventSubscriber.feed`` (см.
+        ``lib/services/compaction_event_subscriber.py``) при получении
+        ``OutboundMessage.event`` типа ``ContextCompactionEvent`` из
+        ``bus.outbound``. Канал (postgres/redis/streamlit) дёргает
+        subscriber из своего ``send``; CLI-gateway вызывает метод
+        напрямую (минуя шину).
+
+        Фаза ``succeeded`` соответствует фактической архивации: пишется
+        ``event_type="context_compacted"`` в ``agent_gateway_logs`` и
+        history-notice в ``agent_conversation_messages`` (через единый
+        ``_notify`` путь). Для прочих фаз — только ``agent_gateway_logs``
+        (observability-trail без UI-стикера).
+
+        Параметры ``tokens_before``/``tokens_after``/``archived_msgs``
+        неизвестны из upstream-события (содержит только ``compaction_id``
+        и ``phase``), поэтому history-notice для upstream-сжатия
+        содержит сводку без замеров; численные поля остаются
+        ``None``/``0``.
+        """
+        if not session_key:
+            return
+        event_id = compaction_id or f"context_compacted:{session_key}"
+
+        try:
+            await self._record_event_log(
+                session_key=session_key,
+                report={
+                    "session_key": session_key,
+                    "mode": "upstream",
+                    "phase": phase,
+                    "compaction_id": event_id,
+                    "archived_msgs": 0,
+                    "kept_msgs": 0,
+                    "tokens_before": 0,
+                    "tokens_after": 0,
+                    "summary": f"upstream compaction phase={phase} ({event_id})",
+                    "raw_dump": False,
+                },
+                text=f"upstream compaction phase={phase} ({event_id})",
+            )
+        except Exception:
+            logger.opt(exception=True).warning(
+                "notify_session_compacted: event_log for {} failed", session_key,
+            )
+
+        if phase != "succeeded" or not self.notify_in_history:
+            return
+        history_text = (
+            f"🗜️ upstream-сжатие ({phase}, {event_id}) выполнено upstream-механизмом"
+        )
+        try:
+            await self._write_history_notice(
+                session_key=session_key,
+                report={
+                    "session_key": session_key,
+                    "mode": "upstream",
+                    "ok": True,
+                    "archived_msgs": 0,
+                    "kept_msgs": 0,
+                    "tokens_before": 0,
+                    "tokens_after": 0,
+                    "summary": history_text,
+                    "raw_dump": False,
+                    "compaction_id": event_id,
+                    "phase": phase,
+                },
+            )
+        except Exception:
+            logger.opt(exception=True).warning(
+                "notify_session_compacted: history_notice for {} failed", session_key,
+            )
+
     async def _write_history_notice(self, session_key: str, report: dict) -> None:
         """Записать заметку о сжатии в ``agent_conversation_messages``.
 
@@ -436,7 +522,8 @@ class ContextCompactionService:
         ``streamlit:<chat_id>`` — это единственные каналы, у которых
         есть таблица обмена. Для прочих префиксов (например, ``cli:...``)
         — выходим без записи: история диалога CLI живёт в REPL-выводе
-        и ``PGSessionManager`` (``agent_session_messages``).
+        и upstream JSONL-сторе ``SessionManager`` (mirror в PG через
+        ``SessionColdSyncService``).
         """
         try:
             prefix, _, chat_id = (session_key + ":").partition(":")

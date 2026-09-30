@@ -4,22 +4,23 @@
 инструмента (имя, аргументы, статус, ошибка, превью результата) на
 протяжении всех итераций оборота, а также вспомогательную функцию
 ``format_tool_params`` для форматирования параметров.
-"""
 
+В nanobot 0.3.5 хелперы из удалённого ``base_tool_tracking_hook`` не
+нужны: ``AgentHookContext.tool_calls`` напрямую возвращает список
+``ToolCallRequest`` с публичными атрибутами ``name``/``id``/``arguments``.
+"""
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from nanobot.agent import AgentHookContext
-
-from .base_tool_tracking_hook import BaseToolTrackingHook
+from nanobot.agent import AgentHook
 
 # Ключ-«bucket» для оборотов без session_key (например, прямые SDK-вызовы).
 _DEFAULT_KEY = ""
 
 
-class ToolAuditHook(BaseToolTrackingHook):
+class ToolAuditHook(AgentHook):
     """Аккумулирует каждый вызов инструмента (имя, аргументы, статус, ошибка,
     превью результата) на протяжении всех итераций оборота, чтобы вызывающая
     сторона могла вставить полный аудит-трейл в
@@ -51,7 +52,7 @@ class ToolAuditHook(BaseToolTrackingHook):
         key = getattr(ctx, "session_key", None)
         return key if isinstance(key, str) else _DEFAULT_KEY
 
-    async def before_execute_tools(self, ctx: AgentHookContext) -> None:
+    async def before_execute_tools(self, ctx: Any) -> None:
         """Вызывается перед выполнением инструментов в итерации.
 
         Сохраняет снимок имён и аргументов всех инструментов текущей
@@ -63,25 +64,27 @@ class ToolAuditHook(BaseToolTrackingHook):
                  ``session_key`` и номер итерации.
         """
         key = self._bucket_key(ctx)
-        calls = self._iter_tool_calls(ctx)
+        calls = list(getattr(ctx, "tool_calls", None) or [])
         self._calls[key] = [
-            {"name": self._tool_call_name(tc), "arguments": self._tool_call_arguments(tc)}
+            {"name": str(getattr(tc, "name", "?")), "arguments": getattr(tc, "arguments", {})}
             for tc in calls
         ]
         bucket = self._entries.setdefault(key, [])
         self._pending_start[key] = len(bucket)
         for tc in calls:
-            info = self._tool_call_info(tc)
+            arguments = getattr(tc, "arguments", {})
+            if not isinstance(arguments, dict):
+                arguments = {}
             bucket.append({
-                "name": info["name"],
-                "arguments": info["arguments"],
+                "name": str(getattr(tc, "name", "?")),
+                "arguments": arguments,
                 "status": "started",
                 "error": None,
                 "result_preview": None,
                 "iteration": ctx.iteration,
             })
 
-    async def after_iteration(self, ctx: AgentHookContext) -> None:
+    async def after_iteration(self, ctx: Any) -> None:
         """Вызывается после завершения итерации.
 
         Обновляет статус и, при необходимости, ошибку или превью
@@ -139,28 +142,42 @@ class ToolAuditHook(BaseToolTrackingHook):
 def format_tool_params(params: list[dict]) -> dict[str, str]:
     """Форматирует список параметров инструментов в словарь строк.
 
-    Для каждого словаря из ``params`` загружает поле ``arguments``
-    как JSON и сериализует значение каждого аргумента в компактный
-    строковый вид (с repr для простых типов и json.dumps для
-    составных).
+    Принимает ``p["arguments"]`` в одной из форм:
+
+    * **dict** (nanobot 0.3.5+: ``ToolCallRequest.arguments: Any`` —
+      фактически ``dict`` после парсинга provider'ом; см.
+      ``nanobot/providers/openai_compat_provider.py`` и др.);
+    * **str** с JSON (legacy/другие transport'ы — JSON-encoded);
+    * **None** / прочее — оборачивается в ``{"_": repr(value)}``.
+
+    Для каждого аргумента значение сериализуется в компактный
+    строковый вид (repr для простых типов и json.dumps для составных).
 
     Параметры:
         params: Список словарей с ключами ``name`` (имя инструмента)
-                и ``arguments`` (строка JSON с аргументами).
+                и ``arguments`` (dict / JSON-строка / None).
 
-    Returns:
+    Возвращает:
         Словарь, где ключ — имя инструмента, значение — строка с
-        отформатированными аргументами.
+        отформатированными параметрами. Если инструменты не переданы,
+        возвращается пустой словарь.
     """
     result: dict[str, str] = {}
     for p in params:
         name = p["name"]
-        try:
-            args = json.loads(p["arguments"])
-            if not isinstance(args, dict):
-                args = {"_": str(args)}
-        except (json.JSONDecodeError, TypeError):
-            args = {"_": str(p["arguments"])}
+        arguments = p.get("arguments")
+        if isinstance(arguments, dict):
+            args = arguments
+        elif isinstance(arguments, str):
+            try:
+                loaded = json.loads(arguments)
+                args = loaded if isinstance(loaded, dict) else {"_": str(loaded)}
+            except (json.JSONDecodeError, TypeError):
+                args = {"_": arguments}
+        elif arguments is None:
+            args = {}
+        else:
+            args = {"_": str(arguments)}
         parts = []
         for k, v in args.items():
             if isinstance(v, str):

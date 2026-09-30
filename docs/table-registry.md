@@ -8,9 +8,10 @@
 ## Зачем это нужно
 
 Каждый skill читает свои данные через общий DuckDB-снапшот
-(`workspace/data_store/duckdb/cache.duckdb`). Чтобы snapshot содержал нужные
+(`resolve_publish_path()`: `project.json::gateway.cache.local_path` либо
+`~/.cache/nanobot/duckdb/cache.duckdb`). Чтобы snapshot содержал нужные
 таблицы, sync-слой (`PgDuckDbSyncService` + `DuckDbCacheStore`) должен знать,
-что именно синхронизировать. До рефакторинга это знание было разбросано:
+что именно синхронизировать. Раньше это знание было разбросано:
 
 - по плоским полям skill'а (`db_tables`, `db_additional_tables`, `mode_vector_*`,
   `track_column_overrides`);
@@ -389,7 +390,7 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 | `snapshot_path(workspace_path)` | Путь к общему DuckDB-снапшоту. |
 | `clear()` | Полный сброс реестра (тесты/пересборка). |
 
-> `set_embedding_config` / `embedding_config()` удалены в Фазе 6: параметры
+> `set_embedding_config` / `embedding_config()` отсутствуют: параметры
 > эмбеддинга захардкожены в `cache_provider_impl` (`_EMBED_*`, токен из
 > окружения `EMBED_TOKEN`), читаются через `read_embedding_config()`.
 
@@ -439,7 +440,7 @@ Legacy `TableRegistry.snapshot_path(workspace_path)` через
 `gateway.cache.use_workspace_path` удалён.
 
 Доступ к снимку — через CLI skill'а (`scripts/cli.py --mode predefined`
-и `--list-scripts`); прямой tool `duckdb_query` удалён в фазе 8.
+и `--list-scripts`); прямой tool `duckdb_query` отсутствует.
 
 ## Definition of Done для нового skill'а
 

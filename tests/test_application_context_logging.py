@@ -309,7 +309,7 @@ class TestFlushIntervalSecPropagation:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=True,
@@ -346,7 +346,7 @@ class TestFlushIntervalSecPropagation:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=True,
@@ -380,7 +380,7 @@ class TestFlushIntervalSecPropagation:
 
         script = Path(__file__).resolve().parent.parent
         with pytest.raises(ConfigurationError) as exc_info:
-            ApplicationContext.create(
+            ApplicationContext.create(role='gateway', 
                 script_dir=script,
                 workspace_dir=script / "workspace",
                 enable_db_logging=True,

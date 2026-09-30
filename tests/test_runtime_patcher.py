@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import time
@@ -35,31 +36,50 @@ def _settings(gateway_overrides=None, channels=None, **overrides):
     return _Settings()
 
 
-def _make_fake_document_module(body_factory=None):
+def _make_fake_document_module(text_value=None):
     """Собрать fake ``nanobot.utils.document`` для подмены в ``sys.modules``.
 
     ``from nanobot.utils import document`` резолвится через атрибут
     ``document`` родительского модуля ``nanobot.utils``. Чтобы патч
     ``patch_document_text_threshold`` подхватил наш fake (а не
     настоящий submodule), подменяем **оба** ключа в ``sys.modules``.
+
+    ``extract_text(path)`` для тестовых файлов читает содержимое из
+    ``tmp_path_factory``: env-vars ``FAKE_FILE_<basename>`` содержат
+    текст файла. Если env не задан, возвращается ``text_value``
+    (одинаковый текст для всех).
     """
     document_mod = types.ModuleType("nanobot.utils.document")
 
-    def _fake_extract(text, media_paths, **kwargs):
-        new = text
-        if media_paths:
-            blocks = []
-            for p in media_paths:
-                body = (
-                    body_factory(media_paths)
-                    if body_factory is not None
-                    else "a" * 5000
-                )
-                blocks.append(f"[File: {Path(p).name}]\n{body}")
-            new = (text + "\n\n" + "\n\n".join(blocks)) if text else "\n\n".join(blocks)
-        return new, []
+    def _fake_extract_text(path):
+        if not isinstance(path, str) or not path:
+            return None
+        basename = Path(path).name
+        env_key = f"FAKE_FILE_{basename}"
+        if env_key in os.environ:
+            return os.environ[env_key]
+        return text_value
 
-    document_mod.extract_documents = _fake_extract
+    def _fake_is_image_file(path):
+        if not isinstance(path, str):
+            return False
+        name = Path(path).name.lower()
+        return name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+
+    def _fake_reference(content, media):
+        # Поведение upstream ``reference_non_image_attachments``:
+        # только [Attachment: path] для не-изображений, ничего не читает.
+        blocks: list[str] = []
+        for p in media or []:
+            if not _fake_is_image_file(p):
+                blocks.append(f"[Attachment: {p}]")
+        if blocks:
+            content = f"{content}\n\n" + "\n\n".join(blocks) if content else "\n\n".join(blocks)
+        return content, []
+
+    document_mod.reference_non_image_attachments = _fake_reference
+    document_mod.extract_text = _fake_extract_text
+    document_mod.is_image_file = _fake_is_image_file
     return document_mod
 
 
@@ -78,21 +98,41 @@ def _patched_document_module(document_mod):
 
 
 class TestPatchAssembleOutbound:
+    """Nanobot 0.3.5: ``AgentLoop._assemble_outbound`` имеет сигнатуру
+    ``(self, msg, final_content, stop_reason, streamed_content,
+       *, log_content=True, turn_latency_ms=None)``.
+    Обёртка в ``RuntimePatcher.patch_assemble_outbound`` принимает
+    те же позиционные параметры и передаёт их оригиналу as-is.
+
+    В nanobot 0.3.5 ``_attach_context_window`` ТРЕБУЕТ засеянный bridge
+    (``seed_context_window`` вызывается через подписку на
+    TurnRuntimeAdmitted в ``RuntimeEventsSubscriber``). Тесты должны
+    сеять bridge явно — иначе получают ``ContextWindowNotSeededError``.
+    """
+
+    def _seed_bridge(self, session_key: str, limit: int = 40000, model: str = "MiniMax-M3") -> None:
+        from lib.hooks.database_logging_hook import seed_context_window
+
+        seed_context_window(session_key, limit=limit, model=model)
+
     def test_wraps_and_injects_audit(self):
         agent = MagicMock()
         original_return = MagicMock()
         original_return.metadata = {}
         agent._assemble_outbound.return_value = original_return
+        agent.context_window_tokens = 40000  # симулируем RuntimeEventAdmitted-эффект
 
         hook = MagicMock()
         hook.drain.return_value = [{"name": "read"}]
+
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, hook)
         assert ok
 
         result = agent._assemble_outbound(
-            MagicMock(), "content", [], "stop", False, None
+            MagicMock(), "content", "stop", False,
         )
         hook.drain.assert_called_once()
         assert result.metadata["_tool_audit"] == [{"name": "read"}]
@@ -100,12 +140,14 @@ class TestPatchAssembleOutbound:
     def test_result_none_skips_drain(self):
         agent = MagicMock()
         agent._assemble_outbound.return_value = None
+        agent.context_window_tokens = 40000
         hook = MagicMock()
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, hook)
 
-        result = agent._assemble_outbound(None, None, None, None, False, None)
+        result = agent._assemble_outbound(None, None, None, None)
         assert result is None
         hook.drain.assert_not_called()
         assert ok
@@ -115,17 +157,21 @@ class TestPatchAssembleOutbound:
         original_return = MagicMock()
         original_return.metadata = {}
         agent._assemble_outbound.return_value = original_return
+        agent.context_window_tokens = 40000
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
 
-        result = agent._assemble_outbound(MagicMock(), "x", [], "stop", False, None)
+        result = agent._assemble_outbound(MagicMock(), "x", "stop", False)
         assert ok
         assert result.metadata["_final_turn"] is True
 
     def test_none_result_synthesizes_marker_outbound(self):
         agent = MagicMock()
         agent._assemble_outbound.return_value = None
+        agent.context_window_tokens = 40000
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
@@ -135,12 +181,87 @@ class TestPatchAssembleOutbound:
         msg.chat_id = "chat-1"
         msg.metadata = {"message_id": "m-1", "answer_id": "a-1"}
 
-        result = agent._assemble_outbound(msg, "", [], "stop", False, None)
+        result = agent._assemble_outbound(msg, "", "stop", False)
         assert ok
         assert result is not None
         assert result.metadata["_final_turn"] is True
         assert result.content == ""
         assert result.chat_id == "chat-1"
+
+    def test_context_window_not_seeded_raises(self):
+        """Без seed_context_window — ContextWindowNotSeededError."""
+        agent = MagicMock()
+        original_return = MagicMock()
+        original_return.metadata = {}
+        agent._assemble_outbound.return_value = original_return
+        agent.context_window_tokens = 0  # типичный случай без подписки
+
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
+        assert ok
+
+        # Без seed — поднимается ContextWindowNotSeededError.
+        from lib.services.runtime_patcher import ContextWindowNotSeededError
+
+        with pytest.raises(ContextWindowNotSeededError):
+            agent._assemble_outbound(MagicMock(), "x", "stop", False)
+
+    def test_first_turn_without_tool_calls_has_context_window(self):
+        """Regression 5.2: первый оборот без tool-вызовов имеет
+        ``metadata.context_window`` с ``limit > 0``, ``model != ""``,
+        ``used == 0`` (usage ещё не пришёл — это первая итерация).
+
+        Контракт: подписка на TurnRuntimeAdmitted засевает bridge
+        ДО первой LLM-итерации. Тест симулирует это явно через
+        ``seed_context_window``.
+        """
+        from lib.hooks.database_logging_hook import (
+            _CONTEXT_BRIDGE,
+            _CONTEXT_BRIDGE_LOCK,
+            seed_context_window,
+        )
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        session_key = "test:first_turn"
+        seed_context_window(session_key, limit=40000, model="MiniMax-M3")
+
+        try:
+            agent = MagicMock()
+            original_return = MagicMock()
+            original_return.metadata = {}
+            agent._assemble_outbound.return_value = original_return
+            # agent.context_window_tokens НЕ задан → bridge должен
+            # обеспечить limit/model.
+
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
+            assert ok
+
+            msg = MagicMock()
+            msg.session_key = session_key
+            msg.metadata = {}
+            msg.channel = "test"
+            msg.chat_id = "1"
+
+            # Без usage в bridge (первая итерация без tool-calls).
+            result = agent._assemble_outbound(msg, "x", "stop", False)
+            block = result.metadata["context_window"]
+            assert block["limit"] == 40000, (
+                f"limit должен быть из bridge (40000), получено: "
+                f"{block['limit']!r}"
+            )
+            assert block["model"] == "MiniMax-M3", (
+                f"model должен быть из bridge (MiniMax-M3), получено: "
+                f"{block['model']!r}"
+            )
+            assert block["used"] == 0, (
+                f"used == 0 для first-turn без tool-calls, получено: "
+                f"{block['used']!r}"
+            )
+            assert block["pct"] == 0.0
+        finally:
+            with _CONTEXT_BRIDGE_LOCK:
+                _CONTEXT_BRIDGE.pop(session_key, None)
 
     def test_agent_none_skipped(self):
         patcher = RuntimePatcher()
@@ -227,6 +348,17 @@ class TestPatchContextGovernor:
 
 
 class TestPatchDocumentTextThreshold:
+    """В nanobot 0.3.5 патч оборачивает ``reference_non_image_attachments``
+    вместо ``extract_documents``. Семантика: для каждого файла из ``media``
+    пытается прочитать текст через ``extract_text`` и встроить в content
+    (с маркером обрезки при превышении порога); изображения и
+    нечитаемые файлы — fallback на upstream-формат ``[Attachment: …]``.
+    """
+
+    def _patch_with_fake_doc(self, channels=None):
+        document_mod = _make_fake_document_module()
+        return _patched_document_module(document_mod), document_mod
+
     def test_threshold_zero_skipped(self):
         patcher = RuntimePatcher()
         ok, detail = patcher.patch_document_text_threshold(
@@ -251,75 +383,81 @@ class TestPatchDocumentTextThreshold:
         assert ok
         assert "patched" in detail
 
-    def test_small_text_passes_through(self):
-        document_mod = _make_fake_document_module()
-        with _patched_document_module(document_mod):
+    def test_small_text_passes_through_with_path(self, monkeypatch):
+        text = "a" * 100
+        ctx, document_mod = self._patch_with_fake_doc()
+        monkeypatch.setenv("FAKE_FILE_file.pdf", text)
+        with ctx:
             patcher = RuntimePatcher()
             ok, _ = patcher.patch_document_text_threshold(
                 _settings(channels={"document_text_threshold": 20000})
             )
             assert ok
-            new_text, _ = document_mod.extract_documents(
+            new_text, images = document_mod.reference_non_image_attachments(
                 "user prompt", ["x/cache/file.pdf"]
             )
-            # Унифицированный формат: путь ВСЕГДА в заголовке, даже для
-            # маленьких документов (агент должен мочь передать путь в skill).
             assert "[File: file.pdf (saved at x/cache/file.pdf)]" in new_text
+            assert text in new_text
             assert "text omitted" not in new_text
+            assert images == []
 
-    def test_large_text_replaced_with_marker_and_path(self):
-        document_mod = _make_fake_document_module(
-            body_factory=lambda media: "a" * 30000
-        )
-        with _patched_document_module(document_mod):
+    def test_large_text_replaced_with_marker_and_path(self, monkeypatch):
+        text = "a" * 30000
+        monkeypatch.setenv("FAKE_FILE_big.pdf", text)
+        ctx, document_mod = self._patch_with_fake_doc()
+        with ctx:
             patcher = RuntimePatcher()
             ok, _ = patcher.patch_document_text_threshold(
                 _settings(channels={"document_text_threshold": 1000})
             )
             assert ok
-            new_text, _ = document_mod.extract_documents(
+            new_text, _ = document_mod.reference_non_image_attachments(
                 "user prompt", ["cache/sessions/k/big.pdf"]
             )
-            # Унифицированный формат: путь в заголовке (один раз),
-            # маркер обрезки — отдельной строкой без дублирования пути.
-            assert "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
-            assert "[text omitted (len=30000 > threshold=1000)]" in new_text
-            # Дублирования «read at <path>» быть не должно — путь уже в заголовке.
+            assert (
+                "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
+            )
+            assert (
+                "[text omitted (len=30000 > threshold=1000)]" in new_text
+            )
             assert "read at" not in new_text
-            assert ("a" * 30000) not in new_text
+            assert text not in new_text
 
-    def test_marker_omits_path_when_basename_not_in_media(self):
-        # В реальной выдаче extract_documents basename берётся из media_paths.
-        # Здесь мы симулируем ситуацию, когда заголовок блока и список путей
-        # рассогласованы: блок от другого источника, и его basename нет в media.
-        def _factory(media):
-            return "a" * 5000
-
-        document_mod = _make_fake_document_module(body_factory=_factory)
-
-        def _custom_extract(text, media_paths, **kwargs):
-            # Перебиваем — формируем блок с basename, которого нет в media_paths
-            big_body = "a" * 5000
-            return text + "\n\n" + f"[File: ghost.pdf]\n{big_body}", []
-
-        document_mod.extract_documents = _custom_extract
-        with _patched_document_module(document_mod):
+    def test_image_returns_path_in_image_paths_only(self):
+        """Изображения НЕ формируют текстовых блоков: путь возвращается
+        в ``image_paths`` (для vision-блоков upstream), content не
+        раздувается маркерами.
+        """
+        ctx, document_mod = self._patch_with_fake_doc()
+        with ctx:
             patcher = RuntimePatcher()
             ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 100})
+                _settings(channels={"document_text_threshold": 20000})
             )
             assert ok
-            new_text, _ = document_mod.extract_documents(
-                "user prompt", ["cache/sessions/k/real.pdf"]
+            new_text, images = document_mod.reference_non_image_attachments(
+                "user prompt", ["x/cache/pic.png"]
             )
-            # Путь не нашёлся → заголовок БЕЗ «(saved at …)», маркер обрезки
-            # БЕЗ «read at <path>». Никакого выдуманного пути.
-            assert "text omitted" in new_text
-            assert "(saved at" not in new_text
-            assert "read at" not in new_text
-            assert "[File: ghost.pdf]\n[text omitted" in new_text
+            assert images == ["x/cache/pic.png"]
+            assert new_text == "user prompt"
+            assert "[File:" not in new_text
+            assert "[Attachment:" not in new_text
 
-    def test_missing_extract_documents_skipped(self):
+    def test_unreadable_file_falls_back_to_attachment(self, monkeypatch):
+        monkeypatch.delenv("FAKE_FILE_ghost.pdf", raising=False)
+        ctx, document_mod = self._patch_with_fake_doc()
+        with ctx:
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_document_text_threshold(
+                _settings(channels={"document_text_threshold": 20000})
+            )
+            assert ok
+            new_text, _ = document_mod.reference_non_image_attachments(
+                "user prompt", ["x/cache/ghost.pdf"]
+            )
+            assert "[Attachment: x/cache/ghost.pdf]" in new_text
+
+    def test_missing_reference_skipped(self):
         hidden = {"nanobot.utils.document": None, "nanobot.utils": None}
         with patch.dict("sys.modules", hidden):
             patcher = RuntimePatcher()
@@ -328,60 +466,6 @@ class TestPatchDocumentTextThreshold:
             )
             assert not ok
             assert "missing" in detail or "import failed" in detail
-
-    def test_multipage_pdf_grouped_by_file(self):
-        # nanobot разбивает PDF на ``--- Page N ---`` блоки, разделённые
-        # ``\n\n``. Каждая страница по отдельности меньше порога, но документ
-        # целиком — больше. Старый подход (сплит по ``\n\n``) пропускал бы
-        # каждую страницу и не сработал; патч должен группировать по файлу.
-
-        def _factory(media):
-            return (
-                "--- Page 1 ---\n" + "x" * 100 + "\n\n"
-                "--- Page 2 ---\n" + "x" * 100
-            )
-
-        document_mod = _make_fake_document_module(body_factory=_factory)
-        with _patched_document_module(document_mod):
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 150})
-            )
-            assert ok
-            new_text, _ = document_mod.extract_documents(
-                "user prompt", ["cache/sessions/k/mp.pdf"]
-            )
-            assert "text omitted" in new_text
-            assert "--- Page" not in new_text
-            assert ("x" * 100) not in new_text
-
-    def test_loop_namespace_also_patched(self):
-        # Реальная точка вызова — ``nanobot.agent.loop`` (импорт через
-        # ``from nanobot.utils.document import extract_documents``), а не
-        # ``document.extract_documents``. Патч обязан подменить и эту ссылку.
-        document_mod = _make_fake_document_module(
-            body_factory=lambda media: "a" * 5000
-        )
-        import nanobot.agent.loop as _loop_mod
-
-        saved = _loop_mod.extract_documents
-        try:
-            with _patched_document_module(document_mod):
-                patcher = RuntimePatcher()
-                ok, detail = patcher.patch_document_text_threshold(
-                    _settings(channels={"document_text_threshold": 100})
-                )
-                assert ok
-                assert "nanobot.agent.loop.extract_documents" in detail
-                assert _loop_mod.extract_documents is not saved
-                new_text, _ = _loop_mod.extract_documents(
-                    "p", ["cache/sessions/k/big.pdf"]
-                )
-                assert "text omitted" in new_text
-                # Путь — в заголовке (единый механизм), не в маркере обрезки.
-                assert "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
-        finally:
-            _loop_mod.extract_documents = saved
 
 
 class TestPatchExecLimits:
@@ -540,7 +624,7 @@ class TestPatchSaveTurn:
         msg = {"role": "tool", "content": big, "tool_call_id": "t1", "name": "exec"}
         captured = {}
 
-        def _fake_save_turn(session, messages, skip, *, turn_latency_ms=None):
+        def _fake_save_turn(session, messages, skip, *, turn_latency_ms=None, **kw):
             captured["messages"] = messages
             captured["turn_latency_ms"] = turn_latency_ms
             return None
@@ -805,118 +889,6 @@ class TestPatchAsyncSessionSaves:
         sessions._async_save_executor.shutdown(wait=True)
 
 
-class TestPatchCompactCommand:
-    """``patch_compact_command`` — регистрация ``/compact`` как slash-команды."""
-
-    def test_registers_exact_and_prefix(self):
-        from functools import partial
-
-        from lib.commands.compact_command import cmd_compact
-
-        class _Commands:
-            def __init__(self):
-                self.exact_reg = {}
-                self.prefix_reg = []
-
-            def exact(self, cmd, handler):
-                self.exact_reg[cmd] = handler
-
-            def prefix(self, pfx, handler):
-                self.prefix_reg.append((pfx, handler))
-
-        class _Agent:
-            commands = _Commands()
-
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_compact_command(_Agent(), _settings())
-        assert ok, detail
-        assert "/compact" in _Agent.commands.exact_reg
-        handler = _Agent.commands.exact_reg["/compact"]
-        assert isinstance(handler, partial)
-        assert handler.func is cmd_compact
-        assert any(pfx == "/compact " for pfx, _ in _Agent.commands.prefix_reg)
-
-    def test_missing_commands_skipped(self):
-        class _Agent:
-            pass
-
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_compact_command(_Agent(), _settings())
-        assert ok is False
-        assert "commands" in detail
-
-    def test_apply_all_includes_compact_command(self):
-        agent = MagicMock()
-        original_return = MagicMock()
-        original_return.metadata = {}
-        agent._assemble_outbound.return_value = original_return
-        hook = MagicMock()
-        hook.drain.return_value = []
-
-        patcher = RuntimePatcher()
-        report = patcher.apply_all(
-            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
-            db_logging_service=None,
-        )
-        assert "compact_command" in report.to_dict()["applied"]
-
-    def test_apply_all_records_document_text_threshold(self):
-        agent = MagicMock()
-        original_return = MagicMock()
-        original_return.metadata = {}
-        agent._assemble_outbound.return_value = original_return
-        hook = MagicMock()
-        hook.drain.return_value = []
-
-        patcher = RuntimePatcher()
-        report = patcher.apply_all(
-            MagicMock(),
-            _settings(channels={"document_text_threshold": 20000}),
-            Path("ws"),
-            agent,
-            hook,
-            db_logging_service=None,
-        )
-        details = report.to_dict()["details"]
-        assert "document_text_threshold" in details
-        assert "patched" in details["document_text_threshold"]
-
-
-class TestAutoCompactIdleGuard:
-    """``patch_auto_compact_idle_guard`` — глушит list_sessions при ttl=0."""
-
-    def test_disabled_ttl_makes_check_expired_noop(self):
-        calls = []
-
-        def _original(*a, **k):
-            calls.append(a)
-
-        class _Auto:
-            _ttl = 0
-            check_expired = _original
-
-        class _Agent:
-            auto_compact = _Auto()
-
-        ok, detail = RuntimePatcher().patch_auto_compact_idle_guard(_Agent())
-        assert ok, detail
-        _Agent.auto_compact.check_expired("ignored")
-        assert calls == []  # оригинал не вызван — list_sessions не идёт
-
-    def test_enabled_ttl_keeps_original(self):
-        class _Auto:
-            _ttl = 30
-            check_expired = lambda *a, **k: "original"
-
-        class _Agent:
-            auto_compact = _Auto()
-
-        ok, detail = RuntimePatcher().patch_auto_compact_idle_guard(_Agent())
-        assert ok is False
-        assert "idle compact enabled" in detail
-        assert _Agent.auto_compact.check_expired() == "original"
-
-
 class TestApplyAll:
     def test_report_contents(self):
         agent = MagicMock()
@@ -933,92 +905,60 @@ class TestApplyAll:
         )
         d = report.to_dict()
         assert "assemble_outbound" in d["applied"]
-        assert "context_bridge_seed" in d["applied"]
+        # context_bridge_seed удалён в nanobot 0.3.5; seed лимита
+        # делает RuntimeEventsSubscriber через bus.subscribe.
+        assert "context_bridge_seed" not in d["applied"]
+        assert "context_bridge_seed" not in d.get("skipped", [])
         assert any(name == "context_governor" for name, _ in d["skipped"])
         assert any(name == "subagent_logging" for name, _ in d["skipped"])
 
 
 class TestPatchContextBridgeSeed:
-    """``patch_context_bridge_seed`` — патч ``agent._state_build`` для live-update."""
+    """``patch_context_bridge_seed`` удалён в nanobot 0.3.5:
+    seed лимита окна делается подпиской на TurnRuntimeAdmitted
+    в ``RuntimeEventsSubscriber`` (зарегистрированной через
+    ``ApplicationContext.start()``). См.
+    ``openspec/changes/runtime-events-subscription`` и
+    ``post-0.3.5-patches-cleanup``.
 
-    @pytest.fixture(autouse=True)
-    def _clean_bridge(self):
-        from lib.hooks.database_logging_hook import pop_context_bridge
-        pop_context_bridge("postgres:chat-1")
-        yield
-        pop_context_bridge("postgres:chat-1")
+    Защитные тесты:
+    * Метод ``patch_context_bridge_seed`` не существует на ``RuntimePatcher``.
+    * Spec ``context_bridge_seed`` НЕ зарегистрирован в ``_PATCH_SPECS``.
+    * ``apply_all()`` report НЕ содержит "context_bridge_seed".
+    """
 
-    def test_no_agent_skipped(self):
+    def test_method_removed(self):
         from lib.services.runtime_patcher import RuntimePatcher
 
-        ok, detail = RuntimePatcher().patch_context_bridge_seed(None)
-        assert ok is False
-        assert "agent is None" in detail
+        assert not hasattr(RuntimePatcher, "patch_context_bridge_seed"), (
+            "patch_context_bridge_seed удалён в nanobot 0.3.5; "
+            "seed лимита делает RuntimeEventsSubscriber через "
+            "bus.subscribe(TurnRuntimeAdmitted)"
+        )
 
-    def test_no_state_build_skipped(self):
+    def test_spec_removed_from_patch_specs(self):
         from lib.services.runtime_patcher import RuntimePatcher
 
-        agent = MagicMock(spec=[])
-        ok, detail = RuntimePatcher().patch_context_bridge_seed(agent)
-        assert ok is False
-        assert "_state_build is missing" in detail
+        # _PATCH_SPECS — module-level dict[str, PatchSpec].
+        spec_dict = getattr(RuntimePatcher, "_PATCH_SPECS", {})
+        assert "context_bridge_seed" not in spec_dict, (
+            "spec context_bridge_seed удалён из _PATCH_SPECS в nanobot 0.3.5"
+        )
 
-    @pytest.mark.asyncio
-    async def test_patches_state_build_and_seeds_bridge(self):
-        from lib.hooks.database_logging_hook import _CONTEXT_BRIDGE
+    def test_apply_all_report_has_no_context_bridge_seed(self):
+        """``apply_all()`` НЕ пишет в отчёт context_bridge_seed.
+
+        Проверяется через ``RuntimePatcher._PATCH_SPECS`` напрямую
+        (без вызова ``apply_all``, который тянет тяжёлые deps через
+        патчи upstream runtime API).
+        """
         from lib.services.runtime_patcher import RuntimePatcher
 
-        call_count = {"n": 0}
-
-        async def original_state_build(c):
-            call_count["n"] += 1
-            return {"fresh": True, "got": c}
-
-        agent = MagicMock()
-        agent._state_build = original_state_build
-
-        runtime = MagicMock()
-        runtime.context_window_tokens = 65536
-        runtime.model = "MiniMax-M3"
-
-        ctx = MagicMock()
-        ctx.runtime = runtime
-        ctx.session_key = "postgres:chat-1"
-
-        ok, detail = RuntimePatcher().patch_context_bridge_seed(agent)
-        assert ok is True
-
-        result = await agent._state_build(ctx)
-        assert result == {"fresh": True, "got": ctx}
-        assert call_count["n"] == 1
-
-        entry = _CONTEXT_BRIDGE.get("postgres:chat-1") or {}
-        assert entry.get("limit") == 65536
-        assert entry.get("model") == "MiniMax-M3"
-
-    @pytest.mark.asyncio
-    async def test_seed_errors_do_not_break_state_build(self):
-        """Любой сбой внутри seed → оригинальный ``_state_build`` всё равно вызван."""
-        from lib.services.runtime_patcher import RuntimePatcher
-
-        called = {"n": 0}
-
-        async def original_state_build(c):
-            called["n"] += 1
-            return {"fresh": True}
-
-        agent = MagicMock()
-        agent._state_build = original_state_build
-        agent.runtime_for_session = MagicMock(side_effect=RuntimeError("boom"))
-
-        ctx = MagicMock()
-        ctx.runtime = None
-        ctx.session_key = "postgres:chat-1"
-
-        RuntimePatcher().patch_context_bridge_seed(agent)
-        result = await agent._state_build(ctx)
-        assert called["n"] == 1
-        assert result == {"fresh": True}
+        spec_dict = getattr(RuntimePatcher, "_PATCH_SPECS", {})
+        assert "context_bridge_seed" not in spec_dict, (
+            "context_bridge_seed удалён из _PATCH_SPECS — apply_all "
+            "больше не регистрирует этот patch"
+        )
 
 
 class TestPatchReportClassification:
@@ -1039,9 +979,9 @@ class TestPatchReportClassification:
 
         report = PatchReport()
         RuntimePatcher._record(
-            report, "compact_tracking", (False, "import failed: cannot import name X"),
+            report, "assemble_outbound", (False, "import failed: cannot import name X"),
         )
-        assert report.failed == [("compact_tracking", "import failed: cannot import name X")]
+        assert report.failed == [("assemble_outbound", "import failed: cannot import name X")]
         assert report.skipped == []
 
     def test_agent_none_is_skipped(self):
@@ -1053,6 +993,11 @@ class TestPatchReportClassification:
         assert report.failed == []
 
     def test_idle_compact_enabled_is_skipped(self):
+        """Сохранено как legacy-причина — некоторые скипы теперь
+        классифицируются по другим правилам, но ``idle compact
+        enabled`` остаётся в ``_SKIPPABLE_REASONS`` для обратной
+        совместимости с PatchSpec.
+        """
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
@@ -1086,34 +1031,44 @@ class TestPatchReportClassification:
         assert report.failed == []
 
     def test_internal_failed_marker_reclassifies(self):
-        """``[INTERNAL_FAILED]`` от ``patch_project_tools`` → failed."""
+        """``[INTERNAL_FAILED]`` маркер → failed (не applied, не skipped)."""
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
         RuntimePatcher._record(
             report,
-            "project_tools",
-            (True, "[INTERNAL_FAILED] 3 project tools registered: foo; 1 failed: Bar"),
+            "save_turn",
+            (True, "[INTERNAL_FAILED] 3 turns saved: foo; 1 failed: Bar"),
         )
         assert report.failed == [
             (
-                "project_tools",
-                "[INTERNAL_FAILED] 3 project tools registered: foo; 1 failed: Bar",
+                "save_turn",
+                "[INTERNAL_FAILED] 3 turns saved: foo; 1 failed: Bar",
             ),
         ]
         assert report.skipped == []
-        assert "project_tools" not in report.applied
+        assert "save_turn" not in report.applied
 
     def test_details_recorded_for_every_state(self):
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        RuntimePatcher._record(report, "compact_command", (True, "/compact registered"))
+        RuntimePatcher._record(
+            report, "document_text_threshold",
+            (True, "reference_non_image_attachments patched"),
+        )
         RuntimePatcher._record(report, "save_turn", (False, "persist_threshold <= 0"))
-        RuntimePatcher._record(report, "compact_tracking", (False, "import failed: boom"))
-        assert report.details["compact_command"] == "/compact registered"
+        RuntimePatcher._record(
+            report, "assemble_outbound", (False, "import failed: boom"),
+        )
+        assert (
+            report.details["document_text_threshold"]
+            == "reference_non_image_attachments patched"
+        )
         assert report.details["save_turn"] == "persist_threshold <= 0"
-        assert report.details["compact_tracking"] == "import failed: boom"
+        assert (
+            report.details["assemble_outbound"] == "import failed: boom"
+        )
 
 
 class TestPatchReportRender:
@@ -1123,40 +1078,99 @@ class TestPatchReportRender:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        report.applied.append("compact_command")
+        report.applied.append("document_text_threshold")
         report.skipped.append(("save_turn", "persist_threshold <= 0"))
-        report.failed.append(("compact_tracking", "import failed: boom"))
+        report.failed.append(("assemble_outbound", "import failed: boom"))
         rendered = report.render()
-        assert "✓ compact_command" in rendered
+        assert "✓ document_text_threshold" in rendered
         assert "⚠ save_turn skipped: persist_threshold <= 0" in rendered
-        assert "✗ compact_tracking failed: import failed: boom" in rendered
+        assert "✗ assemble_outbound failed: import failed: boom" in rendered
 
     def test_render_includes_spec_purpose_for_failed(self):
         from lib.services.runtime_patcher import PatchReport, RuntimePatcher
 
         specs = RuntimePatcher.patch_specs()
         report = PatchReport()
-        report.failed.append(("compact_tracking", "import failed: boom"))
+        report.failed.append(("assemble_outbound", "import failed: boom"))
         rendered = report.render(specs=specs)
-        assert "✗ compact_tracking failed: import failed: boom" in rendered
-        assert "auto-compact" in rendered  # purpose из PatchSpec содержит это слово
+        assert "✗ assemble_outbound failed: import failed: boom" in rendered
+        assert "tool_audit" in rendered  # purpose из PatchSpec
 
 
 class TestPatchSpecs:
-    """Каждый патч из ``apply_all`` должен иметь ``PatchSpec``."""
+    """Каждый патч из ``apply_all`` должен иметь ``PatchSpec``,
+    три множества (apply_all AST / _PATCH_SPECS / canonical) —
+    попарно равны (финально — 12 patches)."""
 
-    def test_all_patches_have_specs(self):
+    def _extract_apply_all_names(self) -> set[str]:
+        """AST-извлечение имён patches из тела ``RuntimePatcher.apply_all``.
+
+        Берём все строки второго позиционного аргумента
+        ``self._record(report, "<name>", ...)``. Это даёт фактический
+        набор имён, которые ``apply_all`` пишет в ``PatchReport``.
+        """
+        import ast
+        import inspect
+        import textwrap
         from lib.services.runtime_patcher import RuntimePatcher
 
-        specs = RuntimePatcher.patch_specs()
-        expected = {
-            "context_governor", "save_turn", "exec_limits", "exec_timeout_cap",
-            "tool_limits", "assemble_outbound", "context_bridge_seed",
-            "async_save", "subagent_logging", "project_tools",
-            "compact_tracking", "compact_command", "idle_guard",
-            "session_content_cleanup", "document_text_threshold",
-        }
-        assert set(specs) == expected
+        source = textwrap.dedent(inspect.getsource(RuntimePatcher.apply_all))
+        tree = ast.parse(source)
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # Цель — атрибут ``self._record``
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "_record":
+                continue
+            if len(node.args) < 2:
+                continue
+            second = node.args[1]
+            if not isinstance(second, ast.Constant) or not isinstance(second.value, str):
+                continue
+            names.add(second.value)
+        return names
+
+    def test_inventory_is_exact(self):
+        """Main invariant: три множества попарно равны."""
+        from lib.services.runtime_patcher import RuntimePatcher
+        from lib.services.runtime_inventory import canonical_runtime_patches
+
+        apply_all_names = self._extract_apply_all_names()
+        patch_specs_names = set(RuntimePatcher.patch_specs())
+        canonical_names = {p.name for p in canonical_runtime_patches()}
+
+        assert apply_all_names == patch_specs_names, (
+            f"apply_all != _PATCH_SPECS: "
+            f"only in apply_all={apply_all_names - patch_specs_names}, "
+            f"only in _PATCH_SPECS={patch_specs_names - apply_all_names}",
+        )
+        assert apply_all_names == canonical_names, (
+            f"apply_all != canonical: "
+            f"only in apply_all={apply_all_names - canonical_names}, "
+            f"only in canonical={canonical_names - apply_all_names}",
+        )
+        assert patch_specs_names == canonical_names, (
+            f"_PATCH_SPECS != canonical: "
+            f"only in _PATCH_SPECS={patch_specs_names - canonical_names}, "
+            f"only in canonical={canonical_names - patch_specs_names}",
+        )
+
+    def test_inventory_size_is_12(self):
+        """Sanity check для этой change: ровно 12 patches во всех трёх множествах.
+
+        Этот тест не защищает архитектурный контракт (его защищает
+        ``test_inventory_is_exact``); он фиксирует текущее количество
+        patches и обновляется отдельно при добавлении legitimate patch'а.
+        """
+        from lib.services.runtime_patcher import RuntimePatcher
+        from lib.services.runtime_inventory import canonical_runtime_patches
+
+        apply_all_names = self._extract_apply_all_names()
+        assert len(apply_all_names) == 12
+        assert len(RuntimePatcher.patch_specs()) == 12
+        assert len(canonical_runtime_patches()) == 12
 
     def test_specs_have_required_fields(self):
         from lib.services.runtime_patcher import RuntimePatcher
@@ -1205,7 +1219,7 @@ class TestApplyAllFailed:
         )
         d = report.to_dict()
         assert "details" in d
-        assert "compact_command" in d["details"]
+        assert "document_text_threshold" in d["details"]
         assert "save_turn" in d["details"]
         assert "subagent_logging" in d["details"]
 
@@ -1226,3 +1240,532 @@ class TestApplyAllFailed:
             db_logging_service=None,
         )
         assert report.failed == [], f"unexpected failures: {report.failed}"
+
+
+def _make_stub_td_module(published, turn_completed_calls):
+    """Создать НЕЗАВИСИМЫЙ stub-модуль ``nanobot.agent.turn_delivery``.
+
+    Каждый вызов возвращает СВЕЖИЙ класс ``TurnDelivery`` — критично,
+    потому что патч мутирует ``TurnDelivery.fail`` на уровне класса,
+    и если использовать общий класс между тестами, состояние протекает.
+
+    Stub воспроизводит upstream ``turn_delivery.py:336-353``:
+    ``fail()`` зовёт ``await self.bus.publish_outbound(...)`` (а не
+    мутирует общий список в обход bus), чтобы per-instance прокси
+    ``_OutboundSilencer`` мог подавить outbound при вызове оригинала.
+    """
+    import types as _types
+
+    class _RuntimeEventPublisher:
+        async def turn_completed(self, **kwargs):
+            turn_completed_calls.append(kwargs)
+
+    class _StubBus:
+        def __init__(self, sink):
+            self._sink = sink
+
+        async def publish_outbound(self, msg):
+            self._sink.append(msg)
+
+    class _TurnDelivery:
+        def __init__(self):
+            self.lifecycle_message = None
+            self.bus = None
+            self.session_key = None
+            self._failure_error_kind = None
+            self.runtime_event_publisher = None
+
+        async def fail(self, *, publish_completion: bool) -> None:
+            from nanobot.bus.events import OutboundMessage
+
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=self.lifecycle_message.channel,
+                    chat_id=self.lifecycle_message.chat_id,
+                    content="Sorry, I encountered an error.",
+                    metadata=dict(self.lifecycle_message.metadata or {}),
+                )
+            )
+            if publish_completion:
+                await self.runtime_event_publisher.turn_completed(
+                    channel=self.lifecycle_message.channel,
+                    chat_id=self.lifecycle_message.chat_id,
+                    session_key=self.session_key,
+                    metadata=self.lifecycle_message.metadata,
+                    outcome="failed",
+                    failure_kind="internal",
+                )
+
+    mod = _types.ModuleType("nanobot.agent.turn_delivery")
+    mod.TurnDelivery = _TurnDelivery
+
+    def _make_instance():
+        inst = _TurnDelivery()
+        inst.lifecycle_message = MagicMock()
+        inst.lifecycle_message.channel = "cli"
+        inst.lifecycle_message.chat_id = "c1"
+        inst.lifecycle_message.metadata = {"foo": "bar"}
+        inst.lifecycle_message.sender_id = "u1"
+        # ``InboundMessage`` НЕ имеет ``session_key`` / ``user_id`` —
+        # ставим None, чтобы тесты провалились, если реализация
+        # по ошибке начнёт их читать.
+        inst.lifecycle_message.session_key = None
+        inst.lifecycle_message.user_id = None
+        inst.bus = _StubBus(published)
+        inst.session_key = "sess1"
+        inst._failure_error_kind = "RuntimeError"
+        inst.runtime_event_publisher = _RuntimeEventPublisher()
+        return inst
+
+    return mod, _make_instance
+
+
+class TestPatchTurnDeliveryFail:
+    """Контракт error fallback (``openspec/specs/runtime/error-fallback``)."""
+
+    @pytest.fixture
+    def stub_td_module(self, monkeypatch):
+        """Подменить ``nanobot.agent.turn_delivery`` stub-модулем.
+
+        Каждый вызов фикстуры создаёт СВЕЖИЙ класс ``TurnDelivery`` —
+        критично, потому что патч мутирует ``TurnDelivery.fail`` на
+        уровне класса, и общий класс между тестами протекал бы.
+
+        Возвращает ``(mod, published, turn_completed_calls, make_instance)``.
+        """
+        published: list = []
+        turn_completed_calls: list = []
+        mod, make_instance = _make_stub_td_module(
+            published, turn_completed_calls,
+        )
+        monkeypatch.setitem(sys.modules, "nanobot.agent.turn_delivery", mod)
+        return mod, published, turn_completed_calls, make_instance
+
+    @pytest.mark.asyncio
+    async def test_default_text_when_no_settings(self, stub_td_module):
+        _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        ok, msg = patcher.patch_turn_delivery_fail(settings=None)
+        assert ok, msg
+        from lib.services.runtime_patcher import (
+            _DEFAULT_INTERNAL_ERROR_TEXT,
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        # Ровно один outbound — наш fallback. Upstream-литерал подавлен
+        # per-instance прокси на ``self.bus``.
+        assert len(published) == 1
+        out = published[0]
+        assert out.content == _DEFAULT_INTERNAL_ERROR_TEXT
+        assert out.channel == "cli"
+        assert out.chat_id == "c1"
+        assert out.metadata.get("_error_kind") == "internal"
+        assert out.metadata.get("_final_turn") is True
+
+    @pytest.mark.asyncio
+    async def test_custom_text_from_settings(self, stub_td_module):
+        _, published, _, _ = stub_td_module
+        settings = {
+            "gateway": {
+                "error_messages": {
+                    "internal_error": "Сервис временно недоступен.",
+                },
+            },
+        }
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_turn_delivery_fail(settings=settings)
+        assert ok
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert len(published) == 1
+        assert published[0].content == "Сервис временно недоступен."
+
+    @pytest.mark.asyncio
+    async def test_no_exception_details_leak_to_user(self, stub_td_module):
+        """requirement: content содержит ТОЛЬКО заготовку, не str(exc)."""
+        _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        inst._failure_error_kind = "KeyError: agent_internal_state_xyz"
+        await inst.fail(publish_completion=True)
+
+        assert "KeyError" not in published[0].content
+        assert "agent_internal_state_xyz" not in published[0].content
+
+    @pytest.mark.asyncio
+    async def test_upstream_literal_not_published(self, stub_td_module):
+        """Upstream-литерал ``"Sorry, I encountered an error."`` НЕ ДОЛЖЕН
+        доходить до пользователя — это инвариант подмены.
+        """
+        _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        for msg in published:
+            assert msg.content != "Sorry, I encountered an error.", (
+                f"upstream literal leaked: {msg.content!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_log_to_db_true_writes_event(
+        self, stub_td_module, monkeypatch
+    ):
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append((svc, event, producer, event_type))
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        svc = MagicMock()
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(
+            settings=None, db_logging_service=svc, agent_id="agent_test",
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert len(recorded) == 1
+        svc_arg, log_event, producer, event_type = recorded[0]
+        assert svc_arg is svc
+        assert producer == "runtime_patcher"
+        assert event_type == "turn_failed"
+        assert log_event.event_type == "turn_failed"
+        assert log_event.session_id == "sess1"
+        assert log_event.channel == "cli"
+        assert log_event.payload["kind"] == "internal"
+        assert log_event.payload["failure_error_kind"] == "RuntimeError"
+        assert log_event.payload["agent_id"] == "agent_test"
+        assert log_event.payload["sender_id"] == "u1"
+        assert log_event.payload["chat_id"] == "c1"
+        # exception_available зависит от того, есть ли активное исключение
+        # при вызове. В pytest-asyncio без except-блока — False.
+        assert log_event.payload["exception_available"] is False
+        assert log_event.payload["exception_type"] is None
+        assert log_event.payload["exception_message"] is None
+
+    @pytest.mark.asyncio
+    async def test_log_to_db_false_skips_db(
+        self, stub_td_module, monkeypatch
+    ):
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(
+            settings={
+                "gateway": {"error_messages": {"log_to_db": False}},
+            },
+            db_logging_service=MagicMock(),
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert recorded == [], (
+            f"try_log_event called despite log_to_db=False: {recorded}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_db_logging_service_is_fail_open(
+        self, stub_td_module, monkeypatch
+    ):
+        """При ``db_logging_service=None`` fallback-сообщение всё равно
+        уходит пользователю (fail-open).
+        """
+        _, published, _, _ = stub_td_module
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            raise AssertionError("try_log_event should not be called")
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(
+            settings=None,
+            db_logging_service=None,
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert len(published) == 1
+        assert published[0].content == (
+            "Я не справился с вашим вопросом. "
+            "Попробуйте, пожалуйста, переформулировать конкретнее — "
+            "например, уточните ключевую часть или приведите пример."
+        )
+
+    @pytest.mark.asyncio
+    async def test_turn_completed_event_published(self, stub_td_module):
+        """``publish_completion=True`` — оригинальный ``fail`` зовёт
+        ``turn_completed`` (сохранение runtime-event публикации).
+        """
+        _, _, turn_completed_calls, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert len(turn_completed_calls) == 1
+        assert turn_completed_calls[0]["outcome"] == "failed"
+        assert turn_completed_calls[0]["failure_kind"] == "internal"
+
+    @pytest.mark.asyncio
+    async def test_turn_completed_not_published_when_completion_false(
+        self, stub_td_module
+    ):
+        _, _, turn_completed_calls, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=False)
+
+        assert turn_completed_calls == []
+
+    @pytest.mark.asyncio
+    async def test_session_key_from_turn_delivery_instance(
+        self, stub_td_module, monkeypatch
+    ):
+        """``session_key`` берётся из ``self.session_key`` (атрибут
+        ``TurnDelivery``), а НЕ из ``lifecycle_message`` (такого поля нет).
+        """
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+        # Поставим «плохое» значение в lifecycle_message.session_key —
+        # если реализация по ошибке его читает, тест упадёт.
+        inst.lifecycle_message.session_key = "WRONG_LIFECYCLE"
+        inst.session_key = "real_session_key"
+        await inst.fail(publish_completion=True)
+
+        assert recorded[0].session_id == "real_session_key"
+
+    @pytest.mark.asyncio
+    async def test_sender_id_from_lifecycle_message(
+        self, stub_td_module, monkeypatch
+    ):
+        """``sender_id`` берётся из ``lifecycle_message.sender_id``."""
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+        inst.lifecycle_message.sender_id = "u-42"
+        await inst.fail(publish_completion=True)
+
+        assert recorded[0].payload["sender_id"] == "u-42"
+        assert recorded[0].user_id == "u-42"
+
+    @pytest.mark.asyncio
+    async def test_agent_id_passed_through(
+        self, stub_td_module, monkeypatch
+    ):
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(
+            settings=None, db_logging_service=MagicMock(), agent_id="agent_main",
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert recorded[0].payload["agent_id"] == "agent_main"
+
+    @pytest.mark.asyncio
+    async def test_exception_available_inside_except_block(
+        self, stub_td_module, monkeypatch
+    ):
+        """При вызове из ``except``-блока ``sys.exception()`` возвращает
+        активное исключение — payload содержит ``exception_available=true``
+        и тип/текст исключения.
+        """
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+
+        try:
+            raise ValueError("boom-12345")
+        except Exception:
+            await inst.fail(publish_completion=True)
+
+        assert len(recorded) == 1
+        evt = recorded[0]
+        assert evt.payload["exception_available"] is True
+        assert evt.payload["exception_type"] == "ValueError"
+        assert evt.payload["exception_message"] == "boom-12345"
+
+    @pytest.mark.asyncio
+    async def test_exception_unavailable_degrades_gracefully(
+        self, stub_td_module, monkeypatch
+    ):
+        """Без активного исключения (прямой вызов из теста) — payload
+        содержит ``exception_available=false`` и ``null`` тип/сообщение.
+        """
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+        # Прямой вызов — НЕ из except-блока.
+        await inst.fail(publish_completion=True)
+
+        assert len(recorded) == 1
+        evt = recorded[0]
+        assert evt.payload["exception_available"] is False
+        assert evt.payload["exception_type"] is None
+        assert evt.payload["exception_message"] is None
+
+    def test_module_not_loaded_returns_false(self, monkeypatch):
+        """Если ``TurnDelivery`` модуль отсутствует в ``sys.modules`` —
+        патч возвращает ``(False, <reason>)`` без падения.
+        """
+        monkeypatch.delitem(
+            sys.modules, "nanobot.agent.turn_delivery", raising=False
+        )
+        patcher = RuntimePatcher()
+        ok, msg = patcher.patch_turn_delivery_fail(settings=None)
+        assert not ok
+        assert "not loaded" in msg
+
+    def test_turn_delivery_fail_missing_returns_false(self, stub_td_module):
+        """Если у stub-класса нет атрибута ``fail`` — патч no-op."""
+        stub_td_module[0].TurnDelivery.fail = None  # type: ignore[assignment]
+        patcher = RuntimePatcher()
+        ok, msg = patcher.patch_turn_delivery_fail(settings=None)
+        assert not ok
+        assert "missing" in msg
+
+    def test_invalid_internal_error_type_falls_back_to_default(
+        self, stub_td_module
+    ):
+        """Невалидный ``internal_error`` (не строка) → default-текст."""
+        _, _, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_turn_delivery_fail(
+            settings={
+                "gateway": {"error_messages": {"internal_error": 999}},
+            },
+        )
+        assert ok
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_path_untouched(self, stub_td_module):
+        """Патч не подменяет ``_process_message`` — CancelledError-ветка
+        upstream'а остаётся нетронутой. Здесь фиксируем только инвариант
+        «ровно один outbound» и отсутствие побочных эффектов.
+        """
+        _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert len(published) == 1
+        assert published[0].metadata.get("_error_kind") == "internal"
+
+    @pytest.mark.asyncio
+    async def test_bus_is_restored_after_original_fail(
+        self, stub_td_module
+    ):
+        """``self.bus`` восстанавливается после вызова оригинального
+        ``fail()`` — критично для следующих вызовов в этом обороте.
+        """
+        _, _, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        real_bus = inst.bus
+        await inst.fail(publish_completion=True)
+
+        assert inst.bus is real_bus

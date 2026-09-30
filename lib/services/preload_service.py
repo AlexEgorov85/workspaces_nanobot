@@ -16,11 +16,9 @@ stale) и:
 
 Legacy-методы ``preload_audit_cache`` / ``background_audit_cache_refresh``
 / ``start_audit_cache_tasks`` / ``stop_tasks`` / ``get_audit_cache_config``
-/ ``_audit_settings`` удалены в рефакторинге
-``refactor/core-extract-duckdb-faiss``: единственный писатель
-``audit_cache.duckdb`` теперь — ``DuckDbCacheStore.publish()`` через
-gateway (PgDuckDbSyncService → in-memory mirror → snapshot file). CLI-агент
-остаётся чистым читателем.
+/ ``_audit_settings`` отсутствуют: единственный писатель ``audit_cache.duckdb``
+— ``DuckDbCacheStore.publish()`` через gateway (PgDuckDbSyncService →
+in-memory mirror → snapshot file). CLI-агент остаётся чистым читателем.
 """
 
 from __future__ import annotations
@@ -29,6 +27,8 @@ import asyncio
 import logging
 import sys
 from typing import Any
+
+from lib.services.db_logging_service import LogEvent
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +40,17 @@ def _emit_health_event(
     level: str,
     service: Any | None,
 ) -> None:
-    """Один-в-one emit в ``agent_gateway_logs`` через ``DbLoggingService``.
+    """DEPRECATED: используется только тестами как testable unit контракта.
 
-    Единственный writer — ``DbLoggingService`` (через
-    :func:`lib.services.db_logging_service.try_log_event`).
+    Production call-site в ``preload_vector_indexes`` использует прямой
+    инлайн ``try_log_event`` (см. ниже). Helper оставлен для
+    ``tests/test_preload_service.py::TestEmitHealthEvent`` —
+    проверяет, что ``LogEvent`` собирается с правильными полями.
+
+    Lookup ``try_log_event`` через атрибут модуля (а не через локальный
+    импорт) — чтобы тесты, патчущие
+    ``lib.services.db_logging_service.try_log_event``, видели патч.
     """
-    from lib.services.db_logging_service import LogEvent, try_log_event
-
     log_event = LogEvent(
         event_type="vector_index_preload_health",
         level=level,
@@ -57,7 +61,8 @@ def _emit_health_event(
         summary=summary,
         payload=payload,
     )
-    try_log_event(
+    import lib.services.db_logging_service as _svc
+    _svc.try_log_event(
         service,
         log_event,
         producer="PreloadService",
@@ -287,9 +292,19 @@ class PreloadService:
             "orphan": health["orphan"],
             "stale": health["stale"],
         }
-        _emit_health_event(
-            summary=summary,
-            payload=payload,
-            level=health["level"],
-            service=self._db_logging_service,
+        import lib.services.db_logging_service as _db_logging_service
+        _db_logging_service.try_log_event(
+            self._db_logging_service,
+            LogEvent(
+                event_type="vector_index_preload_health",
+                level=health["level"],
+                session_id="gateway:sync",
+                channel=None,
+                actor="sync",
+                name="vector_index_preload_health",
+                summary=summary,
+                payload=payload,
+            ),
+            producer="PreloadService",
+            event_type="vector_index_preload_health",
         )

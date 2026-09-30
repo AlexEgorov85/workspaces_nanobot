@@ -73,8 +73,9 @@ def compute_index_signature(cfg: dict[str, Any]) -> str:
     допустим; отсутствующие трактуются как ``""``). Выход: 64-char hex.
 
     Детерминирована: одинаковый вход → одинаковый выход на любой платформе.
-    Используется для записи в ``agent_vector_index_store.metadata.signature``
-    и для последующей проверки ``verify_index_signature``.
+    Используется для проверки ``verify_index_signature``: подпись текущего
+    конфига сравнивается с подписью, сохранённой в metadata индекса
+    (в штатном пути metadata строится в памяти, подпись вычисляется inline).
     """
     parts: list[str] = []
     for key in _INDEX_SIGNATURE_FIELDS:
@@ -365,8 +366,8 @@ def read_vector_index_config(cfg: dict) -> dict[str, Any]:
 def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvider:
     """Универсальная фабрика: собрать провайдера из конфиг-секции навыка.
 
-    cfg — секция ``skills.<name>`` из project.json (Phase 7 модель:
-    ``tables: [...]``, ``vector_indexes: [...]``, ``cache.*``, ``embedding.*``).
+    cfg — секция ``skills.<name>`` из project.json (Resource Model:
+    ``tables: [...]``, ``vector_indexes: [...]``, ``cache.*``).
 
     base_dir — каталог, относительно которого разрешаются относительные пути
     индексов (для навыка это корень навыка; cache_path — единый runtime
@@ -1181,15 +1182,16 @@ class PostgresDuckDbProvider(CacheProvider):
             self._search_error = "Не установлены зависимости: faiss и numpy. Установите: pip install faiss-cpu numpy"
             return []
 
-        # Единый путь загрузки индекса (P0-3): persisted FAISS в PG-store →
-        # сырые векторы из PG → DuckDB-снимок навыка → .faiss файл на диске.
-        # Так STALE/INVALID-detection (``_check_index_signature``) работает
-        # на всех путях, а не только на store-пути preload.
+        # Единый путь загрузки индекса: in-memory кэш → сборка из
+        # DuckDB-снапшота (storage_table). Persisted-кеша нет, поэтому
+        # STALE/INVALID-detection (_check_index_signature) работает на
+        # единственном пути.
         idx, meta = self._load_index(index_path or "", index_name, self._vector_db_table)
         if idx is None:
             cache_txt = str(self._cache_path) if self._cache_path else "нет кэша"
             self._search_error = (
-                f"Индекс '{index_name}' не найден ни в store, ни в кэше ({cache_txt})"
+                f"Индекс '{index_name}' не найден в DuckDB-снапшоте ({cache_txt}): "
+                f"нет строк с source='{index_name}' в таблице векторов"
             )
             return []
 

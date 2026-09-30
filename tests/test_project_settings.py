@@ -731,3 +731,68 @@ class TestGatewayLegacyFailFast:
         })
         # Не падает; ключ становится extra-полем.
         assert result.gateway is not None
+
+
+class TestErrorMessagesSettings:
+    """Валидация ``gateway.error_messages.*`` (error fallback)."""
+
+    def test_section_absent_defaults_to_none(self) -> None:
+        """Без секции — поле ``error_messages`` равно ``None`` (не объект
+        с пустыми полями). Runtime-фоллбек сработает в ``runtime_patcher``.
+        """
+        result = validate_project_settings({"gateway": {}})
+        assert result.gateway is not None
+        assert result.gateway.error_messages is None
+
+    def test_section_present_with_defaults(self) -> None:
+        result = validate_project_settings({
+            "gateway": {"error_messages": {}},
+        })
+        assert result.gateway.error_messages is not None
+        # Pydantic сохраняет None для не заданных полей (default_factory
+        # не подменяет, как в ``flush_interval_sec``).
+        assert result.gateway.error_messages.internal_error is None
+        assert result.gateway.error_messages.log_to_db is None
+
+    def test_custom_text(self) -> None:
+        result = validate_project_settings({
+            "gateway": {
+                "error_messages": {
+                    "internal_error": "Сервис временно недоступен.",
+                    "log_to_db": False,
+                },
+            },
+        })
+        em = result.gateway.error_messages
+        assert em.internal_error == "Сервис временно недоступен."
+        assert em.log_to_db is False
+
+    def test_invalid_internal_error_type_fails_fast(self) -> None:
+        """Неверный тип ``internal_error`` → ``ConfigurationError``."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            validate_project_settings({
+                "gateway": {"error_messages": {"internal_error": 123}},
+            })
+        assert "error_messages" in str(exc_info.value)
+
+    def test_invalid_log_to_db_type_fails_fast(self) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            validate_project_settings({
+                "gateway": {"error_messages": {"log_to_db": [1, 2]}},
+            })
+        assert "error_messages" in str(exc_info.value)
+
+    def test_unknown_keys_allowed(self) -> None:
+        """``ErrorMessagesSettings`` наследует ``_StrictOptional`` —
+        неизвестные ключи разрешены (forward-compat под per-channel
+        тексты, когда они появятся).
+        """
+        result = validate_project_settings({
+            "gateway": {
+                "error_messages": {
+                    "internal_error": "x",
+                    "per_channel": {"cli": "y"},
+                },
+            },
+        })
+        assert result.gateway.error_messages.internal_error == "x"

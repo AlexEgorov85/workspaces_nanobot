@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-09-28
+goal: После change CLI и gateway отличаются только точкой входа (терминал vs
+  HTTP/WS-клиент) и наличием серверных сервисов (PostgresChannel worker pool,
+  проверка занятости WS-порта). Все сервисы (audit sync, cron, db logging,
+  hooks, runtime patches) идентичны и читают свои настройки из общей секции
+  gateway.* конфига.

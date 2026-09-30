@@ -200,6 +200,11 @@ PROFILE_OWNED_RUNTIME_KEYS = frozenset({
     ("channels", "postgres", "claims_table"),
     ("logging",  "db",       "table_name"),
     ("logging",  "db",       "question_runs_table"),
+    # NB (change ``unify-cli-gateway-architecture``, design D11/Stage 7):
+    # ``gateway.cache.local_path`` MUST NOT быть profile-owned ключом —
+    # это shared runtime resource, единый физический путь для gateway
+    # и CLI вне зависимости от профиля. Per-profile override ловится
+    # ``validate_profile_overlay`` через reject «extra keys» ниже.
 })
 
 EXPECTED_RUNTIME_TABLE_NAMES: dict[str, dict[str, str]] = {

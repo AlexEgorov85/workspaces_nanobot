@@ -593,11 +593,9 @@ async def _run_suite(
     # enable_audit=False при --no-audit (только локальные прогоны без DSN).
     enable_audit = not getattr(args, "no_audit", False)
     try:
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=BENCH_SCRIPT_DIR,
             workspace_dir=BENCH_WORKSPACE_DIR,
-            enable_db_logging=True,
-            enable_audit=enable_audit,
         )
     finally:
         # Восстанавливаем config.json даже при ошибке инициализации
@@ -617,7 +615,7 @@ async def _run_suite(
         ctx.sync_service is not None and ctx.cache_store is not None
     )
     if audit_ready:
-        ctx.cache_store.open()
+        ctx.cache_store.connect()
         ctx.sync_service.set_on_new_records_callback(
             ctx.cache_store.upsert_records
         )

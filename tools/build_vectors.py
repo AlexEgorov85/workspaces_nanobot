@@ -75,10 +75,7 @@ from lib.services.cache_provider_impl import (
     read_vector_index_config,
 )
 from lib.services.text_splitter import build_chunks
-from lib.services.vector_index_service import (
-    VectorIndexBuildService,
-    get_embedding,
-)
+from lib.services.vector_index_service import get_embedding
 from utils.db import configure, execute, fetch, resolve_dsn
 
 
@@ -202,7 +199,7 @@ def _validate_index_config(
         warnings.append("track_column не задан — используется дефолт 'updated_at'. "
                          "Если колонки updated_at нет, инкрементальный режим не будет работать")
 
-    # --- dostęp do source table в PG ---
+    # --- доступ к source table в PG ---
     available_cols: set[str] = set()
     if src_table and "." in src_table:
         db_schema, db_table_name = src_table.split(".", 1)
@@ -853,7 +850,7 @@ def main():
     args = parser.parse_args()
     _setup_logging(args.verbose)
 
-    # Предупреждение о FAISS-зависимостях (для rebuild_and_store_index)
+    # Предупреждение о FAISS-зависимостях (для provider.preload_indexes)
     try:
         import faiss  # noqa: F401
         import numpy  # noqa: F401
