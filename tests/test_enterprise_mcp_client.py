@@ -166,6 +166,195 @@ class TestChildEnv:
             del os.environ["PYTHONIOENCODING"]
 
 
+class TestLlmEnv:
+    """Capability ``llm`` получает провайдера из окружения, а не из config.json.
+
+    Платформе запрещён импорт конфига агента, поэтому единственный канал —
+    окружение процесса. Агент экспортирует туда только ``LLM_API_KEY``, а
+    модели и адреса у него в ``SETTINGS``: без явной передачи capability
+    осталась бы ненастроенной, и это выглядело бы как «сервер поднялся и не
+    работает».
+    """
+
+    def test_provider_reaches_child_env(self, monkeypatch) -> None:
+        from lib.services import enterprise_mcp_client as mod
+
+        monkeypatch.setattr(
+            mod,
+            "_llm_env_from_settings",
+            lambda: {
+                "ENTERPRISE_LLM_MODEL": "model-x",
+                "ENTERPRISE_LLM_API_BASE": "https://prov.invalid/v1",
+                "ENTERPRISE_LLM_API_KEY": "sk-x",
+            },
+        )
+        client = EnterpriseMcpClient(command="python")
+        env = client._child_env()
+        assert env["ENTERPRISE_LLM_MODEL"] == "model-x"
+        assert env["ENTERPRISE_LLM_API_BASE"] == "https://prov.invalid/v1"
+
+    def test_all_platform_fields_are_exported(self, monkeypatch) -> None:
+        """Все шесть полей, а не только модель: адрес и ключ тоже обязательны."""
+        from lib.services import enterprise_mcp_client as mod
+
+        cfg = {
+            "provider": "openai-compatible",
+            "model": "m",
+            "api_base": "https://p.invalid/v1",
+            "api_key": "k",
+            "max_tokens": 4096,
+            "temperature": 0.2,
+        }
+        monkeypatch.setattr(
+            "lib.services.llm_config.resolve_llm_config", lambda: cfg
+        )
+        assert mod._llm_env_from_settings() == {
+            "ENTERPRISE_LLM_PROVIDER": "openai-compatible",
+            "ENTERPRISE_LLM_MODEL": "m",
+            "ENTERPRISE_LLM_API_BASE": "https://p.invalid/v1",
+            "ENTERPRISE_LLM_API_KEY": "k",
+            "ENTERPRISE_LLM_MAX_TOKENS": "4096",
+            "ENTERPRISE_LLM_TEMPERATURE": "0.2",
+        }
+
+    def test_unresolvable_config_does_not_break_startup(self, monkeypatch) -> None:
+        """Capability остаётся ненастроенной, но запуск агента не падает.
+
+        Отказ должен быть виден на операции ``llm`` как ``infrastructure_error``,
+        а не обрушивать весь процесс: остальные capability к провайдеру
+        отношения не имеют.
+        """
+        from lib.services import enterprise_mcp_client as mod
+
+        def _boom() -> dict:
+            raise RuntimeError("не задана модель")
+
+        monkeypatch.setattr(
+            "lib.services.llm_config.resolve_llm_config", _boom, raising=True
+        )
+        assert mod._llm_env_from_settings() == {}
+        client = EnterpriseMcpClient(command="python")
+        assert "ENTERPRISE_LLM_MODEL" not in client._child_env()
+
+
+class TestVectorsEnv:
+    """Capability ``vectors`` получает объявления индексов и путь снимка.
+
+    Индексы объявлены у агента в ``project.json → gateway.vector.index``;
+    платформа их не читает, поэтому единственный канал — окружение процесса.
+    Потеря объявления означала бы «индексов нет» там, где они есть.
+    """
+
+    def test_declared_indexes_are_exported_as_json(self, monkeypatch) -> None:
+        from lib.services import enterprise_mcp_client as mod
+
+        indexes = {
+            "audits_index": {"table": "oarb.audits", "pk": "id", "content_columns": ["title"]},
+        }
+        monkeypatch.setattr(
+            mod,
+            "_project_gateway_vector_index",
+            lambda: {"enable": True, "storage_table": "oarb.audit_vectors", "indexes": indexes},
+        )
+        monkeypatch.setattr(
+            mod, "_agent_embedding_config", lambda: {"model": "m", "dimension": 1024, "http_timeout_sec": 60.0}
+        )
+        env = mod._vectors_env_from_settings("/tmp/cache.duckdb")
+        assert env["ENTERPRISE_SNAPSHOT_PATH"] == "/tmp/cache.duckdb"
+        assert env["ENTERPRISE_VECTOR_STORAGE_TABLE"] == "oarb.audit_vectors"
+        assert json.loads(env["ENTERPRISE_VECTOR_INDEXES"]) == indexes
+        assert env["ENTERPRISE_EMBED_MODEL"] == "m"
+        assert env["ENTERPRISE_EMBED_DIMENSION"] == "1024"
+
+    def test_embedder_address_is_exported_split_into_base_and_path(self, monkeypatch) -> None:
+        """Адрес эмбеддера передаётся — и разбирается на base и path.
+
+        Эмбеддер агента (Ollama) не является чат-провайдером. Без адреса
+        платформа пошла бы в эндпоинт эмбеддингов чат-провайдера и получила
+        бы 404, а подпись индекса разошлась бы с фактически использованной
+        моделью. Формат полного URL известен в одном месте — здесь.
+        """
+        from lib.services import enterprise_mcp_client as mod
+
+        monkeypatch.setattr(mod, "_project_gateway_vector_index", lambda: {})
+        monkeypatch.setattr(
+            mod,
+            "_agent_embedding_config",
+            lambda: {
+                "base_url": "http://localhost:11434/api/embed",
+                "model": "mxbai-embed-large:latest",
+                "dimension": 1024,
+                "auth_token": "secret-token",
+            },
+        )
+        env = mod._vectors_env_from_settings(None)
+        assert env["ENTERPRISE_EMBED_API_BASE"] == "http://localhost:11434"
+        assert env["ENTERPRISE_EMBED_PATH"] == "api/embed"
+        assert env["ENTERPRISE_EMBED_API_KEY"] == "secret-token"
+        assert env["ENTERPRISE_EMBED_MODEL"] == "mxbai-embed-large:latest"
+
+    def test_embedder_address_without_path_is_passed_as_is(self, monkeypatch) -> None:
+        """Адрес без пути эндпойнта не выдумывает путь: платформа возьмёт свой."""
+        from lib.services import enterprise_mcp_client as mod
+
+        monkeypatch.setattr(mod, "_project_gateway_vector_index", lambda: {})
+        monkeypatch.setattr(
+            mod, "_agent_embedding_config", lambda: {"base_url": "http://host:1234/v1"}
+        )
+        env = mod._vectors_env_from_settings(None)
+        assert env["ENTERPRISE_EMBED_API_BASE"] == "http://host:1234/v1"
+        assert "ENTERPRISE_EMBED_PATH" not in env
+
+    def test_no_http_client_duplicated_for_embedder(self, monkeypatch) -> None:
+        """Передача адреса НЕ означает второго HTTP-клиента.
+
+        Адрес — конфигурация; запрос по-прежнему делает ``libs/llm``.
+        Проверяется тем, что платформа не импортирует httpx вне
+        ``libs/llm`` — это отдельный страж (RESOURCE_OWNERS), и его тест
+        здесь не дублируется.
+        """
+        from lib.services import enterprise_mcp_client as mod
+
+        monkeypatch.setattr(mod, "_project_gateway_vector_index", lambda: {})
+        monkeypatch.setattr(
+            mod, "_agent_embedding_config", lambda: {"base_url": "http://localhost:11434/api/embed"}
+        )
+        env = mod._vectors_env_from_settings(None)
+        # В окружении уходят строки, а не объекты-клиенты и не импорты.
+        assert all(isinstance(v, str) for v in env.values())
+
+    def test_no_snapshot_path_means_unconfigured_not_empty_string(self) -> None:
+        """Нет пути — переменная не выставляется вовсе.
+
+        Пустая строка означала бы «снимок по пути ''» и упала бы при
+        открытии; отсутствие переменной оставляет capability ненастроенной с
+        внятной ошибкой, что и нужно оператору увидеть.
+        """
+        from lib.services import enterprise_mcp_client as mod
+
+        env = mod._vectors_env_from_settings(None)
+        assert "ENTERPRISE_SNAPSHOT_PATH" not in env
+
+    def test_missing_section_does_not_break_startup(self, monkeypatch) -> None:
+        """Нет секции vector в project.json — не ошибка, а «индексов нет».
+
+        Но модель эмбеддера при этом экспортируется: она входит в подпись
+        индекса, и потерять её из-за отсутствия объявлений индексов значило
+        бы пометить индекс STALE на ровном месте.
+        """
+        from lib.services import enterprise_mcp_client as mod
+
+        monkeypatch.setattr(mod, "_project_gateway_vector_index", lambda: {})
+        monkeypatch.setattr(
+            mod, "_agent_embedding_config", lambda: {"model": "m", "dimension": 1024}
+        )
+        env = mod._vectors_env_from_settings("/tmp/cache.duckdb")
+        assert env["ENTERPRISE_SNAPSHOT_PATH"] == "/tmp/cache.duckdb"
+        assert "ENTERPRISE_VECTOR_INDEXES" not in env
+        assert "ENTERPRISE_VECTOR_STORAGE_TABLE" not in env
+        assert env["ENTERPRISE_EMBED_MODEL"] == "m"
+
+
 # --- жизненный цикл ------------------------------------------------------
 
 

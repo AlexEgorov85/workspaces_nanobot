@@ -1,0 +1,1 @@
+"""Операции capability ``vectors``."""

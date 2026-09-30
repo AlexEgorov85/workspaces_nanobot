@@ -16,6 +16,13 @@
 Профиль вызывающей стороны, к которой относится операция, передан
 параметром ``audience`` и не выводится по умолчанию: логирование не должно
 писать в журнал входа в журнал.
+
+**Снимок — тоже здесь.** Добавлено при миграции ``enterprise-mcp-platform``
+(фаза 3): снимок DuckDB читается через переданный снаружи владелец
+(``libs/enterprise_data/snapshot``), а наружу отдаются только методы чтения.
+Так capability ``vectors`` получает строки отсюда и не знает ни про путь к
+файлу, ни про DuckDB. Собственных tool'ов у чтения снимка нет: операции
+принимают текст и имя индекса, а не SQL.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from typing import Any
 
 from libs.enterprise_common.errors import InfrastructureError, InvalidRequestError
 from libs.enterprise_data.jsonb import decode_jsonb
+
 from servers.enterprise.capabilities.data.service.writer import EventBuffer
 
 logger = logging.getLogger(__name__)
@@ -99,6 +107,7 @@ class DataService:
         max_rows: int = 1000,
         buffer_maxlen: int = 2048,
         buffer_flush_interval: float = 5.0,
+        snapshot: Any | None = None,
     ) -> None:
         self._db = db
         self._log_schema, self._log_table = log_table
@@ -109,6 +118,87 @@ class DataService:
             self._write_events,
             maxlen=buffer_maxlen,
             flush_interval=buffer_flush_interval,
+        )
+        # Владелец снимка (DuckDB) передаётся снаружи: сам сервис файл не
+        # открывает и пути к нему не знает. Открывает его composition root
+        # (server.py) через libs.enterprise_data.snapshot.open_snapshot_store.
+        self._snapshot = snapshot
+
+    # -- снимок -------------------------------------------------------------
+    #
+    # Единственная точка, через которую другие capability читают снимок.
+    # Capability ``vectors`` получает эти методы отсюда (container.get("data"))
+    # и не знает ни про путь к файлу, ни про DuckDB. Прямого доступа к
+    # ``self._snapshot`` наружу нет: второй путь к данным — это ровно то, чего
+    # граница «один владелец» и не должна допускать.
+
+    def _snapshot_store(self) -> Any:
+        """Хранилище снимка.
+
+        Raises:
+            InfrastructureError: снимок в сервис не подключён. Молчаливый
+                «снимка нет» выглядел бы как «индексов нет».
+        """
+        if self._snapshot is None:
+            raise InfrastructureError(
+                "снимок недоступен: хранилище не подключено к capability data "
+                "(проверьте регистрацию в server.py)"
+            )
+        return self._snapshot
+
+    def snapshot_is_ready(self) -> bool:
+        """Готов ли снимок к чтению."""
+        return bool(self._snapshot_store().is_ready())
+
+    def snapshot_stats(self) -> dict[str, Any]:
+        """Состояние хранилища снимка для диагностики."""
+        return dict(self._snapshot_store().get_stats())
+
+    def snapshot_query(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        """SELECT к снимку.
+
+        Для **внутренних** потребителей (другие capability через контейнер);
+        capability ``data`` не выставляет это в tool. Политика режима и запрет
+        DDL обеспечиваются владельцем (``CacheProvider.query_sql``), здесь
+        текст только переадресуется.
+        """
+        return dict(self._snapshot_store().query_sql(sql, params))
+
+    def snapshot_schema(
+        self,
+        schema_name: str | None = None,
+        table_names: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Структура таблиц снимка (``information_schema``).
+
+        Для внутренних потребителей; в tool capability ``data`` не выставляется.
+        """
+        return dict(self._snapshot_store().get_schema(schema_name, table_names))
+
+    def vector_source_stats(self) -> list[dict[str, Any]]:
+        """Источники векторного индекса со счётчиками, **без** сборки FAISS.
+
+        Отдаёт capability ``vectors`` для ``list_indexes``/``index_stats``.
+        """
+        return list(self._snapshot_store().vector_source_stats())
+
+    def fetch_source_vectors(self, source: str) -> list[dict[str, Any]]:
+        """Строки векторного хранилища одного источника (сборка индекса)."""
+        return list(self._snapshot_store().fetch_source_vectors(source))
+
+    def fetch_chunk_payload(
+        self,
+        source: str,
+        pk_value: Any,
+        chunk_index: int,
+    ) -> dict[str, Any]:
+        """Текст и исходная строка одного чанка (гидратация результата поиска)."""
+        return dict(
+            self._snapshot_store().fetch_chunk_payload(source, pk_value, chunk_index)
         )
 
     # -- доступ к пулу ------------------------------------------------------

@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -84,6 +85,8 @@ def _check_dependencies() -> None:
 def _build_container() -> ToolContainer:
     """Собрать контейнер: сервисы capability и конфигурация из окружения."""
     from servers.enterprise.capabilities.data.service.main import DataService
+    from servers.enterprise.capabilities.llm.service.main import LlmService
+    from servers.enterprise.capabilities.vectors.service.main import VectorsService
 
     expected = tuple(
         name.strip()
@@ -99,12 +102,121 @@ def _build_container() -> ToolContainer:
         max_rows=max_rows,
         buffer_maxlen=int(os.environ.get("ENTERPRISE_LOG_BUFFER_MAXLEN", "2048")),
         buffer_flush_interval=float(os.environ.get("ENTERPRISE_LOG_FLUSH_INTERVAL", "5")),
+        snapshot=_snapshot_from_env(),
     )
+    # Конфигурация LLM резолвится лениво, внутри сервиса. Сборка сервера
+    # обязана пережить её отсутствие: процесс обслуживает несколько
+    # capability, и забытая переменная провайдера не должна снимать из
+    # работы ``data``. Незаданный провайдер отдаёт ``infrastructure_error``
+    # на своей операции и виден как ``configured: false`` в health-отчёте.
+    llm = LlmService()
     container = ToolContainer(
-        services={"data": data},
+        services={"data": data, "llm": llm},
         config={"statement_timeout_ms": statement_timeout_ms, "max_rows": max_rows},
     )
+    # Регистрация ПОСЛЕ сборки контейнера: конструктор VectorsService берёт
+    # сервисы ``data`` и ``llm`` из контейнера сразу, а не на первом запросе.
+    # Причина — диагностика: отсутствие эмбеддера должно падать на сборке,
+    # а не отдавать агенту «индексов нет» там, где на самом деле нет провайдера.
+    container.register(
+        "vectors", VectorsService(container=container, config=_vectors_config_from_env())
+    )
     return container
+
+
+def _snapshot_from_env() -> Any:
+    """Открыть снимок DuckDB, если оператор его задал. Иначе — ``None``.
+
+    Снимок **не обязателен**. ``open_snapshot_store`` падает громко и
+    правильно (занятый файл, неподдерживаемая ФС), и требование снимка при
+    старте означало бы, что сервер перестаёт подниматься там, где capability
+    ``vectors`` не развёрнут, — вместе с работающим ``history_search``.
+
+    Без переменной снимок остаётся неподключённым, и чтение даёт
+    ``InfrastructureError`` («снимок недоступен»), а не «индексов нет»:
+    разница между «нечего искать» и «нечем искать» обязана быть видна.
+
+    Принимается именно **путь к файлу**, а не каталог: у агента путь
+    считается единственным механизмом ``resolve_cache_path()``, и требовать
+    от него ещё и разбирать свой путь обратно на каталог значило бы завести
+    второе место, где решается, где лежит снимок. Форма «каталог» остаётся в
+    платформе для standalone-утилит (``resolve_snapshot_path``), но не как
+    вторая переменная окружения.
+    """
+    path = os.environ.get("ENTERPRISE_SNAPSHOT_PATH", "").strip()
+    if not path:
+        return None
+    from libs.enterprise_data.snapshot import CacheAccessMode, open_snapshot_store
+
+    return open_snapshot_store(
+        path,
+        CacheAccessMode.READ_ONLY,
+        vector_db_table=os.environ.get("ENTERPRISE_VECTOR_DB_TABLE", ""),
+    )
+
+
+def _vectors_config_from_env() -> dict[str, Any]:
+    """Собрать конфигурацию capability ``vectors`` из окружения.
+
+    Форма повторяет ``project.json`` агента (``gateway.vector.*``), чтобы
+    перенос не переписывал объявления индексов руками: агент экспортирует их
+    в окружение процесса, платформа читает — и индекса, объявленного у
+    агента, не может случайно не оказаться здесь.
+
+    Пустые значения **не заменяются дефолтами**: подпись индекса обязана
+    отражать конфигурацию процесса, и выдуманный дефолт сделал бы её
+    одинаковой для настроенного и ненастроенного провайдера.
+    """
+    raw_indexes = os.environ.get("ENTERPRISE_VECTOR_INDEXES", "").strip()
+    indexes: dict[str, Any] = {}
+    if raw_indexes:
+        try:
+            parsed = json.loads(raw_indexes)
+        except json.JSONDecodeError as exc:
+            raise InfrastructureError(
+                f"ENTERPRISE_VECTOR_INDEXES не разбирается как JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise InfrastructureError(
+                "ENTERPRISE_VECTOR_INDEXES должен быть JSON-объектом вида "
+                "{имя индекса: описание}, получено "
+                f"{type(parsed).__name__}"
+            )
+        indexes = parsed
+
+    def _optional_int(name: str) -> int | None:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise InfrastructureError(
+                f"{name} должен быть целым числом, получено {raw!r}"
+            ) from exc
+
+    def _optional_float(name: str) -> float | None:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise InfrastructureError(
+                f"{name} должен быть числом, получено {raw!r}"
+            ) from exc
+
+    embedding = {
+        "model": os.environ.get("ENTERPRISE_EMBED_MODEL", "").strip() or None,
+        "dimension": _optional_int("ENTERPRISE_EMBED_DIMENSION"),
+        "timeout_sec": _optional_float("ENTERPRISE_EMBED_TIMEOUT"),
+    }
+    index = {
+        "enable": os.environ.get("ENTERPRISE_VECTOR_ENABLE", "1") != "0",
+        "storage_table": os.environ.get("ENTERPRISE_VECTOR_STORAGE_TABLE", "").strip(),
+        "indexes": indexes,
+    }
+    return {"gateway": {"vector": {"embedding": embedding, "index": index}}}
 
 
 def _log_table_from_env() -> tuple[str, str]:

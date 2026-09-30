@@ -494,7 +494,7 @@ class ApplicationContext:
         # of truth для ``_emit_project_tools_inventory_banner``.
         from lib.services.project_tool_loader import register_project_tools
 
-        ctx.enterprise_mcp = _make_enterprise_mcp(ctx.settings)
+        ctx.enterprise_mcp = _make_enterprise_mcp(ctx.settings, ctx)
         if ctx.enterprise_mcp is not None:
             logger.info(
                 "enterprise-mcp: клиент создан (%s), соединение ленивое",
@@ -1685,16 +1685,48 @@ def _make_preload(
     )
 
 
-def _make_enterprise_mcp(settings: Any) -> Any:
+def _make_enterprise_mcp(settings: Any, ctx: Any = None) -> Any:
     """Создать клиента к MCP-серверу ``enterprise-mcp``.
 
     ``None`` — раздел ``enterprise_mcp`` выключен или не задан. Это не
     ошибка: без него агент работает, но потребители, которым нужен
     сервер, отвечают структурной ошибкой вместо падения на старте.
+
+    Путь к снимку вычисляется здесь, через ``resolve_cache_path()``, и
+    передаётся клиенту: он уходит в процесс сервера переменной окружения, а
+    вычислять его на стороне платформы нельзя — там нет ни ``project.json``,
+    ни второго экземпляра этого механизма.
     """
     from lib.services.enterprise_mcp_client import client_from_settings
 
-    return client_from_settings(settings)
+    snapshot_path = _resolve_snapshot_file(ctx) if ctx is not None else None
+    return client_from_settings(settings, snapshot_path=snapshot_path)
+
+
+def _resolve_snapshot_file(ctx: ApplicationContext) -> str | None:
+    """Путь к файлу снимка по единственному механизму агента.
+
+    ``None`` — путь не вычислился. Это не повод поднимать исключение:
+    capability ``vectors`` останется ненастроенной и отдаст внятную ошибку
+    на своей операции, тогда как ``history_search`` продолжит работать.
+    """
+    if ctx is None:
+        return None
+    try:
+        gateway_cfg = ctx.config_service.settings_section("gateway") or {}
+        if not isinstance(gateway_cfg, dict):
+            gateway_cfg = {}
+        cache_cfg = gateway_cfg.get("cache")
+        if not isinstance(cache_cfg, dict):
+            cache_cfg = {}
+        return resolve_cache_path(ctx.config.workspace_path, cache_cfg)
+    except Exception:  # noqa: BLE001 - путь снимка не должен ронять запуск агента
+        logger.warning(
+            "enterprise-mcp: путь снимка не вычислился, capability vectors "
+            "останется ненастроенной",
+            exc_info=True,
+        )
+        return None
 
 
 def _make_cron_service(config: Any) -> Any:

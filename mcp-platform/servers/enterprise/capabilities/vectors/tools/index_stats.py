@@ -1,0 +1,55 @@
+"""Операция ``index_stats`` — метрики одного векторного индекса.
+
+Показывает векторы, размерность, время последней сборки и счётчик запросов.
+Как и ``list_indexes``, отвечает **без** поднятия FAISS: для ещё не
+собранного индекса ``vectors`` равен размеру источника в снимке, а
+``last_built_at`` — ``None``.
+"""
+
+from __future__ import annotations
+
+import json
+
+from libs.enterprise_common.container import ToolContainer
+from libs.enterprise_common.registry import ToolDefinition
+from servers.enterprise.capabilities.vectors.service.main import (
+    DEFAULT_INDEX,
+    VectorsService,
+)
+
+#: Контейнер подставляется загрузчиком при регистрации операции.
+container: ToolContainer | None = None
+
+
+def handle_index_stats(index_name: str = DEFAULT_INDEX) -> str:
+    """Метрики индекса: векторы, размерность, время сборки, число запросов.
+
+    Args:
+        index_name: Имя индекса.
+
+    Returns:
+        JSON с метриками индекса.
+    """
+    if container is None:  # pragma: no cover - защита от неверной сборки
+        raise RuntimeError("контейнер не инициализирован")
+    service: VectorsService = container.get("vectors")
+    return json.dumps(
+        service.index_stats(index_name),
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def create_tool(registry_container: ToolContainer) -> ToolDefinition:
+    global container
+    container = registry_container
+    return ToolDefinition(
+        name="index_stats",
+        description=(
+            "Метрики векторного индекса: число векторов, размерность, время "
+            "последней сборки, число выполненных поисков. Индекс не собирается."
+        ),
+        handler=handle_index_stats,
+        category="vectors",
+        tags=("vector", "diagnostics"),
+    )

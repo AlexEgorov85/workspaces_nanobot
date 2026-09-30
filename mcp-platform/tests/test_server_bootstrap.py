@@ -40,9 +40,17 @@ async def _call(transport: Any, name: str, arguments: dict[str, Any]) -> Any:
 
 
 class TestBootstrap:
-    def test_build_registers_expected_operations(self) -> None:
+    def test_data_surface_is_stable(self) -> None:
+        """Поверхность capability ``data`` фиксирована: её рост — явное решение.
+
+        Проверяется именно ``data``, а не весь реестр. Тест «список всех
+        операций сервера равен этому множеству» краснеет от каждой новой
+        capability, и рано или поздно его отключат целиком — вместе с
+        проверкой, которая в нём была.
+        """
         _, registry, _ = enterprise_server.build()
-        assert set(registry.names()) == {
+        by_category = registry.by_category()
+        assert {d.name for d in by_category["data"]} == {
             "log_event",
             "history_search",
             "schema_check",
@@ -50,9 +58,58 @@ class TestBootstrap:
             "update_task_status",
         }
 
-    def test_all_operations_belong_to_data(self) -> None:
+    def test_every_capability_has_a_registered_service(self) -> None:
+        """У каждой capability с операциями обязан быть сервис в контейнере.
+
+        Это ловит реальный класс отказа: файл операции подложен в
+        ``capabilities/<имя>/tools/``, а сервис в ``_build_container`` забыли.
+        Загрузчик операцию зарегистрирует, discovery её покажет, и она будет
+        падать ``InfrastructureError`` на ПЕРВОМ же вызове в проде.
+        """
+        _, registry, container = enterprise_server.build()
+        for category in registry.by_category():
+            assert container.get(category) is not None, (
+                f"у capability {category!r} есть операции, но сервис не зарегистрирован"
+            )
+
+    def test_no_capability_without_operations(self) -> None:
+        """Каталог capability без операций — недоделанная работа, а не заготовка.
+
+        Пустая capability в реестре не появится, но появится её каталог, и
+        следующий человек будет считать её перенесённой.
+        """
+        capabilities_dir = enterprise_server.CAPABILITIES_DIR
+        if not capabilities_dir.is_dir():
+            pytest.skip("каталог capability отсутствует")
+        # ``_template`` — заготовка под новую capability, ``__pycache__`` —
+        # артефакт импорта. Оба не перенос, и оставление ``_template`` в
+        # этом каталоге намеренное: с него начинают новую capability.
+        ignored = {"__pycache__"}
+        empty = [
+            entry.name
+            for entry in sorted(capabilities_dir.iterdir())
+            if entry.is_dir()
+            and entry.name not in ignored
+            and not entry.name.startswith("_")
+            and not list((entry / "tools").glob("*.py"))
+        ]
+        assert not empty, f"capability без операций: {empty}"
+
+    def test_runtime_only_tools_declare_permissions(self) -> None:
+        """Инструмент не для модели обязан объявлять permission.
+
+        Фильтрация model-facing инструментов живёт на стороне агента и
+        работает по ``permissions``/``tags``. Операция с тегом
+        ``runtime-only`` и пустым ``permissions`` не попала бы ни в один
+        список и молча висела бы в реестре без владельца.
+        """
         _, registry, _ = enterprise_server.build()
-        assert set(registry.by_category()) == {"data"}
+        for definition in registry:
+            if "runtime-only" in definition.tags:
+                assert definition.permissions, (
+                    f"операция {definition.name!r} помечена runtime-only, "
+                    "но не объявляет ни одного permission"
+                )
 
     def test_no_sql_surface_on_operations(self) -> None:
         """Произвольного SQL на поверхности агента не существует."""

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from contextlib import AsyncExitStack
@@ -82,6 +83,7 @@ class EnterpriseMcpClient:
         cwd: str | os.PathLike[str] | None = None,
         tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
         server_name: str = "enterprise-mcp",
+        snapshot_path: str | None = None,
     ) -> None:
         self._command = command
         self._args = list(args or [])
@@ -90,6 +92,10 @@ class EnterpriseMcpClient:
         self._cwd = str(Path(cwd)) if cwd else None
         self._timeout = float(tool_timeout_sec or DEFAULT_TOOL_TIMEOUT_SEC)
         self._server_name = server_name
+        # Путь к файлу снимка приходит снаружи, из единственного механизма
+        # агента (resolve_cache_path). None = «снимок не задан», и capability
+        # vectors остаётся ненастроенной с внятной ошибкой на операции.
+        self._snapshot_path = str(snapshot_path) if snapshot_path else None
         self._stack: AsyncExitStack | None = None
         self._session: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -112,6 +118,33 @@ class EnterpriseMcpClient:
         }
 
     # -- вызов -------------------------------------------------------------
+
+    async def list_operations(self) -> list[str]:
+        """Имена операций, которые сервер отдаёт в discovery.
+
+        Нужно не для красоты, а для диагностики: «сервер поднялся» и «сервер
+        отдаёт те операции, ради которых поднялся» — разные утверждения. Без
+        этого метода несовпадение состава операций обнаруживалось бы только
+        по жалобе пользователя на «индексы не ищутся».
+
+        Raises:
+            EnterpriseMcpUnavailable: сервер недоступен или не ответил.
+        """
+        session = await self._ensure_session()
+        try:
+            result = await asyncio.wait_for(
+                session.list_tools(), timeout=self._timeout
+            )
+        except asyncio.TimeoutError as exc:
+            await self._reset()
+            raise EnterpriseMcpUnavailable(
+                f"discovery не ответил за {self._timeout:g}с"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - транспорт любой формы
+            await self._reset()
+            raise EnterpriseMcpUnavailable(f"discovery не удался: {exc}") from exc
+        tools = sorted(getattr(result, "tools", None) or [], key=lambda t: t.name)
+        return [str(t.name) for t in tools]
 
     async def call(self, operation: str, arguments: dict[str, Any] | None = None) -> str:
         """Вызвать операцию и вернуть её текстовый ответ.
@@ -226,17 +259,173 @@ class EnterpriseMcpClient:
         ``PYTHONIOENCODING`` задаётся явно: сервер пишет в stderr по-русски,
         и на Windows с cp1251 кодировка консоли убила бы процесс на
         первом же сообщении.
+
+        Сверх наследования добавляется LLM-конфигурация capability ``llm``.
+        Причина: агент держит провайдера в ``SETTINGS``
+        (``agents.defaults.model``, ``providers.<p>.apiBase``), а в
+        ``os.environ`` экспортирует только ``LLM_API_KEY`` — этого не хватит
+        ни модели, ни адреса. Платформа не читает конфиг агента (такой импорт
+        запрещён архитектурным стражем), поэтому единственный источник —
+        окружение процесса, и заполняет его агент. Дублировать значения в
+        ``project.json`` нельзя: там уже не будет ни одного пути и ни одной
+        машины, и две копии провайдера разъедутся.
         """
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
+        env.update(_llm_env_from_settings())
+        env.update(_vectors_env_from_settings(self._snapshot_path))
         return env
 
 
-def client_from_settings(settings: Any) -> EnterpriseMcpClient | None:
+def _vectors_env_from_settings(snapshot_path: str | None) -> dict[str, str]:
+    """Передать в процесс конфигурацию capability ``vectors`` и путь снимка.
+
+    Платформа не читает ``project.json`` агента (такой импорт запрещён
+    архитектурным стражем), поэтому объявления индексов переезжают в
+    окружение процесса. Экспортируется ровно то, что уже является источником
+    истины у агента: ``gateway.vector.index.*`` из ``project.json`` и
+    параметры эмбеддера из ``read_embedding_config()``.
+
+    Путь снимка приходит **аргументом**, а не вычисляется здесь заново:
+    ``resolve_cache_path()`` — единственный механизм вычисления пути в
+    агенте, и второе вычисление того же пути разошлось бы с ним при любой
+    будущей правке. Пустой результат — «снимок не задан», а не «снимок
+    задан как пустая строка»: платформа тогда оставляет capability
+    ненастроенной, и чтение отдаёт внятную ошибку вместо «индексов нет».
+    """
+    env: dict[str, str] = {}
+    if snapshot_path:
+        env["ENTERPRISE_SNAPSHOT_PATH"] = str(snapshot_path)
+
+    # Объявления индексов и параметры эмбеддера экспортируются независимо.
+    # Модель эмбеддера входит в подпись индекса, поэтому её потеря из-за
+    # отсутствия секции ``gateway.vector.index.indexes`` (индексы могут
+    # прийти из реестра снимка) сделала бы индекс STALE на ровном месте.
+    index = _project_gateway_vector_index()
+    storage_table = str(index.get("storage_table") or "").strip()
+    if storage_table:
+        env["ENTERPRISE_VECTOR_STORAGE_TABLE"] = storage_table
+    env["ENTERPRISE_VECTOR_ENABLE"] = "0" if index.get("enable") is False else "1"
+    indexes = index.get("indexes")
+    if isinstance(indexes, dict) and indexes:
+        env["ENTERPRISE_VECTOR_INDEXES"] = json.dumps(indexes, ensure_ascii=False)
+
+    embedding = _agent_embedding_config()
+    if embedding.get("model"):
+        env["ENTERPRISE_EMBED_MODEL"] = str(embedding["model"])
+    if embedding.get("dimension") is not None:
+        env["ENTERPRISE_EMBED_DIMENSION"] = str(embedding["dimension"])
+    timeout = embedding.get("http_timeout_sec")
+    if timeout is not None:
+        env["ENTERPRISE_EMBED_TIMEOUT"] = str(timeout)
+
+    # Адрес и токен эмбеддера — это КОНФИГУРАЦИЯ, а не HTTP-клиент, и
+    # передавать её необходимо. Эмбеддер агента (Ollama) не является чат-
+    # провайдером: другой адрес, другой путь, другая размерность вектора. Без
+    # этих переменных платформа пошла бы в эндпойнт эмбеддингов чат-провайдера
+    # и получила бы 404, а подпись индекса, посчитанная для mxbai-embed-large,
+    # разошлась бы с фактически использованной моделью.
+    #
+    # Второго HTTP-клиента при этом не появляется: запрос по-прежнему делает
+    # ``libs/llm``, и страж ловит ``httpx`` вне его владельца.
+    base_url = str(embedding.get("base_url") or "").strip()
+    if base_url:
+        base, _, path = base_url.rstrip("/").partition("/api/")
+        if _:
+            # Адрес агента задан полным URL вместе с путём эндпоинта
+            # ("http://host:port/api/embed"). Платформа ждёт base и path
+            # отдельно, поэтому путь отделяется здесь — единственное место,
+            # где формат адреса известен.
+            env["ENTERPRISE_EMBED_API_BASE"] = base
+            env["ENTERPRISE_EMBED_PATH"] = f"api/{path}"
+        else:
+            env["ENTERPRISE_EMBED_API_BASE"] = base_url
+    token = embedding.get("auth_token")
+    if token:
+        env["ENTERPRISE_EMBED_API_KEY"] = str(token)
+    return env
+
+
+def _project_gateway_vector_index() -> dict[str, Any]:
+    """``project.json → gateway.vector.index`` без инициализации ``SETTINGS``.
+
+    Читается файл проекта напрямую, а не через ``SETTINGS``: клиент
+    создаётся при инициализации контекста, и требовать от него
+    lifecycle-gate конфигурации значило бы связать порядок сборки сервисов с
+    порядком инициализации настроек. Структура секции валидируется в
+    ``ProjectSettings``.
+    """
+    try:
+        from config import load_config_json
+
+        project = load_config_json("project.json")
+        gateway = project.get("gateway") or {}
+        vector = gateway.get("vector") or {}
+        index = vector.get("index") or {}
+    except Exception:  # noqa: BLE001 - отсутствие секции = индексов не объявлено
+        return {}
+    return index if isinstance(index, dict) else {}
+
+
+def _agent_embedding_config() -> dict[str, Any]:
+    """Параметры эмбеддера из единственного источника агента.
+
+    Адрес и bearer-токен **не** экспортируются: HTTP принадлежит capability
+    ``llm``, и вторая копия подключения к эмбеддеру была бы тем же нарушением
+    владения, ради которого страж ловит ``httpx`` вне её владельца.
+    """
+    try:
+        from lib.services.cache_provider_impl import read_embedding_config
+
+        cfg = read_embedding_config()
+    except Exception:  # noqa: BLE001 - нет конфигурации = подпись индекса неполна
+        logger.debug("enterprise-mcp: конфигурация эмбеддера не прочитана", exc_info=True)
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _llm_env_from_settings() -> dict[str, str]:
+    """Передать провайдера в процесс ``enterprise-mcp`` через окружение.
+
+    Fail-soft и без логирования ключа: если конфигурация не резолвится,
+    capability ``llm`` остаётся ненастроенной и честно отвечает
+    ``infrastructure_error`` на своей операции. Это не хуже молчаливого
+    подключения к не тому провайдеру, а диагностика указывает на конкретную
+    capability, а не на весь сервер.
+    """
+    try:
+        from lib.services.llm_config import resolve_llm_config
+
+        cfg = resolve_llm_config()
+    except Exception:  # noqa: BLE001 - конфиг LLM не должен ронять запуск
+        logger.debug(
+            "enterprise-mcp: LLM-конфигурация не разрешилась, capability llm "
+            "останется ненастроенной",
+            exc_info=True,
+        )
+        return {}
+    return {
+        "ENTERPRISE_LLM_PROVIDER": str(cfg.get("provider") or ""),
+        "ENTERPRISE_LLM_MODEL": str(cfg.get("model") or ""),
+        "ENTERPRISE_LLM_API_BASE": str(cfg.get("api_base") or ""),
+        "ENTERPRISE_LLM_API_KEY": str(cfg.get("api_key") or ""),
+        "ENTERPRISE_LLM_MAX_TOKENS": str(cfg.get("max_tokens") or ""),
+        "ENTERPRISE_LLM_TEMPERATURE": str(cfg.get("temperature") or ""),
+    }
+
+
+def client_from_settings(
+    settings: Any, *, snapshot_path: str | None = None
+) -> EnterpriseMcpClient | None:
     """Собрать клиента из ``project.json → enterprise_mcp``.
 
     ``None`` — раздел выключен или не задан: тогда потребитель сообщает
     об этом структурной ошибкой, а не падает.
+
+    ``snapshot_path`` — путь к файлу снимка, вычисленный вызывающей стороной
+    через ``resolve_cache_path()``. Клиент его не вычисляет: единственный
+    механизм вычисления пути в агенте один, и второе вычисление того же пути
+    разошлось бы с ним при первой же правке.
     """
     section = settings.get("enterprise_mcp") if settings is not None else None
     if not section:
@@ -253,4 +442,5 @@ def client_from_settings(settings: Any) -> EnterpriseMcpClient | None:
         tool_timeout_sec=float(
             section.get("tool_timeout_sec") or DEFAULT_TOOL_TIMEOUT_SEC
         ),
+        snapshot_path=snapshot_path,
     )
