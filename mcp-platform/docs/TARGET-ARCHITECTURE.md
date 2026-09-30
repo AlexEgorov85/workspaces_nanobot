@@ -109,9 +109,19 @@ PostgreSQL владеет соединениями одна. Запрет на �
 | `benchmarks/db.py` | 340 | `BenchmarkDB` — именованная операция записи |
 | `tools/migrate.py` | 252 | Раннер миграций схемы |
 | `tools/apply_test_profile_tables.py` | 97 | Применение DDL тест-профиля |
-| `lib/services/schema_validation.py` | 284 | Проверка наличия runtime-таблиц → health-операция |
+| `lib/services/schema_validation.py` | 284 | **Остаётся в агенте.** Проверяет наличие его же runtime-таблиц; `fetch` внедряется, поэтому транспорт перенаправляется на `data-mcp` |
+| `lib/utils/text_utils.py` | 96 | `sanitize_value` / `truncate_middle` — потребители это skill'ы и `history_search_tool` |
 | `lib/services/db_logging_service.py` | 1142 | Пакетная запись `agent_gateway_logs` / `agent_question_runs` |
-| `lib/services/db_logging_bus.py` | 166 | Шина событий логирования |
+
+⚠️ **Масштаб, который недооценивается:** `db_logging_service.py` — не лист, а
+хребет событий агента. На него ссылаются **19 файлов в `lib/`**, из них
+`runtime_patcher.py` содержит 26 вызовов, а `application_context.py` — 38.
+Хорошая новость: сама запись чистая — неблокирующая `queue.Queue` → один поток
+воркера → батчевый INSERT, и **сервис не владеет соединением**, а берёт общее
+через `run(...)`. Перенос писателя в `data-mcp` превращает горячий путь агента
+в MCP-клиент на каждом событии tool'а, каждом ходе и баннере старта.
+`db_logging_bus.py` при этом **остаётся в агенте**: он знает форму сообщений
+nanobot, писатель — нет.
 
 **Оговорка по `history_search_tool.py`:** его гарантия изоляции привязана к
 `nanobot.agent.tools.context.RequestContext`. Если перенести SQL, не перенеся
@@ -127,6 +137,14 @@ PostgreSQL владеет соединениями одна. Запрет на �
 | `lib/services/text_splitter.py` | 217 | Чанкинг текста перед эмбеддингом |
 | `tools/build_vectors.py` | 1023 | Сборка и прогрев. **Не dev-утилита:** FAISS в памяти, пересборка обязательна на каждом старте |
 | `tools/check_indexes.py` | 285 | Сверка объявленных индексов с рантаймом |
+| `lib/services/cache_provider_impl.py` | 476 | **Бо́льшая часть — векторная обвязка:** `get_embedding`, `read_embedding_config`, `read_vector_index_config`, `compute/verify_index_signature`, `list_runtime_vector_indexes`. Умирает только `_capture_schema_meta` |
+| `lib/services/preload_service.py` | 318 | Вся его работа — `store.preload_indexes()`, то есть сборка FAISS в памяти |
+| `lib/utils/duckdb_query.py` | 338 **частично** | `build_faiss_index`, `group_vector_hits`, `build_raw_items` — **единственный в репозитории код сборки FAISS.** Извлечь ДО удаления файла |
+| `lib/services/cache_provider.py` | 440 частично | Сам класс умирает, но концепции `SearchResult` и `IndexIntegrityError` векторные — переехать должны они |
+
+⚠️ `duckdb_query.py` и `cache_provider.py` — **смешанные модули под DuckDB-этикеткой.**
+Удалять их целиком нельзя: `vector-mcp` придётся заново выводить группировку
+чанков и косинусную нормализацию с нуля. Сначала извлечение, потом удаление.
 
 Конфигурация индексов переезжает как есть: `project.json::gateway.vector.index.indexes`
 (по индексу: таблица, pk, content/embedding-колонки, track-колонка, chunk_size,
@@ -147,25 +165,44 @@ chunk_overlap, metric).
 
 ### 4.4 Умирает
 
-**Кластер DuckDB** — 3 181 строка production-кода:
+**Кластер DuckDB** — ~2 600 строк, которые действительно умирают
+(из 3 600 строк кластера; остальное переезжает в `vector-mcp`):
 
-| Модуль | Строк |
-|---|---:|
-| `lib/services/duckdb_cache_store.py` | 1455 |
-| `lib/services/cache_provider_impl.py` | 476 |
-| `lib/services/cache_load_service.py` | 472 |
-| `lib/services/cache_provider.py` | 440 |
-| `lib/utils/duckdb_query.py` | 338 |
-
-**Каскадом за ними:**
-
-| Модуль | Строк | Почему умирает |
+| Модуль | Строк | Что умирает |
 |---|---:|---|
-| `lib/services/table_registry.py` | 347 | Единственная задача — перечислить таблицы для снапшота |
+| `lib/services/duckdb_cache_store.py` | 1455 | целиком — ATTACH, блокировки, `_read_conn` на вызов |
+| `lib/services/cache_load_service.py` | 472 | целиком — он существует только чтобы наполнить файл снапшота |
+| `lib/services/cache_provider.py` | 440 | ABC и `open_cache_provider` для локального файла |
+| `lib/utils/duckdb_query.py` | 338 | `run_query`, `explain_query`, `build_schema`, `rewrite_duck_sql` |
+| `lib/services/cache_provider_impl.py` | 476 | только `_capture_schema_meta` |
+
+**Каскадом — с оговорками:**
+
+| Модуль | Строк | Что умирает |
+|---|---:|---|
 | `lib/core/skill_registration.py` | 98 | Регистрирует skill-ресурсы в `TableRegistry` |
-| `lib/core/infra_registration.py` | 54 | Регистрирует `oarb.audit_vectors` как хранилище для снапшота |
-| `lib/services/preload_service.py` | 318 | Прогрев DuckDB-кэша и FAISS; остаётся только прогрев FAISS |
-| `lib/core/skill_config.py` | 325 | `get_in_memory_cache_path` и прочий cache-API уходят |
+| `lib/core/skill_config.py` | 325 | `get_in_memory_cache_path` и `build_cache_provider` |
+| `lib/core/project_settings.py` | 759 | секция `CacheSettings`; остальное остаётся |
+| `lib/services/runtime_health.py` | 210 | проверки компонент `duckdb_cache` и `vector_search` — перенаправить на два сервера |
+| `lib/core/application_context.py` | 1816 | 88 строк кэш-обвязки из 1816: `resolve_cache_path`, `_warn_if_cache_path_on_nfs`, `_init_cache_runtime`, `check_duckdb_cache`, `check_vector_search` |
+| `lib/services/__init__.py` | 8 | текст «DuckDB-кеш» в docstring устаревает |
+
+> ✅ **Хорошая новость для шага 1:** `runtime_patcher.py` (2252 строки) не нужно
+> трогать. Его единственное упоминание кэша — неиспользуемый DI-параметр
+> `cache_store: Any = None` (`:583`) с комментарием «резерв для будущих патчей».
+
+> ⚠️ **`table_registry.py` (347) НЕ умирает целиком.** Имя обманывает: это не
+> маппинг PG→DuckDB, а реестр ресурсов с тремя живыми потребителями, не связанными
+> со снапшотом:
+> * `resources_by_label("scripts_registry")` — резолвит **таблицу PostgreSQL**
+>   для `audit_analyzer` (через `skill_config.py:85-102`). Удаление сломает
+>   SQL-скрипты аудита в первый же день;
+> * `register_infra("vector.storage")` — регистрирует `oarb.audit_vectors`;
+> * `tracking_column_for` — описывает колонку-маркер в PG.
+>
+> Умирает только агрегация имён в список загрузки для `CacheLoadService`
+> (`application_context.py:1388`). Остальное расходится: векторная часть →
+> конфиг `vector-mcp`, `scripts_registry` → `audit-analyzer`.
 
 **Мёртвый код, обнаруженный попутно** (уже сломан, не связан с миграцией):
 
@@ -177,6 +214,9 @@ chunk_overlap, metric).
 | `sql/vectors/create_vector_index_store.sql` | Таблица уже удалена миграцией `V003` |
 | `workspace/skills/audit_analyzer/err1.log` | Случайный артефакт в каталоге skill'а |
 | `workspace/data_store/cache/**/*.py` (83 файла) | Черновые скрипты прошлых сессий |
+| `lib/utils/table_utils.py` (36) | **AGENTS.md устарел:** описывает использование в `_make_sync_services` (не существует, 0 совпадений) и `tools/build_vectors.py` (не импортирует). Единственный импортёр — `tests/test_table_utils.py` |
+| `lib/utils/retry.py` (70) | Два импортёра, и оба сами уходят: `cache_provider_impl.py:300`, `llm_client.py:28` |
+| `project.json::gateway.vector.index.default_root` | Помечен в самом конфиге как DEPRECATED |
 
 **Отдельные кандидаты на удаление — на ваше решение:**
 
@@ -220,7 +260,27 @@ chunk_overlap, metric).
 | `tools/audit_nanobot_contracts.py` | 194 | Проверка, что импортируемые символы nanobot существуют |
 | `tools/check_worker_pool_integrity.py` | 201 | Диагностика аренды задач воркерами |
 
-### 4.6 Требует вашего решения
+### 4.6 Модули, у которых нет владельца
+
+Аудит нашёл три модуля, которые не помещаются ни в один ящик целевой схемы.
+Все три — с **нулевым** числом импортов `nanobot` и без связи со слоем данных,
+то есть формально они уже независимы, но никто их не забирает.
+
+| Модуль | Строк | Проблема |
+|---|---:|---|
+| `lib/services/llm_client.py` | 199 | httpx-клиент с retry для OpenAI-совместимого чата. Потребители: домены-скиллы и `benchmarks/evaluator.py`. **Кто владеет LLM-выходом после расщепления?** |
+| `lib/services/llm_config.py` | 88 | Резолвит провайдера/модель/ключ из `agents.defaults` + `providers.*` |
+| `lib/core/skill_config.py` | 325 | Фасад настроек skill'а. Единственные потребители — `workspace/skills/*`, которые уезжают |
+
+Предлагаемое разрешение (нужно ваше подтверждение): **два независимых LLM-клиента.**
+Агент сохраняет свой провайдер для диалога; доменные сервисы получают собственный
+клиент в `libs/llm` со своей конфигурацией и своими ключами. Обратный вызов
+агента через MCP невозможен — это не провайдер инструментов, а канал управления.
+
+`skill_config.py` в этом случае теряет смысл: каждый домен читает **свой**
+конфиг из конфига платформы, а не из `project.json` агента.
+
+### 4.7 Требует вашего решения
 
 | Вопрос | Почему нельзя решить однозначно |
 |---|---|
@@ -289,22 +349,27 @@ chunk_overlap, metric).
 
 ## 8. Порядок работ
 
-Отличается от исходного плана: риск лежит не в доменах, а в удалении DuckDB.
+> **Поправка после аудита `lib/`.** В прошлой редакции я ставил удаление DuckDB
+> первым. Это неверно: код сборки FAISS живёт **внутри** DuckDB-модулей и читает
+> векторы из снапшота (`duckdb_query.build_faiss_index`). Удалив DuckDB раньше
+> `vector-mcp`, мы гасим векторный поиз и вынуждены отлаживать два класса отказа
+> одновременно. Ниже — исправленный порядок.
 
 | # | Шаг | Основание |
 |---|---|---|
-| 0 | Удалить сломанный мёртвый код (`structure_cache.py`, `extract_office_structure.py`) | Мешает инвентаризации, чинится за минуту |
-| 1 | **Атомарное удаление DuckDB** одним коммитом, без MCP-работы | Затрагивает `lib/services/`, 2 утилиты, 1 skill и 10 тестовых модулей. Самостоятельно проверяемо пересборкой baseline |
-| 2 | `libs/data` ← `workspace/utils/db.py` + `sql_safety` + `jsonb` + `clean_text` | Модуль уже чист и покрыт тестами; это перенос |
-| 3 | `data-mcp`: MCP-поверхность над `libs/data` | Тонкий слой: схемы инструментов, маппинг ошибок |
-| 4 | Логирование через `data-mcp` | Буфер в агенте, батчевый flush |
-| 5 | `vector-mcp` ← `vector_index_service` + `build_vectors` + `check_indexes` | FAISS в памяти, векторы из PG |
+| 0 | Удалить сломанный мёртвый код (`structure_cache.py`, `extract_office_structure.py`, `table_utils.py`, `retry.py`) | Уже сломан или уже мёртв. Мешают инвентаризации, чинится за минуты |
+| 1 | `libs/data` ← `workspace/utils/db.py` + `sql_safety` + `jsonb` + `clean_text` | Модуль уже чист и покрыт тестами; это перенос, а не постройка |
+| 2 | `data-mcp`: MCP-поверхность над `libs/data` | Тонкий слой: схемы инструментов, маппинг ошибок |
+| 3 | **`vector-mcp`**: сборка FAISS **напрямую из PostgreSQL** | Заменяет путь «снапшот → FAISS». Переносит `build_faiss_index`, `group_vector_hits`, `build_raw_items` и векторную половину `cache_provider_impl.py` |
+| 4 | **Удаление DuckDB** одним коммитом, без MCP-работы | К этому моменту векторный поиск уже не зависит от снапшота. Затрагивает `lib/services/`, 2 утилиты, 88 строк в `application_context.py` и 10 тестовых модулей. Проверяемо пересборкой baseline |
+| 5 | Логирование через `data-mcp` | Буфер в агенте, батчевый flush. `db_logging_bus.py` остаётся в агенте |
 | 6 | `libs/document` + перенос `legal_summarizer` | Самый чистый актив, ноль связности |
-| 7 | `audit_analyzer` поверх `data-mcp` / `vector-mcp` | CLI-граница уже существует |
+| 7 | `audit-analyzer` поверх `data-mcp` / `vector-mcp` | CLI-граница уже существует. Не забыть `scripts_registry`-резолв из `TableRegistry` |
 | 8 | Разделение зависимостей | Убрать офисные и векторные пакеты из `requirements.txt` агента, если не выбран вариант (A) по документам |
 
-Шаг 1 идёт **первым**, хотя в прошлой редакции документа он был последним:
-чем дольше живёт DuckDB, тем больше кода завязано на него.
+**Пересобрать baseline после шага 4, не до.** Строка допустимых падений (4
+предсуществующих) после удаления станет другой; чинить тесты удалённой
+подсистемы — работа без смысла.
 
 ---
 
@@ -315,3 +380,9 @@ chunk_overlap, metric).
 3. **Границы `data-mcp`** — доступен ли read-only SQL произвольной сложности агенту, или только именованные операции? Первое проще, второе безопаснее: произвольный `ILIKE` по 24 таблицам рано или поздно даст стоимость на полкорпуса.
 4. **Судьба `example.py` / dead tools** — удалять или хранить.
 5. **Судьба `benchmarks/`** — остаются в агенте или уезжают.
+6. **Кто владеет LLM-выходом** — `llm_client.py` + `llm_config.py` (287 строк)
+   остались без владельца. Предлагаю два независимых клиента: агент со своим
+   провайдером для диалога, домены со своим в `libs/llm`. Нужно подтверждение.
+7. **`schema_validation.py`** — остаётся в агенте (проверяет наличие его же
+   runtime-таблиц), но ходит в БД через внедрённый адаптер. Перенаправляется
+   на `data-mcp`, а не переезжает в него.
