@@ -449,14 +449,18 @@ chunk_overlap, metric).
 Проверено, что даёт `nanobot-ai==0.3.5`:
 
 * **`AgentHook` — 18 методов**, включая `after_execute_tool`, `on_error`,
-  `on_finally`, `before_iteration`, `finalize_content`;
-* **`AgentHookContext` мутабельный**: `messages`, `tool_results`, `error`,
-  `final_content` — обычные поля дата-класса;
-* **`AgentTurnHookContext.events: EventSink`** — хук может публиковать события;
+  `on_finally`, `before_iteration`;
+* **`AgentTurnHookContext.events: EventSink`** — `publish` + `accepts(type)`.
+  Публикация событий из хука — штатный механизм: собственный `AgentProgressHook`
+  в `nanobot` делает ровно это;
+* **`AgentTurnHookContext.metadata` / `.attributes`** — мутабельные `dict`,
+  передаваемые каждой `AgentTurnHookFactory`: второй канал для per-turn данных,
+  чище ключей в `OutboundMessage.metadata`;
 * **`finalize_content(context, content) -> str | None`** вызывается в
-  `agent/runner.py` в трёх местах — pipeline-хук на финальный контент;
+  `agent/runner.py` в трёх местах — **единственная** хук-точка, подменяющая
+  значение;
 * **`AgentTurnHookFactory = Callable[[AgentTurnHookContext], AgentHook | None]`** —
-  официальная фабрика per-turn хуков;
+  официальная фабрика per-turn хуков, цепочка собирается в `agent/turn_hooks.py`;
 * **23 события**, в том числе `TurnCompleted` (несёт `outcome`, `failure_kind`,
   `failure_error_kind`, `failure_attempts`), `TurnEndEvent`, `SessionTurnPersisted`,
   `SessionTurnStarted`, `ContextCompactionEvent`, `RecoveryStateEvent`,
@@ -469,26 +473,44 @@ chunk_overlap, metric).
 | 7 | `async_save` | **нашим классом** | `agent.sessions` — это наш `PGSessionManager`. Обёртка на `ThreadPoolExecutor` делается при создании в `session_storage.py` |
 | 11 | `session_content_cleanup` | **нашим классом** | Чистка NUL — забота PostgreSQL. `clean_text.py` уже делает это и уезжает в `libs/data`. Перенести в `PGSessionManager.save` |
 | 8 | `session_dir_watch` | **удалить** | Диагностика, выключена по умолчанию, тестов нет |
-| 6 | `assemble_outbound` | **урезать** | Хука «после сборки outbound» в 0.3.5 нет — подтверждено чтением `AgentHook`. `_final_turn` уходит на `TurnEndEvent`/`TurnCompleted`. `media` и `_tool_audit` остаются: прочитать их на отправке нечем |
-| 1 | `context_governor` | **остаётся** | `after_execute_tool` получает `result`, но `execution.py` возвращает `return result` — хук **не может** подменить содержимое в контексте. Для MCP-инструментов укорачивание делает сам `data-mcp`; для встроенных (`read_file`) патч остаётся |
+| 6 | `assemble_outbound` | **события** | Хука «после сборки outbound» в 0.3.5 нет, но хук может **опередить** её: `after_execute_tool` публикует `_tool_audit` и `media` через `turn_context.events` раньше, чем канал получит финальный outbound. `_final_turn` → `TurnEndEvent` |
+| 1 | `context_governor` | **частично хук** | Выгрузка большого результата в файл — побочный эффект, хук может. Но подстановка короткой ссылки в контекст — нет: `execution.py` делает `return result`, игнорируя хук. Остаётся подстановка для встроенных tool'ов; для MCP-инструментов её делает сам `data-mcp` |
 | 9 | `subagent_logging` | **остаётся** | `SubagentManager` конструирует `_SubagentHook` жёстко (`hook=_SubagentHook(task_id, status)`), фабрики нет. Точки вставки не существует — патч оправдан |
 | 3, 5 | `exec_limits`, `tool_limits` | **остаются** | Конфига в 0.3.5 нет. Альтернатива — свой `Tool`, наследующий `ExecTool`, вместо мутации чужого класса; требует проверки правил переопределения в реестре |
 | 4 | `exec_timeout_cap` | **пересмотреть** | Обоснование — длинные legal-задачи; уезжают в MCP, где LLM-вызов происходит в сервере |
 | 12 | `document_text_threshold` | **уходит с документами** | Публичная функция nanobot, но логика документная; переезжает вместе с решением по документам |
 
-**Итог: 12 → 5–6.** Четыре патча заменяются хуками или собственным классом без
-патча, ещё четыре уходят по мере миграции.
+**Итог: 12 → 4–5.** Шесть заменяются хуками, событиями или собственным классом
+(`1` частично, `2`, `6`, `7`, `10`, `11`), один удаляется (`8`), один уходит по
+миграции доменов (`12`).
+
+`subagent_logging` — единственный оставшийся патч с **структурным** блокером:
+`_SubagentHook` конструируется жёстко, фабрики для subagent'ов нет, то есть
+точка вставки отсутствует физически, а не из-за слабости хука.
+
+### Что хук может, а что — нет
+
+| Действие | Чем делается |
+|---|---|
+| наблюдение вызовов, параметров, результатов, ошибок | любой метод `AgentHook` |
+| запись в БД, файлы, счётчики | побочный эффект в хуке |
+| публикация события | `await turn_context.events.publish(...)` |
+| передача per-turn данных | мутабельные `turn_context.metadata` / `.attributes` |
+| подмена финального контента | `finalize_content` — возвращает значение |
+| **подмена результата tool'а** | **только инструментом или патчем** |
+
+Последняя строка — единственное ограничение, и в 0.3.5 оно ровно одно:
+`after_execute_tool` возвращает `None`, а `execution.py` делает `return result`.
 
 ### Пять правил вместо патча
 
 1. **Патчить наше, а не фреймворк.** Если поведение правится в
    `PGSessionManager`, патч не нужен — правь наш класс.
-2. **Подписка на событие вместо инъекции в metadata.** Уже сработало для
-   `compact_tracking`, теперь то же для `_final_turn` и fallback-текста.
-3. **Проверять не наличие хука, а наличие у него возвращаемого значения.**
-   `finalize_content` возвращает значение и подменяет контент; `after_execute_tool`
-   возвращает `None`, и `execution.py` делает `return result` — результат в
-   контекст попадёт исходный.
+2. **Событие вместо инъекции в `OutboundMessage.metadata`.** Хук публикует
+   событие через `turn_context.events`, потребитель подписывается. Сработало
+   для `compact_tracking`, теперь то же для `_final_turn`, `_tool_audit`, `media`.
+3. **Прямого запрета на хуки нет.** Проверять надо не наличие хука, а может ли
+   он повлиять **именно на то, что нужно изменить**.
 4. **Проверять наличие конфига до патча константы.** Для exec в 0.3.5 конфига нет.
 5. **Контрактные тесты на целевой API** уже есть в `tests/contract/`.
 

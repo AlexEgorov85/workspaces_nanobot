@@ -76,7 +76,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     Миграция на MCP · аудит завершён
   </div>
   <h1>Два сервера.<br>Агент теряет данные, код и патчи.</h1>
-  <p class="lede">PostgreSQL — единственный стор, DuckDB удаляется, FAISS собирается в памяти напрямую из базы. Всё, что касается данных, уходит в <strong>data-mcp</strong> и <strong>vector-mcp</strong>. Однопроцессный агент без бенчмарков, веб-интерфейса и мультимашинной аренды задач. Из двенадцати патчей Nanobot остаётся пять.</p>
+  <p class="lede">PostgreSQL — единственный стор, DuckDB удаляется, FAISS собирается в памяти напрямую из базы. Всё, что касается данных, уходит в <strong>data-mcp</strong> и <strong>vector-mcp</strong>. Однопроцессный агент без бенчмарков, веб-интерфейса и мультимашинной аренды задач. Из двенадцати патчей Nanobot остаётся четыре.</p>
 </header>
 
 <section>
@@ -155,7 +155,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <div class="card"><div class="big">21 781</div><span>строк в агенте сейчас</span></div>
     <div class="card"><div class="big" style="color:var(--warn)">~16 800</div><span>после трёх удалений</span></div>
     <div class="card"><div class="big" style="color:var(--accent)">~15 500</div><span>после замены патчей на хуки</span></div>
-    <div class="card"><div class="big" style="color:var(--accent)">12 → 5</div><span>патчей останется</span></div>
+    <div class="card"><div class="big" style="color:var(--accent)">12 → 4</div><span>патчей останется</span></div>
   </div>
 
   <div class="tbl-wrap" style="margin-top:16px">
@@ -242,7 +242,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
 </section>
 
 <section>
-  <div class="sec-head"><span class="sec-num">03</span><h2>12 патчей → 5: что заменяется хуками</h2></div>
+  <div class="sec-head"><span class="sec-num">03</span><h2>12 патчей → 4: что заменяется хуками и событиями</h2></div>
   <p class="sec-sub">Вы были правы, что стоит проверить хуки. Проверил фактическую поверхность <code>nanobot-ai==0.3.5</code>: у <code>AgentHook</code> 18 методов, у <code>AgentHookContext</code> мутабельные поля, и есть 23 события.</p>
 
   <div class="grid grid-2" style="margin-bottom:16px">
@@ -254,7 +254,8 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
       <ul style="font-size:13.5px;line-height:1.7;color:var(--body);padding-left:18px">
         <li><code>finalize_content(ctx, content) → str | None</code> — вызывается в <code>runner.py</code> трижды, <strong>подменяет финальный контент</strong></li>
         <li><code>AgentHookContext</code> мутабельный: <code>messages</code>, <code>tool_results</code>, <code>error</code></li>
-        <li><code>AgentTurnHookContext.events: EventSink</code> — хук публикует события</li>
+        <li><code>AgentTurnHookContext.events: EventSink</code> — <strong>публикация событий из хука</strong>, штатный механизм</li>
+        <li><code>turn_context.metadata</code> / <code>.attributes</code> — мутабельные dict, второй канал per-turn данных</li>
         <li><code>AgentTurnHookFactory</code> — официальная фабрика per-turn хуков</li>
         <li><code>TurnCompleted</code> несёт <code>outcome</code>, <code>failure_kind</code>, <code>failure_error_kind</code>, <code>failure_attempts</code></li>
       </ul>
@@ -262,10 +263,11 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <div class="card" style="background:var(--w10);border-color:var(--w28)">
       <div class="rule" style="margin-bottom:12px">
         <div class="rule-ic" style="background:rgba(168,102,47,.1);border-color:rgba(168,102,47,.3);color:var(--warn)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v5M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></div>
-        <div><h3>Ловушка, которую надо знать</h3><p>Наличие хука ≠ возможность повлиять.</p></div>
+        <div><h3>Ловушка — узкая, а не общая</h3><p>Единственное, чего хук не может.</p></div>
       </div>
-      <p style="font-size:13.5px;line-height:1.65">В <code>execution.py</code> вызов идёт так: <code>result = await tool.execute(...)</code> → <code>await hook.after_execute_tool(context, ..., result)</code> → <code>return result</code>. Хук получает результат, но <strong>возвращаемого значения не имеет</strong>, а раннер отдаёт <code>result</code> без изменений. Подменить содержимое результата в контексте через хук нельзя.</p>
-      <p style="font-size:13.5px;line-height:1.65;margin-top:10px">Отсюда правило: проверять не <em>наличие</em> хука, а наличие у него возвращаемого значения. <code>finalize_content</code> возвращает значение и подменяет контент — работает. <code>after_execute_tool</code> — нет.</p>
+      <p style="font-size:13.5px;line-height:1.65">В <code>execution.py</code> вызов идёт так: <code>result = await tool.execute(...)</code> → <code>await hook.after_execute_tool(context, ..., result)</code> → <code>return result</code>. Хук результат получает, но <strong>возвращаемого значения не имеет</strong>, а раннер отдаёт <code>result</code> без изменений. Подменить <em>содержимое результата tool'а</em> через хук нельзя.</p>
+      <p style="font-size:13.5px;line-height:1.65;margin-top:10px">Вот и всё ограничение. Наблюдать, писать в БД, публиковать события через <code>turn_context.events.publish</code>, менять <code>turn_context.metadata</code> — хук умеет всё. Собственный <code>AgentProgressHook</code> в nanobot публикует события именно так, то есть это задуманный паттерн.</p>
+      <p style="font-size:13.5px;line-height:1.65;margin-top:10px"><strong>Правило:</strong> проверять не наличие хука, а может ли он повлиять <em>именно на то, что нужно изменить</em>. Возвращаемое значение требуется только для подстановки значения.</p>
     </div>
   </div>
 
@@ -280,8 +282,8 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
       <tr><td class="num">7</td><td class="blk"><code>async_save</code></td><td><span class="verdict v-keep">нашим классом</span></td><td><code>agent.sessions</code> — это наш <code>PGSessionManager</code>. Обёртка на <code>ThreadPoolExecutor</code> делается при создании в <code>session_storage.py</code></td></tr>
       <tr><td class="num">11</td><td class="blk"><code>session_content_cleanup</code></td><td><span class="verdict v-keep">нашим классом</span></td><td>Чистка NUL — забота PostgreSQL. <code>clean_text.py</code> уже делает это и уезжает в <code>libs/data</code>. Перенести в <code>PGSessionManager.save</code></td></tr>
       <tr><td class="num">8</td><td class="blk"><code>session_dir_watch</code></td><td><span class="verdict v-cut">удалить</span></td><td>Диагностика, выключена по умолчанию, тестов нет</td></tr>
-      <tr><td class="num">6</td><td class="blk"><code>assemble_outbound</code></td><td><span class="verdict v-move">урезать</span></td><td>Хука «после сборки outbound» в 0.3.5 нет. <code>_final_turn</code> уходит на <code>TurnEndEvent</code>. <code>media</code> и <code>_tool_audit</code> остаются: прочитать их на отправке нечем</td></tr>
-      <tr><td class="num">1</td><td class="blk"><code>context_governor</code></td><td><span class="verdict v-move">остаётся</span></td><td>Из-за <code>return result</code> хук не может укоротить результат. Для MCP-инструментов это делает сам <code>data-mcp</code>, для встроенных — остаётся патч</td></tr>
+      <tr><td class="num">6</td><td class="blk"><code>assemble_outbound</code></td><td><span class="verdict v-move">урезать</span></td><td>Хука «после сборки outbound» нет, но хук может <strong>опередить</strong> её: <code>after_execute_tool</code> публикует <code>_tool_audit</code> и <code>media</code> через <code>turn_context.events</code> раньше финального outbound. <code>_final_turn</code> → <code>TurnEndEvent</code></td></tr>
+      <tr><td class="num">1</td><td class="blk"><code>context_governor</code></td><td><span class="verdict v-move">остаётся</span></td><td>Выгрузка в файл — побочный эффект, хук может. Подстановка ссылки — нет, из-за <code>return result</code>. Остаётся только для встроенных tool'ов; для MCP-инструментов это делает <code>data-mcp</code></td></tr>
       <tr><td class="num">9</td><td class="blk"><code>subagent_logging</code></td><td><span class="verdict v-move">остаётся</span></td><td><code>SubagentManager</code> конструирует <code>_SubagentHook</code> жёстко, фабрики нет — точки вставки не существует. Патч оправдан</td></tr>
       <tr><td class="num">3, 5</td><td class="blk"><code>exec_limits</code>, <code>tool_limits</code></td><td><span class="verdict v-move">остаются</span></td><td>Конфига в 0.3.5 нет. Альтернатива — свой <code>Tool</code> вместо мутации чужого класса; требует проверки правил переопределения в реестре</td></tr>
       <tr><td class="num">4</td><td class="blk"><code>exec_timeout_cap</code></td><td><span class="verdict v-move">пересмотреть</span></td><td>Обоснование — длинные legal-задачи; уезжают в MCP, где LLM-вызов происходит в сервере</td></tr>

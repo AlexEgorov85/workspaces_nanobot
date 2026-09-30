@@ -42,25 +42,100 @@ runtime patch'ом — это отдельный loader
 `canonical_runtime_patches()` (попарно равны — exact-match тест
 [`tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`](../../tests/test_runtime_patcher.py)).
 
-| # | Патч | Target (nanobot API) | Risk | Required | Категория |
-|---|---|---|---|---|---|
-| 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | MEDIUM | ✓ | ISOLATE+TESTS |
-| 2 | `save_turn` | `agent._save_turn` | HIGH | ✓ | KEEP |
-| 3 | `exec_limits` | константы + schema tools | MEDIUM | — | REVIEW |
-| 4 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + schema | MEDIUM | — | KEEP |
-| 5 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | REVIEW |
-| 6 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | KEEP |
-| 7 | `async_save` | `agent.sessions.save` | MEDIUM | — | KEEP |
-| 8 | `session_dir_watch` | `sessions.save` (diagnostic) | LOW | — | KEEP (gated) |
-| 9 | `subagent_logging` | `_SubagentHook` (подмена класса) + публикация `SubagentTurnCompleted` через `bus.publish` | HIGH | ✓ | KEEP |
-| 10 | `turn_delivery_fail` | `TurnDelivery.fail` (private, класса) | MEDIUM | — | KEEP |
-| 11 | `session_content_cleanup` | `Session.add_message` | LOW | — | KEEP |
-| 12 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | — | KEEP |
+| # | Патч | Target (nanobot API) | Risk | Required | Категория | Условие удаления |
+|---|---|---|---|---|---|---|
+| 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | MEDIUM | ✓ | ISOLATE+TESTS | хук выгружает результат в файл; остаётся только подстановка ссылки для встроенных tool'ов. Исчезает, когда тяжёлые запросы уйдут в MCP |
+| 2 | `save_turn` | `agent._save_turn` | HIGH | ✓ | KEEP | **хуки:** `after_execute_tool` вызывается раньше, чем upstream усечёт результат |
+| 3 | `exec_limits` | константы + schema tools | MEDIUM | — | REVIEW | upstream даст конфигурацию лимитов |
+| 4 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + schema | MEDIUM | — | KEEP | legal уезжает в MCP — LLM-вызов уходит из процесса агента |
+| 5 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | REVIEW | upstream даст конфигурацию лимитов |
+| 6 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | KEEP | **события:** `_final_turn` → `TurnEndEvent`, `_tool_audit` и `media` → публикация через `turn_context.events` |
+| 7 | `async_save` | `agent.sessions.save` | MEDIUM | — | KEEP | **собственный класс:** `agent.sessions` — это `PGSessionManager`, патч не нужен |
+| 8 | `session_dir_watch` | `sessions.save` (диагностика) | LOW | — | KEEP (gated) | **удаляется** — гейт выключен по умолчанию, тестов нет |
+| 9 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст фабрику хуков для subagent'ов (сейчас `_SubagentHook` конструируется жёстко) |
+| 10 | `turn_delivery_fail` | `TurnDelivery.fail` | MEDIUM | — | KEEP | **хуки:** `finalize_content` заменяет текст, `on_error` + `TurnCompleted` дают логирование |
+| 11 | `session_content_cleanup` | `Session.add_message` | LOW | — | KEEP | **собственный класс:** `PGSessionManager.save` — `clean_text.py` уже делает это для PostgreSQL |
+| 12 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | — | KEEP | документы уезжают в `libs/document` |
 
 `Required = ✓` (4 патча: `assemble_outbound`, `save_turn`,
 `subagent_logging`, `context_governor`) — критичность для
 diagnostics в startup-баннере. **НЕ** означает startup-abort
 (см. `openspec/specs/runtime/context/spec.md`).
+
+---
+
+## Поверхность расширения `nanobot-ai==0.3.5`
+
+Проверено чтением установленного пакета. Это основание для колонки
+«Условие удаления».
+
+| Механизм | Что даёт | Значение для патчей |
+|---|---|---|
+| `AgentHook` | 18 методов, в т.ч. `after_execute_tool`, `on_error`, `on_finally`, `before_iteration` | наблюдение и побочные эффекты |
+| `AgentTurnHookContext.events: EventSink` | `publish: Callable[[AgentEvent], Awaitable[None]]` + `accepts(type)` для пропуска дорогого производства без потребителя | **публикация событий из хука — штатный механизм** |
+| `AgentTurnHookContext.metadata` / `.attributes` | мутабельные `dict`, передаваемые каждой `AgentTurnHookFactory` | второй канал для per-turn данных, чище ключей в `OutboundMessage.metadata` |
+| `AgentTurnHookFactory` | `Callable[[AgentTurnHookContext], AgentHook \| None]`; цепочка собирается в `agent/turn_hooks.py` | официальная фабрика per-turn хуков |
+| `finalize_content(ctx, content) -> str \| None` | вызывается в `agent/runner.py` в трёх местах | **единственная хук-точка, подменяющая значение** |
+| 23 события | `TurnCompleted` (несёт `outcome`, `failure_kind`, `failure_error_kind`, `failure_attempts`), `TurnEndEvent`, `SessionTurnPersisted`, `SessionTurnStarted`, `ContextCompactionEvent`, `RecoveryStateEvent`, `RetryStatusEvent`, `RetryWaitEvent` | замена инъекции в `metadata` подпиской |
+
+Собственный `AgentProgressHook` в наборе `nanobot` публикует события
+прогресса через тот же `EventSink` — публикация из хука является задуманным
+паттерном, а не обходным путём.
+
+### Что хук может, а что — нет
+
+Хук **может**: наблюдать всё (вызовы, параметры, результаты, ошибки, поток,
+итерации), писать в БД, публиковать события в шину хода, менять
+`turn_context.metadata` и `.attributes`, и — если метод возвращает значение —
+подменять это значение.
+
+Хук **не может только одно**: заменить значение, которое фреймворк передаёт
+дальше, не используя возвращаемое значение хука. В 0.3.5 такой случай ровно
+один. Проверено в `nanobot/agent/tools/execution.py`:
+
+```python
+result = await tool.execute(**params)          # или tools.execute(...)
+...
+await hook.after_execute_tool(context, tool_call, tool, params, result)
+...
+return result, {...}                           # возвращается ИСХОДНЫЙ result
+```
+
+`after_execute_tool` возвращает `None`, и раннер отдаёт `result` без изменений.
+Поэтому хук годится для выгрузки большого результата в файл (побочный
+эффект), но **не годится для подстановки короткой ссылки в контекст**.
+
+Отсюда правило — и оно уже, чем звучало раньше:
+
+> Проверять надо не наличие хука, а **может ли он повлиять именно на то, что
+> нужно изменить**: побочным эффектом, публикацией события, мутацией
+> `metadata` или возвращаемым значением. Возвращаемое значение требуется
+> только для подстановки значения.
+
+### Пять правил вместо патча
+
+1. **Патчить наше, а не фреймворк.** Если поведение правится в
+   `PGSessionManager`, патч не нужен — правь наш класс (`async_save`,
+   `session_content_cleanup`).
+2. **Событие вместо инъекции в `OutboundMessage.metadata`.** Хук публикует
+   событие через `turn_context.events`, потребитель подписывается. Сработало
+   для `compact_tracking`; та же схема применима к `_tool_audit`, `media` и
+   `_final_turn`.
+3. **Хук вместо патча — почти всегда.** Прямых запретов на хуки нет; единственное
+   исключение разобрано выше и касается только подстановки значения.
+4. **Проверять наличие конфига до патча константы.** Для exec в 0.3.5 конфига нет.
+5. **Контрактные тесты на целевой API** — в `tests/contract/`.
+
+### Ожидаемый результат
+
+12 патчей → **4–5**. Шесть заменяются хуками, событиями или собственным
+классом (`1` частично, `2`, `6`, `7`, `10`, `11`), один удаляется (`8`), один
+уходит по миграции доменов (`12`).
+
+Остаются: `1` — только подстановка ссылки для встроенных tool'ов, и при
+переносе тяжёлых запросов в MCP он тоже исчезает; `9` — у `SubagentManager`
+нет фабрики хуков, точка вставки структурно отсутствует; `3` и `5` — нет
+конфигурации upstream; `4` — пересматривается вместе с уходом legal в MCP.
 
 ---
 
