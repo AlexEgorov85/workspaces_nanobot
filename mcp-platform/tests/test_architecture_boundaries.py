@@ -74,10 +74,17 @@ RESOURCE_OWNERS: tuple[tuple[str, frozenset[str]], ...] = (
                 "SimpleConnectionPool",
                 "ThreadedConnectionPool",
                 "AbstractConnectionPool",
+                # Снимок DuckDB — файл во владении capability ``data``.
+                # Токены точечные, а не голое ``duckdb``: строка про «снимок
+                # duckdb недоступен» в тексте ошибки — не нарушение владения,
+                # и общий запрет на слово превращал бы страж в шум, который
+                # однажды отключат целиком.
+                "duckdb.connect",
+                "ATTACH",
             }
         ),
     ),
-    ("libs/vector_index", frozenset({"faiss"})),
+    ("libs/vectors", frozenset({"faiss"})),
     ("libs/llm", frozenset({"chat/completions"})),
 )
 
@@ -287,9 +294,43 @@ def test_service_owners_guard_detects_violation() -> None:
             "servers/enterprise/capabilities/llm/service/client.py",
             "URL = 'https://api/v1/chat/completions'\n",
         ),
+        # Снимок DuckDB открывается только во владельце. Capability ``vectors``
+        # получает снимок сервисом, поэтому собственный ``duckdb.connect``
+        # там — это вторая копия файла кэша в обход владения.
+        (
+            "servers/enterprise/capabilities/vectors/service/snapshot.py",
+            "import duckdb\n\ndef f(path):\n    return duckdb.connect(path)\n",
+        ),
+        (
+            "servers/enterprise/capabilities/vectors/service/attach.py",
+            "SQL = \"ATTACH 'cache.duckdb' AS snap\"\n",
+        ),
     )
     for rel, source in cases:
         assert _scan_source(source, rel), f"страж промолчал на {rel}"
+
+
+def test_service_owners_guard_allows_snapshot_owner() -> None:
+    """Снимок — файл во владении ``data``: ``libs/enterprise_data`` его домен.
+
+    Вложенный подпакет ``snapshot/`` попадает под префикс владельца, поэтому
+    правило «duckdb.connect только там» не запрещает само владение.
+    """
+    source = "import duckdb\n\ndef f(path):\n    return duckdb.connect(path)\n"
+    assert _scan_source(source, "libs/enterprise_data/snapshot/store.py") == []
+
+
+def test_service_owners_guard_does_not_flag_prose_about_duckdb() -> None:
+    """Слово «duckdb» в тексте ошибки — не нарушение владения.
+
+    Страж, который ругается на упоминание в прозе, однажды будет отключён
+    целиком вместе с настоящей проверкой. Поэтому токены точечные.
+    """
+    source = (
+        "def f():\n"
+        "    raise RuntimeError('снимок duckdb недоступен: файл занят')\n"
+    )
+    assert _scan_source(source, "servers/enterprise/capabilities/vectors/service/main.py") == []
 
 
 def test_service_owners_guard_allows_owner() -> None:
