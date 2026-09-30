@@ -36,37 +36,79 @@ mcp-platform/
 ├── requirements.txt          # только enterprise-стек, без nanobot
 ├── docs/
 │   ├── BASELINE.md           # точка отсчёта миграции (фаза 0)
-│   └── MIGRATION.md          # что куда переносится и в каком порядке
+│   ├── MIGRATION.md          # что куда переносится и в каком порядке
+│   └── TARGET-ARCHITECTURE.md
 ├── libs/
-│   ├── enterprise_common/    # config, models, errors, serialization
-│   └── enterprise_data/      # postgres, duckdb, vector (FAISS)
+│   ├── enterprise_common/    # config, models, errors, реестр инструментов
+│   └── enterprise_data/      # postgres, vector (FAISS)
 ├── servers/
-│   └── _template/            # ЭТАЛОН. Копируется, а не выдумывается заново.
+│   ├── _template/            # ЭТАЛОН. Копируется, а не выдумывается заново.
+│   └── <name>/
+│       ├── server.py         # bootstrap: поднять реестр, отдать MCP
+│       ├── tools/*.py        # по файлу на инструмент
+│       └── service.py
 └── tests/
 ```
 
 ## Слои внутри одного сервера
 
 ```text
-server.py   # тонкий MCP-адаптер: схема параметров, вызов, маппинг ошибок
+server.py   # тонкий bootstrap: собрать реестр и отдать его MCP
+    ↓
+tools/*.py  # по одному инструменту на файл: create_tool(container) → ToolDefinition
     ↓
 service.py  # бизнес-логика домена. Ни MCP, ни Nanobot, ни SQL в промптах
     ↓
 libs/enterprise_data   # доступ к данным
 ```
 
-Сервер **не должен** содержать бизнес-логику. Сервер — адаптер.
-Логика живёт в `service.py` и тестируется без MCP вообще.
+Сервер **не должен** содержать бизнес-логику и **не должен** знать список
+инструментов заранее. Логика живёт в `service.py` и тестируется без MCP вообще.
+Список инструментов приходит из `tools/` при старте.
 
 ## Как добавить сервер
 
 1. Скопировать `servers/_template` в `servers/<name>`.
 2. Реализовать `service.py`. Он обязан тестироваться без MCP.
-3. Реализовать `server.py` — только схема и вызов.
-4. Добавить `servers/<name>/tests/test_service.py`.
-5. Проверить: `pytest` в `mcp-platform/` зелёный, `server.py` запускается
+3. Создать `tools/<operation>.py` для каждой операции (§ «Как добавить инструмент»).
+4. Описать `server.py` как bootstrap реестра — без `@mcp.tool()` вручную.
+5. Добавить `servers/<name>/tests/test_service.py` и тест загрузки реестра.
+6. Проверить: `pytest` в `mcp-platform/` зелёный, `server.py` запускается
    без установленного nanobot.
-6. Только после этого — подключать к агенту через `config.json::mcpServers`.
+7. Только после этого — подключать к агенту через `config.json::mcpServers`.
+
+## Как добавить инструмент
+
+Один файл. `server.py` не меняется.
+
+```python
+# servers/data/tools/history_search.py
+def create_tool(container):
+    def history_search(query: str, limit: int = 20) -> str:
+        return container.data.history_search(query, limit)
+
+    return ToolDefinition(
+        name="history_search",
+        description="Поиск по журналу agent_gateway_logs",
+        handler=history_search,
+        category="read",
+        version="1.0",
+    )
+```
+
+Порядок при старте: `tools/*.py` → `create_tool(container)` → валидация →
+`registry.register()` → MCP. Валидатор проверяет импорт, наличие
+`create_tool`, тип `ToolDefinition`, непустые `name`/`description`, уникальность
+`name`, callable `handler` и валидность схемы аргументов.
+
+**Ошибка любого одного файла останавливает старт целиком** — с именем файла и
+`name`. Полузагруженный сервер не поднимается: иначе агент будет считать
+capability существующей, а отказ всплывёт на реальном запросе пользователя.
+
+**Hot reload нет.** Реестр иммутабелен в пределах процесса: добавил файл →
+перезапустил сервер. Регистрация — это выполнение кода из каталога `tools/`,
+поэтому каталог доверенный: туда попадает только код репозитория, и всё
+исполняется с правами процесса.
 
 ## Подключение к агенту
 

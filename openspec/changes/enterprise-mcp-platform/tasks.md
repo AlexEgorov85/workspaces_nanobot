@@ -60,26 +60,41 @@
 
 ---
 
-## Фаза 2 — `libs/data` и `data-mcp`
+## Фаза 2 — реестр инструментов, `libs/data` и `data-mcp`
 
-- [ ] 2.1 Перенести `workspace/utils/db.py` → `mcp-platform/libs/data/db.py`
-- [ ] 2.2 Перенести `lib/utils/sql_safety.py` → `mcp-platform/libs/data/sql_safety.py`
-- [ ] 2.3 Перенести `workspace/utils/jsonb.py` и `clean_text.py`
-- [ ] 2.4 Перенести `tests/test_utils_db.py` и `tests/test_sql_safety.py`
-- [ ] 2.5 `mcp-platform/servers/data/` по шаблону `_template`: `service.py` (логика,
-      тестируется без MCP) + `server.py` (схемы, маппинг ошибок)
-- [ ] 2.6 Инструменты: `query_sql` (read-only, AST-валидация), `log_event`,
+> Реестр идёт первым: оба сервера наполняются через него, а `data-mcp` —
+> первый, кто его использует.
+
+- [ ] 2.1 `libs/enterprise_common`: `ToolDefinition` (name, description, handler,
+      category, version, enabled, tags, permissions) и `ToolRegistry`
+- [ ] 2.2 Загрузчик `tools/*.py` → `create_tool(container)`: discovery,
+      импорт, вызов точки входа, регистрация
+- [ ] 2.3 Валидация при загрузке: импорт, наличие `create_tool`, тип
+      `ToolDefinition`, непустые `name`/`description`, уникальность `name`,
+      callable `handler`, валидная схема аргументов
+- [ ] 2.4 **Fail-fast:** ошибка одного файла валит старт сервера целиком, с
+      именем файла и `name`. Тест на каждый пункт валидации
+- [ ] 2.5 Переписать `servers/_template/server.py` на bootstrap реестра вместо
+      `@mcp.tool()` вручную; эталон копируется, а не выдумывается заново
+- [ ] 2.6 Перенести `workspace/utils/db.py` → `mcp-platform/libs/data/db.py`
+- [ ] 2.7 Перенести `lib/utils/sql_safety.py` → `mcp-platform/libs/data/sql_safety.py`
+- [ ] 2.8 Перенести `workspace/utils/jsonb.py` и `clean_text.py`
+- [ ] 2.9 Перенести `tests/test_utils_db.py` и `tests/test_sql_safety.py`
+- [ ] 2.10 `mcp-platform/servers/data/`: `service.py` (логика, тестируется без
+      MCP) + `tools/*.py` (по файлу на операцию)
+- [ ] 2.11 Операции: `query_sql` (read-only, AST-валидация), `log_event`,
       `history_search` (изоляция по `user_id`/`session_id` как часть контракта),
       `upsert_records`, `schema_check`
-- [ ] 2.7 Перенаправить потребителей на `data-mcp`:
+- [ ] 2.12 Перенаправить потребителей на `data-mcp`:
       `history_search_tool.py` (оставить ~30-строчный адаптер),
       `db_logging_service.py`, `benchmarks` (уже удалён), `streamlit` (уже удалён),
       `schema_validation.py` (остаётся в агенте, `fetch` внедряется)
-- [ ] 2.8 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
+- [ ] 2.13 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
 
 **Приёмка:** `cd mcp-platform && pytest` — зелёные. Сервер поднимается в
 подпроцессе с заблокированным `import nanobot`. `mcp-platform/servers/data/`
-не содержит `psycopg2.pool` / `ThreadedConnectionPool` (единый пул).
+не содержит `psycopg2.pool` / `ThreadedConnectionPool` (единый пул). Добавление
+файла в `tools/` не требует правок `server.py`.
 
 ---
 
@@ -99,7 +114,9 @@
 - [ ] 3.5 **Переписать** чтение векторов: из PostgreSQL напрямую, а не из снапшота
 - [ ] 3.6 Перенести `tools/build_vectors.py` (сборка и прогрев), `tools/check_indexes.py`
 - [ ] 3.7 Конфигурация: `gateway.vector.index.indexes.*` → конфиг `vector-mcp`
-- [ ] 3.8 Инструменты: `vector_search`, `list_indexes`, `index_stats`
+- [ ] 3.8 Операции как `servers/vector/tools/*.py` через тот же реестр из фазы 2:
+      `vector_search`, `list_indexes`, `index_stats` — собственного механизма
+      регистрации не заводить
 
 **Приёмка:** `vector_search` возвращает те же результаты, что до шага 4.
 `vector-mcp` **не имеет** зависимости от модели эмбеддингов.
@@ -196,6 +213,9 @@
 - [ ] 8.2 Резолв `scripts_registry` из `TableRegistry` перенести в audit-сервис
 - [ ] 8.3 SQL-безопасность (`sql_safety`) — внутри сервера, не в агенте
 - [ ] 8.4 Удалить регистрацию audit-tool'ов из `project_tool_loader`
+- [ ] 8.5 Разложить перенесённые домены по capability
+      `capabilities/<name>/{skill/SKILL.md, tools/*.py, service/}`; проверить,
+      что skill и операции ведут к одному сервису и не вложены друг в друга
 
 **Приёмка:** агент не содержит `sqlglot`, `duckdb`, `faiss`, имён `oarb.*`.
 
