@@ -36,9 +36,22 @@ from typing import Any
 from rich.console import Console
 
 from lib.cli.display_config import DisplayConfig
-from lib.utils.windows_terminal import enable_vt, is_windows_console
+from lib.utils.windows_terminal import ensure_console_colors
 
 console = Console()
+
+
+def _warn_no_vt(message: str | None) -> None:
+    """Показать предупреждение об отключённых цветах (один раз за сессию)."""
+    if not message:
+        return
+    try:
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: {message}\n")
+        _sys.stderr.flush()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +212,9 @@ async def run_repl(
         markdown = True
 
     _init_prompt_session()
-    # prompt_toolkit на старте может сбросить ENABLE_VIRTUAL_TERMINAL_PROCESSING →
-    # Rich вывод уезжает с ANSI в legacy cmd/PowerShell ISE как ``?[2m...``.
-    if is_windows_console():
-        enable_vt()
+    # Повторная проверка VT после инициализации prompt_toolkit-сессии:
+    # если хост его не держит — цвета откатятся в plain-текст (без ``?[2m``).
+    _warn_no_vt(ensure_console_colors())
 
     __logo__, __version__ = get_logo_version()
     _model, _preset_tag = model_display(config)
@@ -333,8 +345,9 @@ async def run_repl(
                 user_input = _sanitize_surrogates(
                     await _read_interactive_input_async()
                 )
-                if is_windows_console():
-                    enable_vt()
+                # Перепроверяем VT после каждого ввода — откат цветов
+                # применяется один раз, предупреждение не повторяется.
+                _warn_no_vt(ensure_console_colors())
 
                 command = user_input.strip()
                 if not command:

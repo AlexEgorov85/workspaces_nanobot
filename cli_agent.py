@@ -29,14 +29,14 @@ CLI_REJECTED_FLAGS = frozenset({"--profile", "-profile", "-p"})
 
 from config import ConfigurationError  # noqa: E402 — module-level import is safe
 
-from lib.utils.windows_terminal import enable_vt, is_windows_console
+from lib.utils.windows_terminal import ensure_console_colors
 
-# Без ENABLE_VIRTUAL_TERMINAL_PROCESSING Windows-консоль рендерит
-# ANSI escape как "?" — поэтому "[dim]→ LLM: ..." выходит как
-# "?[2m→ LLM: ...?[0m". Делаем ДО первого вывода; на других платформах
-# и при перенаправленном stdout no-op.
-if is_windows_console():
-    enable_vt()
+# Legacy Windows-консоль без ENABLE_VIRTUAL_TERMINAL_PROCESSING печатает
+# ANSI как мусор "?[2m→ LLM: ...?[0m". ensure_console_colors() включает VT,
+# а если хост его не поддерживает — отключает цвета (NO_COLOR + ANSI-фильтр
+# на sys.stdout) и возвращает текст предупреждения. Вызывается на импорте
+# ДО создания первого Console(), т.к. no_color читается в Console.__init__.
+_WINDOWS_COLOR_WARNING = ensure_console_colors()
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -108,6 +108,9 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
     from lib.cli.console_loop import run_repl
     from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext
+
+    if _WINDOWS_COLOR_WARNING:
+        console.print(f"[yellow]{_WINDOWS_COLOR_WARNING}[/yellow]")
 
     console.print(
         f"[bold]Starting nanobot cli[/bold] · profile={CLI_FIXED_PROFILE}"
