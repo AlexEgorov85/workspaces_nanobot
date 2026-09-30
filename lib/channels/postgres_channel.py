@@ -841,35 +841,50 @@ class PostgresChannel(BaseChannel):
 
         Захват идёт одним ``UPDATE ... RETURNING``: подзапрос выбирает самую
         старую подходящую задачу, внешний ``WHERE`` требует, чтобы её статус
-        всё ещё был ``pending``. Если задачу параллельно взял другой захват,
+        всё ещё был захватываемым. Если задачу параллельно взял другой захват,
         статус уже ``processing``, и повторный UPDATE не срабатывает — двойная
         обработка невозможна. Таблица аренды не используется: состояние захвата
         хранится в самой строке задачи. Дополнительный фильтр — чат без
         активной ``processing`` user-задачи.
 
+        **Внешний ``WHERE`` повторяет условие подзапроса, а не сужает его.**
+        Раньше внешний фильтр был ``status = 'pending'``, и этим он делал
+        ветку повтора ``status='error'`` в подзапросе недостижимой: подзапрос
+        выбирал задачу с просроченным backoff'ом, а внешний ``WHERE`` её
+        отсекал. ``_mark_failed`` обещает вернуть задачу в пул после
+        ``error_retry_delay``, и обещание не выполнялось никогда — задача
+        оставалась в ``error`` навсегда. Условие в двух местах должно быть
+        одинаковым ещё и потому, что внешний ``WHERE`` — это перепроверка под
+        конкурентный UPDATE: сужение до ``pending`` означало бы, что задача,
+        только что помеченная соседним воркером в ``error`` (с обновлённым
+        ``updated_at``, то есть с ещё не истёкшим backoff'ом), забиралась бы
+        немедленно и без паузы.
+
         user_stop_signal: ``status != 'cancelled'`` в обоих подзапросах — если
         AW пометил user-сообщение как ``cancelled`` ДО того, как polling успел
         его захватить, polling его пропускает (race-free: ``UPDATE ... WHERE
-        id = (...)`` сам по себе атомарен, а условие ``status='pending'`` в
-        WHERE подзапроса + ``status != 'cancelled'`` гарантирует, что захват
-        не произойдёт).
+        id = (...)`` сам по себе атомарен, а условие ``status != 'cancelled'``
+        в обоих WHERE гарантирует, что захват не произойдёт).
 
         Если ``priority_contents`` задан (кортеж строк) — добавляется фильтр
         ``AND content = ANY(%s)`` в обоих WHERE. Используется для priority
         polling path (например, ``/stop``, ``/restart``, ``/status``).
 
-        Известный дефект, намеренно не тронутый при снятии протокола аренды:
-        внешний ``AND status = 'pending'`` делает ветку повтора
-        ``status='error'`` в подзапросе недостижимой. Задача, помеченная
-        ``_mark_failed`` как повторяемая ошибка (retry_count <
-        max_stuck_retries), больше не подхватывается и остаётся в ``error``
-        навсегда. Требует отдельного решения — см. CHANGELOG.
+        Параметры позиционные, и их порядок — это порядок плейсхолдеров в
+        тексте: backoff подзапроса, затем (опционально) список priority,
+        затем backoff внешнего ``WHERE``. Расхождение порядка здесь не
+        синтаксическая ошибка, а тихая подмена: ``error_retry_delay``
+        попал бы в ``ANY(%s)``, и priority-путь отсекался бы всегда.
         """
         priority_clause = ""
-        params: tuple = (self._error_retry_delay,)
+        params: tuple = (self._error_retry_delay, self._error_retry_delay)
         if priority_contents is not None:
             priority_clause = "  AND content = ANY(%s)\n"
-            params = (self._error_retry_delay, list(priority_contents))
+            params = (
+                self._error_retry_delay,
+                list(priority_contents),
+                self._error_retry_delay,
+            )
         row = await fetchone(
             f"""
             UPDATE {self._fq_table}
@@ -892,7 +907,11 @@ class PostgresChannel(BaseChannel):
                 ORDER BY created_at ASC
                 LIMIT 1
             )
-            AND status = 'pending'
+            AND (
+                status = 'pending'
+                OR (status = 'error'
+                    AND updated_at + interval '1 second' * %s < NOW())
+            )
             AND status != 'cancelled'
             RETURNING id, chat_id, user_id, content, media, metadata, created_at
             """,
@@ -1276,7 +1295,7 @@ class PostgresChannel(BaseChannel):
                 try:
                     await subscriber.feed(msg)
                 except Exception:
-                    logger.opt(exception=True).warning(
+                    self.logger.opt(exception=True).warning(
                         "compaction_event_subscriber feed failed for {}",
                         getattr(msg, "session_key", None),
                     )
