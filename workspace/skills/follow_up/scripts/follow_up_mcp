@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""Лаунчер MCP-сервера Follow Up.
+
+Его запускают инструменты агента (`workspace/tools/follow_up.py`) — тем же
+Python, что и gateway, — и говорят с сервером по stdio. Руками — для
+проверки (`--where`, `--check`, см. ниже). Записи в `config.json` не нужно.
+
+Код Follow Up лежит прямо в папке навыка (`backend/` рядом с SKILL.md) —
+тогда настраивать нечего: запускается тем же Python, что и сам нанобот,
+а модель, Greenplum и схему сервер берёт из настроек агента.
+
+Отдельный клон тоже поддерживается — пути тогда в
+`workspace/skills/follow_up/follow_up.env.local` (git его игнорирует)
+или в окружении; окружение важнее файла, файл важнее встроенного кода:
+
+    FOLLOW_UP_ROOT=/opt/follow_up                    # корень клона Follow Up
+    FOLLOW_UP_PYTHON=/opt/follow_up/.venv/bin/python # его интерпретатор
+    MODELS_DEVICE=cpu                                # по умолчанию cpu
+
+Отдельный процесс, а не импорт в gateway: у Follow Up своя база SQLite с
+единственным писателем и фоновые потоки синхронизации — падение или
+зависание навыка не должно ронять агента.
+
+Лаунчер ограничен стандартной библиотекой и запускается любым Python ≥ 3.8.
+Если запускать нечего — выход с кодом 3 и понятной строкой в stderr (stdout
+— канал JSON-RPC, туда ни слова); инструменты агента вернут эту причину
+вместо ответа.
+
+    follow_up_mcp --where   # где код и каким Python запускать (быстро)
+    follow_up_mcp --check   # то же + самопроверка: библиотеки, модель, GP
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+SKILL_DIR = HERE.parent.parent                  # workspace/skills/follow_up
+NANOBOT_HOME = SKILL_DIR.parent.parent.parent   # корень нанобота
+LOCAL_FILE = SKILL_DIR / "follow_up.env.local"
+SERVER_REL = Path("backend") / "skill" / "mcp_server.py"
+EXIT_NOT_CONFIGURED = 3
+
+# Без этих модулей сервер не поднимется. find_spec не импортирует —
+# проверка кандидата занимает миллисекунды, а не секунды torch.
+_PROBE = ("import importlib.util as u, sys; "
+          "sys.exit(0 if all(u.find_spec(m) for m in "
+          "('mcp', 'pydantic_settings', 'sentence_transformers')) else 1)")
+
+
+def _read_env_file(path: Path) -> dict:
+    """KEY=VALUE, комментарии с #, кавычки вокруг значения снимаются."""
+    out: dict = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key.strip()] = value
+    return out
+
+
+def _venv_python(root: Path) -> Path | None:
+    for candidate in (root / ".venv" / "bin" / "python",
+                      root / ".venv" / "Scripts" / "python.exe"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _parent_python() -> Path | None:
+    """Интерпретатор gateway — того, кто нас запустил.
+
+    Берётся argv[0] родителя, а не /proc/<pid>/exe: exe у venv — симлинк
+    на системный Python, и по нему site-packages окружения теряются.
+    """
+    try:
+        raw = Path(f"/proc/{os.getppid()}/cmdline").read_bytes()
+    except OSError:
+        return None
+    argv0 = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+    if "python" not in Path(argv0).name.lower():
+        return None
+    if os.sep in argv0:
+        # Относительный путь (`.venv/bin/python gateway.py`) — от каталога
+        # gateway, а не нашего: после chdir он бы уже не нашёлся.
+        try:
+            base = os.readlink(f"/proc/{os.getppid()}/cwd")
+        except OSError:
+            base = os.getcwd()
+        found = os.path.join(base, argv0)
+    else:
+        found = shutil.which(argv0)
+    # abspath, а не resolve(): resolve() прошёл бы симлинк venv до системного
+    # Python — ровно то, от чего бережёт выбор argv[0].
+    return Path(os.path.abspath(found)) if found and Path(found).exists() else None
+
+
+def _has_deps(python: Path) -> bool:
+    try:
+        return subprocess.run([str(python), "-c", _PROBE], timeout=20,
+                              capture_output=True).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _agent_python() -> tuple:
+    """Python нанобота: сначала тот, у кого есть библиотеки навыка."""
+    seen: list = []
+    for c in (_parent_python(), Path(sys.executable)):
+        if c is not None and c not in seen:
+            seen.append(c)
+    for c in seen:
+        if _has_deps(c):
+            return c, "python агента"
+    # Библиотек нет ни у кого — берём первого: самопроверка скажет, чего
+    # не хватает, а не «интерпретатор не найден».
+    return (seen[0], "python агента (без библиотек навыка)") if seen else (None, "")
+
+
+def resolve() -> dict:
+    """Где Follow Up и чем его запускать."""
+    local = _read_env_file(LOCAL_FILE)
+    get = lambda k: (os.environ.get(k) or local.get(k) or "").strip()  # noqa: E731
+
+    problems: list = []
+    root_raw = get("FOLLOW_UP_ROOT")
+    if root_raw:
+        root, mode = Path(os.path.abspath(Path(root_raw).expanduser())), "отдельный клон"
+    elif (SKILL_DIR / SERVER_REL).exists():
+        root, mode = SKILL_DIR, "встроенный код"
+    else:
+        root, mode = None, ""
+    if root is None:
+        problems.append(f"кода Follow Up нет в папке навыка и не задан "
+                        f"FOLLOW_UP_ROOT (окружение или {LOCAL_FILE})")
+    elif not (root / SERVER_REL).exists():
+        problems.append(f"в FOLLOW_UP_ROOT={root} нет {SERVER_REL.as_posix()}")
+
+    py_raw = get("FOLLOW_UP_PYTHON")
+    python, source = None, ""
+    if py_raw:
+        python, source = Path(os.path.abspath(Path(py_raw).expanduser())), "FOLLOW_UP_PYTHON"
+    elif root is not None and _venv_python(root):
+        python, source = _venv_python(root), ".venv в корне"
+    elif root is not None:
+        python, source = _agent_python()
+    if root is not None and python is None:
+        problems.append("не найден интерпретатор: задайте FOLLOW_UP_PYTHON")
+    elif python is not None and not python.exists():
+        problems.append(f"интерпретатор не найден: {python}")
+
+    return {
+        "ok": not problems,
+        "mode": mode,
+        "root": str(root) if root else None,
+        "python": str(python) if python else None,
+        "python_source": source,
+        "nanobot_home": str(NANOBOT_HOME),
+        "models_device": get("MODELS_DEVICE") or "cpu",
+        "local_file": str(LOCAL_FILE),
+        "local_file_exists": LOCAL_FILE.exists(),
+        "problems": problems,
+    }
+
+
+def _child_env(info: dict) -> dict:
+    env = dict(os.environ)
+    env.update({
+        "PYTHONPATH": os.pathsep.join(
+            p for p in (info["root"], os.environ.get("PYTHONPATH", "")) if p),
+        "NANOBOT_HOME": str(NANOBOT_HOME),     # модель, GP и схема — у агента
+        "MODELS_DEVICE": info["models_device"],
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    })
+    return env
+
+
+def _selfcheck(info: dict) -> dict:
+    """Самопроверка сервера тем же Python и в том же окружении, что и запуск."""
+    try:
+        r = subprocess.run([info["python"], "-m", "backend.skill.selfcheck"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           env=_child_env(info), cwd=info["root"], timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "problems": [f"самопроверка не запустилась: {e}"]}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        tail = (r.stderr or r.stdout).strip()[-500:]
+        return {"ok": False,
+                "problems": [f"самопроверка упала (код {r.returncode}): {tail}"]}
+
+
+def main(argv: list) -> int:
+    info = resolve()
+    if "--where" in argv or "--check" in argv:
+        if "--check" in argv and info["ok"]:
+            info["selfcheck"] = _selfcheck(info)
+            info["ok"] = bool(info["selfcheck"].get("ok"))
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return 0 if info["ok"] else EXIT_NOT_CONFIGURED
+    if not info["ok"]:
+        # stdout — канал JSON-RPC, туда ни слова.
+        print("follow_up: навык не настроен на этой машине:", file=sys.stderr)
+        for p in info["problems"]:
+            print(f"  - {p}", file=sys.stderr)
+        print(f"  Заполните {LOCAL_FILE} (см. follow_up.env.local.example).",
+              file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
+
+    root, python = Path(info["root"]), Path(info["python"])
+    env = _child_env(info)
+    cmd = [str(python), "-m", "backend.skill.mcp_server", *argv]
+    os.chdir(root)
+    if os.name != "nt":
+        os.execve(str(python), cmd, env)       # тот же PID, stdio как есть
+    return subprocess.run(cmd, env=env, cwd=str(root)).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

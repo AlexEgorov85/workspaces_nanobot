@@ -301,6 +301,16 @@
           "llm_max_tokens": 8192                    // Резерв под output.
         }
       }
+    },
+    // -------------------------------------------------------------------------
+    //  follow_up — Follow Up (контроль исполнения поручений, корпус актов ОАРБ).
+    //  Код — в workspace/skills/follow_up/backend/; инструменты агента
+    //  (workspace/tools/follow_up.py) держат его отдельным процессом и говорят
+    //  с ним по MCP stdio (→ workspace/skills/follow_up/scripts/follow_up_mcp). GP и схему навык
+    //  берёт из channels.postgres. Здесь — только запись в реестре навыков:
+    //  таблиц и индексов в нашем runtime у него нет.
+    "follow_up": {
+      "enabled": true
     }
   },
 

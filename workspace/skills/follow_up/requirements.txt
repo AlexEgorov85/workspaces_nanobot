@@ -1,0 +1,22 @@
+# Библиотеки навыка Follow Up сверх тех, что уже ставит сам агент.
+#
+# numpy, faiss-cpu, psycopg2-binary, python-docx, pypdf закреплены в корневом
+# requirements.txt и здесь не повторяются, чтобы не спорить с ним о версиях.
+# mcp, openai и pydantic приходят с nanobot-ai.
+#
+#     pip install -r workspace/skills/follow_up/requirements.txt
+#
+# Проверить, всё ли на месте:
+#     python workspace/skills/follow_up/scripts/follow_up_mcp --check
+
+pydantic-settings>=2.2.0
+sqlalchemy>=2.0.30
+rank-bm25>=0.2.2
+sentence-transformers>=3.0.0
+torch>=2.2.0
+requests>=2.31.0
+
+# Разбор вложений идёт через те же обработчики, что и в веб-версии
+# Follow Up; FastAPI без python-multipart падает уже при импорте.
+fastapi>=0.111.0
+python-multipart>=0.0.9

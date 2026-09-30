@@ -2,7 +2,8 @@
 
 Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)**
 (PyPI: `nanobot-ai`) с кастомными доработками: PostgreSQL-каналы, Redis, Streamlit UI,
-бенчмарки, навыки `audit_analyzer`, `legal_summarizer` и `office_files`.
+бенчмарки, навыки `audit_analyzer`, `legal_summarizer`, `office_files` и
+`follow_up` (сервер отдельным процессом, код — в папке навыка).
 
 > **Агент:** Aura (🐈) · **Модель:** OpenAI-compatible · **ОС:** Windows · **Язык:** RU/EN
 

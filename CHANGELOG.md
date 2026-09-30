@@ -256,6 +256,27 @@
 
 ### Added
 
+- **Навык `follow_up` — Follow Up целиком, сервер отдельным процессом.**
+  Контроль исполнения поручений и корпус актов проверок ОАРБ. В
+  `workspace/skills/follow_up/` — инструкция агенту `SKILL.md` (когда звать,
+  разграничение с `audit_analyzer`, дословный вывод `answer_md`, ожидание
+  долгой сборки карточки), код сервера `backend/`, `tools.json` (описания и
+  схемы его инструментов), лаунчер `scripts/follow_up_mcp` и
+  `requirements.txt` навыка. `workspace/tools/follow_up.py` — семь
+  инструментов агента `mcp_follow_up_*`: загрузчик проекта регистрирует их
+  как обычные project tools, а модуль держит сервер отдельным процессом
+  (тем же Python) и MCP-сессию с ним по stdio. `config.json` не меняется:
+  в `nanobot-ai` 0.3.5 `tools.mcpServers` читают только CLI фреймворка, а
+  gateway проекта MCP не подключает. Клонировать и настраивать на машине
+  ничего не нужно: модель — из настроек агента, Greenplum и схема — из
+  `channels.postgres`, модели — из
+  `workspace/data_store/cache/caches_pipelines/`. Отдельный процесс — потому
+  что у навыка своя SQLite с единственным писателем и фоновые потоки
+  синхронизации корпуса. Код навыка сопровождается в репозитории Follow Up;
+  вложенный `ruff.toml` исключает `backend/` из линтера проекта. Проверка
+  машины — `follow_up_mcp --check`. Запись `skills.follow_up` в
+  `project.json`. OpenSpec: `add-follow-up-skill`.
+
 - **DB safety net в polling**: фильтр `AND status != 'cancelled'` в
   `_claim_one_single` (3 места: основной WHERE, подзапрос по соседним
   задачам, финальный UPDATE) и в `_claim_one` (worker_pool) — если AW
