@@ -1584,7 +1584,7 @@ nanobot/
 │   └── utils/                            #   утилиты сервисного слоя
 │       ├── sql_safety.py                 #     SQL Security Guard (read-only AST-политика)
 │       ├── outbound_meta.py              #     фильтрация служебных outbound
-│       ├── text_utils.py, table_utils.py, project_version.py,
+│       ├── text_utils.py, project_version.py,
 │       │   duckdb_query.py, retry.py, node_access.py, logging_utils.py
 │
 ├── workspace/                            # runtime-данные и плагины-хуки
@@ -1597,7 +1597,7 @@ nanobot/
 │   │   │   legal_summarizer_query.py, example.py
 │   ├── utils/                            # утилиты workspace
 │   │   ├── db.py, media.py, jsonb.py, session_file_store.py,
-│   │   │   session_key.py, clean_text.py, office_files.py, structure_cache.py
+│   │   │   session_key.py, clean_text.py, office_files.py
 │   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │   │   ├── SKILL.md                      #   пользовательская документация
 │   │   ├── scripts/

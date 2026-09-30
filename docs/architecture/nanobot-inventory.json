@@ -2,8 +2,8 @@
   "_meta": {
     "description": "Инвентаризация зависимостей workspaces_nanobot от nanobot-ai",
     "nanobot_version_pinned": "0.3.0",
-    "nanobot_version_installed": "0.3.0",
-    "scan_date": "2026-09-29",
+    "nanobot_version_installed": "0.3.5",
+    "scan_date": "2026-09-30",
     "scanner": "tools/scan_nanobot_inventory.py",
     "legend": {
       "GREEN": "public/stable extension point",
@@ -13,7 +13,7 @@
     }
   },
   "summary": {
-    "files_scanned": 188,
+    "files_scanned": 185,
     "total_imports": 65,
     "by_classification": {
       "RED": 6,
@@ -464,12 +464,6 @@
     },
     {
       "file": "lib/services/__init__.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "lib/services/cache_engine.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -1075,12 +1069,6 @@
     },
     {
       "file": "lib/utils/sql_safety.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "lib/utils/table_utils.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -1923,12 +1911,6 @@
     },
     {
       "file": "workspace/utils/session_key.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "workspace/utils/structure_cache.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []

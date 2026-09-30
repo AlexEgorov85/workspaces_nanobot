@@ -38,16 +38,47 @@
 
 ## Фаза 0 — мёртвый и сломанный код
 
-- [ ] 0.1 Удалить `workspace/utils/structure_cache.py` — импортирует несуществующий `extract_structure`
-- [ ] 0.2 Удалить `tools/extract_office_structure.py` — то же
-- [ ] 0.3 Удалить `lib/utils/table_utils.py` + `tests/test_table_utils.py`
-- [ ] 0.4 Удалить `lib/utils/retry.py` (оба импортёра уезжают)
-- [ ] 0.5 Удалить `workspace/skills/audit_analyzer/err1.log`
-- [ ] 0.6 Удалить `workspace/data_store/cache/**/*.py` (83 черновых скрипта)
-- [ ] 0.7 Поправить `AGENTS.md`: запись про `lib/utils/table_utils.py` не соответствует коду
+- [x] 0.1 Удалить `workspace/utils/structure_cache.py` — импортирует несуществующий `extract_structure`
+- [x] 0.2 Удалить `tools/extract_office_structure.py` — то же
+- [x] 0.3 Удалить `lib/utils/table_utils.py` + `tests/test_table_utils.py`
+- [ ] 0.4 ~~Удалить `lib/utils/retry.py`~~ — **перенесён в фазу 3** (пункт 3.14).
+      `retry_on_exception` импортируется двумя живыми модулями:
+      `cache_provider_impl.py:300` (ленивый импорт) и `llm_client.py:28`. Оба
+      уезжают в `mcp-platform/libs/` только в фазе 3, поэтому удалять модуль
+      в фазе 0 нельзя — это оставит два неразрешимых импорта. Дублировать
+      реализаю в двух местах тоже нельзя.
+- [ ] 0.5 Удалить `workspace/skills/audit_analyzer/err1.log` — **заблокировано
+      политикой удаления**, файл не отслеживается git. Требуется ручное удаление.
+- [ ] 0.6 Удалить `workspace/data_store/cache/**/*.py` (82 черновых скрипта) —
+      **заблокировано политикой удаления**, файлы не отслеживаются git. Требуется
+      ручное удаление. Удалять нужно **только** `.py`: в этих же папках лежат
+      реальные результаты прошлых сессий (PDF, JSON, `attachments/`, `results/`),
+      каталог `documents/` пуст.
+- [x] 0.7 Поправить `AGENTS.md`: запись про `lib/utils/table_utils.py` не соответствует коду
+
+**Смежные правки, не входившие в исходный пункт:**
+
+- `tests/test_core_infrastructure_independence.py::CORE_SERVICES` — убраны
+  `lib/utils/table_utils.py` (удалён) и `lib/services/pg_duckdb_sync_service.py`
+  (удалён ранее, список фильтровался по `.exists()` и молча пропускал запись).
+- `docs/ARCHITECTURE.md:1587,1600` — из дерева файлов убраны `table_utils.py`
+  и `structure_cache.py`.
+- `docs/architecture/nanobot-inventory.json` — перегенерирован
+  (`python tools/scan_nanobot_inventory.py`).
 
 **Приёмка:** `pytest` — те же 4 падения. `tools/architecture_guard.py` — exit 0.
-`ruff check` — чисто.
+
+> **Поправка к приёмке (проверено, 4-я неверная предпосылка плана):** критерий
+> «`ruff check` — чисто» **не выполняется и не выполнялся** для главного проекта.
+> Фактический baseline: `ruff check lib workspace` → **218 ошибок**, из них
+> удалённые в этой фазе файлы приносили ровно 2 (`E402` в `test_table_utils.py`,
+> `E501` в `extract_office_structure.py`). Изменение дало **−2 ошибки, ни одной
+> новой**. `ruff check mcp-platform` — действительно чисто, это отдельная цель.
+> Расчистка 218 ошибок — самостоятельная задача, не смешивать с миграцией.
+> Косвенно то же подтверждает `docs/audit/reports/13-tools.md`: по всей команде
+> CI — 653 ошибки, `tools/` и `tests/` исключены в `pyproject.toml`, но CI зовёт
+> `ruff check lib workspace tests tools` явно.
+
 
 ---
 
@@ -167,6 +198,11 @@
       из `config.json` агента
 - [ ] 3.13 Удалить `llm_client.py` и `llm_config.py` из агента; убедиться, что
       в `lib/` не осталось потребителей
+- [ ] 3.14 Удалить `lib/utils/retry.py` из агента (перенесено из фазы 0, пункт
+      0.4). К этому моменту оба импортёра — `cache_provider_impl.py` и
+      `llm_client.py` — уже уехали в `mcp-platform/libs/`. Проверить grep по
+      `retry_on_exception` перед удалением; `mcp-platform` получает свою копию
+      в `libs/enterprise_common/retry.py`
 
 **Приёмка:** `vector_search` возвращает те же результаты, что до шага 4.
 Зависимость вектора запроса есть служебная зависимость на сервис
