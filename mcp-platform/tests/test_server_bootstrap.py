@@ -546,8 +546,7 @@ class TestSqlglotIsMandatory:
                 # без неё разбор файла остановился бы на ней, и проверка DSN
                 # не была бы проверена вовсе. На путь DSN это не влияет —
                 # ``db.dsn`` в файле пуст, а ``DATABASE_URL`` в окружении нет.
-                Settings(env={"EMBED_TOKEN": "test",
-        "LLM_API_KEY": "test"}, secrets={}, file_path=no_dsn)
+                Settings(env={"LLM_API_KEY": "test"}, secrets={}, file_path=no_dsn)
             )
 
 

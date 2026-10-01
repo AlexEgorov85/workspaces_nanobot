@@ -540,11 +540,21 @@ SETTINGS: tuple[Setting, ...] = (
        "servers/enterprise/server.py:_vectors_config",
        "адрес эндпойнта эмбеддингов; эмбеддер и чат — разные провайдеры, "
        "поэтому адрес свой", file_key="llm.embed_api_base"),
-    _s("ENTERPRISE_EMBED_API_KEY", "secret", FROM_FILE, OWNER_PLATFORM,
+    # Ключ эмбеддера — OPTIONAL, а не FROM_FILE, и это не «второй способ
+    # задать дефолт». Эмбеддер локальный (Ollama) и авторизации не требует:
+    # агент шлёт токен тогда и только тогда, когда он у него есть
+    # (``cache_provider_impl.read_embedding_config`` → ``auth_token =
+    # os.environ.get("EMBED_TOKEN") or None``), и в типовом развёртывании его
+    # нет вовсе. Требовать на платформе то, чего нет у владельца, значит
+    # поднимать в `.secrets.env` выдуманное значение — оно выглядело бы
+    # настроенным и ничего не проверяло бы. Если ключ задан (прокси перед
+    # эмбеддером с авторизацией), он живёт в файле подстановкой из
+    # ``mcp-platform/.secrets.env``; общий с чатом секрет по-прежнему
+    # ошибка: эмбеддер локальный, чат облачный, развёртывания разные.
+    _s("ENTERPRISE_EMBED_API_KEY", "secret", OPTIONAL, OWNER_PLATFORM,
        "libs/llm/config.py:resolve_llm_config",
-       "ключ эмбеддингов; в файле — подстановка ${EMBED_TOKEN} из "
-       ".secrets.env платформы. Общий с чатом секрет был бы ошибкой: "
-       "эмбеддер локальный (Ollama), чат облачный, развёртывания разные",
+       "ключ эмбеддингов; не задан — эмбеддер зовётся без авторизации, "
+       "задан — подстановкой из .secrets.env платформы",
        file_key="llm.embed_key"),
     _s("ENTERPRISE_EMBED_PATH", "str", FROM_FILE, OWNER_PLATFORM,
        "libs/llm/config.py:resolve_llm_config",

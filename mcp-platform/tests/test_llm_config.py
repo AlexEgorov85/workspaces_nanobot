@@ -76,8 +76,7 @@ class TestResolution:
             env={
                 "LLM_MODEL": "alias-model",
                 "LLM_API_BASE": "https://alias.invalid/v1",
-                "EMBED_TOKEN": "test",
-        "LLM_API_KEY": "sk-alias",
+                "LLM_API_KEY": "sk-alias",
             }
         )
         assert (cfg.model, cfg.api_key, cfg.provider) == (
@@ -305,8 +304,7 @@ class TestEnsureLlmEnv:
         assert target["LLM_API_KEY"] == "sk-cp-secret"
 
     def test_does_not_override_existing_alias_key(self) -> None:
-        target: dict[str, str] = {**FULL_ENV, "EMBED_TOKEN": "test",
-        "LLM_API_KEY": "already-set"}
+        target: dict[str, str] = {**FULL_ENV, "LLM_API_KEY": "already-set"}
         ensure_llm_env(target)
         assert target["LLM_API_KEY"] == "already-set"
 

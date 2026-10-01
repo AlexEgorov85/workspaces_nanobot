@@ -558,12 +558,18 @@ class TestFileIsTheSingleSourceOfTruth:
         for name in sorted(optional):
             assert capabilities_of(name), f"{name} не читается ни одной capability"
 
-    def test_every_platform_key_exists_in_the_file(self) -> None:
-        """Каждому ключу реестра — ключ в файле.
+    def test_every_required_platform_key_exists_in_the_file(self) -> None:
+        """Каждому **обязательному** ключу реестра — ключ в файле.
 
-        Пропущенный ключ означал бы, что при старте реестр упадёт с
-        «нет ключа», и это правильно; но дешевле и понятнее сказать об этом
-        в тесте реестра, а не на развёртывании.
+        Пропущенный обязательный ключ означал бы, что при старте реестр
+        упадёт с «нет ключа», и это правильно; но дешевле и понятнее сказать
+        об этом в тесте реестра, а не на развёртывании.
+
+        Необязательные ключи (``OPTIONAL``) в файле **не** обязаны быть:
+        их отсутствие и есть объявленное состояние «настройки нет». Пример —
+        ``llm.embed_key``: локальный эмбеддер авторизации не требует, и
+        требовать ключ, которого в развёртывании не существует, значило бы
+        выдумать его значение в ``.secrets.env``.
         """
         import json
 
@@ -572,11 +578,13 @@ class TestFileIsTheSingleSourceOfTruth:
         raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
         in_file = set(_flatten(raw))
         missing = sorted(
-            s.key for s in settings_owned_by(OWNER_PLATFORM) if s.key not in in_file
+            s.key
+            for s in settings_owned_by(OWNER_PLATFORM)
+            if s.required and s.key not in in_file
         )
         assert not missing, (
-            f"в platform.json нет ключей: {missing}. Они обязаны быть в файле — "
-            "в коде их нет намеренно."
+            f"в platform.json нет обязательных ключей: {missing}. Они обязаны быть "
+            "в файле — в коде их нет намеренно."
         )
 
     def test_file_sections_mirror_the_project(self) -> None:
