@@ -13,5 +13,18 @@
 
   "vectors": {
     "enable": true
+  },
+
+  "pool": {
+    "min_conn": 1,
+    "max_conn": 4,
+    "pool_timeout": 5.0,
+    "queue_maxsize": 10000,
+    "reconnect_backoff_sec": 1.0,
+    "reconnect_backoff_max_sec": 60.0,
+    "connect_max_retries": 5,
+    "idle_timeout_sec": 60.0,
+    "job_max_retries": 3,
+    "print_activity": false
   }
 }

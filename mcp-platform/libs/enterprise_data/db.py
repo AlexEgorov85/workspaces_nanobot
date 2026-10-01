@@ -63,6 +63,7 @@ import psycopg2
 import psycopg2.extensions
 import psycopg2.extras
 
+from libs.enterprise_common.settings import pool_defaults
 from libs.enterprise_data.clean_text import clean_text
 
 # Глобальный адаптер: psycopg2 автоматически сериализует dict → JSONB
@@ -83,18 +84,12 @@ _dsn: str = ""
 # Пул (конфигурация)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_POOL = {
-    "min_conn": 1,
-    "max_conn": 4,
-    "pool_timeout": 5.0,
-    "queue_maxsize": 10000,
-    "reconnect_backoff_sec": 1.0,
-    "reconnect_backoff_max_sec": 60.0,
-    "connect_max_retries": 5,
-    "idle_timeout_sec": 60.0,
-    "job_max_retries": 3,
-    "print_activity": False,
-}
+#: Дефолты пула берутся из реестра настроек платформы
+#: (``libs.enterprise_common.settings``), а не объявлены здесь. Два списка
+#: дефолтов разъезжаются при первом же изменении: пул пошёл бы по одному,
+#: а ``platform.json`` и реестр обещали бы оператору другое, и отказ
+#: выглядел бы как «настройка не применилась».
+_DEFAULT_POOL: dict[str, Any] = pool_defaults()
 
 _pool_cfg: dict[str, Any] = dict(_DEFAULT_POOL)
 
@@ -104,6 +99,12 @@ def set_pool_config(cfg: dict) -> None:
 
     Применяется до первого вызова воркера; уже созданный пул не ресайзится
     автоматически (для смены размера вызывайте ``start()`` заново).
+
+    Источник значений на процессе — ``platform.json`` через реестр: сервер
+    зовёт ``pool_config(settings)`` и передаёт результат сюда
+    (``servers/enterprise/server.py:_apply_pool_settings``). Этот сеттер
+    остаётся для standalone-скриптов и тестов, которые конфигурируют пул
+    напрямую, мимо реестра.
     """
     global _pool_cfg
     merged = dict(_DEFAULT_POOL)

@@ -34,11 +34,13 @@ from pathlib import Path
 from libs.enterprise_common.settings import (
     BY_ANY_NAME,
     BY_FILE_KEY,
+    BY_NAME,
     CAPABILITIES,
     OWNER_AGENT,
     OWNER_PLATFORM,
     PLATFORM_CONFIG_PATH,
     SETTINGS,
+    SHARED_SECTIONS,
     SHARED_SETTINGS,
     Settings,
 )
@@ -51,11 +53,22 @@ SELF = Path(__file__).resolve()
 #: из другого модуля.
 ENV_OBJECTS = ("os.environ", "os.getenv")
 
-#: Модуль, где имена заданы декларативно, а не вызовом ``os.environ.get``.
-#: Обычный синтаксический скан его не видит — именно на этом первая версия
-#: карты настроек и объявила десять «переменных без читателя».
-DECLARATIVE_MODULE = "libs/llm/config.py"
-DECLARATIVE_TABLE = "_ENV_NAMES"
+#: Модули, где имена заданы декларативной таблицей, а не вызовом
+#: ``os.environ.get``. Обычный синтаксический скан их не видит — именно на
+#: этом первая версия карты настроек объявила десять «переменных без
+#: читателя». Вторая таблица — ``POOL_SETTING_KEYS``: имена настроек пула
+#: приходят в реестр не вызовом, а значением словаря.
+DECLARATIVE_TABLES = (
+    ("libs/llm/config.py", "_ENV_NAMES"),
+    ("libs/enterprise_common/settings.py", "POOL_SETTING_KEYS"),
+)
+
+#: Получатели настроек, чтение которых считается чтением. ``Settings.get("X")``
+#: — это чтение настройки по имени, просто из реестра, а не из окружения.
+#: Пока ``server.py`` читал окружение сам, таких вызовов не было; теперь они
+#: единственный способ, которым бутстрап берёт значения, и страж обязан их
+#: видеть — иначе он объявил бы все настройки непрочитанными.
+SETTINGS_ACCESSORS = ("settings", "_settings")
 
 #: Имена переменных, которые читаются **через локальный хелпер**: их аргумент
 #: — имя, а не литерал в месте вызова. На этом синтаксический скан молчал и
@@ -156,31 +169,69 @@ def _env_names_from_file(path: Path) -> set[str]:
     return names
 
 
-def _declarative_names() -> set[str]:
-    """Имена из декларативной таблицы ``_ENV_NAMES``."""
-    path = PLATFORM_ROOT / DECLARATIVE_MODULE
+def _registry_read_names(path: Path) -> set[str]:
+    """Имена, прочитанные у реестра: ``settings.get("ENTERPRISE_*")``.
+
+    Отдельная форма чтения, а не чтение окружения: значение пришло из
+    ``Settings``, который и разобрал приоритет. Считать её «не прочитанной»
+    нельзя — тогда страж объявил бы непрочитанными все настройки платформы
+    после того, как бутстрап перестал читать ``os.environ`` сам.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    _strip_docstrings(tree)
     names: set[str] = set()
     for node in ast.walk(tree):
         if not (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == DECLARATIVE_TABLE
-            and isinstance(node.value, ast.Dict)
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in SETTINGS_ACCESSORS
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
         ):
             continue
-        for value in node.value.values:
-            for element in getattr(value, "elts", []):
-                if isinstance(element, ast.Constant) and isinstance(element.value, str):
-                    names.add(element.value)
-    assert names, f"{DECLARATIVE_MODULE}: таблица {DECLARATIVE_TABLE} пуста или не найдена"
+        if ENV_NAME_LITERAL.match(node.args[0].value):
+            names.add(node.args[0].value)
     return names
 
 
-def _all_read_names() -> set[str]:
+def _declarative_names() -> set[str]:
+    """Имена из декларативных таблиц платформы.
+
+    Значение элемента — кортеж имён (``_ENV_NAMES``) или одно имя
+    (``POOL_SETTING_KEYS``); собираются оба вида.
+    """
+    names: set[str] = set()
+    for relative, table in DECLARATIVE_TABLES:
+        path = PLATFORM_ROOT / relative
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == table
+                and isinstance(node.value, ast.Dict)
+            ):
+                continue
+            for value in node.value.values:
+                elements = getattr(value, "elts", None)
+                if elements is None:
+                    elements = [value]
+                for element in elements:
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                        names.add(element.value)
+    assert names, f"декларативные таблицы {DECLARATIVE_TABLES} пусты или не найдены"
+    return names
+
+
+def _all_referenced_names() -> set[str]:
+    """Всё, к чему код обращается по имени настройки."""
     names: set[str] = set()
     for path in _python_files():
         names |= _env_names_from_file(path)
+        names |= _registry_read_names(path)
     names |= _declarative_names()
     return names
 
@@ -188,15 +239,21 @@ def _all_read_names() -> set[str]:
 class TestRegistryIsComplete:
     def test_every_read_variable_is_declared(self) -> None:
         """Платформа не читает ничего, чего нет в реестре."""
-        undeclared = sorted(_all_read_names() - set(BY_ANY_NAME))
+        undeclared = sorted(_all_referenced_names() - set(BY_ANY_NAME))
         assert not undeclared, (
             f"переменные читаются, но не объявлены в реестре: {undeclared}. "
             "У них нет дефолта, владельца и места в документации."
         )
 
     def test_every_declared_name_is_read_somewhere(self) -> None:
-        """Обратная сторона: в реестре нет настроек-призраков."""
-        unread = sorted(set(BY_ANY_NAME) - _all_read_names())
+        """Обратная сторона: в реестре нет настроек-призраков.
+
+        Сверяется по **основным** именам, а не по всем: синоним — это тот же
+        адрес значения, и требовать, чтобы код прочитал настройку по каждому
+        из имён, значило бы запретить объявлять синонимы.
+        """
+        referenced = _all_referenced_names()
+        unread = sorted(set(BY_NAME) - referenced)
         assert not unread, (
             f"объявлены в реестре, но никем не читаются: {unread}. "
             "Настройка выглядит рабочей, а значения не имеет."
@@ -346,19 +403,41 @@ class TestCapabilityTree:
 
         ``data.log_table`` в секции ``vectors`` — это уже не организация по
         capability, а ошибка, которая выглядит как «работает».
+
+        Исключение объявлено списком ``SHARED_SECTIONS``: настройки вне
+        capability лежат в собственной секции, и секция, которой нет ни там,
+        ни в списке, — опечатка, которая выглядела бы как «настройка
+        прочитана».
+        """
+        import json
+
+        from libs.enterprise_common.settings import _flatten
+
+        allowed = {c.name for c in CAPABILITIES} | set(SHARED_SECTIONS)
+        raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+        for key in _flatten(raw):
+            if key.startswith("_"):
+                continue
+            section = key.split(".", 1)[0]
+            assert section in allowed, (
+                f"{key!r}: секция {section!r} не является capability и не "
+                f"объявлена в SHARED_SECTIONS"
+            )
+
+    def test_declared_shared_sections_are_used(self) -> None:
+        """Объявленная секция, которой нет в файле, — опечатка в самом списке.
+
+        Иначе ``SHARED_SECTIONS`` мог бы разрастаться в молчаливый список
+        пожеланий, и пропуск секции в файле перестал бы замечаться.
         """
         import json
 
         from libs.enterprise_common.settings import _flatten
 
         raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
-        for key in _flatten(raw):
-            if key.startswith("_"):
-                continue
-            section = key.split(".", 1)[0]
-            assert section in {c.name for c in CAPABILITIES}, (
-                f"{key!r}: секция {section!r} не является capability"
-            )
+        sections = {key.split(".", 1)[0] for key in _flatten(raw)}
+        unused = sorted(set(SHARED_SECTIONS) - sections)
+        assert not unused, f"SHARED_SECTIONS объявляет неиспользуемые секции: {unused}"
 
 
 class TestGuardIgnoresProse:

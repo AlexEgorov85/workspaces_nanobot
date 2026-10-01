@@ -3,21 +3,29 @@
 Зачем файл реестра, если настройки и так приходят через окружение
 --------------------------------------------------------------------
 
-Три причины, по которым список настроек перестал читаться глазами:
+Настройки платформы приходили через 28 имён переменных, прочитанных тремя
+разными способами: литерально в ``servers/enterprise/server.py`` (по пяти
+функциям, пять из них — инлайном в ``_build_container``), ещё десять
+описаны декларативной таблицей ``_ENV_NAMES`` в ``libs/llm/config.py``,
+DSN — через ``resolve_dsn()``. Перечислить настройки, не открыв три
+файла, было нельзя.
 
-1. **Разбор разбросан по трём механизмам.** 16 переменных читаются
-   литерально в ``servers/enterprise/server.py`` (разложены по пяти
-   функциям, пять из них — инлайном в ``_build_container``), ещё десять
-   описаны декларативной таблицей ``_ENV_NAMES`` в ``libs/llm/config.py``,
-   DSN — через ``resolve_dsn()``. Перечислить настройки, не открыв три
-   файла, нельзя.
-2. **Нет владельца.** По части значений у платформы есть мнение, по части
+Сейчас разбор **один**: ``Settings`` — единственный, кто читает окружение
+и ``platform.json``, и единственный, кто владеет дефолтами. Остальной код
+получает уже разрешённое значение, поэтому ``server.py`` не обращается к
+``os.environ`` вовсе. Пока это было не так, файл с настройками читался
+только в тестах, а на процессе действовали дефолты из кода: значения в
+``platform.json`` выглядели рабочими и не влияли ни на что.
+
+Два свойства, из-за которых реестр и нужен:
+
+1. **Владелец.** По части значений у платформы есть мнение, по части
    его быть не должно: выбор модели и ключи — дело агента, а размер
-   буфера журнала и таймаут запроса — дело платформы. Это разные вещи,
-   и в одном списке они неразличимы.
-3. **Нет места, где живут значения без агента.** Свои ручки платформы
-   существуют только как дефолты внутри ``os.environ.get(...)``. Задать их
-   без агента нечем, и перечислить их — негде.
+   буфера журнала, размер пула и таймаут запроса — дело платформы. Это
+   разные вещи, и в одном списке они неразличимы.
+2. **Место, где живут значения без агента.** Свои ручки платформы
+   существуют только как дефолты в коде. Задать их без агента можно
+   только файлом, и перечислить их — тоже негде.
 
 Структура реестра повторяет код
 -------------------------------
@@ -54,6 +62,24 @@
 ``platform.json``. ``owner="agent"`` — решение агента (модель, ключ,
 адрес, путь снимка, пока снимок грузит агент), значение приходит через
 окружение и в файл не попадает никогда.
+
+Настройки вне capability
+-----------------------
+
+Пул соединений нужен всем capability сразу и ни одной из них не
+принадлежит, поэтому он объявлен в ``SHARED_SETTINGS`` и лежит в файле в
+собственной секции ``pool``, а не в секции какой-нибудь capability. Секции
+перечислены в ``SHARED_SECTIONS``, и страж сверяет файл именно с этим
+списком: секция, которой нет ни в capability, ни в ``SHARED_SECTIONS``, —
+это опечатка, которая выглядела бы как «настройка прочитана».
+
+Дефолты пула
+------------
+
+``_DEFAULT_POOL`` в ``libs/enterprise_data/db.py`` **выводится** из этого
+реестра (``pool_defaults()``), а не объявлен рядом с ним. Два списка
+дефолтов разъезжаются при первом же изменении: пул работал бы на одних
+значениях, а реестр обещал бы оператору другие.
 """
 
 from __future__ import annotations
@@ -149,7 +175,15 @@ class Setting:
             if self.kind == "bool":
                 return text.lower() in ("1", "true", "yes", "on")
             if self.kind == "list":
-                return [item.strip() for item in text.split(",") if item.strip()]
+                # Перевод строки — разделитель наравне с запятой: агент
+                # экспортирует списки таблиц по одной на строку, и раньше
+                # их читал разбор, который понимал оба. Забытая здесь
+                # запятая склеила бы семь таблиц в одно имя — молча.
+                return [
+                    item.strip()
+                    for item in text.replace("\n", ",").split(",")
+                    if item.strip()
+                ]
             if self.kind == "secret":
                 return text
             return text
@@ -194,39 +228,39 @@ SETTINGS: tuple[Setting, ...] = (
        aliases=("PG_DSN",), required=True),
     # -- capability audit ----------------------------------------------------
     _s("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_audit_config_from_env",
+       "servers/enterprise/server.py:_audit_config",
        "таблица реестра предустановленных скриптов; пусто — registry_unavailable",
        required=True),
     _s("ENTERPRISE_AUDIT_TABLES", "list", (), OWNER_AGENT,
-       "servers/enterprise/server.py:_audit_config_from_env",
+       "servers/enterprise/server.py:_audit_config",
        "белый список таблиц для аудита; реестр скриптов сюда не входит"),
     _s("ENTERPRISE_AUDIT_ROW_CEILING", "int", 0, OWNER_AGENT,
-       "servers/enterprise/server.py:_audit_config_from_env",
+       "servers/enterprise/server.py:_audit_config",
        "потолок строк для generate_sql; 0 — не применять"),
     # -- capability vectors --------------------------------------------------
     _s("ENTERPRISE_SNAPSHOT_PATH", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_snapshot_from_env",
+       "servers/enterprise/server.py:_snapshot",
        "путь к файлу снимка DuckDB; пусто — снимок не обязателен"),
     _s("ENTERPRISE_VECTOR_DB_TABLE", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_snapshot_from_env",
+       "servers/enterprise/server.py:_snapshot",
        "таблица эмбеддингов в снимке, из которой собираются индексы"),
     _s("ENTERPRISE_VECTOR_INDEXES", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_vectors_config_from_env",
+       "servers/enterprise/server.py:_vectors_config",
        "индексы вида имя=таблица, через запятую"),
     _s("ENTERPRISE_VECTOR_STORAGE_TABLE", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_vectors_config_from_env",
+       "servers/enterprise/server.py:_vectors_config",
        "инфраструктурная таблица хранения векторов"),
     _s("ENTERPRISE_VECTOR_ENABLE", "bool", True, OWNER_PLATFORM,
-       "servers/enterprise/server.py:_vectors_config_from_env",
+       "servers/enterprise/server.py:_vectors_config",
        "выключатель capability vectors", file_key="vectors.enable"),
     _s("ENTERPRISE_EMBED_MODEL", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_vectors_config_from_env",
+       "servers/enterprise/server.py:_vectors_config",
        "модель эмбеддера; пусто — capability llm остаётся ненастроенной"),
     _s("ENTERPRISE_EMBED_DIMENSION", "int", None, OWNER_AGENT,
-       "servers/enterprise/server.py:_vectors_config_from_env",
+       "servers/enterprise/server.py:_vectors_config",
        "размерность вектора эмбеддера; входит в подпись индекса"),
     _s("ENTERPRISE_EMBED_TIMEOUT", "float", None, OWNER_AGENT,
-       "servers/enterprise/server.py:_vectors_config_from_env",
+       "servers/enterprise/server.py:_vectors_config",
        "таймаут HTTP-запроса к эмбеддеру, сек"),
     # -- capability llm ------------------------------------------------------
     _s("ENTERPRISE_LLM_PROVIDER", "str", "", OWNER_AGENT,
@@ -258,7 +292,7 @@ SETTINGS: tuple[Setting, ...] = (
        "путь эндпойнта эмбеддингов, если адрес задан полным URL"),
     # -- журнал и бюджеты запросов: собственные ручки платформы ---------------
     _s("ENTERPRISE_LOG_TABLE", "str", "public.agent_gateway_logs", OWNER_PLATFORM,
-       "servers/enterprise/server.py:_log_table_from_env",
+       "servers/enterprise/server.py:_log_table",
        "таблица долговечного журнала gateway", file_key="data.log_table"),
     _s("ENTERPRISE_LOG_BUFFER_MAXLEN", "int", 2048, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
@@ -279,6 +313,51 @@ SETTINGS: tuple[Setting, ...] = (
        "servers/enterprise/server.py:_build_container",
        "обязательные runtime-таблицы для schema_check",
        file_key="data.expected_tables"),
+    # -- пул соединений -----------------------------------------------------
+    # Размеры и таймауты пула — ручки платформы: агент о них не знает и
+    # знать не должен. До этого они жили только в ``_DEFAULT_POOL``, то
+    # есть задать их было нечем, а реестр молчал. Тот же отказ, что был
+    # с ``ENTERPRISE_SCRIPTS_REGISTRY_TABLE``: значение не имеет пути из
+    # конфигурации.
+    _s("ENTERPRISE_POOL_MIN_CONN", "int", 1, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "воркеров пула, поднимаемых на старте", file_key="pool.min_conn"),
+    _s("ENTERPRISE_POOL_MAX_CONN", "int", 4, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "потолок пула: больше соединений не открывается никогда",
+       file_key="pool.max_conn"),
+    _s("ENTERPRISE_POOL_TIMEOUT", "float", 5.0, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "ожидание места в очереди и порог warning'а при ожидании аренды, сек",
+       file_key="pool.pool_timeout"),
+    _s("ENTERPRISE_POOL_QUEUE_MAXSIZE", "int", 10000, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "предел длины очереди; переполнение — PoolTimeoutError, а не вечный блок",
+       file_key="pool.queue_maxsize"),
+    _s("ENTERPRISE_POOL_RECONNECT_BACKOFF_SEC", "float", 1.0, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "первая пауза перед повтором подключения, сек",
+       file_key="pool.reconnect_backoff_sec"),
+    _s("ENTERPRISE_POOL_RECONNECT_BACKOFF_MAX_SEC", "float", 60.0, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "потолок паузы между попытками подключения, сек",
+       file_key="pool.reconnect_backoff_max_sec"),
+    _s("ENTERPRISE_POOL_CONNECT_MAX_RETRIES", "int", 5, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "попыток подключения воркера до отказа",
+       file_key="pool.connect_max_retries"),
+    _s("ENTERPRISE_POOL_IDLE_TIMEOUT_SEC", "float", 60.0, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "простой воркера, после которого он снимается до min_conn, сек",
+       file_key="pool.idle_timeout_sec"),
+    _s("ENTERPRISE_POOL_JOB_MAX_RETRIES", "int", 3, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "повторов задания при повторяемой ошибке",
+       file_key="pool.job_max_retries"),
+    _s("ENTERPRISE_POOL_PRINT_ACTIVITY", "bool", False, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "вывод активности db-worker'ов в stderr процесса",
+       file_key="pool.print_activity"),
 )
 
 #: Имя -> настройка. Построен один раз; единственный источник правды.
@@ -389,7 +468,57 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
 )
 
 #: Настройки вне capability: ими владеет общий код платформы.
-SHARED_SETTINGS: tuple[str, ...] = ("DATABASE_URL",)
+#:
+#: Пул соединений нужен всем capability сразу, и ни одной из них не
+#: принадлежит: ``data`` ходит в базу напрямую, ``audit`` — через снимок,
+#: загрузчик снимка — тоже через пул. Объявлять пул в секции ``data``
+#: означало бы, что размер пула — дело capability PostgreSQL-очереди.
+SHARED_SETTINGS: tuple[str, ...] = (
+    "DATABASE_URL",
+    "ENTERPRISE_POOL_MIN_CONN",
+    "ENTERPRISE_POOL_MAX_CONN",
+    "ENTERPRISE_POOL_TIMEOUT",
+    "ENTERPRISE_POOL_QUEUE_MAXSIZE",
+    "ENTERPRISE_POOL_RECONNECT_BACKOFF_SEC",
+    "ENTERPRISE_POOL_RECONNECT_BACKOFF_MAX_SEC",
+    "ENTERPRISE_POOL_CONNECT_MAX_RETRIES",
+    "ENTERPRISE_POOL_IDLE_TIMEOUT_SEC",
+    "ENTERPRISE_POOL_JOB_MAX_RETRIES",
+    "ENTERPRISE_POOL_PRINT_ACTIVITY",
+)
+
+#: Секции ``platform.json`` для настроек вне capability. Список объявлен
+#: явно, потому что страж сверяет с ним файл: секция, не принадлежащая ни
+#: capability, ни этому списку, выглядела бы как «настройка прочитана».
+SHARED_SECTIONS: tuple[str, ...] = ("pool",)
+
+#: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуются
+#: и :func:`pool_defaults`, и :func:`pool_config`: иначе второй список
+#: ключей разошёлся бы с первым, и неизвестный ключ уехал бы в
+#: ``set_pool_config`` молча.
+POOL_SETTING_KEYS: dict[str, str] = {
+    "min_conn": "ENTERPRISE_POOL_MIN_CONN",
+    "max_conn": "ENTERPRISE_POOL_MAX_CONN",
+    "pool_timeout": "ENTERPRISE_POOL_TIMEOUT",
+    "queue_maxsize": "ENTERPRISE_POOL_QUEUE_MAXSIZE",
+    "reconnect_backoff_sec": "ENTERPRISE_POOL_RECONNECT_BACKOFF_SEC",
+    "reconnect_backoff_max_sec": "ENTERPRISE_POOL_RECONNECT_BACKOFF_MAX_SEC",
+    "connect_max_retries": "ENTERPRISE_POOL_CONNECT_MAX_RETRIES",
+    "idle_timeout_sec": "ENTERPRISE_POOL_IDLE_TIMEOUT_SEC",
+    "job_max_retries": "ENTERPRISE_POOL_JOB_MAX_RETRIES",
+    "print_activity": "ENTERPRISE_POOL_PRINT_ACTIVITY",
+}
+
+
+def pool_defaults() -> dict[str, Any]:
+    """Дефолты пула в форме ``set_pool_config`` — из реестра, а не из кода."""
+    return {key: BY_NAME[name].default for key, name in POOL_SETTING_KEYS.items()}
+
+
+def pool_config(settings: "Settings") -> dict[str, Any]:
+    """Разрешённые значения пула в форме ``set_pool_config``."""
+    return {key: settings.get(name) for key, name in POOL_SETTING_KEYS.items()}
+
 
 #: capability -> её настройки, для файла и документации.
 SETTINGS_BY_CAPABILITY: dict[str, tuple[str, ...]] = {
@@ -538,6 +667,45 @@ class Settings:
                 out[setting.name] = "***"
             else:
                 out[setting.name] = value
+        return out
+
+    def file_backed(self) -> tuple[str, ...]:
+        """Настройки, значение которых пришло из ``platform.json``.
+
+        Для баннера запуска: значение из файла — единственное, о котором
+        оператор не знает наверняка, потому что он не передавал его через
+        окружение.
+        """
+        return tuple(
+            name
+            for name, source in self._sources.items()
+            if source == "file:platform.json"
+        )
+
+    def as_env(self) -> dict[str, str]:
+        """Разрешённые значения в виде ``имя переменной -> значение``.
+
+        Нужен потребителям, которые принимают источник окружения параметром
+        (``libs/llm``): они получают ровно то, что разрешил реестр, и не
+        читают ``os.environ`` сами. Второй разбор — это и есть «настройка
+        прописана в двух местах»: файл меняет значение для одного, а для
+        второго остаётся окружение.
+
+        Секреты здесь живут так же, как в окружении, и уходят дальше по
+        процессу, — но не в лог: печатать их нельзя, поэтому для диагностики
+        есть :meth:`as_dict`, который маскирует.
+        """
+        out: dict[str, str] = {}
+        for setting in SETTINGS:
+            value = self._values[setting.name]
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                out[setting.name] = "1" if value else "0"
+            elif isinstance(value, (list, tuple)):
+                out[setting.name] = ",".join(str(item) for item in value)
+            else:
+                out[setting.name] = str(value)
         return out
 
     def missing_required(self) -> tuple[str, ...]:

@@ -21,7 +21,19 @@ PLATFORM_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLATFORM_ROOT))
 
 from libs.enterprise_common.errors import InfrastructureError  # noqa: E402
+from libs.enterprise_common.settings import Settings  # noqa: E402
 from servers.enterprise import server as enterprise_server  # noqa: E402
+
+
+def _settings() -> Settings:
+    """Реестр поверх текущего окружения и настоящего ``platform.json``.
+
+    Отдельная функция, чтобы проверки доезда конфигурации вызывали bootstrap
+    ровно так же, как это делает сервер: реестр строит ``build()`` и
+    передаёт его дальше, и проверка, строящая сервис в обход этого пути,
+    не видела бы разрыва между файлом и процессом.
+    """
+    return Settings()
 
 
 async def _discover(transport: Any) -> list[Any]:
@@ -142,7 +154,7 @@ class TestContainerWiring:
             '{"audits_index": {"table": "oarb.audits", "pk": "id"}}',
         )
         monkeypatch.setenv("ENTERPRISE_EMBED_MODEL", "mxbai-embed-large:latest")
-        container = enterprise_server._build_container()
+        container = enterprise_server._build_container(_settings())
         config = container.config
         vector = ((config.get("gateway") or {}).get("vector") or {})
         index = vector.get("index") or {}
@@ -158,7 +170,7 @@ class TestContainerWiring:
             "ENTERPRISE_AUDIT_TABLES", "oarb.audits, oarb.violations\noarb.audit_reports"
         )
         monkeypatch.setenv("ENTERPRISE_AUDIT_ROW_CEILING", "500")
-        container = enterprise_server._build_container()
+        container = enterprise_server._build_container(_settings())
         config = container.config
         assert config["scripts_registry"]["table"] == "public.agent_predefined_scripts"
         # Разделители: запятая с пробелом и перевод строки. Список пишут руками.
@@ -167,7 +179,10 @@ class TestContainerWiring:
             "oarb.violations",
             "oarb.audit_reports",
         ]
-        assert config["audit"]["row_ceiling"] == "500"
+        # Число, а не строка: потолок строк — счётчик, и раньше он доезжал
+        # строкой, которую сервис аудита приводил сам. Приводит теперь реестр,
+        # и потолок приходит числом туда же, где проверяется на тип.
+        assert config["audit"]["row_ceiling"] == 500
 
     def test_both_sections_coexist(self, monkeypatch) -> None:
         """Секции не должны затирать друг друга.
@@ -178,7 +193,7 @@ class TestContainerWiring:
         """
         monkeypatch.setenv("ENTERPRISE_VECTOR_STORAGE_TABLE", "oarb.audit_vectors")
         monkeypatch.setenv("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "public.agent_predefined_scripts")
-        config = enterprise_server._build_container().config
+        config = enterprise_server._build_container(_settings()).config
         assert config.get("gateway"), "секция gateway потеряна"
         assert config.get("scripts_registry"), "секция scripts_registry потеряна"
         assert config.get("audit"), "секция audit потеряна"
