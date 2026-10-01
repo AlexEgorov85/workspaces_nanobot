@@ -280,6 +280,8 @@ class Setting:
         """
         if self.kind == "table_list":
             return _table_pairs(raw, self.name)
+        if self.kind == "json":
+            return _json_object(raw, self.name)
         text = str(raw).strip()
         if self.kind in ("int", "float", "bool", "list"):
             if not text:
@@ -314,6 +316,33 @@ class Setting:
 #: скриптов. По ней capability ``audit`` отделяет реестр от доменных
 #: таблиц: реестр — метаданные, и читать его как схему модели нельзя.
 SCRIPTS_REGISTRY_LABEL = "scripts_registry"
+
+
+def _json_object(raw: Any, setting_name: str) -> dict[str, Any]:
+    """Привести значение к JSON-объекту.
+
+    Из файла объявление приходит объектом и остаётся им: оборачивать его в
+    строку, а потом разбирать обратно — значит заставить человека править
+    экранированный текст вместо читаемых объектов. Из окружения приходит
+    строка (так объявляли при переносе) и разбирается здесь, с именем
+    настройки в ошибке.
+    """
+    if isinstance(raw, dict):
+        return dict(raw)
+    text = str(raw).strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise InfrastructureError(
+            f"{setting_name}: не разбирается как JSON ({exc})"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise InfrastructureError(
+            f"{setting_name}: ожидался JSON-объект, получено {type(parsed).__name__}"
+        )
+    return parsed
 
 
 def _table_pairs(raw: Any, setting_name: str) -> tuple[tuple[str, str], ...]:
@@ -415,30 +444,44 @@ SETTINGS: tuple[Setting, ...] = (
        "дефолт из кода, то есть значение никто не задавал",
        file_key="audit.row_ceiling"),
     # -- capability vectors --------------------------------------------------
-    _s("ENTERPRISE_SNAPSHOT_PATH", "str", "", OWNER_AGENT,
+    #
+    # Владелец — платформа. Снимок DuckDB, объявления индексов и подпись
+    # эмбеддера живут здесь, потому что владеет ими тот, кто строит индексы
+    # и проверяет их свежесть, — процесс enterprise-mcp. Когда они приходили
+    # переменными от агента, у процесса не было ни одного собственного
+    # ответа на вопрос «какой индекс считается актуальным»: он переписывал
+    # чужое объявление и не мог его проверить.
+    # Путь к снимку — OPTIONAL, а не FROM_FILE: capability ``vectors`` имеет
+    # право отсутствовать (занятый или битый файл не должен ронять процесс),
+    # и пустой путь — это «снимок ненастроен», а не «сервер не запустится».
+    # Значение живёт в файле, а не приходит окружением агента: два владельца
+    # одного файла означали бы, что снимок читают не оттуда, откуда пишут.
+    _s("ENTERPRISE_SNAPSHOT_PATH", "str", OPTIONAL, OWNER_PLATFORM,
        "servers/enterprise/server.py:_snapshot",
-       "путь к файлу снимка DuckDB; пусто — снимок не обязателен"),
-    _s("ENTERPRISE_VECTOR_DB_TABLE", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_snapshot",
-       "таблица эмбеддингов в снимке, из которой собираются индексы"),
-    _s("ENTERPRISE_VECTOR_INDEXES", "str", "", OWNER_AGENT,
+       "путь к файлу снимка DuckDB; пусто — снимок не настроен",
+       file_key="data.snapshot_path"),
+    _s("ENTERPRISE_VECTOR_INDEXES", "json", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_vectors_config",
-       "индексы вида имя=таблица, через запятую"),
-    _s("ENTERPRISE_VECTOR_STORAGE_TABLE", "str", "", OWNER_AGENT,
+       "объявления индексов; входят в подпись индекса, поэтому объявляются "
+       "здесь, а не приходят из чужого окружения",
+       file_key="vectors.indexes"),
+    _s("ENTERPRISE_VECTOR_STORAGE_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_vectors_config",
-       "инфраструктурная таблица хранения векторов"),
-    _s("ENTERPRISE_VECTOR_ENABLE", "bool", True, OWNER_AGENT,
+       "инфраструктурная таблица хранения векторов; она же таблица "
+       "эмбеддингов внутри снимка — второй настройки для того же факта "
+       "заводить не будем",
+       file_key="vectors.storage_table"),
+    _s("ENTERPRISE_VECTOR_ENABLE", "bool", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_vectors_config",
-       "выключатель capability vectors; берётся из project.json агента "
-       "(gateway.vector.index.enable), потому что тем же флагом агент "
-       "решает, строить ли индексы. Ключ в platform.json был бы вторым "
-       "ответом на тот же вопрос и всегда проигрывал бы окружению"),
-    _s("ENTERPRISE_EMBED_DIMENSION", "int", None, OWNER_AGENT,
+       "выключатель capability vectors",
+       file_key="vectors.enable"),
+    _s("ENTERPRISE_EMBED_DIMENSION", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_vectors_config",
-       "размерность вектора эмбеддера; входит в подпись индекса"),
-    _s("ENTERPRISE_EMBED_TIMEOUT", "float", None, OWNER_AGENT,
+       "размерность вектора эмбеддера; входит в подпись индекса",
+       file_key="llm.embed_dimension"),
+    _s("ENTERPRISE_EMBED_TIMEOUT", "float", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_vectors_config",
-       "таймаут HTTP-запроса к эмбеддеру, сек"),
+       "таймаут HTTP-запроса к эмбеддеру, сек", file_key="llm.embed_timeout"),
     # -- capability llm ------------------------------------------------------
     #
     # Владелец — платформа, а не агент. Сервис общения с моделью живёт
@@ -483,33 +526,44 @@ SETTINGS: tuple[Setting, ...] = (
        "libs/llm/config.py:resolve_llm_config",
        "температура чата", aliases=("LLM_TEMPERATURE",),
        file_key="llm.temperature"),
-    # Эмбеддер объявлен здесь, но остаётся **агентским**: HTTP-вызов к нему
-    # делает тот же владелец (``libs/llm``), а вот модель эмбеддера входит в
-    # подпись индекса, которую агент и строит, и проверяет. Перенос её в
-    # ``platform.json`` дал бы второе место для одного и того же имени, и они
-    # разошлись бы при первой смене модели — индекс был бы помечен
-    # актуальным, будучи построенным на другом эмбеддере.
-    #
-    # Следствие: ``describe()`` сервиса показывает источник этих значений
-    # (окружение), а не файл. Это честнее, чем файл с ключами, которые
-    # ничего не меняют.
-    _s("ENTERPRISE_EMBED_API_BASE", "str", "", OWNER_AGENT,
+    # Эмбеддер — платформенный, как и чат: HTTP-вызов к нему делает тот же
+    # владелец (``libs/llm``). Раньше модель эмбеддера объявлялась агентом на
+    # том основании, что в подпись индекса входит модель, а индекс строит и
+    # проверяет агент. Проверяющая сторона отсюда ушла: подпись считает
+    # ``libs.vectors.signature`` в этом процессе, и объявление модели в
+    # чужом окружении означало, что половина подписи живёт здесь, а
+    # половина — там, и расхождение видно только как «индекс STALE».
+    # Дубликат, который остаётся до переноса build-инструментов (фаза 8), —
+    # объявление индекса у агента для ``build_vectors.py``; он объявлен
+    # явно в ``platform.json``, а не приходит неявно через окружение.
+    _s("ENTERPRISE_EMBED_API_BASE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_vectors_config",
        "адрес эндпойнта эмбеддингов; эмбеддер и чат — разные провайдеры, "
-       "поэтому адрес приходит своим"),
-    _s("ENTERPRISE_EMBED_API_KEY", "secret", "", OWNER_AGENT,
+       "поэтому адрес свой", file_key="llm.embed_api_base"),
+    _s("ENTERPRISE_EMBED_API_KEY", "secret", FROM_FILE, OWNER_PLATFORM,
        "libs/llm/config.py:resolve_llm_config",
-       "ключ эмбеддингов; пусто — запрос без Authorization"),
-    _s("ENTERPRISE_EMBED_PATH", "str", "", OWNER_AGENT,
+       "ключ эмбеддингов; в файле — подстановка ${EMBED_TOKEN} из "
+       ".secrets.env платформы. Общий с чатом секрет был бы ошибкой: "
+       "эмбеддер локальный (Ollama), чат облачный, развёртывания разные",
+       file_key="llm.embed_key"),
+    _s("ENTERPRISE_EMBED_PATH", "str", FROM_FILE, OWNER_PLATFORM,
        "libs/llm/config.py:resolve_llm_config",
-       "путь эндпойнта эмбеддингов, если адрес задан полным URL"),
-    _s("ENTERPRISE_EMBED_MODEL", "str", "", OWNER_AGENT,
+       "путь эндпойнта эмбеддингов, если адрес задан полным URL",
+       file_key="llm.embed_path"),
+    _s("ENTERPRISE_EMBED_MODEL", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_vectors_config",
-       "модель эмбеддера; входит в подпись индекса, поэтому объявляет агент"),
+       "модель эмбеддера; входит в подпись индекса",
+       file_key="llm.embed_model"),
     # -- журнал и бюджеты запросов: собственные ручки платформы ---------------
     _s("ENTERPRISE_LOG_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_log_table",
        "таблица долговечного журнала gateway", file_key="data.log_table"),
+    _s("ENTERPRISE_LOG_QUESTION_RUNS_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_question_runs_table",
+       "таблица прогонов вопросов; настройки не было ни в реестре, ни в "
+       "файле, поэтому сервис получал пустое значение и операции по прогонам "
+       "вопросов отвечали ошибкой",
+       file_key="data.question_runs_table"),
     _s("ENTERPRISE_LOG_BUFFER_MAXLEN", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "потолок буфера журнала; переполнение теряет события, а не растёт",
@@ -525,12 +579,11 @@ SETTINGS: tuple[Setting, ...] = (
     _s("ENTERPRISE_MAX_ROWS", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "потолок строк в ответах операций", file_key="data.max_rows"),
-    _s("ENTERPRISE_EXPECTED_TABLES", "list", (), OWNER_AGENT,
-       "servers/enterprise/server.py:_build_container",
-       "обязательные runtime-таблицы для schema_check. Это факт о схеме "
-       "агента, а не ручка платформы: список собирается агентом из его "
-       "конфигурации и отдаётся аргументом процесса. Ключ в platform.json "
-       "был вторым ответом на тот же вопрос и всегда проигрывал окружению"),
+    # Настройки ``ENTERPRISE_EXPECTED_TABLES`` больше нет: schema_check
+    # проверяет таблицы, объявленные в этом файле (журнал, прогоны вопросов,
+    # таблицы аудита, реестр скриптов), а список runtime-таблиц агента был
+    # принесён окружением и всегда проигрывал файлу, когда тот появлялся.
+    # Runtime-таблицы агента он проверяет сам, на своём старте.
     # -- пул соединений -----------------------------------------------------
     # Размеры и таймауты пула — ручки платформы: агент о них не знает и
     # знать не должен. До этого они жили только в ``_DEFAULT_POOL``, то
@@ -630,11 +683,11 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
         ),
         settings=(
             "ENTERPRISE_LOG_TABLE",
+            "ENTERPRISE_LOG_QUESTION_RUNS_TABLE",
             "ENTERPRISE_LOG_BUFFER_MAXLEN",
             "ENTERPRISE_LOG_FLUSH_INTERVAL",
             "ENTERPRISE_STATEMENT_TIMEOUT_MS",
             "ENTERPRISE_MAX_ROWS",
-            "ENTERPRISE_EXPECTED_TABLES",
         ),
         summary="PostgreSQL: очередь задач, долговечный журнал, чтение журнала",
     ),
@@ -654,7 +707,6 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
         tools=("index_stats", "list_indexes", "vector_search"),
         settings=(
             "ENTERPRISE_SNAPSHOT_PATH",
-            "ENTERPRISE_VECTOR_DB_TABLE",
             "ENTERPRISE_VECTOR_INDEXES",
             "ENTERPRISE_VECTOR_STORAGE_TABLE",
             "ENTERPRISE_VECTOR_ENABLE",
@@ -804,18 +856,27 @@ def read_secrets(path: Path | None = None) -> dict[str, str]:
     return values
 
 
-def _flatten(raw: dict[str, Any]) -> dict[str, Any]:
+def _flatten(raw: dict[str, Any], opaque: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Развернуть вложенные секции в точечные ключи, один уровень глубины.
 
     Ключи, начинающиеся с подчёркивания (``_about``, ``_owner``), —
     комментарии в данных, а не настройки; они пропускаются молча, иначе
     пришлось бы держать в файле синтаксис комментариев ради двух строк.
+
+    Args:
+        opaque: ключи, значение которых — **структура** (список таблиц с
+            метками, JSON-объект объявлений индексов). Их не разворачиваем:
+            подстановка ключа внутрь значения превратила бы объявление в
+            набор отдельных настроек, которых никто не объявлял.
     """
     flat: dict[str, Any] = {}
     for key, value in raw.items():
         if str(key).startswith("_"):
             continue
         if isinstance(value, dict):
+            if str(key) in opaque:
+                flat[str(key)] = value
+                continue
             for sub, sub_value in value.items():
                 if str(sub).startswith("_"):
                     continue
@@ -848,8 +909,12 @@ def read_platform_file(path: Path | None = None) -> dict[str, Any]:
         raise InfrastructureError(f"{target.name}: ожидался объект")
 
     allowed = {s.key for s in settings_owned_by(OWNER_PLATFORM)}
+    structured = frozenset(
+        s.key for s in settings_owned_by(OWNER_PLATFORM)
+        if s.kind in ("table_list", "json")
+    )
     flat: dict[str, Any] = {}
-    for key, value in _flatten(raw).items():
+    for key, value in _flatten(raw, structured).items():
         if key not in allowed:
             raise InfrastructureError(
                 f"{target.name}: {key!r} — не настройка платформы "
@@ -859,12 +924,12 @@ def read_platform_file(path: Path | None = None) -> dict[str, Any]:
             flat[key] = "1" if value else "0"
         elif isinstance(value, (int, float)):
             flat[key] = str(value)
-        elif isinstance(value, (list, tuple)) and BY_FILE_KEY[key].kind == "table_list":
-            # Список таблиц с метками остаётся структурой. Склеивать его в
-            # строку нельзя: метка (scripts_registry) и есть смысл
-            # объявления, и потерять её — значит объявить реестр скриптов
-            # обычной доменной таблицей.
-            flat[key] = list(value)
+        elif BY_FILE_KEY[key].kind in ("table_list", "json"):
+            # Список таблиц с метками и объявления индексов остаются
+            # структурой. Склеить их в строку нельзя: метка
+            # (scripts_registry) и объекты индексов и есть смысл
+            # объявления, и потеря их сделала бы файл нечитаемым.
+            flat[key] = value
         elif isinstance(value, (list, tuple)):
             flat[key] = ",".join(str(v) for v in value)
         else:
@@ -956,6 +1021,12 @@ class Settings:
         «забыли подставить» у файла быть не должно.
         """
         raw = self._file.get(setting.name)
+        if isinstance(raw, dict):
+            # Объявление индексов приходит объектом: подстановки в нём нет,
+            # а str() превратил бы его в текст, который потом не прочитать.
+            if not raw:
+                return None
+            return raw, "file:platform.json"
         if isinstance(raw, (list, tuple)):
             if not raw:
                 return None

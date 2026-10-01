@@ -35,7 +35,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
@@ -170,6 +169,33 @@ def _audit_config(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _question_runs_table(settings: Settings) -> tuple[str, str]:
+    """Разобрать ``data.question_runs_table`` так же, как таблицу журнала."""
+    return _split_table(
+        str(settings.get("ENTERPRISE_LOG_QUESTION_RUNS_TABLE")),
+        "ENTERPRISE_LOG_QUESTION_RUNS_TABLE",
+    )
+
+
+def _declared_tables(settings: Settings) -> tuple[str, ...]:
+    """Таблицы, которые платформа сама объявила в ``platform.json``.
+
+    Раньше сюда приходил список runtime-таблиц агента переменной окружения.
+    Проверять чужие таблицы — значит зависеть от того, кто их назвал: список
+    приезжал из чужой конфигурации, и когда у платформы появлялось своё
+    объявление, старая переменная молча побеждала его. Теперь ``schema_check``
+    отвечает на вопрос «на месте ли то, чем пользуется платформа», а
+    runtime-таблицы агента он проверяет сам, на своём старте.
+    """
+    log = ".".join(_log_table(settings))
+    tables = {log, ".".join(_question_runs_table(settings))}
+    audit = _audit_config(settings)
+    if audit["scripts_registry"]["table"]:
+        tables.add(audit["scripts_registry"]["table"])
+    tables.update(audit["audit"]["tables"])
+    return tuple(sorted(tables))
+
+
 def _build_container(
     settings: Settings, capabilities: frozenset[str] | None = None
 ) -> ToolContainer:
@@ -217,7 +243,8 @@ def _build_container(
     max_rows = int(settings.get("ENTERPRISE_MAX_ROWS"))
     data = DataService(
         log_table=_log_table(settings),
-        expected_tables=tuple(settings.get("ENTERPRISE_EXPECTED_TABLES")),
+        question_runs_table=_question_runs_table(settings),
+        expected_tables=_declared_tables(settings),
         statement_timeout_ms=statement_timeout_ms,
         max_rows=max_rows,
         buffer_maxlen=int(settings.get("ENTERPRISE_LOG_BUFFER_MAXLEN")),
@@ -320,7 +347,7 @@ def _snapshot(settings: Settings) -> Any:
         return open_snapshot_store(
             path,
             CacheAccessMode.READ_ONLY,
-            vector_db_table=str(settings.get("ENTERPRISE_VECTOR_DB_TABLE")),
+            vector_db_table=str(settings.get("ENTERPRISE_VECTOR_STORAGE_TABLE")),
         )
     except InfrastructureError as exc:
         # Причина и её код (``cache_busy``, ``cache_open_error``) доезжают до
@@ -349,22 +376,10 @@ def _vectors_config(settings: Settings) -> dict[str, Any]:
     приводит реестр: значение не того типа поднимается там, с именем
     настройки, а не здесь, где неизвестно, о какой речь.
     """
-    raw_indexes = str(settings.get("ENTERPRISE_VECTOR_INDEXES")).strip()
-    indexes: dict[str, Any] = {}
-    if raw_indexes:
-        try:
-            parsed = json.loads(raw_indexes)
-        except json.JSONDecodeError as exc:
-            raise InfrastructureError(
-                f"ENTERPRISE_VECTOR_INDEXES не разбирается как JSON: {exc}"
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise InfrastructureError(
-                "ENTERPRISE_VECTOR_INDEXES должен быть JSON-объектом вида "
-                "{имя индекса: описание}, получено "
-                f"{type(parsed).__name__}"
-            )
-        indexes = parsed
+    # Реестр уже привёл объявления к объекту (тип ``json``): из файла они
+    # приходят как есть, из окружения разбираются с именем настройки в
+    # ошибке. Разбирать JSON здесь второй раз нечего.
+    indexes = dict(settings.get("ENTERPRISE_VECTOR_INDEXES"))
 
     embedding = {
         "model": str(settings.get("ENTERPRISE_EMBED_MODEL")).strip() or None,
@@ -379,20 +394,27 @@ def _vectors_config(settings: Settings) -> dict[str, Any]:
     return {"gateway": {"vector": {"embedding": embedding, "index": index}}}
 
 
-def _log_table(settings: Settings) -> tuple[str, str]:
-    """Разобрать ``ENTERPRISE_LOG_TABLE`` на ``(schema, table)``.
+def _split_table(raw: str, setting_name: str) -> tuple[str, str]:
+    """Разобрать ``'<schema>.<table>'``.
 
     Без fallback-литерала: настройка обязательна (``FROM_FILE``), пустое или
     неоднозначное значение — ошибка конфигурации, а не молчаливое имя.
     """
-    raw = str(settings.get("ENTERPRISE_LOG_TABLE")).strip()
-    schema, _, table = raw.partition(".")
+    text = raw.strip()
+    schema, _, table = text.partition(".")
     if not schema or not table:
         raise InfrastructureError(
-            "ENTERPRISE_LOG_TABLE должен быть в виде '<schema>.<table>', "
-            f"получено {raw!r}"
+            f"{setting_name} должен быть в виде '<schema>.<table>', "
+            f"получено {text!r}"
         )
     return schema, table
+
+
+def _log_table(settings: Settings) -> tuple[str, str]:
+    """Таблица долговечного журнала."""
+    return _split_table(
+        str(settings.get("ENTERPRISE_LOG_TABLE")), "ENTERPRISE_LOG_TABLE"
+    )
 
 
 def build(

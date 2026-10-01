@@ -2,7 +2,7 @@
   "_about": "Настройки платформенной части enterprise-mcp. Это ЕДИНСТВЕННОЕ место, где живут значения настроек MCP: в коде их нет (см. libs/enterprise_common/settings.py — платформенная настройка объявлена как FROM_FILE, а не со значением), поэтому если ключа нет здесь, его нет нигде и сервер не поднимется. Приоритет: окружение > этот файл, с одним исключением — db.dsn (см. ниже). Ключ чужой настройки в этом файле — ошибка, сервер не поднимется.",
   "_owner": "platform",
 
-  "_structure": "Секции повторяют структуру проекта. Сверху — общий код платформы: db (libs/enterprise_data/db.py) и pool (тот же модуль). Ниже — capability в том же порядке и составе, что каталоги servers/enterprise/capabilities/: audit, data, llm, vectors. Настройки, которыми владеет агент, здесь не хранятся: они приходят через окружение процесса, и в соответствующей секции сказано, откуда именно.",
+  "_structure": "Секции повторяют структуру проекта. Сверху — общий код платформы: db (libs/enterprise_data/db.py) и pool (тот же модуль). Ниже — capability в том же порядке и составе, что каталоги servers/enterprise/capabilities/: audit, data, llm, vectors. Настроек, которыми владеет агент, здесь нет и быть не должно: MCP ничего не получает от агента, поэтому весь раздел — только то, что платформа объявляет сама.",
 
   "db": {
     "_about": "Подключение к базе — владелец libs/enterprise_data/db.py. DSN приоритетнее окружения: переменная DATABASE_URL в окружении процесса унаследована от агента (dict(os.environ) целиком), а не объявлена платформой, и без file_first значение из файла было бы декоративным — сервер показывал бы в конфигурации одну базу, а подключался бы к другой. Учётная и адресная части — подстановками ${ПЕРЕМЕННАЯ}: они читаются из mcp-platform/.secrets.env (свои секреты платформы, файл под .gitignore), а при отсутствии файла — из окружения процесса. Незаданная переменная останавливает сервер на старте с её именем: молча подставиться не может, а молча не подключиться хуже.",
@@ -36,8 +36,10 @@
   },
 
   "data": {
-    "_about": "capability data — servers/enterprise/capabilities/data/. Журнал, очередь задач, чтение журнала, schema_check. Обязательные runtime-таблицы для schema_check приходят от агента (ENTERPRISE_EXPECTED_TABLES): это факт о его схеме, а не ручка платформы.",
+    "_about": "capability data — servers/enterprise/capabilities/data/. Журнал, прогоны вопросов, очередь задач, чтение журнала, schema_check. Здесь же путь к снимку DuckDB: снимком владеет capability data (libs/enterprise_data/snapshot/), и объявлять его должен она, а не получать окружением агента — два владельца одного файла означали бы, что снимок читают не оттуда, откуда пишут. Путь здесь OPTIONAL, и это честно: пустое значение означает «снимок ненастроен» (сервер поднимается, операции со снимком отвечают snapshot_unavailable), а не «сервер не запустится» — capability data от снимка не зависит. schema_check проверяет собственные таблицы платформы (журнал, прогоны вопросов, таблицы аудита, реестр скриптов), а не runtime-таблицы агента: их список приезжал окружением и молча перебивал файл.",
     "log_table": "public.agent_gateway_logs",
+    "question_runs_table": "public.agent_question_runs",
+    "snapshot_path": "C:\\Users\\Алексей\\.cache\\nanobot\\duckdb\\cache.duckdb",
     "log_buffer_maxlen": 2048,
     "log_flush_interval": 5.0,
     "statement_timeout_ms": 30000,
@@ -45,16 +47,68 @@
   },
 
   "llm": {
-    "_about": "capability llm — servers/enterprise/capabilities/llm/. Здесь живут настройки внутреннего сервиса общения с моделью (libs/llm/gateway.py): он владеет единственным HTTP-вызовом к провайдеру, поэтому адрес, модель и ключ чата — его. Раньше это был выбор агента (project.json → agents.defaults / providers.*), и вторая копия здесь разъехалась бы с ним при первой же смене модели. Ключ провайдера лежит в llm.key (в окружении та же настройка называется ENTERPRISE_LLM_API_KEY): в файле платформенных настроек секрет не хранится даже в виде подстановки под «настоящим» именем ключа, иначе в файл рано или поздно попал бы сам ключ вместо ссылки на него. Подстановка ${LLM_API_KEY} разворачивается из mcp-platform/.secrets.env (свои секреты платформы, файл под .gitignore), а при отсутствии файла — из окружения процесса; незаданная переменная останавливает сервер на старте с её именем. Окружение приоритетнее файла: развёртывание, задающее ENTERPRISE_LLM_* вручную, продолжает работать. Пустые значения — законное состояние (настройки объявлены OPTIONAL, capability необязательна): оно не мешает подняться capability data, видно в баннере по llm.model и llm.api_base и приходит на операции complete/embed как infrastructure_error. Эмбеддера здесь нет намеренно: его модель входит в подпись индекса, который строит и проверяет агент, поэтому она остаётся объявлением агента (ENTERPRISE_EMBED_*).",
+    "_about": "capability llm — servers/enterprise/capabilities/llm/. Здесь живут настройки внутреннего сервиса общения с моделью (libs/llm/gateway.py): он владеет единственным HTTP-вызовом к провайдеру, поэтому адрес, модель и ключ чата — его. Раньше это был выбор агента (project.json → agents.defaults / providers.*), и вторая копия здесь разъехалась бы с ним при первой же смене модели. Ключ провайдера лежит в llm.key (в окружении та же настройка называется ENTERPRISE_LLM_API_KEY): в файле платформенных настроек секрет не хранится даже в виде подстановки под «настоящим» именем ключа, иначе в файл рано или поздно попал бы сам ключ вместо ссылки на него. Подстановка ${LLM_API_KEY} разворачивается из mcp-platform/.secrets.env (свои секреты платформы, файл под .gitignore), а при отсутствии файла — из окружения процесса; незаданная переменная останавливает сервер на старте с её именем. Окружение приоритетнее файла: развёртывание, задающее ENTERPRISE_LLM_* вручную, продолжает работать. Пустые значения — законное состояние (настройки чата объявлены OPTIONAL, capability необязательна): оно не мешает подняться capability data, видно в баннере по llm.model и llm.api_base и приходит на операции complete как infrastructure_error. Эмбеддер (embed_*) — тоже платформенный, потому что HTTP-вызов к нему делает тот же владелец libs/llm. Объявлялся он раньше агентом на том основании, что в подпись индекса входит модель эмбеддера: проверяющая сторона оттуда ушла, подпись считает libs.vectors.signature в этом процессе, и объявление модели в чужом окружении означало, что половина подписи живёт здесь, а половина там, а расхождение видно только как «индекс STALE». Эмбеддер и чат — разные провайдеры (эмбеддер локальный Ollama, чат облачный), поэтому у эмбеддера свои адрес, путь, ключ и модель; ключ — подстановка ${EMBED_TOKEN} из .secrets.env платформы, общий с чатом секрет связал бы развёртывания, которые обязаны жить отдельно.",
     "provider": "minimax",
     "model": "MiniMax-M3",
     "api_base": "https://api.minimax.io/v1",
     "key": "${LLM_API_KEY}",
     "max_tokens": 8192,
-    "temperature": 0.1
+    "temperature": 0.1,
+    "embed_api_base": "http://localhost:11434",
+    "embed_key": "${EMBED_TOKEN}",
+    "embed_path": "api/embed",
+    "embed_model": "mxbai-embed-large:latest",
+    "embed_dimension": 1024,
+    "embed_timeout": 60.0
   },
 
   "vectors": {
-    "_about": "capability vectors — servers/enterprise/capabilities/vectors/. Путь к снимку, таблица векторов, объявления индексов и размерность эмбеддинга приходят от агента (project.json → gateway.vector.*, путь снимка — resolve_cache_path()): это факт о его проекте, а не ручка платформы. Подключение к эмбеддеру (адрес, ключ, путь, модель) — платформенное, оно в секции llm вместе с чатом: HTTP-вызов к эмбеддеру делает тот же владелец libs/llm. Выключатель capability тоже решение агента (gateway.vector.index.enable): тем же флагом он решает, строить ли индексы, и вторая копия здесь всегда проигрывала бы окружению."
+    "_about": "capability vectors — servers/enterprise/capabilities/vectors/. Поиск по эмбеддингам поверх снимка (путь к нему объявлен в секции data, владельцем снимка является capability data). Здесь объявления индексов, инфраструктурная таблица хранения векторов и выключатель capability. Форма объявлений повторяет прежнюю (project.json → gateway.vector.index) целиком, включая колонки, чанкинг и метрику: перенос не должен переписывать объявления руками, иначе подпись индекса (libs.vectors.signature) считалась бы по одной форме, а строилась по другой. Индексы не склеиваются в строку — это объект, и его форма здесь и есть смысл объявления. Дубликат, который остаётся до переноса build-инструментов (фаза 8): то же объявление индексов в project.json для build_vectors.py у агента.",
+    "enable": true,
+    "storage_table": "oarb.audit_vectors",
+    "indexes": {
+      "audits_index": {
+        "table": "oarb.audits",
+        "pk": "id",
+        "source_table": "audits",
+        "content_columns": ["title", "audit_type", "auditee_entity", "status"],
+        "embedding_columns": ["title", "audit_type", "auditee_entity", "status"],
+        "track_column": "updated_at",
+        "chunk_size": 500,
+        "chunk_overlap": 80,
+        "metric": "cosine",
+        "enabled": true
+      },
+      "violations_index": {
+        "table": "oarb.violations",
+        "pk": "id",
+        "source_table": "violations",
+        "content_columns": ["description", "recommendation", "violation_code", "severity"],
+        "embedding_columns": [
+          {"column": "description", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+          "violation_code"
+        ],
+        "track_column": "updated_at",
+        "chunk_size": 500,
+        "chunk_overlap": 80,
+        "metric": "cosine",
+        "enabled": true
+      },
+      "audit_reports_index": {
+        "table": "oarb.audit_reports",
+        "pk": "id",
+        "source_table": "audit_reports",
+        "content_columns": ["full_text", "title", "report_number", "report_date"],
+        "embedding_columns": [
+          {"column": "full_text", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+          "title"
+        ],
+        "track_column": "updated_at",
+        "chunk_size": 500,
+        "chunk_overlap": 80,
+        "metric": "cosine",
+        "enabled": true
+      }
+    }
   }
 }

@@ -20,23 +20,51 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from libs.enterprise_common.errors import InfrastructureError
-from libs.enterprise_common.settings import Settings
+from libs.enterprise_common.settings import PLATFORM_CONFIG_PATH, Settings
 from libs.enterprise_data import snapshot as snapshot_module
 from libs.enterprise_data.snapshot import CacheBusyError, CacheOpenError
 from libs.enterprise_data.snapshot.unavailable import UnavailableSnapshot
 from servers.enterprise import server as enterprise_server
 
 
-def _settings() -> Settings:
+def _settings(**overrides: str) -> Settings:
     return Settings()
+
+
+def _settings_with_file(config_path) -> Settings:
+    """Реестр поверх копии файла: как на развёртывании, но без правки рабочей."""
+    return Settings(file_path=config_path)
+
+
+def _config_without(tmp_path, *keys: str):
+    """Копия platform.json без указанных ключей.
+
+    «Снимок не настроен» — это отсутствие ключа в файле. Пустая переменная
+    окружения больше не выражает этого: окружение приоритетнее файла, но
+    пустое значение просто пропускается, и путь из файла остаётся в силе.
+    """
+    raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+    for dotted in keys:
+        section, _, key = dotted.partition(".")
+        raw.get(section, {}).pop(key, None)
+    target = tmp_path / "platform.json"
+    target.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    return target
 
 
 @pytest.fixture
 def _snapshot_path(monkeypatch, tmp_path):
-    """Задать путь снимка, как это делает агент через ``_child_env``."""
+    """Задать путь снимка.
+
+    Раньше агент передавал его переменной окружения; теперь путь объявляется
+    в platform.json, поэтому тест подставляет его в окружение только чтобы
+    открытие гарантированно ушло в подменённый ``open_snapshot_store``.
+    """
     path = tmp_path / "cache.duckdb"
     monkeypatch.setenv("ENTERPRISE_SNAPSHOT_PATH", str(path))
     return path
@@ -125,28 +153,26 @@ class TestClientGetsTheRealCause:
             snapshot.get_schema()
         assert excinfo.value.code == "cache_open_error"
 
-    def test_unset_path_says_it_is_not_configured(self, monkeypatch):
-        monkeypatch.setenv("ENTERPRISE_SNAPSHOT_PATH", "")
-        snapshot = enterprise_server._snapshot(_settings())
+    def test_unset_path_says_it_is_not_configured(self, tmp_path):
+        config = _config_without(tmp_path, "data.snapshot_path")
+        snapshot = enterprise_server._snapshot(_settings_with_file(config))
         assert snapshot.is_ready() is False
         assert "ENTERPRISE_SNAPSHOT_PATH" in snapshot.reason
         with pytest.raises(InfrastructureError) as excinfo:
             snapshot.query_sql("SELECT 1")
         assert "ENTERPRISE_SNAPSHOT_PATH" in str(excinfo.value)
 
-    def test_reason_is_readable_without_calling_an_operation(self, monkeypatch):
+    def test_reason_is_readable_without_calling_an_operation(self, tmp_path):
         """Health не должен падать, чтобы узнать причину."""
-        monkeypatch.setenv("ENTERPRISE_SNAPSHOT_PATH", "")
-        stats = enterprise_server._snapshot(_settings()).get_stats()
+        config = _config_without(tmp_path, "data.snapshot_path")
+        stats = enterprise_server._snapshot(_settings_with_file(config)).get_stats()
         assert stats["ready"] is False
         assert "ENTERPRISE_SNAPSHOT_PATH" in stats["reason"]
 
-    def test_vector_reads_fail_with_the_reason_not_attribute_error(
-        self, monkeypatch,
-    ):
+    def test_vector_reads_fail_with_the_reason_not_attribute_error(self, tmp_path):
         """Векторные чтения не входят в ABC — без заглушки был бы AttributeError."""
-        monkeypatch.setenv("ENTERPRISE_SNAPSHOT_PATH", "")
-        snapshot = enterprise_server._snapshot(_settings())
+        config = _config_without(tmp_path, "data.snapshot_path")
+        snapshot = enterprise_server._snapshot(_settings_with_file(config))
         for call in (
             lambda: snapshot.fetch_source_vectors("audits_index"),
             lambda: snapshot.vector_source_stats(),

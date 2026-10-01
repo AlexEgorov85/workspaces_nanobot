@@ -40,6 +40,7 @@ from libs.enterprise_common.errors import InfrastructureError  # noqa: E402
 from libs.enterprise_common.settings import (  # noqa: E402
     BY_NAME,
     FROM_FILE,
+    PLATFORM_CONFIG_PATH,
     POOL_SETTING_KEYS,
     Settings,
     pool_config,
@@ -55,7 +56,8 @@ DUMMY_SECRETS: dict[str, str] = {
     "DB_HOST": "localhost",
     "DB_PORT": "5432",
     "DB_NAME": "test",
-    "LLM_API_KEY": "test",
+    "EMBED_TOKEN": "test",
+        "LLM_API_KEY": "test",
 }
 
 def _settings(
@@ -512,12 +514,21 @@ class TestLlmGetsResolvedValues:
         settings = _settings(env={"ENTERPRISE_AUDIT_TABLES": "a,b\nc"})
         assert settings.as_env()["ENTERPRISE_AUDIT_TABLES"] == "a,b,c"
 
-    def test_as_env_skips_unset_values(self) -> None:
+    def test_as_env_skips_unset_values(self, tmp_path) -> None:
         """Без значения — отсутствие ключа, а не пустая строка.
 
         Пустая строка для ``int``-настройки не «не задана», а значение: пустой
-        ``ENTERPRISE_EMBED_DIMENSION`` приводится как ``None`` реестром, и
+        ``ENTERPRISE_LLM_MAX_TOKENS`` приводится как ``None`` реестром, и
         потребитель обязан увидеть именно отсутствие.
+
+        Берём необязательную настройку capability ``llm``: у обязательной
+        (``FROM_FILE``) отсутствие ключа в файле — ошибка конфигурации с
+        именем ключа, а вовсе не «unset».
         """
-        resolved = _settings().as_env()
-        assert "ENTERPRISE_EMBED_DIMENSION" not in resolved
+        raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+        raw["llm"].pop("max_tokens")
+        config = tmp_path / "platform.json"
+        config.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+        resolved = _settings(file_path=config).as_env()
+        assert "ENTERPRISE_LLM_MAX_TOKENS" not in resolved
