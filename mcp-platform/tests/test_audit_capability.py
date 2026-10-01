@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -55,6 +56,15 @@ class FakeLlm:
         self.calls: list[list[dict[str, Any]]] = []
 
     def complete(self, *, messages: list[dict[str, Any]], audience: str = "") -> Any:
+        self.calls.append(messages)
+        return type("Completion", (), {"text": self.answer})()
+
+    def send(self, *, messages: list[dict[str, Any]], context: Any = None, **kwargs: Any) -> Any:
+        """Конвейер генерации идёт через ``send``, а не ``complete``.
+
+        Пока фейк знал только ``complete``, happy path ``generate_sql`` не
+        проверялся вовсе: до провайдера дело не доходило.
+        """
         self.calls.append(messages)
         return type("Completion", (), {"text": self.answer})()
 
@@ -256,6 +266,40 @@ class TestConfiguration:
             service.generate_sql(query="сколько аудитов")
         assert caught.value.code == "infrastructure_error", caught.value.code
         assert "llm" in caught.value.message
+
+
+class TestGeneratedSqlExplainSeam:
+    """Проверка синтаксиса идёт швом capability ``data``.
+
+    Раньше audit звал ``explain_query(sql, reader)`` — с переставленными
+    аргументами и с вызываемым объектом вместо соединения. Отказ приходил
+    как ``internal_error`` уже на живом сервере: тесты проверяли
+    ``libs.audit`` с подставным explainer'ом и до шва не доходили.
+    """
+
+    def test_explain_goes_through_data_capability(self) -> None:
+        snapshot = _snapshot()
+        container = _container(snapshot)
+
+        container.get("audit").generate_sql(query="сколько аудитов")
+
+        assert snapshot.explain_calls, "SQL не проверился через data.snapshot_explain"
+        assert snapshot.explain_calls[0].lstrip().upper().startswith("SELECT")
+
+    def test_capability_does_not_reach_into_the_store(self) -> None:
+        """Шов объяснения принадлежит владельцу снимка.
+
+        Прямой импорт ``explain_query`` в capability означал бы, что
+        объяснение запроса — её собственное дело, и второй вызов с
+        соединением она получить не может.
+        """
+        import servers.enterprise.capabilities.audit.service.main as audit_module
+
+        source = Path(audit_module.__file__).read_text(encoding="utf-8")
+        assert "snapshot.query import explain_query" not in source, (
+            "capability audit импортирует внутренний explain_query снимка "
+            "вместо шва data.snapshot_explain"
+        )
 
 
 class TestErrorTranslation:

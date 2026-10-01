@@ -198,6 +198,17 @@ class DataService:
         """
         return dict(self._snapshot_store().query_sql(sql, params))
 
+    def snapshot_explain(self, sql: str) -> dict[str, Any]:
+        """Синтаксическая проверка SQL к снимку, без выполнения.
+
+        Отдельный метод, а не ``snapshot_query("EXPLAIN ...")``: соединение с
+        снимком открывает владелец снимка, и вызывающая сторона его не имеет.
+        Capability ``audit`` проверяет сгенерированный SQL именно этим швом —
+        раньше он дотягивался до ``explain_query`` напрямую и передавал
+        туда вызываемый объект вместо соединения.
+        """
+        return dict(self._snapshot_store().explain(sql))
+
     def snapshot_schema(
         self,
         schema_name: str | None = None,
@@ -296,10 +307,17 @@ class DataService:
         транзакции: половина батча в журнале хуже, чем ничего.
         """
         schema, table = self._require_log_table("log_events")
+        # Полный конверт события. Список колонок раньше обрывался на девяти
+        # полях, и события, написанные платформой, теряли `request_id`,
+        # `metadata`, `channel` и `actor`: без `request_id` оборот не
+        # коррелировался, без `metadata` терялись source/component. Агентский
+        # писатель (`lib/services/db_logging_service.py`) пишет те же двенадцать
+        # полей, поэтому две половины журнала читались по разным схемам.
         sql = (
             f'INSERT INTO "{schema}"."{table}" '
-            '(id, "timestamp", event_type, name, level, summary, payload, session_id, user_id) '
-            "VALUES (%s, now(), %s, %s, %s, %s, %s::jsonb, %s, %s)"
+            "(id, \"timestamp\", event_type, name, level, summary, payload, "
+            "session_id, user_id, request_id, channel, actor, metadata) "
+            "VALUES (%s, now(), %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)"
         )
         rows = [
             (
@@ -314,6 +332,10 @@ class DataService:
                 json.dumps(event.get("payload") or {}),
                 event.get("session_id"),
                 event.get("user_id"),
+                event.get("request_id"),
+                event.get("channel"),
+                event.get("actor"),
+                json.dumps(event.get("metadata") or {}),
             )
             for event in events
         ]
@@ -336,18 +358,31 @@ class DataService:
         payload: dict[str, Any] | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
+        request_id: str | None = None,
         *,
+        channel: str | None = None,
+        actor: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        event_id: str | None = None,
         audience: str = AUDIENCE_MODEL,
     ) -> str:
         """Записать событие журнала. Неблокирующий вход.
 
         Возвращает ``"accepted"`` либо ``"dropped"``: агент должен видеть
         переполнение, иначе он решит, что событие записано.
+
+        Конверт события (§ ``runtime/event-model``) собирается целиком: кроме
+        ``payload`` пишутся ``request_id``, ``channel``, ``actor`` и
+        ``metadata``. Раньше здесь были только ``payload`` и идентичность, и
+        событие, записанное агентом, нельзя было связать с оборотом по
+        ``request_id``.
         """
+        del audience  # логирование не пишет в журнал входа в журнал
         if not event_type.strip():
             raise InvalidRequestError("event_type не должен быть пустым")
         result = self.accept(
             {
+                "id": event_id or str(uuid.uuid4()),
                 "event_type": event_type,
                 "name": name,
                 # Нормализация здесь, на границе запроса: в буфер уходит уже
@@ -357,6 +392,10 @@ class DataService:
                 "payload": payload or {},
                 "session_id": session_id,
                 "user_id": user_id,
+                "request_id": request_id,
+                "channel": channel,
+                "actor": actor,
+                "metadata": metadata or {},
             }
         )
         return "dropped" if result is not None else "accepted"
@@ -405,7 +444,7 @@ class DataService:
                 )
             prepared.append(
                 {
-                    "id": event.get("id"),
+                    "id": event.get("id") or str(uuid.uuid4()),
                     "event_type": event_type,
                     "name": str(event.get("name") or ""),
                     "level": normalize_level(event.get("level", "info")),
@@ -413,6 +452,10 @@ class DataService:
                     "payload": event.get("payload") or {},
                     "session_id": event.get("session_id"),
                     "user_id": event.get("user_id"),
+                    "request_id": event.get("request_id"),
+                    "channel": event.get("channel"),
+                    "actor": event.get("actor"),
+                    "metadata": event.get("metadata") or {},
                 }
             )
         dropped = self._buffer.accept_many(prepared)

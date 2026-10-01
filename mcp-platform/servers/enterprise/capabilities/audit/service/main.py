@@ -104,12 +104,17 @@ class AuditService:
         return self._container.get(DATA_SERVICE).snapshot_schema()
 
     def _explainer(self):
-        from libs.enterprise_data.snapshot.query import explain_query
+        """Синтаксическая проверка SQL сгенерированного запроса.
 
-        reader = self._reader()
+        Через capability ``data``: соединение с снимком открывает владелец
+        снимка, и у capability ``audit`` его нет. Прямой вызов
+        ``explain_query(conn, sql)`` отсюда означал бы, что шов у audit
+        собственный — а он не его: объяснение запроса к снимку делает тот,
+        кто снимком владеет.
+        """
 
         def _explain(sql: str) -> dict[str, Any]:
-            return explain_query(sql, reader)
+            return self._container.get(DATA_SERVICE).snapshot_explain(sql)
 
         return _explain
 

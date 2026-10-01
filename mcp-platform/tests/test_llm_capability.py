@@ -183,6 +183,68 @@ class TestConstruction:
         assert "не задана модель" in str(caught.value)
 
 
+class TestSend:
+    """``send`` на capability-сервисе, а не на шлюзе.
+
+    Метод зовёт конвейер генерации SQL, который сам собирает историю
+    попыток. Тесты на ``libs.llm.gateway`` его не касаются, поэтому отказ
+    здесь был виден только вживую: ``TypeError`` вместо доменной ошибки.
+    """
+
+    def test_history_reaches_provider(self) -> None:
+        service, recorder = _service("SQL")
+        messages = [
+            {"role": "system", "content": "пиши SQL"},
+            {"role": "user", "content": "счёт по годам"},
+            {"role": "assistant", "content": "прошлый негодный SQL"},
+        ]
+
+        result = service.send(messages=messages)
+
+        assert recorder.calls[0]["messages"] == messages
+        assert result.text == "SQL"
+
+    def test_history_is_not_rewritten(self) -> None:
+        """Обрезанная переписка выглядела бы как «поправил запрос», а
+        конвейер её собирает сам: терять нечего."""
+        service, recorder = _service("ok")
+        messages = [
+            {"role": "user", "content": "вопрос"},
+            {"role": "assistant", "content": "ошибка разбора"},
+            {"role": "user", "content": "исправь"},
+        ]
+
+        service.send(messages=messages)
+
+        assert len(recorder.calls[0]["messages"]) == len(messages)
+
+    @pytest.mark.parametrize(
+        "messages",
+        [
+            "строка вместо списка",
+            [{"content": "без роли"}],
+            [{"role": "user"}],
+            [{"role": 1, "content": "роль не строка"}],
+        ],
+        ids=["строка-вместо-списка", "без-role", "без-content", "роль-не-строка"],
+    )
+    def test_malformed_history_is_a_domain_error(self, messages: Any) -> None:
+        service, recorder = _service()
+        with pytest.raises(InvalidRequestError):
+            service.send(messages=messages)
+        assert recorder.calls == []
+
+    def test_type_error_is_not_a_domain_error(self) -> None:
+        """Подпись ``require_messages`` и её вызов должны совпадать.
+
+        Расхождение даёт ``TypeError`` внутри операции: не доменный код, а
+        ``internal``, и по журналу это читается как дефект платформы.
+        """
+        service, recorder = _service("ok")
+        service.send(messages=[{"role": "user", "content": "вопрос"}])
+        assert len(recorder.calls) == 1
+
+
 class TestComplete:
     def test_returns_text_and_model(self) -> None:
         service, _ = _service("итоговый ответ")

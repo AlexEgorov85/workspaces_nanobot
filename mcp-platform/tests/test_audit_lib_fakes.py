@@ -204,6 +204,16 @@ class FakeSnapshot:
     def snapshot_schema(self, schema_name: str | None = None, table_names: list[str] | None = None) -> Any:
         return self.schema()
 
+    def snapshot_explain(self, sql: str) -> Any:
+        """Синтаксическая проверка: EXPLAIN делает владелец снимка.
+
+        Capability ``audit`` ходит за этим швом, а не в ``explain_query``
+        напрямую: соединение с снимком у неё нет, и раньше она передавала
+        туда вызываемый объект вместо соединения.
+        """
+        self.explain_calls.append(sql)
+        return {"valid": True, "plan": []}
+
     # --- утверждения для тестов ----------------------------------------
 
     @property

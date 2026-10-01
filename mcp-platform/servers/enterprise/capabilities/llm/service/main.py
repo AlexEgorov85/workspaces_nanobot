@@ -235,7 +235,11 @@ class LlmService:
             InfrastructureError: провайдер не ответил либо ответил пустотой.
         """
         self._require_runtime(audience, "send")
-        require_messages(messages, "messages")
+        # Один аргумент: ``require_messages`` сама называет поле в тексте
+        # ошибки. Второй аргумент здесь означал TypeError на каждом
+        # ``send`` — то есть на ``generate_sql``, который ходит сюда из
+        # конвейера аудита с собранной историей попыток.
+        require_messages(messages)
         text = self._service_call(
             messages,
             context=context,
