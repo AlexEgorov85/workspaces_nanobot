@@ -300,32 +300,9 @@ class TestHistorySearchFilters:
 
 
 class TestQueuePermissions:
-    def test_queue_op_rejects_model_audience(self, service: DataService) -> None:
-        """Модель, захватившая задачу, увела бы её у живого воркера."""
-        with pytest.raises(InvalidRequestError, match="только рантайму"):
-            service.claim_task("tasks", "w1", audience=AUDIENCE_MODEL)
-
     def test_update_status_rejects_model_audience(self, service: DataService) -> None:
         with pytest.raises(InvalidRequestError, match="только рантайму"):
             service.update_task_status("tasks", "t1", "done", audience=AUDIENCE_MODEL)
-
-    def test_claim_is_atomic_update_returning(self) -> None:
-        db = _fake_db(rows=[("task-1", {}, "s1", None)])
-        svc = _service(db=db, buffer_flush_interval=0.0)
-        task = svc.claim_task("tasks", "w1", audience=AUDIENCE_RUNTIME)
-        assert task is not None
-        assert task["id"] == "task-1"
-        updates = [s for s in db.conn.statements if s[0].lstrip().startswith("UPDATE")]  # type: ignore[union-attr]
-        assert updates, "сервис не выполнял UPDATE"
-        sql = updates[-1][0]
-        assert sql.startswith("UPDATE tasks SET status = 'processing'")
-        assert "AND status = 'pending' RETURNING" in sql
-        # Внешний фильтр по статусу — то, что делает повторный захват невозможным.
-        assert "FOR UPDATE LIMIT 1" in sql
-
-    def test_empty_queue_returns_none(self) -> None:
-        svc = _service(db=_fake_db(rows=[]), buffer_flush_interval=0.0)
-        assert svc.claim_task("tasks", "w1", audience=AUDIENCE_RUNTIME) is None
 
     def test_unknown_status_rejected(self) -> None:
         svc = _service(db=_fake_db(), buffer_flush_interval=0.0)

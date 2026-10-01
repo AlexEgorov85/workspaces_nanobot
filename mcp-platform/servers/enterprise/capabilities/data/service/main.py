@@ -600,43 +600,6 @@ class DataService:
                 f"{operation} доступна только рантайму агента, профиль вызова: {audience}"
             )
 
-    def claim_task(
-        self,
-        task_table: str,
-        worker_id: str,
-        *,
-        audience: str = AUDIENCE_RUNTIME,
-    ) -> dict[str, Any] | None:
-        """Атомарно захватить одну задачу. ``None`` — очередь пуста.
-
-        Единственный ``UPDATE ... RETURNING`` с внешним фильтром по статусу:
-        повторный захват невозможен, а гонки между воркерами не возникает,
-        потому что переход статуса выполняется самой СУБД.
-        """
-        self._require_runtime(audience, "claim_task")
-        sql = (
-            f"UPDATE {task_table} SET status = 'processing', claimed_at = now(), worker_id = %s "
-            "WHERE id = ("
-            f"  SELECT id FROM {task_table} WHERE status = 'pending' "
-            "  ORDER BY id FOR UPDATE LIMIT 1"
-            ") AND status = 'pending' RETURNING id, payload, session_id, created_at"
-        )
-
-        def job(conn: Any) -> dict[str, Any] | None:
-            with conn.cursor() as cur:
-                cur.execute(sql, (worker_id,))
-                row = cur.fetchone()
-            if row is None:
-                return None
-            return {
-                "id": str(row[0]),
-                "payload": decode_jsonb(row[1]) if row[1] is not None else {},
-                "session_id": row[2],
-                "created_at": row[3],
-            }
-
-        return self.submit(job, audience=audience)
-
     def update_task_status(
         self,
         task_table: str,

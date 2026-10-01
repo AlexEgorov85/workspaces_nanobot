@@ -686,7 +686,6 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
         name="data",
         service="servers/enterprise/capabilities/data/service/main.py",
         tools=(
-            "claim_task",
             "history_search",
             "log_event",
             "log_events",
