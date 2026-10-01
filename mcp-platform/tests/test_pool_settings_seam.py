@@ -57,6 +57,7 @@ DUMMY_SECRETS: dict[str, str] = {
     "DB_PORT": "5432",
     "DB_NAME": "test",
     "LLM_API_KEY": "test",
+    "EMBED_TOKEN": "test",
 }
 
 def _settings(
