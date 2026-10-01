@@ -82,6 +82,23 @@ def canonical_framework_hooks() -> list[HookSpec]:
             description="живой вывод результатов tool'ов в терминал",
             source="lib/hooks/terminal_tool_print_hook.py",
         ),
+        HookSpec(
+            name="ToolResultArchiveHook",
+            kind="framework",
+            # required=False, потому что хук гейтится конфигом:
+            # ``gateway.persist_threshold <= 0`` — фича выключена и хук
+            # намеренно НЕ создаётся. Ставить required=True значило бы
+            # кричать «критический дрейф» на осознанное выключение.
+            # ``missing_optional`` в этом случае читается как
+            # «архивация результатов выключена», а не как поломка.
+            required=False,
+            description=(
+                "архивирование больших результатов tool'ов в data_store/ "
+                "(нативная замена патча save_turn, фаза 6 п. 6.2); "
+                "гейт: gateway.persist_threshold > 0"
+            ),
+            source="lib/hooks/tool_result_archive_hook.py",
+        ),
     ]
 
 
@@ -148,6 +165,16 @@ def canonical_project_tools() -> list[ToolSpec]:
             required=True,
             description="вопрос-ответ по пакетам документов legal_summarizer",
             config_key=None,
+        ),
+        ToolSpec(
+            name="document_read",
+            module="document_read",
+            required=True,
+            description=(
+                "извлечение текста из офисных документов; носитель порога "
+                "длины текста после удаления патча document_text_threshold (6.7/6.11)"
+            ),
+            config_key="tools.document_read.enable",
         ),
     ]
 

@@ -365,7 +365,7 @@ class TestRegisterProjectToolsEdgeCases:
         _write_tool_module(tools_dir, "regular")
 
         agent = _make_agent(tools_config_section={"dummy": {"enable": True}})
-        result = register_project_tools(agent, tmp_path)
+        register_project_tools(agent, tmp_path)
         # Только regular.py зарегистрирован
         registered = [
             c.args[0].name for c in agent.tools.register.call_args_list
@@ -555,16 +555,35 @@ class TestProjectToolsInventoryBanner:
         assert "legal_summarizer_query" in captured.err
 
     def test_no_inventory_drift_returns_silently(self, capsys):
-        """Если drift нет (всё совпадает с canonical) — banner молчит."""
+        """Если drift нет (всё совпадает с canonical) — banner молчит.
+
+        Фикстура строится из ``canonical_project_tools()``, а не
+        выписывается: перенос порога длины текста из патча
+        ``document_text_threshold`` в tool ``document_read`` добавил
+        четвёртый обязательный tool, и ручной список из трёх имён
+        ломал тест, печатая красный баннер на полностью корректном
+        состоянии. Теперь «нет drift» означает ровно «фактический
+        состав == канон», и остаётся содержательной проверкой:
+        рассинхронизация ``diff_project_tools`` или баннера по-прежнему
+        её повалит.
+        """
         from lib.core.application_context import _emit_project_tools_inventory_banner
         from lib.services.project_tool_loader import ProjectToolsLoadResult
+        from lib.services.runtime_inventory import canonical_project_tools
+
+        canonical = canonical_project_tools()
+        required = [t.name for t in canonical if t.required]
+        assert required, "канон project tools пуст — тест ничего бы не проверял"
 
         result = ProjectToolsLoadResult(
-            registered=["compact_context", "history_search", "legal_summarizer_query"],
+            registered=list(required),
             disabled=["ExampleTool"],
             duplicate=[],
             failed=[],
-            detail="3 project tools registered: ...; 1 disabled by config: ExampleTool",
+            detail=(
+                f"{len(required)} project tools registered: "
+                f"{', '.join(required)}; 1 disabled by config: ExampleTool"
+            ),
             error=None,
         )
 
@@ -574,6 +593,7 @@ class TestProjectToolsInventoryBanner:
         # canonical + disabled ExampleTool = нет drift
         assert "MISSING REQUIRED" not in captured.err
         assert "FAILED" not in captured.err
+        assert "UNEXPECTED" not in captured.err
 
 
 class TestRealCompactContextToolLoads:

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-import threading
-import time
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,67 +31,6 @@ def _settings(gateway_overrides=None, channels=None, **overrides):
             self.channels = channels_ns
 
     return _Settings()
-
-
-def _make_fake_document_module(text_value=None):
-    """Собрать fake ``nanobot.utils.document`` для подмены в ``sys.modules``.
-
-    ``from nanobot.utils import document`` резолвится через атрибут
-    ``document`` родительского модуля ``nanobot.utils``. Чтобы патч
-    ``patch_document_text_threshold`` подхватил наш fake (а не
-    настоящий submodule), подменяем **оба** ключа в ``sys.modules``.
-
-    ``extract_text(path)`` для тестовых файлов читает содержимое из
-    ``tmp_path_factory``: env-vars ``FAKE_FILE_<basename>`` содержат
-    текст файла. Если env не задан, возвращается ``text_value``
-    (одинаковый текст для всех).
-    """
-    document_mod = types.ModuleType("nanobot.utils.document")
-
-    def _fake_extract_text(path):
-        if not isinstance(path, str) or not path:
-            return None
-        basename = Path(path).name
-        env_key = f"FAKE_FILE_{basename}"
-        if env_key in os.environ:
-            return os.environ[env_key]
-        return text_value
-
-    def _fake_is_image_file(path):
-        if not isinstance(path, str):
-            return False
-        name = Path(path).name.lower()
-        return name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
-
-    def _fake_reference(content, media):
-        # Поведение upstream ``reference_non_image_attachments``:
-        # только [Attachment: path] для не-изображений, ничего не читает.
-        blocks: list[str] = []
-        for p in media or []:
-            if not _fake_is_image_file(p):
-                blocks.append(f"[Attachment: {p}]")
-        if blocks:
-            content = f"{content}\n\n" + "\n\n".join(blocks) if content else "\n\n".join(blocks)
-        return content, []
-
-    document_mod.reference_non_image_attachments = _fake_reference
-    document_mod.extract_text = _fake_extract_text
-    document_mod.is_image_file = _fake_is_image_file
-    return document_mod
-
-
-def _patched_document_module(document_mod):
-    """Контекст-менеджер: подменить ``nanobot.utils`` и
-    ``nanobot.utils.document`` так, чтобы ``from nanobot.utils import
-    document`` взял наш fake.
-    """
-    return patch.dict(
-        "sys.modules",
-        {
-            "nanobot.utils.document": document_mod,
-            "nanobot.utils": types.SimpleNamespace(document=document_mod),
-        },
-    )
 
 
 class TestPatchAssembleOutbound:
@@ -347,127 +283,6 @@ class TestPatchContextGovernor:
             assert "import failed" in detail
 
 
-class TestPatchDocumentTextThreshold:
-    """В nanobot 0.3.5 патч оборачивает ``reference_non_image_attachments``
-    вместо ``extract_documents``. Семантика: для каждого файла из ``media``
-    пытается прочитать текст через ``extract_text`` и встроить в content
-    (с маркером обрезки при превышении порога); изображения и
-    нечитаемые файлы — fallback на upstream-формат ``[Attachment: …]``.
-    """
-
-    def _patch_with_fake_doc(self, channels=None):
-        document_mod = _make_fake_document_module()
-        return _patched_document_module(document_mod), document_mod
-
-    def test_threshold_zero_skipped(self):
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_document_text_threshold(
-            _settings(channels={"document_text_threshold": 0})
-        )
-        assert not ok
-        assert "document_text_threshold <= 0" in detail
-
-    def test_threshold_negative_skipped(self):
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_document_text_threshold(
-            _settings(channels={"document_text_threshold": -5})
-        )
-        assert not ok
-        assert "document_text_threshold <= 0" in detail
-
-    def test_threshold_default_applied(self):
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_document_text_threshold(
-            _settings(channels={"document_text_threshold": 20000})
-        )
-        assert ok
-        assert "patched" in detail
-
-    def test_small_text_passes_through_with_path(self, monkeypatch):
-        text = "a" * 100
-        ctx, document_mod = self._patch_with_fake_doc()
-        monkeypatch.setenv("FAKE_FILE_file.pdf", text)
-        with ctx:
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 20000})
-            )
-            assert ok
-            new_text, images = document_mod.reference_non_image_attachments(
-                "user prompt", ["x/cache/file.pdf"]
-            )
-            assert "[File: file.pdf (saved at x/cache/file.pdf)]" in new_text
-            assert text in new_text
-            assert "text omitted" not in new_text
-            assert images == []
-
-    def test_large_text_replaced_with_marker_and_path(self, monkeypatch):
-        text = "a" * 30000
-        monkeypatch.setenv("FAKE_FILE_big.pdf", text)
-        ctx, document_mod = self._patch_with_fake_doc()
-        with ctx:
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 1000})
-            )
-            assert ok
-            new_text, _ = document_mod.reference_non_image_attachments(
-                "user prompt", ["cache/sessions/k/big.pdf"]
-            )
-            assert (
-                "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
-            )
-            assert (
-                "[text omitted (len=30000 > threshold=1000)]" in new_text
-            )
-            assert "read at" not in new_text
-            assert text not in new_text
-
-    def test_image_returns_path_in_image_paths_only(self):
-        """Изображения НЕ формируют текстовых блоков: путь возвращается
-        в ``image_paths`` (для vision-блоков upstream), content не
-        раздувается маркерами.
-        """
-        ctx, document_mod = self._patch_with_fake_doc()
-        with ctx:
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 20000})
-            )
-            assert ok
-            new_text, images = document_mod.reference_non_image_attachments(
-                "user prompt", ["x/cache/pic.png"]
-            )
-            assert images == ["x/cache/pic.png"]
-            assert new_text == "user prompt"
-            assert "[File:" not in new_text
-            assert "[Attachment:" not in new_text
-
-    def test_unreadable_file_falls_back_to_attachment(self, monkeypatch):
-        monkeypatch.delenv("FAKE_FILE_ghost.pdf", raising=False)
-        ctx, document_mod = self._patch_with_fake_doc()
-        with ctx:
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 20000})
-            )
-            assert ok
-            new_text, _ = document_mod.reference_non_image_attachments(
-                "user prompt", ["x/cache/ghost.pdf"]
-            )
-            assert "[Attachment: x/cache/ghost.pdf]" in new_text
-
-    def test_missing_reference_skipped(self):
-        hidden = {"nanobot.utils.document": None, "nanobot.utils": None}
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            ok, detail = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 100})
-            )
-            assert not ok
-            assert "missing" in detail or "import failed" in detail
-
-
 class TestPatchExecLimits:
     def test_patches_module_constants_and_schema(self):
         esm = types.ModuleType("nanobot.agent.tools.exec_session")
@@ -582,109 +397,6 @@ class TestPatchToolLimits:
             assert srm._DEFAULT_HEAD_LIMIT == 10
             assert srm._DEFAULT_FILE_HEAD_LIMIT == 20
             assert srm.GrepTool._MAX_FILE_BYTES == 30
-
-
-class TestPatchSaveTurn:
-    def test_threshold_zero_skipped(self):
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_save_turn(
-            _settings(), Path("ws"), MagicMock()
-        )
-        assert not ok
-        assert "persist_threshold" in detail
-
-    def test_agent_none_skipped(self):
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_save_turn(
-            _settings(persist_threshold=5), Path("ws"), None
-        )
-        assert not ok
-        assert "agent" in detail
-
-    def test_archives_large_tool_result(self, tmp_path):
-        store = MagicMock()
-        store.save.return_value = {
-            "path": "cache/sessions/s1/results/x.txt",
-            "size_kb": 100.0,
-        }
-        utils_mod = types.ModuleType("utils")
-        store_mod = types.ModuleType("utils.session_file_store")
-        store_mod.SessionFileStore = lambda root, **kw: store
-        store_mod.prepare_content = lambda text: (text, "txt")
-        utils_mod.session_file_store = store_mod
-        hidden = {
-            "utils": utils_mod,
-            "utils.session_file_store": store_mod,
-        }
-
-        class _Session:
-            key = "s1"
-
-        big = "x" * 100_000
-        msg = {"role": "tool", "content": big, "tool_call_id": "t1", "name": "exec"}
-        captured = {}
-
-        def _fake_save_turn(session, messages, skip, *, turn_latency_ms=None, **kw):
-            captured["messages"] = messages
-            captured["turn_latency_ms"] = turn_latency_ms
-            return None
-
-        agent = MagicMock()
-        agent.max_tool_result_chars = 16_000
-        agent._save_turn = _fake_save_turn
-
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_save_turn(
-                _settings(persist_threshold=5), tmp_path, agent
-            )
-            assert ok
-            agent._save_turn(_Session(), [msg], 0, turn_latency_ms=42)
-
-        store.save.assert_called_once()
-        call_kwargs = store.save.call_args.kwargs
-        assert call_kwargs["session_key"] == "s1"
-        assert call_kwargs["dedupe"] is True
-        assert call_kwargs["source_tool"] == "exec"
-        # история подменена на ссылку
-        assert captured["messages"][0]["content"].startswith("[Result saved to data_store/")
-        assert captured["turn_latency_ms"] == 42
-
-    def test_small_result_passes_through(self, tmp_path):
-        store = MagicMock()
-        utils_mod = types.ModuleType("utils")
-        store_mod = types.ModuleType("utils.session_file_store")
-        store_mod.SessionFileStore = lambda root, **kw: store
-        store_mod.prepare_content = lambda text: (text, "txt")
-        utils_mod.session_file_store = store_mod
-        hidden = {
-            "utils": utils_mod,
-            "utils.session_file_store": store_mod,
-        }
-
-        class _Session:
-            key = "s1"
-
-        msg = {"role": "tool", "content": "small", "tool_call_id": "t1", "name": "read"}
-        captured = {}
-
-        def _fake_save_turn(session, messages, skip, **kw):
-            captured["messages"] = messages
-
-        agent = MagicMock()
-        agent.max_tool_result_chars = 16_000
-        agent._save_turn = _fake_save_turn
-
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_save_turn(
-                _settings(persist_threshold=5), tmp_path, agent
-            )
-            assert ok
-            agent._save_turn(_Session(), [msg], 0)
-
-        store.save.assert_not_called()
-        assert captured["messages"][0]["content"] == "small"
 
 
 class TestPatchSubagentLogging:
@@ -821,74 +533,6 @@ class TestPatchSubagentLogging:
             subagent_mod._SubagentHook = original
 
 
-class TestPatchAsyncSessionSaves:
-    def test_agent_none_skipped(self):
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_async_session_saves(None)
-        assert not ok
-        assert "agent is None" in detail
-
-    def test_missing_sessions_skipped(self):
-        agent = MagicMock()
-        agent.sessions = None
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_async_session_saves(agent)
-        assert not ok
-        assert "agent.sessions is missing" in detail
-
-    def test_non_loop_call_runs_synchronously(self):
-        agent = MagicMock()
-        sessions = MagicMock()
-        agent.sessions = sessions
-        calls = []
-
-        def _fake_save(session, fsync=False):
-            calls.append(("save", getattr(session, "key", "?"), fsync))
-
-        sessions.save = _fake_save
-        patcher = RuntimePatcher()
-        ok, _ = patcher.patch_async_session_saves(agent)
-        assert ok
-
-        session = MagicMock()
-        session.key = "k"
-        sessions.save(session, fsync=True)
-        assert calls == [("save", "k", True)]
-
-    @pytest.mark.asyncio
-    async def test_loop_call_deferred_to_executor(self):
-        agent = MagicMock()
-        sessions = MagicMock()
-        agent.sessions = sessions
-        fired = threading.Event()
-        received = []
-
-        def _fake_save(session, fsync=False):
-            received.append((session.key, fsync))
-            time.sleep(0.05)
-            fired.set()
-
-        sessions.save = _fake_save
-        patcher = RuntimePatcher()
-        ok, _ = patcher.patch_async_session_saves(agent)
-        assert ok
-
-        session = MagicMock()
-        session.key = "k1"
-        session.messages = [{"role": "user", "content": "hi"}]
-        session.metadata = {"a": 1}
-        session.created_at = 123
-        session.updated_at = 124
-        session.last_consolidated = 0
-
-        result = sessions.save(session, fsync=False)
-        assert result is None  # вызывает только возвращается сразу, не блокируя loop
-        await asyncio.sleep(0.15)
-        assert fired.is_set()
-        assert received == [("k1", False)]
-        sessions._async_save_executor.shutdown(wait=True)
-
-
 class TestApplyAll:
     def test_report_contents(self):
         agent = MagicMock()
@@ -959,6 +603,170 @@ class TestPatchContextBridgeSeed:
             "context_bridge_seed удалён из _PATCH_SPECS — apply_all "
             "больше не регистрирует этот patch"
         )
+
+
+#: Патчи, перенесённые на нативные точки расширения в фазе 6
+#: (change ``enterprise-mcp-platform``, п. 6.2/6.3/6.5/6.6/6.11).
+#: Ключ — имя метода ``patch_*``. Значение — ``(путь, символ)`` нативной
+#: замены; ``None`` — замены нет by design (см. ``NO_NATIVE_REPLACEMENT``).
+#: Если патч вернётся — заработают две реализации одного механизма, а это
+#: прямо запрещено правилом проекта. Поэтому проверяются обе стороны:
+#: старого нет, новое есть.
+REMOVED_PATCHES: dict[str, tuple[str, str] | None] = {
+    "patch_save_turn": (
+        "lib/hooks/tool_result_archive_hook.py",
+        "ToolResultArchiveHook",
+    ),
+    "patch_async_session_saves": (
+        "lib/services/session_storage.py",
+        "install_async_save",
+    ),
+    "patch_session_content_cleanup": (
+        "lib/session/pg_session_manager.py",
+        "clean_session_content",
+    ),
+    "patch_document_text_threshold": (
+        "workspace/tools/document_read.py",
+        "DocumentReadTool",
+    ),
+    # Временный диагностический патч (гейт ``runtime_diagnostics.
+    # session_dir_watch``, по умолчанию выключен, поведение save не менял).
+    # Нативной замены нет и не должно быть: фича была нужна только для
+    # расследования одной ошибки и удалена вместе с её причиной.
+    "patch_session_dir_watch": None,
+}
+
+#: Удалённые патчи, у которых нативной замены нет by design.
+NO_NATIVE_REPLACEMENT: frozenset[str] = frozenset({"patch_session_dir_watch"})
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+class TestRemovedPatchesHaveNoLiveImplementation:
+    """Удалённые патчи не должны вернуться ни в каком виде.
+
+    Инвариант миграции «monkey-patch → нативная точка расширения»:
+    у каждого удалённого патча ровно одна реализация — новая, нативная.
+    Проверки сделаны так, чтобы падать на заведомо плохих данных:
+    верни ``patch_save_turn`` в ``_PATCH_SPECS`` — упадёт
+    ``test_specs_absent_from_patch_specs``; верни вызов в тело
+    ``apply_all`` — упадёт ``test_absent_from_apply_all_report``.
+    """
+
+    def test_methods_removed(self):
+        for method_name, replacement in REMOVED_PATCHES.items():
+            assert not hasattr(RuntimePatcher, method_name), (
+                f"{method_name} удалён в фазе 6; нативная замена — "
+                f"{replacement}. Две работающие реализации одного "
+                f"механизма запрещены."
+            )
+
+    def test_specs_absent_from_patch_specs(self):
+        spec_dict = getattr(RuntimePatcher, "_PATCH_SPECS", {})
+        removed_spec_names = {name[len("patch_"):] for name in REMOVED_PATCHES}
+        leaked = sorted(removed_spec_names & set(spec_dict))
+        assert not leaked, (
+            f"spec'ы удалённых патчей остались в _PATCH_SPECS: {leaked} — "
+            f"apply_all их не регистрирует, инвентарь будет врать"
+        )
+
+    def test_absent_from_apply_all_report(self):
+        """Ни тело ``apply_all``, ни пустой отчёт не упоминают удалённое."""
+        import ast
+        import inspect
+        import textwrap
+
+        from lib.services.runtime_patcher import PatchReport
+
+        src = textwrap.dedent(inspect.getsource(RuntimePatcher.apply_all))
+        called = {
+            node.func.attr
+            for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+        }
+        still_called = sorted(set(REMOVED_PATCHES) & called)
+        assert not still_called, (
+            f"apply_all всё ещё вызывает удалённые патчи: {still_called}"
+        )
+
+        details = getattr(PatchReport(), "details", {})
+        leaked_details = sorted(
+            {name[len("patch_"):] for name in REMOVED_PATCHES} & set(details)
+        )
+        assert not leaked_details, leaked_details
+
+    def test_native_replacements_are_importable(self):
+        """Новые реализации существуют, импортируются и лежат по путям.
+
+        Зеркало ``test_methods_removed``: если удалённый патч не вернётся,
+        но нативную замену потеряют — миграция развалилась в другую
+        сторону (механизм исчез совсем, а не переехал).
+        """
+        import importlib.util
+
+        root = _repo_root()
+        for method_name, replacement in REMOVED_PATCHES.items():
+            if method_name in NO_NATIVE_REPLACEMENT:
+                continue
+            rel_path, symbol = replacement
+            abs_path = root / rel_path
+            assert abs_path.is_file(), (
+                f"{method_name}: нативная замена {rel_path} не найдена "
+                f"(миграция объявляет замену, которой нет)"
+            )
+            mod_name = "_repl_" + rel_path.replace("/", "_").removesuffix(".py")
+            spec = importlib.util.spec_from_file_location(mod_name, abs_path)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+            except Exception as exc:  # noqa: BLE001 — падение = дефект замены
+                raise AssertionError(
+                    f"{method_name}: нативная замена {rel_path} не импортируется: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            assert hasattr(module, symbol), (
+                f"{method_name}: в {rel_path} нет символа {symbol}"
+            )
+
+    def test_every_removed_patch_is_classified(self):
+        """Каждый удалённый патч либо имеет замену, либо помечен «by design».
+
+        Страж на саму таблицу: забытый патч без замены и без пометки
+        выглядел бы как «переехал», хотя нативного пути нет.
+        """
+        for method_name, replacement in REMOVED_PATCHES.items():
+            if method_name in NO_NATIVE_REPLACEMENT:
+                assert replacement is None, (
+                    f"{method_name} помечен «by design», но замена задана"
+                )
+            else:
+                assert replacement is not None, (
+                    f"{method_name}: нет ни нативной замены, ни пометки "
+                    f"в NO_NATIVE_REPLACEMENT"
+                )
+
+    def test_save_turn_replacement_covers_both_cases(self):
+        """``ToolResultArchiveHook`` архивирует, но НЕ подменяет контент.
+
+        Фиксирует осознанное ограничение переноса (см. докстринг хука):
+        ``after_execute_tool`` не может изменить то, что уйдёт в историю.
+        Тест ловит регрессию, при которой хук снова начнёт «молча»
+        переписывать содержимое результата.
+        """
+        from lib.hooks.tool_result_archive_hook import (
+            _PERSISTED_PREFIX,
+            ToolResultArchiveHook,
+        )
+
+        assert hasattr(ToolResultArchiveHook, "after_execute_tool")
+        # Переопределения нет (метод базового AgentHook не считается):
+        # хук не подменяет содержимое, только пишет его на диск.
+        assert "before_execute_tool" not in ToolResultArchiveHook.__dict__
+        assert _PERSISTED_PREFIX.startswith("[Result saved to data_store/")
 
 
 class TestPatchReportClassification:
@@ -1078,29 +886,54 @@ class TestPatchReportRender:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        report.applied.append("document_text_threshold")
-        report.skipped.append(("save_turn", "persist_threshold <= 0"))
-        report.failed.append(("assemble_outbound", "import failed: boom"))
+        report.applied.append("context_governor")
+        report.skipped.append(("exec_limits", "persist_threshold <= 0"))
+        report.failed.append(("turn_delivery_fail", "import failed: boom"))
         rendered = report.render()
-        assert "✓ document_text_threshold" in rendered
-        assert "⚠ save_turn skipped: persist_threshold <= 0" in rendered
-        assert "✗ assemble_outbound failed: import failed: boom" in rendered
+        assert "✓ context_governor" in rendered
+        assert "⚠ exec_limits skipped: persist_threshold <= 0" in rendered
+        assert "✗ turn_delivery_fail failed: import failed: boom" in rendered
 
     def test_render_includes_spec_purpose_for_failed(self):
+        """Правило: ``purpose`` из ``PatchSpec`` попадает в рендер
+        для КАЖДОГО патча, а не для одного выбранного имени.
+
+        Раньше тест брал один патч (``assemble_outbound``) и одну
+        строку его ``purpose``. Стоило удалить spec — тест падал с
+        ``AssertionError`` не про то, что проверял. Теперь красным
+        становится только реальное расхождение «spec есть, purpose в
+        рендер не попал».
+        """
         from lib.services.runtime_patcher import PatchReport, RuntimePatcher
 
         specs = RuntimePatcher.patch_specs()
-        report = PatchReport()
-        report.failed.append(("assemble_outbound", "import failed: boom"))
-        rendered = report.render(specs=specs)
-        assert "✗ assemble_outbound failed: import failed: boom" in rendered
-        assert "tool_audit" in rendered  # purpose из PatchSpec
+        assert specs, "patch_specs() пуст — тест ничего бы не проверял"
+
+        for name, spec in specs.items():
+            report = PatchReport()
+            report.failed.append((name, "import failed: boom"))
+            rendered = report.render(specs=specs)
+            assert f"✗ {name} failed: import failed: boom" in rendered
+            # Первая строка purpose обязана быть в выводе.
+            purpose_head = spec.purpose.strip().splitlines()[0].strip()
+            assert purpose_head, f"{name}: пустой purpose"
+            assert purpose_head in rendered, (
+                f"{name}: purpose {purpose_head!r} не попал в рендер отчёта"
+            )
 
 
 class TestPatchSpecs:
     """Каждый патч из ``apply_all`` должен иметь ``PatchSpec``,
     три множества (apply_all AST / _PATCH_SPECS / canonical) —
-    попарно равны (финально — 12 patches)."""
+    попарно равны.
+
+    Количество патчей намеренно НЕ выписано числом: после переезда
+    части патчей на нативные точки расширения (change
+    ``enterprise-mcp-platform``, фаза 6) любое число в тесте требовало
+    бы правки без содержательной причины. Вместо числа проверяются
+    правила — см. ``test_inventory_is_exact`` и
+    ``test_every_applied_patch_has_an_implementation``.
+    """
 
     def _extract_apply_all_names(self) -> set[str]:
         """AST-извлечение имён patches из тела ``RuntimePatcher.apply_all``.
@@ -1157,20 +990,56 @@ class TestPatchSpecs:
             f"only in canonical={canonical_names - patch_specs_names}",
         )
 
-    def test_inventory_size_is_12(self):
-        """Sanity check для этой change: ровно 12 patches во всех трёх множествах.
+    def test_every_applied_patch_has_an_implementation(self):
+        """Правило вместо числа: у каждого патча из ``apply_all`` есть
+        и зарегистрированный метод ``patch_<name>``, и ``PatchSpec``.
 
-        Этот тест не защищает архитектурный контракт (его защищает
-        ``test_inventory_is_exact``); он фиксирует текущее количество
-        patches и обновляется отдельно при добавлении legitimate patch'а.
+        Заменяет прежний ``test_inventory_size_is_12``: тот фиксировал
+        количество (12), из-за чего переезд патчей на нативные точки
+        расширения ломал его без содержательной причины, а любое
+        легитимное добавление патча требовало правки числа. Теперь
+        красным становится только реальное расхождение «объявлено в
+        отчёте, но не реализовано» (и наоборот).
         """
-        from lib.services.runtime_patcher import RuntimePatcher
+        apply_all_names = self._extract_apply_all_names()
+        assert apply_all_names, "apply_all не регистрирует ни одного патча"
+
+        for name in sorted(apply_all_names):
+            method = getattr(RuntimePatcher, f"patch_{name}", None)
+            assert method is not None, (
+                f"apply_all регистрирует {name!r}, но метода "
+                f"patch_{name} у RuntimePatcher нет"
+            )
+            assert callable(method), f"patch_{name} не callable"
+
+        for name in sorted(RuntimePatcher.patch_specs()):
+            assert hasattr(RuntimePatcher, f"patch_{name}"), (
+                f"spec {name!r} объявлен, но метода patch_{name} нет"
+            )
+
+        # Ожидание не выписывается числом: канонический инвентарь обязан
+        # совпадать с фактическим apply_all (детальнее —
+        # test_inventory_is_exact), а количество — производная от них.
         from lib.services.runtime_inventory import canonical_runtime_patches
 
-        apply_all_names = self._extract_apply_all_names()
-        assert len(apply_all_names) == 12
-        assert len(RuntimePatcher.patch_specs()) == 12
-        assert len(canonical_runtime_patches()) == 12
+        assert len(canonical_runtime_patches()) == len(apply_all_names)
+
+    def test_no_patch_is_gated_behind_debug_only_flag(self):
+        """Ни один патч не гейтится debug-флагом ``runtime_diagnostics``.
+
+        ``patch_session_dir_watch`` был временной диагностикой и удалён
+        вместе с её гейтом. Проверка на заведомо плохих данных: верни в
+        ``PatchSpec.reason`` упоминание ``runtime_diagnostics`` — тест
+        упадёт, и временная диагностика не проскочит в прод-инвентарь.
+        """
+        for name, spec in RuntimePatcher.patch_specs().items():
+            haystack = " ".join(
+                (spec.purpose, spec.reason, spec.nanobot_target, spec.alternatives_checked)
+            )
+            assert "runtime_diagnostics" not in haystack, (
+                f"{name}: патч гейтится debug-флагом runtime_diagnostics — "
+                f"такие патчи удаляются, а не регистрируются"
+            )
 
     def test_specs_have_required_fields(self):
         from lib.services.runtime_patcher import RuntimePatcher
@@ -1205,6 +1074,17 @@ class TestApplyAllFailed:
     """``TestApplyAll`` — расширения для нового состояния ``failed``."""
 
     def test_report_contents_has_details(self):
+        """Правило: ``details`` содержит запись для КАЖДОГО патча,
+        который ``apply_all`` регистрирует, и ни одного лишнего.
+
+        Раньше тест перечислял имена патчей (``document_text_threshold``,
+        ``save_turn``, ``subagent_logging``) — после переезда части
+        патчей на нативные точки расширения список устарел и тест
+        падал, не сообщая о причине. Теперь сверка идёт с фактическим
+        ``apply_all``, поэтому переезд патчей её не ломает, а реальное
+        расхождение (заявлен, но не зарегистрирован / зарегистрирован
+        дважды) — ловит.
+        """
         agent = MagicMock()
         original_return = MagicMock()
         original_return.metadata = {}
@@ -1219,9 +1099,16 @@ class TestApplyAllFailed:
         )
         d = report.to_dict()
         assert "details" in d
-        assert "document_text_threshold" in d["details"]
-        assert "save_turn" in d["details"]
-        assert "subagent_logging" in d["details"]
+
+        expected = TestPatchSpecs()._extract_apply_all_names()
+        assert set(d["details"]) == expected, (
+            f"details != apply_all: "
+            f"only in details={sorted(set(d['details']) - expected)}, "
+            f"only in apply_all={sorted(expected - set(d['details']))}"
+        )
+        assert all(
+            isinstance(v, str) and v for v in d["details"].values()
+        ), "у каждого патча должна быть непустая detail-строка"
 
     def test_normal_scenario_no_failures(self):
         """В нормальном сценарии (MagicMock-agent, persist=0, db_logging=None)

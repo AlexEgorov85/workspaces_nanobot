@@ -1,18 +1,60 @@
 """Тесты для ``lib/services/runtime_inventory.py``."""
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
 
 class TestCanonical:
     def test_framework_hooks_required(self) -> None:
+        """Правило: у каждого фреймворкового хука есть живой ``source``
+        на диске, и он либо обязателен, либо конфиг-гейтится.
+
+        Раньше здесь стояло безусловное ``all(h.required)``. После
+        переезда ``save_turn`` в ``ToolResultArchiveHook`` (фаза 6,
+        п. 6.2) хук стал опциональным по существу: он не создаётся при
+        ``gateway.persist_threshold <= 0``, и объявлять его required
+        значило бы кричать «критический дрейф» на осознанное выключение
+        фичи. Поэтому blanket-утверждение заменено правилом, которое
+        различает «обязателен всегда» и «обязателен, если фича
+        включена», и **проверяет гейт**, а не просто разрешает
+        ``required=False``.
+
+        Проверяется на заведомо плохих данных: убери гейт
+        ``persist_threshold`` из ``_make_tool_result_archive_hook`` —
+        ``test_optional_framework_hook_is_config_gated`` упадёт,
+        и required=False станет неправомерным.
+        """
+        import inspect
+
+        from lib.core.application_context import _make_tool_result_archive_hook
         from lib.services.runtime_inventory import canonical_framework_hooks
 
-        names = {h.name for h in canonical_framework_hooks()}
-        assert "ToolAuditHook" in names
-        assert "TerminalToolPrintHook" in names
-        for h in canonical_framework_hooks():
-            assert h.required, h
+        root = Path(__file__).resolve().parents[1]
+        specs = {h.name: h for h in canonical_framework_hooks()}
+
+        assert "ToolAuditHook" in specs
+        assert "TerminalToolPrintHook" in specs
+        # Нативная замена патча save_turn — тоже фреймворковый хук.
+        assert "ToolResultArchiveHook" in specs
+
+        for name, spec in specs.items():
+            assert (root / spec.source).is_file(), (
+                f"{name}: source {spec.source} не найден на диске"
+            )
+            assert spec.kind == "framework", name
+            assert spec.description, f"{name}: пустое описание"
+
+        # Ровно те optional, чья опциональность обоснована гейтом.
+        optional = {n for n, s in specs.items() if not s.required}
+        assert optional == {"ToolResultArchiveHook"}, (
+            f"неожиданный набор optional framework hooks: {sorted(optional)}"
+        )
+
+        src = inspect.getsource(_make_tool_result_archive_hook)
+        assert "persist_threshold" in src, (
+            "ToolResultArchiveHook помечен required=False, но фабрика "
+            "не гейтится persist_threshold — optionality не обоснована"
+        )
 
     def test_plugin_hooks_include_required(self) -> None:
         from lib.services.runtime_inventory import canonical_plugin_hooks
@@ -34,10 +76,43 @@ class TestCanonical:
         assert not all(h.required for h in diag)
 
     def test_project_tools_required(self) -> None:
+        """Правило: канонический список project tools совпадает с диском.
+
+        Раньше тест выписывал множество имён, и добавление
+        ``document_read`` (перенос порога длины текста из патча в tool)
+        ломало его без содержательной причины. Теперь ожидание
+        выражено правилом — сверка идёт с фактическим
+        ``workspace/tools/*.py``, тем же механизмом, что и
+        auto-discover в ``project_tool_loader`` — поэтому новый tool
+        добавляет одну строку в канон, а не правит тест, и забытый
+        tool по-прежнему ловится.
+        """
         from lib.services.runtime_inventory import canonical_project_tools
 
-        required = {t.name for t in canonical_project_tools() if t.required}
-        assert required == {"compact_context", "history_search", "legal_summarizer_query"}
+        specs = canonical_project_tools()
+        required = {t.name for t in specs if t.required}
+        assert required, "ни одного required project tool в каноне"
+
+        tools_dir = Path(__file__).resolve().parents[1] / "workspace" / "tools"
+        on_disk = {
+            p.stem
+            for p in tools_dir.glob("*.py")
+            if not p.stem.startswith("_")
+        }
+        canonical_modules = {t.module for t in specs}
+
+        assert on_disk == canonical_modules, (
+            f"workspace/tools/*.py != canonical_project_tools(): "
+            f"на диске без записи в каноне={sorted(on_disk - canonical_modules)}, "
+            f"в каноне без файла={sorted(canonical_modules - on_disk)}"
+        )
+
+        for spec in specs:
+            assert spec.description, f"{spec.name}: пустое описание"
+            if spec.config_key is not None:
+                assert spec.config_key.startswith(
+                    "tools."
+                ), f"{spec.name}: config_key должен быть из секции tools.*"
 
     def test_example_tool_absent(self) -> None:
         """Шаблонный tool УБРАНЕН из канонического списка.
@@ -53,16 +128,30 @@ class TestCanonical:
         assert "ExampleTool" not in names
 
     def test_runtime_patches_covers_known(self) -> None:
+        """Патчи, которые обязаны быть в каноническом инвентаре.
+
+        Перечень — не «всё, что есть», а только те патчи, чьё
+        отсутствие означает потерю наблюдаемого поведения. Патчи,
+        перенесённые на нативные точки расширения (change
+        ``enterprise-mcp-platform``, фаза 6), здесь не перечислены:
+        они не патчи.
+        """
         from lib.services.runtime_inventory import canonical_runtime_patches
 
         names = {p.name for p in canonical_runtime_patches()}
         for required_name in (
             "assemble_outbound",
             "subagent_logging",
-            "save_turn",
             "context_governor",
         ):
             assert required_name in names, required_name
+
+        # Перенесённые патчи не должны воскреснуть в каноне.
+        for migrated in ("save_turn", "document_text_threshold"):
+            assert migrated not in names, (
+                f"{migrated} перенесён на нативную точку расширения; "
+                f"в RuntimePatcher его быть не должно"
+            )
 
 
 class TestPatchSpecRequiredProjection:
@@ -123,10 +212,15 @@ class TestPatchSpecRequiredProjection:
         assert canonical["Z_low_required"].required is True
 
     def test_critical_patches_marked_required(self) -> None:
-        """Только 4 патча с ``required=True``: ``assemble_outbound``,
-        ``save_turn``, ``subagent_logging``, ``context_governor``.
+        """Контракт criticality: какие патчи обязаны быть ``required``.
 
-        Защита от ложного «risk=high → required=true» автоприведения.
+        После переноса ``save_turn`` на ``ToolResultArchiveHook`` он
+        перестал быть патчем и убран из набора. Набор остаётся
+        выпиской имён намеренно: это контракт «что подсвечивается в
+        startup-баннере», и его нельзя вывести из ``risk``.
+        Непроизводность ``required`` от ``risk`` проверяет
+        ``test_required_projects_from_patch_spec`` (подменяет
+        ``patch_specs`` и сверяет проекцию).
         """
         from lib.services.runtime_inventory import canonical_runtime_patches
 
@@ -135,10 +229,9 @@ class TestPatchSpecRequiredProjection:
         }
         assert required_names == {
             "assemble_outbound",
-            "save_turn",
             "subagent_logging",
             "context_governor",
-        }
+        }, required_names
 
     def test_no_hardcoded_required_set(self) -> None:
         """В ``runtime_inventory`` нет локального ``high_risk_required``."""
@@ -152,16 +245,29 @@ class TestPatchSpecRequiredProjection:
 
 class TestDiffHooks:
     def test_actual_matches_canonical(self) -> None:
-        from lib.services.runtime_inventory import diff_hooks
+        """Правило: «совпадает с каноном» = подать в ``diff_hooks`` ровно
+        канонический состав — и получить пустой diff.
 
-        actual = [
-            "StreamDiagnosisHook",
-            "RecentFilesHook",
-            "SessionFileRedirectHook",
-            "ToolAuditHook",
-            "TerminalToolPrintHook",
+        Вход строится из ``canonical_framework_hooks()`` +
+        ``canonical_plugin_hooks()``, а не выписывается: переезд
+        ``save_turn`` в ``ToolResultArchiveHook`` добавил хук в канон и
+        сломал бы тест, заставляя править ручной список. Проверка
+        остаётся содержательной — она ломается, если ``diff_hooks``
+        начнёт считать расхождением то, что расхождением не является.
+        """
+        from lib.services.runtime_inventory import (
+            canonical_framework_hooks,
+            canonical_hook_factories,
+            canonical_plugin_hooks,
+            diff_hooks,
+        )
+
+        actual = [h.name for h in canonical_framework_hooks()] + [
+            h.name for h in canonical_plugin_hooks()
         ]
-        diff = diff_hooks(actual, actual_factory_count=1)
+        diff = diff_hooks(
+            actual, actual_factory_count=len(canonical_hook_factories())
+        )
         assert diff["missing_required"] == []
         assert diff["missing_optional"] == []
         assert diff["unexpected"] == []
@@ -191,13 +297,27 @@ class TestDiffHooks:
 
 class TestDiffProjectTools:
     def test_actual_matches_canonical(self) -> None:
-        from lib.services.runtime_inventory import diff_project_tools
+        """Правило: «совпадает с каноном» = подать в ``diff`` ровно
+        канонический состав — и получить пустой diff.
 
+        Вход строится из ``canonical_project_tools()``, а не выписывается:
+        добавление нового tool'а (например ``document_read`` после
+        переноса порога длины текста из патча) не ломает тест. Проверка
+        остаётся содержательной — она ломается, если ``diff`` начнёт
+        считать расхождением то, что расхождением не является.
+        """
+        from lib.services.runtime_inventory import (
+            canonical_project_tools,
+            diff_project_tools,
+        )
+
+        canonical = canonical_project_tools()
         diff = diff_project_tools(
-            registered=["compact_context", "history_search", "legal_summarizer_query"],
+            registered=[t.name for t in canonical if t.required],
             skipped_disabled=["ExampleTool"],
         )
         assert diff["missing_required"] == []
+        assert diff["disabled_required"] == []
         assert diff["failed"] == []
         assert diff["unexpected"] == []
 

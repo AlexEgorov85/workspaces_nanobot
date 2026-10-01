@@ -4,16 +4,28 @@
 
   1. ``patch_context_governor`` — большие результаты инструментов выгружаются
      в ``data_store/`` (ContextGovernor.normalize_tool_result) — было в gateway;
-  2. ``patch_assemble_outbound`` — внедрение ``_tool_audit`` в metadata ответа
-     (agent._assemble_outbound) — было в gateway И в cli (одинаковый код);
-  3. ``patch_subagent_logging`` — БД-логирование подагентов: их tool-события,
+  2. ``patch_subagent_logging`` — БД-логирование подагентов: их tool-события,
      итог запуска (``subagent_run_finished``) и история пишутся в
      ``DbLoggingService`` и ``session_manager`` (SubagentManager использует
      внутренний ``_SubagentHook``, который иначе пишет только debug в loguru).
 
-Регистрация кастомных tool'ов из ``workspace/tools/*.py`` (раньше —
-``patch_project_tools``) вынесена в отдельный loader:
-``lib/services/project_tool_loader.py::register_project_tools``;
+Фаза 6 (``enterprise-mcp-platform``) вынесла пять патчей из этого модуля в
+нативные точки расширения — здесь их больше нет, и второй реализации
+механизма тоже нет:
+
+  * ``save_turn`` → ``lib/hooks/tool_result_archive_hook.py``
+    (``AgentHook.after_execute_tool``);
+  * ``document_text_threshold`` → ``workspace/tools/document_read.py``
+    (нативный tool, порог в его собственном коде);
+  * ``session_content_cleanup`` → ``PGSessionManager.save``;
+  * ``async_save`` → обёртка в ``lib/services/session_storage.py``;
+  * ``session_dir_watch`` → удалён целиком (диагностика расследована);
+  * ``assemble_outbound`` и ``turn_delivery_fail`` — оставлены: в nanobot
+    0.3.5 нет публичного extension point, см. ``docs/architecture/
+    runtime-patcher-inventory.md``.
+
+Регистрация кастомных tool'ов из ``workspace/tools/*.py`` — в отдельном
+loader'е: ``lib/services/project_tool_loader.py::register_project_tools``;
 вызывается из ``ApplicationContext.create()`` сразу после
 ``apply_all()``. ``RuntimePatcher`` НЕ зависит от loader'а.
 
@@ -25,9 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys as _sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -264,17 +274,6 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         risk="medium",
         required=True,
     ),
-    "save_turn": PatchSpec(
-        name="save_turn",
-        purpose="архивировать полные tool-результаты в data_store/ при "
-                "сохранении истории оборота (вместо truncate в _save_turn)",
-        nanobot_target="nanobot.agent.loop.AgentLoop._save_turn",
-        reason="_save_turn — приватный метод; nanobot не имеет публичного "
-               "extension point для кастомного persist",
-        alternatives_checked="public hook 'before/after_save_turn' отсутствует",
-        risk="high",
-        required=True,
-    ),
     "exec_limits": PatchSpec(
         name="exec_limits",
         purpose="сделать лимиты вывода exec-инструмента конфигурируемыми",
@@ -328,16 +327,6 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         risk="high",
         required=True,
     ),
-    "async_save": PatchSpec(
-        name="async_save",
-        purpose="вынести sessions.save из event-loop в executor, чтобы "
-                "синхронный save не блокировал async-канал",
-        nanobot_target="nanobot.agent.loop.AgentLoop.sessions.save",
-        reason="nanobot вызывает sessions.save синхронно из async-методов; "
-               "публичного async-API нет",
-        alternatives_checked="AgentHook.after_run — слишком поздно",
-        risk="medium",
-    ),
     "subagent_logging": PatchSpec(
         name="subagent_logging",
         purpose="проксировать tool-события подагентов в DbLoggingService + "
@@ -365,46 +354,6 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                              "EventSink не публикуется upstream-методом",
         risk="medium",
     ),
-    "session_dir_watch": PatchSpec(
-        name="session_dir_watch",
-        purpose="диагностическое логирование FileNotFoundError вокруг "
-                "agent.sessions.save (file появился и исчез между созданием "
-                "и обращением); гейт gateway.runtime_diagnostics.session_dir_watch",
-        nanobot_target="nanobot.agent.loop.AgentLoop.sessions.save",
-        reason="nanobot падает FileNotFoundError без traceback-контекста; "
-               "минимальный wrapper собирает filename + session_key",
-        alternatives_checked="public hook отсутствует; try/except в каждом "
-                             "channel — дубль",
-        risk="low",
-    ),
-    "session_content_cleanup": PatchSpec(
-        name="session_content_cleanup",
-        purpose="чистить невалидные символы (NUL, control-chars) из контента "
-                "при Session.add_message",
-        nanobot_target="nanobot.session.manager.Session.add_message",
-        reason="add_message — единая точка, через которую в сессию попадают "
-               "user/assistant/tool; NUL-байты валят запись в PostgreSQL",
-        alternatives_checked="public sanitizer — отсутствует",
-        risk="low",
-    ),
-    "document_text_threshold": PatchSpec(
-        name="document_text_threshold",
-        purpose="единый универсальный механизм встраивания документов в "
-                "user-промпт (все каналы и навыки): заголовок каждого блока "
-                "всегда содержит путь к файлу; при превышении порога тело "
-                "заменяется на короткий маркер text omitted",
-        nanobot_target="nanobot.utils.document.reference_non_image_attachments "
-                       "(в nanobot 0.3.5 вместо удалённого extract_documents)",
-        reason="в 0.3.5 extract_documents удалён; upstream по умолчанию "
-               "вставляет только [Attachment: <path>], что заставляет LLM "
-               "вызывать read_file даже для маленьких PDF/DOCX; патч "
-               "читает текст через extract_text и встраивает его в "
-               "content, защищая от раздувания контекста через порог",
-        alternatives_checked="config 'channels.extractDocumentText=false' — "
-                             "только полностью выключает извлечение, без "
-                             "промежуточного режима «текст ≤ N»",
-        risk="medium",
-    ),
 }
 
 
@@ -421,8 +370,6 @@ _SKIPPABLE_REASONS: frozenset[str] = frozenset({
     "agent.sessions is missing",
     "exec_session/shell module not loaded",
     "filesystem/search module not loaded",
-    "gateway.runtime_diagnostics.session_dir_watch != true",
-    "document_text_threshold <= 0",
 })
 
 
@@ -609,8 +556,6 @@ class RuntimePatcher:
         report = PatchReport()
         self._record(report, "context_governor", self.patch_context_governor(
             config, settings, workspace_dir))
-        self._record(report, "save_turn", self.patch_save_turn(
-            settings, workspace_dir, agent))
         self._record(report, "exec_limits", self.patch_exec_limits(settings))
         self._record(report, "exec_timeout_cap", self.patch_exec_timeout_cap(settings))
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
@@ -618,13 +563,8 @@ class RuntimePatcher:
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "turn_delivery_fail", self.patch_turn_delivery_fail(
             settings, db_logging_service, agent_id=_resolve_agent_id(config, agent)))
-        self._record(report, "async_save", self.patch_async_session_saves(agent))
-        self._record(report, "session_dir_watch", self.patch_session_dir_watch(
-            agent, workspace_dir))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager, bus=bus))
-        self._record(report, "document_text_threshold", self.patch_document_text_threshold(settings))
-        self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
         return report
 
     @staticmethod
@@ -662,9 +602,8 @@ class RuntimePatcher:
     def _format_workspace_hint(workspace_dir: Any) -> str:
         """Краткая подсказка с путём до workspace в лог-сообщении.
 
-        Используется в логах отдельных патчей (``patch_session_dir_watch``
-        и др.), чтобы оператор сразу видел, к какому workspace они
-        относятся. Если пути нет — пустая строка.
+        Используется в логах отдельных патчей, чтобы оператор сразу видел,
+        к какому workspace они относятся. Если пути нет — пустая строка.
         """
         if not workspace_dir:
             return ""
@@ -773,482 +712,6 @@ class RuntimePatcher:
             return True, "ContextGovernor.normalize_tool_result patched"
         except Exception as exc:
             return False, f"patch failed: {exc}"
-
-    # ------------------------------------------------------------------
-    # Патч 1b: AgentLoop._save_turn → архивация вместо усечения
-    # ------------------------------------------------------------------
-
-    def patch_save_turn(
-        self, settings: Any, workspace_dir: Any, agent: Any
-    ) -> tuple[bool, str]:
-        """Архивировать большие результаты инструментов вместо усечения.
-
-        ``_save_turn`` (nanobot/agent/loop.py) при сохранении истории оборота
-        усекает строковые результаты инструментов до ``max_tool_result_chars``
-        (по умолчанию 16000 символов), если они не ушли в persist раньше
-        (в первую очередь это ``read_file`` и результаты, «проскочившие» мимо
-        ``normalize_tool_result``). Это потеря данных: усечённый блоб остаётся
-        единственной копией.
-
-        Патч оборачивает ``_save_turn``: любой большой результат
-        ``role == "tool"`` (строка или JSON-сериализуемый список) пишется
-        **полным** файлом в ``data_store/`` через ``SessionFileStore``, в историю
-        кладётся ссылка ``[Result saved to data_store/<path> (<size> KB)]`` —
-        в том же формате, что и кастомный persist. Оригинальный ``_save_turn``
-        вызывается с копией сообщений (логика nanobot не дублируется).
-
-        Гейт тот же, что у ``patch_context_governor``: при
-        ``persist_threshold <= 0`` патч — no-op.
-
-        Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
-        """
-        persist_threshold = int(_get(settings, "gateway", "persist_threshold", default=0) or 0)
-        if persist_threshold <= 0:
-            return False, "persist_threshold <= 0"
-        if agent is None:
-            return False, "agent is None"
-        original = getattr(agent, "_save_turn", None)
-        if original is None:
-            return False, "agent._save_turn is missing"
-
-        max_files = int(_get(settings, "gateway", "persist_max_files", default=100) or 100)
-        max_age_hours = int(_get(settings, "gateway", "persist_max_age_hours", default=0) or 0)
-
-        try:
-            from utils.session_file_store import SessionFileStore, prepare_content
-        except Exception as exc:
-            return False, f"import failed: {exc}"
-
-        char_limit = int(getattr(agent, "max_tool_result_chars", 16_000) or 16_000)
-        try:
-            store = SessionFileStore(
-                Path(workspace_dir) / "data_store",
-                max_files=max_files,
-                max_age_hours=max_age_hours,
-            )
-        except Exception as exc:
-            return False, f"store init failed: {exc}"
-
-        def _serialize(content: Any) -> str | None:
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                try:
-                    return json.dumps(content, ensure_ascii=False, indent=2)
-                except (TypeError, ValueError):
-                    return None
-            return None
-
-        def _wrap(session, messages, skip, *, turn_latency_ms=None, summary_checkpoint=None, input_persisted_early=False):
-            archived = list(messages)
-            for idx in range(skip, len(archived)):
-                m = archived[idx]
-                if not isinstance(m, dict) or m.get("role") != "tool":
-                    continue
-                text = _serialize(m.get("content"))
-                if text is None or len(text.encode("utf-8")) <= char_limit:
-                    continue
-                try:
-                    body, ext = prepare_content(text)
-                    session_key = (
-                        getattr(session, "key", None)
-                        or getattr(session, "session_key", "default")
-                        or "default"
-                    )
-                    info = store.save(
-                        session_key=session_key,
-                        content=body,
-                        source_tool=str(m.get("name") or "tool"),
-                        ext=ext,
-                        dedupe=True,
-                    )
-                    m["content"] = (
-                        f"[Result saved to data_store/{info['path']} "
-                        f"({info['size_kb']} KB)]"
-                    )
-                except OSError:
-                    continue
-            return original(
-                session,
-                archived,
-                skip,
-                turn_latency_ms=turn_latency_ms,
-                summary_checkpoint=summary_checkpoint,
-                input_persisted_early=input_persisted_early,
-            )
-
-        agent._save_turn = _wrap
-        return True, "AgentLoop._save_turn patched for archiving"
-
-    # ------------------------------------------------------------------
-    # Патч 1b: санитизация контента на источнике (Session.add_message)
-    # ------------------------------------------------------------------
-
-    def patch_document_text_threshold(
-        self, settings: Any
-    ) -> tuple[bool, str]:
-        """Единый универсальный механизм встраивания документов в user-промпт.
-
-        ``nanobot.utils.document.reference_non_image_attachments`` —
-        ЕДИНСТВЕННОЕ место, через которое upstream 0.3.5 формирует
-        файловые блоки в ``content`` user-сообщения (для всех каналов —
-        Postgres/Redis/websocket). В 0.3.5
-        ``extract_documents`` удалён, и каналы НЕ должны дублировать
-        информацию о файле собственными хинтами
-        вида ``[Attachment: … (saved at …)]``: иначе агент видит два
-        параллельных указания «файл там-то» и поведение расходится
-        между каналами.
-
-        Upstream-выдача формата ``reference_non_image_attachments``
-        (utils/document.py:681):
-
-            ``[Attachment: <path>]``
-
-        — только путь, без извлечения текста документа. Этого мало для
-        маленьких документов (≤ порога): LLM вынуждена для каждого
-        вызывать ``read_file``, теряя обороты. Поэтому патч оборачивает
-        ``reference_non_image_attachments``: для каждого НЕ-изображения
-        пытается прочитать файл через ``extract_text`` и встроить
-        результат в content; если длина тела превышает ``threshold`` —
-        заменяет тело на короткий маркер ``text omitted``, сохраняя
-        путь в заголовке.
-
-        Итоговый формат каждого файлового блока:
-
-          * маленький документ (длина ≤ порога):
-            ``[File: <basename> (saved at <path>)]\n<text>``;
-          * большой документ (> порога):
-            ``[File: <basename> (saved at <path>)]\n[text omitted (len=… > threshold=…)]``;
-          * нечитаемый файл / изображение — fallback на upstream:
-            ``[Attachment: <path>]``.
-
-        Путь в заголовке присутствует ВСЕГДА, поэтому агент в любом
-        случае знает, куда передать файл (skill, ``read_file``, ``exec``).
-
-        Настройка читается из ``channels.document_text_threshold``
-        (общая для всех каналов). Дефолт 20000 символов: средний
-        договор/акт/раздел закона укладывается, длинные книги —
-        обрезаются. ``<=0`` — патч пропускается (NO-OP, upstream
-        ``reference_non_image_attachments`` остаётся без обёртки).
-
-        Returns:
-            ``(True, ...)`` при успехе;
-            ``(False, <причина>)`` при отказе.
-        """
-        raw = _get(settings, "channels", "document_text_threshold", default=20000)
-        try:
-            threshold = int(raw)
-        except (TypeError, ValueError):
-            return False, "document_text_threshold is not an int"
-        if threshold <= 0:
-            return False, "document_text_threshold <= 0"
-
-        try:
-            from nanobot.utils import document as _document_mod
-        except Exception as exc:
-            return False, f"import failed: {exc}"
-
-        reference = getattr(_document_mod, "reference_non_image_attachments", None)
-        if reference is None:
-            return False, "reference_non_image_attachments is missing"
-
-        extract_text = getattr(_document_mod, "extract_text", None)
-        is_image_file = getattr(_document_mod, "is_image_file", None)
-
-        try:
-            def _is_image(path: str) -> bool:
-                if is_image_file is None or not isinstance(path, str):
-                    return False
-                try:
-                    return bool(is_image_file(path))
-                except Exception:
-                    return False
-
-            def _read_attachment_body(path: str) -> str | None:
-                """Прочитать текст вложения через ``extract_text``.
-
-                Возвращает ``None`` для изображений, нечитаемых форматов
-                или ошибок чтения — в этом случае обёртка оставляет
-                upstream-маркер ``[Attachment: <path>]``.
-                """
-                if not isinstance(path, str) or not path:
-                    return None
-                if _is_image(path):
-                    return None
-                if extract_text is None:
-                    return None
-                try:
-                    text = extract_text(path)
-                except Exception:
-                    return None
-                if not isinstance(text, str) or not text:
-                    return None
-                return text
-
-            def _build_block(path: str) -> str:
-                """Сформировать файловый блок с учётом порога.
-
-                ``[File: <basename> (saved at <path>)]\n<body>``
-                либо ``[Attachment: <path>]`` (fallback).
-                """
-                basename = Path(path).name or path
-                body_text = _read_attachment_body(path)
-                if body_text is None:
-                    return f"[Attachment: {path}]"
-                body_len = len(body_text)
-                header = f"[File: {basename} (saved at {path})]"
-                if body_len <= threshold:
-                    return f"{header}\n{body_text}"
-                return (
-                    f"{header}\n"
-                    f"[text omitted (len={body_len} > threshold={threshold})]"
-                )
-
-            def _reference_with_threshold(
-                content: str, media: list[str],
-            ) -> tuple[str, list[str]]:
-                media_list = list(media or [])
-                image_paths: list[str] = []
-                attachment_blocks: list[str] = []
-                for path in media_list:
-                    if _is_image(path):
-                        image_paths.append(path)
-                    else:
-                        attachment_blocks.append(_build_block(path))
-                if attachment_blocks:
-                    suffix = "\n\n".join(attachment_blocks)
-                    content = f"{content}\n\n{suffix}" if content else suffix
-                return content, image_paths
-
-            _document_mod.reference_non_image_attachments = (
-                _reference_with_threshold
-            )
-
-            return (
-                True,
-                "reference_non_image_attachments patched for document_text_threshold",
-            )
-        except Exception as exc:
-            return False, f"patch failed: {exc}"
-
-    def patch_session_content_cleanup(self) -> tuple[bool, str]:
-        """Вычищать невалидные символы из контента при добавлении сообщения.
-
-        ``nanobot.session.manager.Session.add_message`` — единая точка, через
-        которую в сессию попадают все сообщения (user/assistant/tool), в т.ч.
-        из web/websocket, подагентов и инструментов. NUL-байт (0x00) и
-        литеральные Unicode-escape ``\\u0000``..\\u0003`` могут попасть в
-        контент из бинарного вывода инструментов / LLM-вывода и валят запись
-        в PostgreSQL (``A string literal cannot contain NUL...``).
-
-        Оборачиваем ``add_message`` и чистим ``content`` и ``**kwargs`` на
-        источнике (канонический ``clean_text`` из ``utils.clean_text``), чтобы
-        мусор не оседал ни в памяти сессии, ни в JSON-истории, ни в БД.
-        Обратный вызов вызывается с очищенными значениями.
-
-        Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
-        """
-        try:
-            from nanobot.session.manager import Session
-            from utils.clean_text import clean_text
-        except Exception as exc:
-            return False, f"import failed: {exc}"
-        original = getattr(Session, "add_message", None)
-        if original is None:
-            return False, "Session.add_message is missing"
-
-        def _add_message_clean(                       self: Any,
-            role: Any, content: Any, **kwargs: Any,
-        ) -> Any:
-            return original(self, role, clean_text(content), **clean_text(kwargs))
-
-        Session.add_message = _add_message_clean
-        return True, "Session.add_message patched for content cleanup"
-
-    # ------------------------------------------------------------------
-    # Патч 1c: синхронный sessions.save из async-контекста → executor
-    # ------------------------------------------------------------------
-
-    def patch_async_session_saves(self, agent: Any) -> tuple[bool, str]:
-        """Не блокировать event loop синхронным ``sessions.save()``.
-
-        ``nanobot.agent.loop`` вызывает ``self.sessions.save(...)`` синхронно
-        из async-методов (``_state_restore``/``_state_build``/
-        ``_state_command``/``_state_save``/``_dispatch``). Пока save ждёт
-        в очереди пула БД, event loop заморожен, а async-транзакции канала
-        (poll/flush/lease) в это время не могут завершиться — возникает
-        взаимная блокировка.
-
-        Патч оборачивает ``agent.sessions.save``:
-
-          * из потока event loop — реальное сохранение выполняется в едином
-            последовательном executor (снимок сессии фиксируется на момент
-            вызова), вызывающий код возвращается сразу; порядок сохранений
-            гарантирован очередью executor'а; ошибки логируются;
-          * из остальных потоков (``flush_all``, shutdown, REST-хендлеры) —
-            исполняется синхронно, как раньше.
-
-        Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
-        """
-        if agent is None:
-            return False, "agent is None"
-        sessions = getattr(agent, "sessions", None)
-        if sessions is None:
-            return False, "agent.sessions is missing"
-        original = getattr(sessions, "save", None)
-        if original is None:
-            return False, "agent.sessions.save is missing"
-        try:
-            from nanobot.session.manager import Session
-        except Exception as exc:
-            return False, f"import failed: {exc}"
-
-        executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="session-save",
-        )
-
-        def _snapshot(session: Any) -> Any:
-            return Session(
-                key=session.key,
-                messages=list(session.messages),
-                created_at=session.created_at,
-                updated_at=session.updated_at,
-                metadata=dict(session.metadata or {}),
-                last_consolidated=session.last_consolidated,
-            )
-
-        def _log_save_error(future) -> None:
-            exc = future.exception()
-            if exc is not None:
-                logger.opt(exception=exc).error(
-                    "Async session save failed"
-                )
-
-        def _wrapped_save(session: Any, fsync: bool = False) -> Any:
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                # вне loop — синхронный вызов, как раньше
-                return original(session, fsync=fsync)
-            snapshot = _snapshot(session)
-            future = executor.submit(original, snapshot, fsync=fsync)
-            future.add_done_callback(_log_save_error)
-            return None
-
-        sessions.save = _wrapped_save
-        sessions._async_save_executor = executor
-        return True, "agent.sessions.save wrapped with background executor"
-
-    # ------------------------------------------------------------------
-    # Патч 1d-bis: диагностическое логирование пропавшего sessions_dir
-    # ------------------------------------------------------------------
-
-    def patch_session_dir_watch(
-        self, agent: Any, workspace_dir: Any
-    ) -> tuple[bool, str]:
-        """Снять показания вокруг ``SessionManager.save`` для расследования.
-
-        Временный диагностический патч: ошибки вида
-        ``FileNotFoundError: ...sessions/<key>.jsonl.tmp`` на ``open("w")``
-        означают, что ``self.sessions_dir`` исчез между конструктором
-        ``SessionManager`` и моментом ``save``. Чтобы подтвердить или
-        опровергнуть гипотезу, оборачиваем ``save`` так, чтобы он:
-
-          * непосредственно перед делегированием в ``original`` фиксировал
-            наличие ``self.sessions_dir`` (через ``is_dir()`` + ``stat().st_mtime``);
-          * при ошибке ``FileNotFoundError`` в ``open(tmp_path, "w")`` логировал
-            полную картину: ``self.sessions_dir``, ``tmp_path.parent``,
-            ``os.getcwd()``, ``os.listdir(self.sessions_dir.parent)`` (если
-            parent существует) — этого достаточно, чтобы понять, удалили
-            папку, переименовали workspace, или проблема в антивирусе.
-
-        Поведение ``save`` НЕ меняется: мы только читаем состояние ДО вызова
-        и логируем при ошибке. Никаких ``mkdir``, никаких повторов.
-
-        Гейт: запускается только если в ``settings.gateway.runtime_diagnostics``
-        есть ``session_dir_watch: true``. По умолчанию выключено — патч не
-        нужен в проде, только для расследования.
-
-        Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
-        """
-        try:
-            import config as _config
-            full_settings = getattr(_config, "SETTINGS", None)
-            diagnostics = (
-                (full_settings.get("gateway", {}) or {}).get("runtime_diagnostics", {})
-                if full_settings is not None else {}
-            )
-        except Exception:
-            diagnostics = {}
-
-        if not diagnostics.get("session_dir_watch"):
-            return False, "gateway.runtime_diagnostics.session_dir_watch != true"
-
-        if agent is None:
-            return False, "agent is None"
-        sessions = getattr(agent, "sessions", None)
-        if sessions is None:
-            return False, "agent.sessions is missing"
-        original = getattr(sessions, "save", None)
-        if original is None:
-            return False, "agent.sessions.save is missing"
-        if getattr(sessions, "_session_dir_watch_patched", False):
-            return False, "already patched"
-
-        sessions_dir = getattr(sessions, "sessions_dir", None)
-
-        def _snapshot_state() -> dict[str, Any]:
-            try:
-                exists = bool(sessions_dir.is_dir()) if sessions_dir is not None else False
-            except OSError as exc:
-                return {"sessions_dir": str(sessions_dir), "is_dir_error": repr(exc)}
-            try:
-                mtime = sessions_dir.stat().st_mtime if exists else None
-            except OSError as exc:
-                mtime = f"stat_error:{exc!r}"
-            return {
-                "sessions_dir": str(sessions_dir),
-                "exists": exists,
-                "mtime": mtime,
-            }
-
-        def _wrapped_save(session: Any, fsync: bool = False) -> Any:
-            pre = _snapshot_state()
-            try:
-                return original(session, fsync=fsync)
-            except FileNotFoundError as exc:
-                post = _snapshot_state()
-                try:
-                    parent_listing = (
-                        sorted(os.listdir(str(sessions_dir.parent)))
-                        if sessions_dir is not None and sessions_dir.parent.exists()
-                        else None
-                    )
-                except OSError as exc2:
-                    parent_listing = f"listdir_error:{exc2!r}"
-                logger.error(
-                    "session_dir_watch: FileNotFoundError на save: "
-                    "sessions_dir.exists={pre_exists}->{post_exists}, "
-                    "cwd={cwd}, parent_listing={parent_listing}, "
-                    "session_key={key}, "
-                    "original_error={err!r}",
-                    pre_exists=pre.get("exists"),
-                    post_exists=post.get("exists"),
-                    cwd=os.getcwd(),
-                    parent_listing=parent_listing,
-                    key=getattr(session, "key", "<unknown>"),
-                    err=exc,
-                )
-                raise
-
-        sessions.save = _wrapped_save
-        sessions._session_dir_watch_patched = True
-        return True, "agent.sessions.save wrapped with diagnostic logging"
 
     @staticmethod
     def _bump_schema_max(cls: Any, names: tuple, maximum: int) -> bool:

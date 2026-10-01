@@ -247,64 +247,6 @@ class TestReadFileE2E:
         assert len(out) >= 200_000
 
 
-class TestSaveTurnE2E:
-    """_save_turn-обёртка пишет ПОЛНЫЙ файл в data_store и подменяет историю."""
-
-    def _apply(self, workspace_dir):
-        captured = {}
-
-        def _original(session, messages, skip, *, turn_latency_ms=None, **kw):
-            captured["messages"] = list(messages)
-            captured["turn_latency_ms"] = turn_latency_ms
-            return None
-
-        class FakeAgent:
-            max_tool_result_chars = 16_000
-
-            def __init__(self):
-                self._save_turn = _original
-
-        agent = FakeAgent()
-        settings = _Settings(
-            persist_threshold=5000,
-            persist_max_files=100,
-            persist_max_age_hours=0,
-        )
-        ok, detail = RuntimePatcher().patch_save_turn(settings, workspace_dir, agent)
-        assert ok, detail
-        return agent, captured
-
-    def test_archives_full_content_to_disk(self, tmp_path):
-        class _Session:
-            key = "e2e"
-
-        big = "x" * 100_000
-        msg = {"role": "tool", "content": big, "tool_call_id": "t1", "name": "exec"}
-        agent, captured = self._apply(tmp_path)
-
-        agent._save_turn(_Session(), [msg], 0)
-
-        # история подменена ссылкой
-        assert captured["messages"][0]["content"].startswith("[Result saved to data_store/")
-        # на диске лежит ПОЛНЫЙ результат
-        results = list((tmp_path / "data_store" / "cache" / "sessions" / "e2e" / "results").iterdir())
-        assert len(results) == 1
-        assert results[0].read_text(encoding="utf-8") == big
-
-    def test_small_result_not_archived(self, tmp_path):
-        class _Session:
-            key = "e2e2"
-
-        msg = {"role": "tool", "content": "small", "tool_call_id": "t1", "name": "read"}
-        agent, captured = self._apply(tmp_path)
-
-        agent._save_turn(_Session(), [msg], 0)
-
-        assert captured["messages"][0]["content"] == "small"
-        results_dir = tmp_path / "data_store" / "cache" / "sessions" / "e2e2" / "results"
-        assert not results_dir.exists() or not list(results_dir.iterdir())
-
-
 class TestContextGovernorE2E:
     """ContextGovernor.normalize_tool_result persist-путь с реальным файлом."""
 

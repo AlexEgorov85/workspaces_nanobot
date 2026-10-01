@@ -475,11 +475,25 @@
 
 Атомарный коммит без MCP-работы. Ни одна строка кластера не удаляется.
 
-- [ ] 5.1 Перенести `duckdb_cache_store.py` (1455) в `libs/enterprise_data`
-- [ ] 5.2 Перенести `cache_load_service.py` (472) — единственный писатель снимка
-- [ ] 5.3 Перенести `cache_provider.py` (440) вместе с `CacheAccessMode`; в
-      `libs/vectors` уходят `SearchResult` и `IndexIntegrityError`
-- [ ] 5.4 Перенести исполнитель запросов из `lib/utils/duckdb_query.py`:
+- [x] 5.1 Перенести `duckdb_cache_store.py` (1455) в `libs/enterprise_data`.
+      **Сделано частично, в фазе 3:** читающая половина портирована в
+      `libs/enterprise_data/snapshot/`, писатель — `snapshot/writer.py`
+      (закрыл `CacheIngestion`, который до этого был заглушкой с
+      `NotImplementedError`)
+- [x] 5.2 Перенести `cache_load_service.py` (472) — единственный писатель снимка.
+      **Сделано:** `libs/enterprise_data/loader.py`. `load()` блокирует до конца,
+      фоновых потоков не порождает, число потоков ограничено `max_conn`,
+      ошибка соединения fail loudly, отсутствующая таблица даёт `missing_tables`
+      без исключения, результат несёт `loaded_at`.
+      `FOR UPDATE SKIP LOCKED` не переносится: целевая БД Greenplum 6.5 /
+      PostgreSQL 9.4
+- [x] 5.3 Перенести `cache_provider.py` (440) вместе с `CacheAccessMode`; в
+      `libs/vectors` уходят `SearchResult` и `IndexIntegrityError`.
+      **Сделано в фазе 3:** контракты в `snapshot/contracts.py`,
+      `SearchResult`/`IndexIntegrityError` — **одно определение**, общее место
+      `snapshot/contracts.py`, `libs/vectors` импортирует оттуда
+- [x] 5.4 Перенести исполнитель запросов из `lib/utils/duckdb_query.py`:
+
       `run_query`, `explain_query`, `build_schema`, `rewrite_duck_sql`
 - [ ] 5.5 Перенести `_capture_schema_meta` из `cache_provider_impl.py`; остальное
       ушло в фазу 3
@@ -516,35 +530,56 @@
 
 - [ ] 6.1 `turn_delivery_fail` → хук на `finalize_content` (замена текста) +
       `on_error` (логирование `turn_failed`). Проверить: пользователь получает
-      **один** fallback-ответ
-- [ ] 6.2 `save_turn` → хук на `after_execute_tool`: архивирование результата
-      в момент возврата tool'а
-- [ ] 6.3 `async_save` → обёртка в `session_storage.py` при создании
-      `PGSessionManager`; патч удалить
-- [ ] 6.4 `session_content_cleanup` → `PGSessionManager.save` через
-      `libs/enterprise_data/clean_text.py`; патч удалить
-- [ ] 6.5 Удалить `session_dir_watch`
+      **один** fallback-ответ. **Не начато:** патч остаётся, спека
+      `turn_delivery_fail` на месте
+- [x] 6.2 `save_turn` → хук на `after_execute_tool`: архивирование результата
+      в момент возврата tool'а. **Сделано:** `lib/hooks/tool_result_archive_hook.py`
+      (`ToolResultArchiveHook`), фабрика `_make_tool_result_archive_hook` в
+      `ApplicationContext`, гейт прежний — `gateway.persist_threshold > 0`.
+      Патч удалён из `_PATCH_SPECS`
+- [x] 6.3 `async_save` → обёртка в `session_storage.py` при создании
+      `PGSessionManager`; патч удалить. **Сделано:** обёртка в
+      `lib/services/session_storage.py`, покрыта
+      `tests/test_session_storage_async_save.py`
+- [x] 6.4 `session_content_cleanup` → `PGSessionManager.save` через
+      `libs/enterprise_data/clean_text.py`; патч удалить. **Сделано:**
+      очистка перенесена в `PGSessionManager.save`, покрыта
+      `tests/test_pg_session_manager.py`
+- [x] 6.5 Удалить `session_dir_watch`. **Сделано:** патч удалён целиком
+      (диагностика расследована, нужды нет)
 - [ ] 6.6 `assemble_outbound` → удалить целиком: `_final_turn` перевести на
       `TurnEndEvent`, `media` и `_tool_audit` — на публикацию из хука через
-      `turn_context.events`, потребитель — канал
-- [ ] 6.7 `document_text_threshold` → порог переносится в нативный
-      document-tool агента; патч удаляется. **Пункт зависит от 6.11–6.13**,
-      вынесенных сюда из прежней фазы 8
+      `turn_context.events`, потребитель — канал. **Не начато.** Патч
+      работает; его спека была возвращена в `_PATCH_SPECS` в этом шаге —
+      реализация и вызов в `apply_all` остались, а канон молчал о патче,
+      из-за чего `diagnose_startup` печатал ложный дрейф
+- [x] 6.7 `document_text_threshold` → порог переносится в нативный
+      document-tool агента; патч удаляется. **Сделано** вместе с 6.11:
+      `workspace/tools/document_read.py` (auto-discover, `config_key=document_read`),
+      патч удалён
 - [ ] 6.8 **Проверить слот `media` одним реальным ходом с вложением.** Если он
       не заполняется нигде, кроме этапа сборки outbound, публикация `media`
-      удаляется вместе с патчем и решение закрывается без остаточного кода
-- [ ] 6.9 Обновить `runtime_inventory.canonical_runtime_patches()` и
-      `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`
+      удаляется вместе с патчем и решение закрывается без остаточного кода.
+      **Не начато** — зависит от 6.6
+- [x] 6.9 Обновить `runtime_inventory.canonical_runtime_patches()` и
+      `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`.
+      **Сделано:** канон строится из `patch_specs()` (12 → 7), тест выражен
+      правилом, а не выпиской чисел. Добавлен страж
+      «`_PATCH_SPECS` == записываемые в `apply_all` == `patch_*`-методы»
 - [ ] 6.10 Обновить `docs/architecture/runtime-patcher-inventory.md`:
-      категории, тесты, risk пересчитать
+      категории, тесты, risk пересчитать. **Не начато:** документ описывает
+      состояние до фазы 6
 
-- [ ] 6.11 Написать нативный document-tool агента поверх `office_files.py`;
-      порог длины текста переносится из патча в его собственный код
+- [x] 6.11 Написать нативный document-tool агента поверх `office_files.py`;
+      порог длины текста переносится из патча в его собственный код.
+      **Сделано:** `workspace/tools/document_read.py`; инвариант «путь к
+      файлу есть в ответе **всегда**», в том числе на усечённом ответе
 - [ ] 6.12 Проверить, не расходятся ли две копии парсера: домен `legal`
       переезжает в платформу и тоже разбирает документы. Дублировать модуль
-      нельзя — домен получает уже извлечённый текст
-- [ ] 6.13 `tests/test_office_files.py` остаётся в проекте агента: сам модуль
-      `office_files.py` не переезжает
+      нельзя — домен получает уже извлечённый текст. **Не начато** —
+      зависит от фазы 11 (`legal_summarizer`)
+- [x] 6.13 `tests/test_office_files.py` остаётся в проекте агента: сам модуль
+      `office_files.py` не переезжает. **Сделано:** файл на месте, тест зелёный
 
 **Приёмка:** патчей 12 → **4** на этом шаге: `2` полностью необходимых
 (`exec_limits`, `subagent_logging`) + 2 частичных (`context_governor`,

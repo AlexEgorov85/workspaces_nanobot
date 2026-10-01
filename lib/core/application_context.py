@@ -413,6 +413,15 @@ class ApplicationContext:
         except Exception as exc:
             logger.warning("hook_loader.scan_and_register failed: %s", exc)
 
+        # ToolResultArchiveHook — фреймворковый хук, заменяющий патч
+        # ``save_turn`` (фаза 6, п. 6.2). Архивирует большие результаты
+        # tool'ов в момент их возврата (``AgentHook.after_execute_tool``).
+        # Гейт тот же, что был у патча: ``gateway.persist_threshold <= 0`` —
+        # фича выключена, хук создаётся, но ничего не архивирует.
+        # Создаётся ДО ``agent_factory.create``, чтобы попасть в
+        # ``ctx.hooks`` и быть частью общего CompositeHook.
+        tool_result_archive_hook = _make_tool_result_archive_hook(ctx)
+
         agent_factory = AgentFactory()
         ctx.agent, ctx.hooks, ctx.hook_factories = agent_factory.create(
             ctx.config,
@@ -422,9 +431,14 @@ class ApplicationContext:
             db_logging_service=ctx.db_logging_service,
             agent_id=agent_id,
             project_hooks=project_hooks or None,
+            framework_hooks=[tool_result_archive_hook]
+            if tool_result_archive_hook is not None
+            else None,
             print_llm_calls=ctx.print_llm_calls,
             usage_store=ctx.usage_store,
         )
+
+        ctx.tool_result_archive_hook = tool_result_archive_hook
 
         # ToolAuditHook — фреймворковый, входит в ``ctx.hooks`` последним
         # (после плагинов). Нужен RuntimePatcher'у для внедрения аудита.
@@ -1161,6 +1175,70 @@ def _resolve_agent_id(config: Any) -> str:
     except Exception:
         pass
     return "main"
+
+
+#: Дефолт лимита длины результата tool'а, если runtime-конфиг его не задал.
+#: Совпадает с дефолтом nanobot ``AgentLoop.max_tool_result_chars``.
+_DEFAULT_MAX_TOOL_RESULT_CHARS = 16_000
+
+
+def _make_tool_result_archive_hook(ctx: ApplicationContext) -> Any | None:
+    """Собрать ``ToolResultArchiveHook`` — нативную замену патча ``save_turn``.
+
+    Нативная замена ``RuntimePatcher.patch_save_turn`` (change
+    ``enterprise-mcp-platform``, фаза 6, п. 6.2): большие результаты
+    инструментов пишутся в ``data_store/`` целиком вместо усечения в истории.
+
+    Гейт прежний и осознанно тот же, что был у патча:
+    ``gateway.persist_threshold <= 0`` — фича выключена, хук не создаётся.
+    Это важно для инвентаря: выключенная фича не должна попадать в
+    ``ctx.hooks``, иначе ``diff_hooks`` покажет лишний хук.
+
+    Args:
+        ctx: контекст приложения (нужны ``workspace_dir`` и
+            ``config_service`` для чтения секции ``gateway``).
+
+    Returns:
+        Готовый хук либо ``None``, если фича выключена или класс
+        недоступен (битое окружение — не повод ронять старт агента).
+    """
+    try:
+        from lib.hooks.tool_result_archive_hook import ToolResultArchiveHook
+    except Exception as exc:
+        logger.warning("ToolResultArchiveHook unavailable: %s", exc)
+        return None
+
+    try:
+        gw = ctx.config_service.settings_section("gateway")
+    except Exception as exc:
+        logger.warning("gateway section unreadable, persisting tool results off: %s", exc)
+        return None
+    if not isinstance(gw, dict):
+        return None
+
+    persist_threshold = int(gw.get("persist_threshold", 0) or 0)
+    if persist_threshold <= 0:
+        return None
+
+    max_files = int(gw.get("persist_max_files", 100) or 100)
+    max_age_hours = int(gw.get("persist_max_age_hours", 0) or 0)
+
+    # ``max_tool_result_chars`` берём из runtime-конфига, а не с готового
+    # агента: хук создаётся ДО ``AgentFactory.create``, но тот же лимит
+    # потом получит и AgentLoop. Так порог архива и порог усечения
+    # в истории остаются одной величиной.
+    char_limit = _DEFAULT_MAX_TOOL_RESULT_CHARS
+    defaults = getattr(getattr(ctx.config, "agents", None), "defaults", None)
+    configured = getattr(defaults, "max_tool_result_chars", None)
+    if isinstance(configured, int) and configured > 0:
+        char_limit = configured
+
+    return ToolResultArchiveHook(
+        str(ctx.workspace_dir),
+        char_limit=char_limit,
+        max_files=max_files,
+        max_age_hours=max_age_hours,
+    )
 
 
 def _make_db_logging(ctx: ApplicationContext) -> Any | None:

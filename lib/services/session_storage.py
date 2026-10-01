@@ -8,7 +8,9 @@
   * режим storage: ``auto`` | ``postgres`` | ``file``;
   * при ``configure_db=True`` и наличии DSN — настройка ``utils.db`` и
     экспорт ``DATABASE_URL`` (нужно инструментам/скриптам);
-  * ``storage=postgres`` без DSN → ``SessionStorageError``.
+  * ``storage=postgres`` без DSN → ``SessionStorageError``;
+  * любой созданный менеджер получает ``install_async_save`` — обёртку,
+    выносящую синхронный ``save`` из event-loop в executor (6.3).
 
 Возвращает ``(manager, mode)``:
   * ``mode == "postgres"`` — PGSessionManager;
@@ -18,13 +20,92 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 
 class SessionStorageError(Exception):
     """Хранилище сессий настроено некорректно (например, postgres без DSN)."""
+
+
+def install_async_save(manager: Any) -> Any:
+    """Вынести синхронный ``manager.save`` из event-loop в executor.
+
+    Нативная замена патчу ``RuntimePatcher.patch_async_save`` (change
+    ``enterprise-mcp-platform``, фаза 6, п. 6.3). ``nanobot.agent.loop``
+    вызывает ``self.sessions.save(...)`` синхронно из async-методов; пока
+    save ждёт в очереди пула БД, event loop заморожен, и async-транзакции
+    канала (poll/flush/lease) не могут завершиться — возникает взаимная
+    блокировка.
+
+    Обёртка ставится **здесь**, при создании хранилища: это единственная
+    точка, где агент выбирает менеджер, поэтому ни патч, ни правка
+    приватного метода фреймворка не нужны.
+
+      * из потока event loop — реальное сохранение уходит в единый
+        последовательный executor (снимок сессии фиксируется на момент
+        вызова), вызывающий код возвращается сразу; порядок сохранений
+        гарантирован очередью executor'а; ошибки логируются;
+      * из остальных потоков (``flush_all``, shutdown, REST-хендлеры) —
+        исполняется синхронно, как раньше.
+
+    Args:
+        manager: экземпляр SessionManager (или ``None`` — no-op).
+
+    Returns:
+        Тот же объект (удобно для ``manager = install_async_save(manager)``).
+    """
+    if manager is None:
+        return manager
+    original = getattr(manager, "save", None)
+    if original is None or getattr(manager, "_async_save_wrapped", False):
+        return manager
+
+    try:
+        from nanobot.session.manager import Session
+    except Exception as exc:
+        logger.warning("install_async_save: import failed: {}", exc)
+        return manager
+
+    executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="session-save",
+    )
+
+    def _snapshot(session: Any) -> Any:
+        return Session(
+            key=session.key,
+            messages=list(session.messages),
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            metadata=dict(session.metadata or {}),
+            last_consolidated=session.last_consolidated,
+        )
+
+    def _log_save_error(future) -> None:
+        exc = future.exception()
+        if exc is not None:
+            logger.opt(exception=exc).error("Async session save failed")
+
+    def _wrapped_save(session: Any, fsync: bool = False) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # вне loop — синхронный вызов, как раньше
+            return original(session, fsync=fsync)
+        future = executor.submit(original, _snapshot(session), fsync=fsync)
+        future.add_done_callback(_log_save_error)
+        return None
+
+    manager.save = _wrapped_save
+    manager._async_save_executor = executor
+    manager._async_save_wrapped = True
+    return manager
 
 
 class SessionStorageService:
@@ -131,10 +212,10 @@ class SessionStorageService:
                 max_conn=int(pool_cfg.get("max_conn", 4)),
                 pool_timeout=float(pool_cfg.get("pool_timeout", 5.0)),
             )
-            return "postgres", manager
+            return "postgres", install_async_save(manager)
 
         if return_file_manager:
             from nanobot.session.manager import SessionManager
 
-            return "file", SessionManager(workspace)
+            return "file", install_async_save(SessionManager(workspace))
         return "file", None

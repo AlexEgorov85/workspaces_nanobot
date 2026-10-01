@@ -72,6 +72,7 @@ class AgentFactory:
         db_logging_service: Any | None = None,
         agent_id: str | None = None,
         project_hooks: list[Any] | None = None,
+        framework_hooks: list[Any] | None = None,
         print_llm_calls: bool = False,
         usage_store: Any | None = None,
     ) -> tuple[Any, list[Any], list[Any]]:
@@ -91,6 +92,12 @@ class AgentFactory:
             agent_id: id агента для колонки ``agent_id`` в логах.
             project_hooks: плагины из ``workspace/hooks/`` (после auto-scan).
                 ``None``/``[]`` — только фреймворковые хуки.
+            framework_hooks: готовые инстансы дополнительных фреймворковых
+                хуков, которые ``ApplicationContext`` уже собрал, потому что
+                для них нужна конфигурация (сейчас — ``ToolResultArchiveHook``,
+                читающий ``gateway.persist_*``). ``None``/``[]`` — ничего не
+                добавлять. Класс НЕ импортируется здесь: фабрика управляет
+                только составом списка, а не тем, откуда хук пришёл.
 
         Returns:
             ``(agent, hooks, hook_factories)``:
@@ -135,6 +142,14 @@ class AgentFactory:
         # правки ``params["path"]`` уже были видны в аудите.
         if project_hooks:
             hooks = list(project_hooks) + hooks
+
+        # Дополнительные фреймворковые хуки, собранные вызывающим кодом
+        # (инстансы уже созданы). Идут последними: ``ToolResultArchiveHook``
+        # ничего не мутирует, но читает результат tool'а и держит
+        # ``after_execute_tool`` — ему важно увидеть то, что вернул runner,
+        # а не то, что подготовили плагины.
+        if framework_hooks:
+            hooks.extend(framework_hooks)
 
         # DatabaseLoggingHook — опционален: регистрируется НЕ как общий
         # инстанс, а как фабрика оборота (per-turn инстансы). Это

@@ -32,6 +32,30 @@ from typing import Any
 from loguru import logger
 from nanobot.session.manager import Session, SessionManager
 
+from workspace.utils.clean_text import clean_text
+
+
+def clean_session_content(session: Session) -> None:
+    """Вычистить NUL/control-chars из контента всех сообщений сессии.
+
+    Мутирует ``session.messages`` на месте. Мусор (не-``dict`` сообщения,
+    ``None``-контент) пропускается: ``clean_text`` идемпотентен и
+    безопасен на любом типе, а вот отсутствие атрибута — нет.
+
+    Вынесено в функцию, а не инлайн в ``save``, чтобы страж был
+    проверяем тестом на заведомо плохих данных (правило проекта:
+    страж, который ни разу не срабатывал, неотличим от стража,
+    который ничего не проверяет).
+    """
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list):
+        return
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if "content" in message:
+            message["content"] = clean_text(message["content"])
+
 
 class PGSessionManager(SessionManager):
     """Cold-storage mirror поверх upstream ``SessionManager``.
@@ -91,10 +115,19 @@ class PGSessionManager(SessionManager):
     def save(self, session: Session, *, fsync: bool = False) -> None:
         """Делегирует в upstream ``SessionManager.save`` (JSONL).
 
+        Перед записью контент проходит через ``clean_text`` — санитизацию
+        NUL (0x00) и литеральных ``\\u0000``..``\\u0003`` (см.
+        ``workspace/utils/clean_text.py``). Раньше это делал патч
+        ``RuntimePatcher.patch_session_content_cleanup``, оборачивавший
+        ``Session.add_message``; здесь санитизация живёт на границе
+        записи, рядом с потребителем (PostgreSQL не принимает NUL в
+        text-литералах).
+
         Никаких прямых ``INSERT/UPDATE`` в
         ``agent_session_meta`` / ``agent_session_messages`` — это
         архитектурный инвариант (см. test_storage_hybridization).
         """
+        clean_session_content(session)
         super().save(session, fsync=fsync)
 
     def list_sessions(self) -> list[dict[str, Any]]:

@@ -12,10 +12,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "diagnose_startup.py"
 
 
+# Лог боевого старта ПОСЛЕ фазы 6 (``enterprise-mcp-platform``): в нём
+# есть четвёртый project tool ``document_read`` (нативная замена патча
+# ``document_text_threshold``) и фреймворковый хук
+# ``ToolResultArchiveHook`` (нативная замена патча ``save_turn``) — оба
+# обязательные элементы канона, поэтому «дофазовая» фикстура давала бы
+# CRITICAL вместо проверяемого здесь DRIFT. Намеренный дрейф остался
+# один: ``async_save``/``document_text_threshold`` в applied — их больше
+# нет в каноне, это и есть материал для exit code 2.
 USER_LOG = """
-\u2713 Hooks connected: StreamDiagnosisHook, RecentFilesHook, SessionFileRedirectHook, ToolAuditHook, TerminalToolPrintHook, 1 hook factory (per-turn)
+\u2713 Hooks connected: StreamDiagnosisHook, RecentFilesHook, SessionFileRedirectHook, ToolResultArchiveHook, ToolAuditHook, TerminalToolPrintHook, 1 hook factory (per-turn)
 Registered 22 tools: ['apply_patch', 'run_cli_app', 'create_goal', 'edit_file', 'exec_session', 'exec', 'find_files', 'grep', 'list_dir', 'list_exec_sessions', 'list_sessions', 'message', 'my', 'read_file', 'read_session', 'search_sessions', 'send_session_message', 'spawn', 'update_goal', 'web_fetch', 'web_search', 'write_file']
-Custom (project) tools: 3 project tools registered: compact_context, history_search, legal_summarizer_query; 1 disabled by config: ExampleTool
+Custom (project) tools: 4 project tools registered: compact_context, history_search, legal_summarizer_query, document_read; 1 disabled by config: ExampleTool
 Runtime patches
 ----------------
 \u2713 assemble_outbound
@@ -32,7 +40,7 @@ Runtime patches
 CRITICAL_LOG = """
 \u2713 Hooks connected: ToolAuditHook, TerminalToolPrintHook
 Registered 22 tools: ['apply_patch', 'exec']
-Custom (project) tools: 3 project tools registered: compact_context, history_search, legal_summarizer_query; 1 disabled by config: ExampleTool
+Custom (project) tools: 4 project tools registered: compact_context, history_search, legal_summarizer_query, document_read; 1 disabled by config: ExampleTool
 Runtime patches
 ----------------
 \u2713 assemble_outbound
@@ -70,12 +78,14 @@ class TestParser:
         facts = parse_startup_log(USER_LOG)
         assert facts.hook_names == [
             "StreamDiagnosisHook", "RecentFilesHook",
-            "SessionFileRedirectHook", "ToolAuditHook", "TerminalToolPrintHook",
+            "SessionFileRedirectHook", "ToolResultArchiveHook",
+            "ToolAuditHook", "TerminalToolPrintHook",
         ]
         assert facts.hook_factory_count == 1
         assert len(facts.builtin_tool_names) == 22
         assert facts.project_tools_registered == [
             "compact_context", "history_search", "legal_summarizer_query",
+            "document_read",
         ]
         assert facts.project_tools_disabled == ["ExampleTool"]
         assert "subagent_logging" in facts.runtime_patches_applied
