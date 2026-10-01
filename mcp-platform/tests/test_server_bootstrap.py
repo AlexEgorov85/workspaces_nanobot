@@ -56,6 +56,11 @@ class TestBootstrap:
             "schema_check",
             "claim_task",
             "update_task_status",
+            # Фаза 7: контекст вопроса и очистка журнала. До этого агент писал
+            # в agent_question_runs и удалял старые строки своим пулом — вторым
+            # владельцем того же ресурса.
+            "upsert_question_run",
+            "purge_logs",
         }
 
     def test_every_capability_has_a_registered_service(self) -> None:

@@ -1,0 +1,44 @@
+"""Операция ``purge_logs``: очистка журнала по сроку хранения.
+
+``runtime-only`` по существу, а не по формальности: это удаление данных, и
+отдавать такую операцию модели нельзя. Retention приходит аргументом и
+проверяется на сервере — значение из конфигурации агента сюда не подставляется
+неявно.
+"""
+
+from __future__ import annotations
+
+import json
+
+from libs.enterprise_common.container import ToolContainer
+from libs.enterprise_common.registry import ToolDefinition, build_input_schema
+
+AUDIENCE_RUNTIME = "runtime"
+
+
+def create_tool(container: ToolContainer) -> ToolDefinition:
+    def purge_logs(retention_days: int = 0, remove_empty_outbound: bool = True) -> str:
+        counters = container.get("data").purge_logs(
+            retention_days,
+            remove_empty_outbound=remove_empty_outbound,
+            audience="runtime",
+        )
+        return json.dumps({"status": "ok", **counters}, ensure_ascii=False)
+
+    description = (
+        "Очистить журнал событий и контекст вопросов. retention_days=0 "
+        "означает, что старые записи не трогаются; пустые stream-чанки "
+        "outbound удаляются всегда, потому что не несут смысла. Возвращает "
+        "счётчики удалённых строк по таблицам. Служебная операция: вызывается "
+        "агентом по расписанию, не моделью."
+    )
+
+    return ToolDefinition(
+        name="purge_logs",
+        description=description,
+        handler=purge_logs,
+        category="data",
+        tags=("infrastructure", "runtime-only"),
+        permissions=("data:purge_logs",),
+        input_schema=build_input_schema(purge_logs),
+    )

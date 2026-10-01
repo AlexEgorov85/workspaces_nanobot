@@ -102,6 +102,7 @@ class DataService:
         *,
         db: ModuleType | None = None,
         log_table: tuple[str, str] = ("public", "agent_gateway_logs"),
+        question_runs_table: tuple[str, str] = ("public", "agent_question_runs"),
         expected_tables: tuple[str, ...] = (),
         statement_timeout_ms: int = 30_000,
         max_rows: int = 1000,
@@ -111,6 +112,7 @@ class DataService:
     ) -> None:
         self._db = db
         self._log_schema, self._log_table = log_table
+        self._question_runs_table = tuple(question_runs_table)
         self._expected_tables = tuple(expected_tables)
         self._statement_timeout_ms = int(statement_timeout_ms)
         self._max_rows = int(max_rows)
@@ -534,6 +536,197 @@ class DataService:
         rows = self.submit(lambda conn: _fetch(conn, sql, params), audience=audience)
         return bool(rows)
 
+
+
+    # ------------------------------------------------------------------
+    # Контекст вопроса и очистка журнала (фаза 7)
+    # ------------------------------------------------------------------
+
+    def upsert_question_run(
+        self,
+        request_id: str,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        chat_id: str | None = None,
+        channel: str | None = None,
+        agent_id: str | None = None,
+        parent_agent_id: str | None = None,
+        parent_request_id: str | None = None,
+        is_subagent: bool = False,
+        status: str | None = None,
+        summary: str | None = None,
+        question: str | None = None,
+        response: str | None = None,
+        media: list[Any] | None = None,
+        update_only: bool = False,
+        question_runs_table: tuple[str, str] | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> bool:
+        """Upsert контекста вопроса в ``agent_question_runs``.
+
+        Без ``ON CONFLICT``: Greenplum 6.5 (PostgreSQL 9.4) его не умеет, а
+        целевая база именно такая. Паттерн переносимый и работает на
+        PostgreSQL 13: UPDATE по ``request_id``, затем INSERT ... SELECT ...
+        WHERE NOT EXISTS — второй шаг закрывает гонку «строки нет и после
+        UPDATE».
+
+        ``update_only`` (завершение прогона) трогает только
+        ``updated_at``/``status``/``summary``/``response``/``media`` и через
+        ``COALESCE`` не затирает ранее записанный контекст вопроса. Полный
+        upsert (регистрация нового вопроса) перезаписывает контекст.
+
+        Args:
+            request_id: Идентификатор вопроса; пустой — отказ, а не запись.
+            update_only: Обновлять ли только статус/ответ, не затирая контекст.
+            question_runs_table: Таблица с указанием схемы; ``None`` — та, что
+                задана при сборке сервера.
+
+        Returns:
+            ``True`` — запись выполнена.
+        """
+        self._require_runtime(audience, "upsert_question_run")
+        if not request_id or not str(request_id).strip():
+            raise InvalidRequestError("upsert_question_run: не задан request_id")
+
+        table = _qualified(question_runs_table or self._question_runs_table)
+        # media хранится JSON-строкой в TEXT-колонке.
+        media_json = json.dumps(media, ensure_ascii=False) if media else None
+
+        if update_only:
+            update_sql = (
+                f"UPDATE {table} SET updated_at = now(), status = %s, summary = %s, "
+                "response = COALESCE(%s, response), media = COALESCE(%s, media) "
+                "WHERE request_id = %s"
+            )
+            update_params: list[Any] = [status, summary, response, media_json, request_id]
+            insert_sql = (
+                f"INSERT INTO {table} (request_id, status, summary, response, media) "
+                "SELECT %s, %s, %s, %s, %s "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE request_id = %s)"
+            )
+            insert_params: list[Any] = [request_id, status, summary, response, media_json]
+            insert_params.append(request_id)
+        else:
+            update_sql = (
+                f"UPDATE {table} SET session_id = %s, user_id = %s, chat_id = %s, "
+                "channel = %s, parent_request_id = %s, agent_id = %s, "
+                "parent_agent_id = %s, is_subagent = %s, status = %s, summary = %s, "
+                "question = %s, media = %s, updated_at = now() "
+                "WHERE request_id = %s"
+            )
+            update_params = [
+                session_id, user_id, chat_id, channel, parent_request_id, agent_id,
+                parent_agent_id, bool(is_subagent), status, summary, question,
+                media_json, request_id,
+            ]
+            insert_sql = (
+                f"INSERT INTO {table} (request_id, session_id, user_id, chat_id, "
+                "channel, parent_request_id, agent_id, parent_agent_id, is_subagent, "
+                "status, summary, question, media) "
+                "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE request_id = %s)"
+            )
+            insert_params = [
+                request_id, session_id, user_id, chat_id, channel, parent_request_id,
+                agent_id, parent_agent_id, bool(is_subagent), status, summary,
+                question, media_json, request_id,
+            ]
+
+        def _work(conn: Any) -> None:
+            with conn.cursor() as cur:
+                cur.execute(update_sql, update_params)
+                cur.execute(insert_sql, insert_params)
+
+        self.submit(_work, audience=audience)
+        return True
+
+    def purge_logs(
+        self,
+        retention_days: int = 0,
+        *,
+        remove_empty_outbound: bool = True,
+        log_table: tuple[str, str] | None = None,
+        question_runs_table: tuple[str, str] | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, int]:
+        """Очистить журнал: пустые outbound-чанки и всё старше retention.
+
+        Интервал считается как ``NOW() - (%s || ' days')::interval`` — без
+        ``make_interval``, которого нет в Greenplum 6.5.
+
+        Args:
+            retention_days: Сколько дней хранить. ``0`` — старые записи не
+                трогаются; пустой outbound-мусор чистится всегда, потому что он
+                не несёт смысла ни в какой момент.
+            remove_empty_outbound: Удалять ли пустые stream-чанки.
+            log_table: Таблица журнала; ``None`` — заданная при сборке.
+            question_runs_table: Таблица контекста; ``None`` — заданная при сборке.
+
+        Returns:
+            Счётчики удаления по таблицам.
+        """
+        self._require_runtime(audience, "purge_logs")
+        try:
+            days = int(retention_days)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(
+                f"purge_logs: retention_days должен быть целым, получено {retention_days!r}"
+            ) from exc
+        if days < 0:
+            raise InvalidRequestError(
+                f"purge_logs: retention_days не может быть отрицательным ({days})"
+            )
+
+        logs = _qualified(log_table or self._log_table)
+        runs = _qualified(question_runs_table or self._question_runs_table)
+        counters = {"empty_outbound": 0, "events": 0, "question_runs": 0}
+
+        def _work(conn: Any) -> dict[str, int]:
+            result = dict(counters)
+            with conn.cursor() as cur:
+                if remove_empty_outbound:
+                    # Реальные доставки файлов с пустым текстом сохраняются:
+                    # у них есть media, и удаление стёрло бы сам факт отправки.
+                    cur.execute(
+                        f"DELETE FROM {logs} "
+                        "WHERE event_type IN ('outbound_final', 'outbound_delta') "
+                        "AND coalesce(btrim(payload->>'content'), '') = '' "
+                        "AND (payload->'media') IS NULL"
+                    )
+                    result["empty_outbound"] = int(cur.rowcount)
+                if days > 0:
+                    cur.execute(
+                        f'DELETE FROM {logs} WHERE "timestamp" < NOW() - (%s || \' days\')::interval',
+                        (str(days),),
+                    )
+                    result["events"] = int(cur.rowcount)
+                    cur.execute(
+                        f"DELETE FROM {runs} WHERE updated_at < NOW() - (%s || ' days')::interval",
+                        (str(days),),
+                    )
+                    result["question_runs"] = int(cur.rowcount)
+            return result
+
+        return dict(self.submit(_work, audience=audience) or counters)
+
+
+def _qualified(table: tuple[str, str] | str) -> str:
+    """Имя таблицы со схемой в кавычках.
+
+    Схема и имя приходят аргументом операции, поэтому подставлять их в текст
+    можно только через идентификатор в кавычках. Значения параметров идут
+    плейсхолдерами — это другой случай и он не смешивается с этим.
+    """
+    if isinstance(table, str):
+        schema, name = "public", table
+    else:
+        schema, name = table
+    schema = str(schema).strip().strip('"')
+    name = str(name).strip().strip('"')
+    if not schema or not name:
+        raise InvalidRequestError(f"не задано имя таблицы журнала: {table!r}")
+    return f'"{schema}"."{name}"'
 
 def _fetch(conn: Any, sql: str, params: list[Any]) -> list[tuple[Any, ...]]:
     with conn.cursor() as cur:
