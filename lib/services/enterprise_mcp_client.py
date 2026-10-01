@@ -260,8 +260,8 @@ class EnterpriseMcpClient:
         и на Windows с cp1251 кодировка консоли убила бы процесс на
         первом же сообщении.
 
-        Сверх наследования добавляется LLM-конфигурация capability ``llm``.
-        Причина: агент держит провайдера в ``SETTINGS``
+        Сверх наследования добавляется конфигурация capability ``llm``,
+        ``vectors`` и ``audit``. Причина: агент держит провайдера в ``SETTINGS``
         (``agents.defaults.model``, ``providers.<p>.apiBase``), а в
         ``os.environ`` экспортирует только ``LLM_API_KEY`` — этого не хватит
         ни модели, ни адреса. Платформа не читает конфиг агента (такой импорт
@@ -274,6 +274,7 @@ class EnterpriseMcpClient:
         env["PYTHONIOENCODING"] = "utf-8"
         env.update(_llm_env_from_settings())
         env.update(_vectors_env_from_settings(self._snapshot_path))
+        env.update(_audit_env_from_project())
         return env
 
 
@@ -343,6 +344,55 @@ def _vectors_env_from_settings(snapshot_path: str | None) -> dict[str, str]:
     token = embedding.get("auth_token")
     if token:
         env["ENTERPRISE_EMBED_API_KEY"] = str(token)
+    return env
+
+
+def _audit_env_from_project() -> dict[str, str]:
+    """Передать в процесс конфигурацию capability ``audit``.
+
+    Таблица реестра скриптов и список доменных таблиц приходят из
+    ``project.json → skills.audit_analyzer.tables`` — оттуда же, откуда их
+    берёт сам навык. Дублировать эти имена ещё и в ``project.json →
+    enterprise_mcp`` нельзя: второе место, где правят, разъедется с первым
+    при первой же правке, а платформа запретит потерять таблицы молча.
+
+    Обе переменные обязательны на стороне платформы: с пустым значением
+    ``ENTERPRISE_SCRIPTS_REGISTRY_TABLE`` capability ``audit`` отвечает
+    ``registry_unavailable`` на каждую операцию, то есть не работает вовсе.
+
+    Реестр намеренно НЕ попадает в ``ENTERPRISE_AUDIT_TABLES``: его
+    ``label`` в ``project.json`` означает «реестр метаданных, не для схемы
+    модели», и выдав его как доменную таблицу, мы разрешили бы аудиту
+    читать собственные предустановленные скрипты в обход проверки строк.
+    """
+    try:
+        from config import load_config_json
+
+        project = load_config_json("project.json")
+    except Exception as exc:  # noqa: BLE001 - аудит не должен ронять старт
+        logger.warning("enterprise-mcp: project.json не прочитан, capability audit не настроена: %s", exc)
+        return {}
+
+    skills = project.get("skills") if isinstance(project, dict) else None
+    declared = (skills or {}).get("audit_analyzer", {}).get("tables") or []
+    names: list[str] = []
+    registry: str | None = None
+    for item in declared:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        if item.get("label") == "scripts_registry":
+            registry = name
+        else:
+            names.append(name)
+
+    env: dict[str, str] = {}
+    if registry:
+        env["ENTERPRISE_SCRIPTS_REGISTRY_TABLE"] = registry
+    if names:
+        env["ENTERPRISE_AUDIT_TABLES"] = ",".join(names)
     return env
 
 
