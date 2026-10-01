@@ -3,7 +3,7 @@
 Зачем файл реестра, если настройки и так приходят через окружение
 --------------------------------------------------------------------
 
-Три причин��, по которым список настроек перестал читаться глазами:
+Три причины, по которым список настроек перестал читаться глазами:
 
 1. **Разбор разбросан по трём механизмам.** 16 переменных читаются
    литерально в ``servers/enterprise/server.py`` (разложены по пяти
@@ -18,6 +18,20 @@
 3. **Нет места, где живут значения без агента.** Свои ручки платформы
    существуют только как дефолты внутри ``os.environ.get(...)``. Задать их
    без агента нечем, и перечислить их — негде.
+
+Структура реестра повторяет код
+-------------------------------
+
+Настройки сгруппированы по capability, и у каждой capability названы её
+``service`` и её операции — ровно как они устроены в
+``servers/enterprise/capabilities/``. Причина практическая: вопрос «кто читает
+эту настройку» должен отвечать на вопрос про потребителя, а не про
+``_build_container``, который только собирает сервисы. Первая версия реестра
+была плоским списком и отвечала именно на второй вопрос.
+
+Страж сверяет дерево с диском, поэтому capability без сервиса, операция,
+которой нет в ``tools/``, и настройка без владельца падают в тестах, а не
+при разборе инцидента.
 
 Приоритет значений
 ------------------
@@ -275,8 +289,127 @@ BY_NAME: dict[str, Setting] = {s.name: s for s in SETTINGS}
 BY_ANY_NAME: dict[str, Setting] = {n: s for s in SETTINGS for n in s.names}
 
 
+@dataclass(frozen=True)
+class CapabilitySettings:
+    """Настройки одной capability — в той же форме, в какой устроен код.
+
+    Реестр повторяет структуру платформы, а не выдумывает свою: сначала
+    capability, потом её ``service`` и её операции. Вопрос «кто читает эту
+    настройку» тогда отвечает на вопрос про потребителя, а не про
+    ``_build_container``, который только собирает сервисы.
+
+    Attributes:
+        name: имя capability — оно же секция в ``platform.json`` и каталог
+            в ``servers/enterprise/capabilities/``.
+        service: путь к ``service/main.py``. Проверяется стражем: если
+            сервиса нет, настройки этой capability читать некому.
+        tools: операции capability. Тоже проверяются — настройка, которая
+            никому из них не нужна, вероятно, объявлена зря.
+        settings: имена настроек из ``SETTINGS``.
+    """
+
+    name: str
+    service: str
+    tools: tuple[str, ...]
+    settings: tuple[str, ...]
+    summary: str = ""
+
+
+#: Capability платформы. Порядок и состав — как на диске, в
+#: ``servers/enterprise/capabilities/``; страж сверяет оба.
+CAPABILITIES: tuple[CapabilitySettings, ...] = (
+    CapabilitySettings(
+        name="data",
+        service="servers/enterprise/capabilities/data/service/main.py",
+        tools=(
+            "claim_task",
+            "history_search",
+            "log_event",
+            "log_events",
+            "purge_logs",
+            "schema_check",
+            "update_task_status",
+            "upsert_question_run",
+        ),
+        settings=(
+            "ENTERPRISE_LOG_TABLE",
+            "ENTERPRISE_LOG_BUFFER_MAXLEN",
+            "ENTERPRISE_LOG_FLUSH_INTERVAL",
+            "ENTERPRISE_STATEMENT_TIMEOUT_MS",
+            "ENTERPRISE_MAX_ROWS",
+            "ENTERPRISE_EXPECTED_TABLES",
+        ),
+        summary="PostgreSQL: очередь задач, долговечный журнал, чтение журнала",
+    ),
+    CapabilitySettings(
+        name="audit",
+        service="servers/enterprise/capabilities/audit/service/main.py",
+        tools=("generate_sql", "list_scripts", "run_script"),
+        settings=(
+            "ENTERPRISE_SCRIPTS_REGISTRY_TABLE",
+            "ENTERPRISE_AUDIT_TABLES",
+            "ENTERPRISE_AUDIT_ROW_CEILING",
+        ),
+        summary="запрос к данным агента: реестр скриптов, их выполнение, генерация SQL",
+    ),
+    CapabilitySettings(
+        name="vectors",
+        service="servers/enterprise/capabilities/vectors/service/main.py",
+        tools=("index_stats", "list_indexes", "vector_search"),
+        settings=(
+            "ENTERPRISE_SNAPSHOT_PATH",
+            "ENTERPRISE_VECTOR_DB_TABLE",
+            "ENTERPRISE_VECTOR_INDEXES",
+            "ENTERPRISE_VECTOR_STORAGE_TABLE",
+            "ENTERPRISE_VECTOR_ENABLE",
+            "ENTERPRISE_EMBED_MODEL",
+            "ENTERPRISE_EMBED_DIMENSION",
+            "ENTERPRISE_EMBED_TIMEOUT",
+        ),
+        summary="снимок DuckDB, FAISS-индексы и параметры эмбеддера",
+    ),
+    CapabilitySettings(
+        name="llm",
+        service="servers/enterprise/capabilities/llm/service/main.py",
+        tools=("complete", "embed"),
+        settings=(
+            "ENTERPRISE_LLM_PROVIDER",
+            "ENTERPRISE_LLM_MODEL",
+            "ENTERPRISE_LLM_API_BASE",
+            "ENTERPRISE_LLM_API_KEY",
+            "ENTERPRISE_LLM_MAX_TOKENS",
+            "ENTERPRISE_LLM_TEMPERATURE",
+            "ENTERPRISE_EMBED_API_BASE",
+            "ENTERPRISE_EMBED_API_KEY",
+            "ENTERPRISE_EMBED_PATH",
+            "ENTERPRISE_EMBED_MODEL",
+        ),
+        summary="вызовы чата и эмбеддингов к внешнему провайдеру",
+    ),
+)
+
+#: Настройки вне capability: ими владеет общий код платформы.
+SHARED_SETTINGS: tuple[str, ...] = ("DATABASE_URL",)
+
+#: capability -> её настройки, для файла и документации.
+SETTINGS_BY_CAPABILITY: dict[str, tuple[str, ...]] = {
+    c.name: c.settings for c in CAPABILITIES
+}
+
+
 def settings_owned_by(owner: str) -> tuple[Setting, ...]:
     return tuple(s for s in SETTINGS if s.owner == owner)
+
+
+def capabilities_of(setting_name: str) -> tuple[str, ...]:
+    """Какие capability заинтересованы в настройке (может быть несколько).
+
+    Один и тот же параметр нужен двум capability — например, модель эмбеддера
+    нужна и ``vectors`` (подпись индекса), и ``llm`` (вызов эндпойнта).
+    Объявлять её дважды нельзя, поэтому настройка одна, а список
+    capability — рядом.
+    """
+    return tuple(c.name for c in CAPABILITIES if setting_name in c.settings)
 
 
 #: Ключ файла -> настройка. Строится из ``file_key``, а не из имени

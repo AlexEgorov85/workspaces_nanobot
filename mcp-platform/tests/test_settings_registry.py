@@ -34,10 +34,12 @@ from pathlib import Path
 from libs.enterprise_common.settings import (
     BY_ANY_NAME,
     BY_FILE_KEY,
+    CAPABILITIES,
     OWNER_AGENT,
     OWNER_PLATFORM,
     PLATFORM_CONFIG_PATH,
     SETTINGS,
+    SHARED_SETTINGS,
     Settings,
 )
 
@@ -261,6 +263,102 @@ class TestPlatformFile:
         raw = json.dumps(json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8")))
         for forbidden in ("sk-", "password", "api_key", "apikey", "://"):
             assert forbidden not in raw, f"platform.json содержит {forbidden!r}"
+
+
+class TestCapabilityTree:
+    """Реестр повторяет структуру кода, а не выдумывает свою.
+
+    Плоский список настроек отвечал на вопрос «кто читает» строкой про
+    ``_build_container`` — то есть про bootstrap, а не про потребителя.
+    Дерево capability -> service -> tool отвечает на вопрос про того, кто
+    настройкой пользуется, и его можно сверить с диском механически.
+    """
+
+    def test_every_capability_on_disk_is_in_the_registry(self) -> None:
+        caps_dir = PLATFORM_ROOT / "servers" / "enterprise" / "capabilities"
+        on_disk = {
+            p.name
+            for p in caps_dir.iterdir()
+            if p.is_dir() and not p.name.startswith("_")
+        }
+        declared = {c.name for c in CAPABILITIES}
+        assert on_disk == declared, (
+            f"на диске {sorted(on_disk - declared)}, в реестре лишние "
+            f"{sorted(declared - on_disk)}"
+        )
+
+    def test_every_service_exists(self) -> None:
+        for cap in CAPABILITIES:
+            assert (PLATFORM_ROOT / cap.service).exists(), (
+                f"{cap.name}: сервиса нет по пути {cap.service}"
+            )
+
+    def test_every_listed_tool_exists_in_that_capability(self) -> None:
+        import ast as _ast
+
+        for cap in CAPABILITIES:
+            tools_dir = PLATFORM_ROOT / "servers/enterprise/capabilities" / cap.name / "tools"
+            found: set[str] = set()
+            for path in tools_dir.glob("*.py"):
+                if path.stem == "__init__":
+                    continue
+                tree = _ast.parse(path.read_text(encoding="utf-8"))
+                for node in _ast.walk(tree):
+                    if (
+                        isinstance(node, _ast.Call)
+                        and isinstance(node.func, _ast.Name)
+                        and node.func.id == "ToolDefinition"
+                    ):
+                        for kw in node.keywords:
+                            if kw.arg == "name" and isinstance(kw.value, _ast.Constant):
+                                found.add(kw.value.value)
+                        for arg in node.args:
+                            if isinstance(arg, _ast.Constant) and isinstance(arg.value, str):
+                                found.add(arg.value)
+            unknown = sorted(set(cap.tools) - found)
+            assert not unknown, (
+                f"{cap.name}: в реестре есть операции {unknown}, которых нет "
+                f"в tools/ ({sorted(found)})"
+            )
+
+    def test_every_setting_belongs_to_a_capability_or_is_shared(self) -> None:
+        assigned = {name for cap in CAPABILITIES for name in cap.settings}
+        shared = set(SHARED_SETTINGS)
+        orphans = sorted(s.name for s in SETTINGS if s.name not in assigned | shared)
+        assert not orphans, (
+            f"настройки без capability и без SHARED_SETTINGS: {orphans}. "
+            "Не указано, кто ими пользуется."
+        )
+
+    def test_every_named_setting_is_declared(self) -> None:
+        assigned = {name for cap in CAPABILITIES for name in cap.settings}
+        declared = {s.name for s in SETTINGS}
+        missing = sorted(assigned - declared)
+        assert not missing, f"дерево ссылается на необъявленные настройки: {missing}"
+
+    def test_every_capability_documents_itself(self) -> None:
+        for cap in CAPABILITIES:
+            assert cap.summary.strip(), f"{cap.name}: нет описания"
+            assert cap.settings, f"{cap.name}: ни одной настройки"
+
+    def test_file_keys_match_their_capability(self) -> None:
+        """Ключ файла обязан лежать в секции своей capability.
+
+        ``data.log_table`` в секции ``vectors`` — это уже не организация по
+        capability, а ошибка, которая выглядит как «работает».
+        """
+        import json
+
+        from libs.enterprise_common.settings import _flatten
+
+        raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+        for key in _flatten(raw):
+            if key.startswith("_"):
+                continue
+            section = key.split(".", 1)[0]
+            assert section in {c.name for c in CAPABILITIES}, (
+                f"{key!r}: секция {section!r} не является capability"
+            )
 
 
 class TestGuardIgnoresProse:
