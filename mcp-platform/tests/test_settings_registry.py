@@ -310,8 +310,21 @@ class TestRegistryShape:
 
 class TestPlatformFile:
     def test_file_exists_and_is_valid(self) -> None:
+        """Файл существует и разбирается целиком.
+
+        Разбор идёт с заглушками подстановок, а не с ``env={}``: явное
+        окружение — это всё окружение для реестра, поэтому ``${DB_USER}``
+        пришлось бы искать в локальном ``.secrets.env``, которого нет в свежем
+        клоне. С такими заглушками страж реестра запускается у того, кто
+        склонировал репозиторий, а не только у того, у кого развёрнута база.
+        Пропуск подстановки при этом всё равно ловится отдельно —
+        ``test_file_dsn_carries_no_literal_credentials`` и проверки
+        обязательности ключей в файле.
+        """
+        from tests.conftest import DUMMY_SECRETS
+
         assert PLATFORM_CONFIG_PATH.exists(), "platform.json обязателен: это документация"
-        Settings(env={})  # не бросает
+        Settings(env=dict(DUMMY_SECRETS), secrets={})  # не бросает
 
     def test_file_contains_only_platform_owned_settings(self) -> None:
         """Настройка агента в файле — дублирование, и оно поднимается."""
