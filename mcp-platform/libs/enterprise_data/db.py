@@ -62,7 +62,7 @@ import psycopg2
 import psycopg2.extensions
 import psycopg2.extras
 
-from libs.enterprise_common.settings import pool_defaults
+from libs.enterprise_common.errors import InfrastructureError
 from libs.enterprise_data.clean_text import clean_text
 
 # Глобальный адаптер: psycopg2 автоматически сериализует dict → JSONB
@@ -83,35 +83,81 @@ _dsn: str = ""
 # Пул (конфигурация)
 # ---------------------------------------------------------------------------
 
-#: Дефолты пула берутся из реестра настроек платформы
-#: (``libs.enterprise_common.settings``), а не объявлены здесь. Два списка
-#: дефолтов разъезжаются при первом же изменении: пул пошёл бы по одному,
-#: а ``platform.json`` и реестр обещали бы оператору другое, и отказ
-#: выглядел бы как «настройка не применилась».
-_DEFAULT_POOL: dict[str, Any] = pool_defaults()
+#: Значений пула в коде нет вообще — только контракт: какие ключи нужны и
+#: какого они типа. Значения приходят из ``platform.json`` через реестр
+#: (``servers/enterprise/server.py:_apply_pool_settings`` → ``pool_config``).
+#: Список дефолтов рядом с кодом означал бы второе место для значения: пул пошёл
+#: бы по одному, а ``platform.json`` обещал бы оператору другое, и отказ
+#: выглядел бы как «настройка не применилась». Именно так и вышло, когда
+#: размеры пула жили в ``_DEFAULT_POOL`` и задать их было нечем.
+_POOL_SPEC: dict[str, type | tuple[type, ...]] = {
+    "min_conn": int,
+    "max_conn": int,
+    "pool_timeout": float,
+    "queue_maxsize": int,
+    "reconnect_backoff_sec": float,
+    "reconnect_backoff_max_sec": float,
+    "connect_max_retries": int,
+    "idle_timeout_sec": float,
+    "job_max_retries": int,
+    "print_activity": bool,
+}
 
-_pool_cfg: dict[str, Any] = dict(_DEFAULT_POOL)
+_pool_cfg: dict[str, Any] = {}
 
 
 def set_pool_config(cfg: dict) -> None:
-    """Переопределить параметры пула (min_conn/max_conn/pool_timeout/...).
+    """Задать параметры пула целиком: min_conn/max_conn/pool_timeout/...
 
     Применяется до первого вызова воркера; уже созданный пул не ресайзится
     автоматически (для смены размера вызывайте ``start()`` заново).
 
-    Источник значений на процессе — ``platform.json`` через реестр: сервер
-    зовёт ``pool_config(settings)`` и передаёт результат сюда
-    (``servers/enterprise/server.py:_apply_pool_settings``). Этот сеттер
-    остаётся для standalone-скриптов и тестов, которые конфигурируют пул
-    напрямую, мимо реестра.
+    Args:
+        cfg: полный набор ключей из :data:`_POOL_SPEC`. Неполный набор и
+            лишние ключи — ошибка, а не «остальное как было»: молчаливый
+            добор значений означал бы, что у пула есть собственные дефолты,
+            которых в коде быть не должно.
+
+    Raises:
+        InfrastructureError: отсутствует ключ, лишний ключ или значение не
+            того типа.
     """
     global _pool_cfg
-    merged = dict(_DEFAULT_POOL)
-    if isinstance(cfg, dict):
-        for k, v in cfg.items():
-            if k in merged and v is not None:
-                merged[k] = v
-    _pool_cfg = merged
+    if not isinstance(cfg, dict):
+        raise InfrastructureError(
+            "set_pool_config: нужен словарь параметров пула, получено "
+            f"{type(cfg).__name__}"
+        )
+    missing = sorted(set(_POOL_SPEC) - set(cfg))
+    unknown = sorted(set(cfg) - set(_POOL_SPEC))
+    if missing or unknown:
+        raise InfrastructureError(
+            "set_pool_config: набор параметров пула неполон или лишний. "
+            + (f"нет: {missing}. " if missing else "")
+            + (f"лишние: {unknown}. " if unknown else "")
+            + "Значения берутся из platform.json целиком — дополнять их нечем."
+        )
+    wrong = {
+        key: type(cfg[key]).__name__
+        for key, expected in _POOL_SPEC.items()
+        if not isinstance(cfg[key], expected)
+    }
+    if wrong:
+        raise InfrastructureError(
+            f"set_pool_config: значения не того типа: {wrong}. "
+            f"Ожидалось: {sorted(_POOL_SPEC)}"
+        )
+    if cfg["min_conn"] > cfg["max_conn"]:
+        raise InfrastructureError(
+            f"set_pool_config: min_conn={cfg['min_conn']} больше "
+            f"max_conn={cfg['max_conn']} — пул не поднимется"
+        )
+    _pool_cfg = dict(cfg)
+
+
+def pool_is_configured() -> bool:
+    """Настроен ли пул. ``False`` — пул нельзя запускать."""
+    return set(_pool_cfg) == set(_POOL_SPEC)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +288,17 @@ class _Worker(threading.Thread):
     def _connect_with_backoff(self) -> bool:
         """Цикл подключения с экспоненциальным backoff (вызывается под
         ``_conn_lock``)."""
+        if not _pool_cfg:
+            # Раньше у пула были дефолты в коде, и сюда попадали только при
+            # отсутствии DSN. Теперь значений в коде нет вовсе, и запуск
+            # ненастроенного пула — это ошибка конфигурации, а не «попробуем
+            # позже»: сервер обязан был применить platform.json до старта.
+            self._connect_error = RuntimeError(
+                "пул не сконфигурирован: вызовите set_pool_config(...) "
+                "с параметрами из platform.json (servers/enterprise/server.py:"
+                "_apply_pool_settings)"
+            )
+            return False
         dsn = self._manager._dsn
         if not dsn:
             self._connect_error = RuntimeError(

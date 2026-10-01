@@ -327,19 +327,38 @@ class TestSqlglotIsMandatory:
     def test_dependency_list_names_sqlglot(self) -> None:
         assert "sqlglot" in enterprise_server.REQUIRED_PACKAGES
 
-    def test_missing_dsn_stops_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_dsn_stops_server(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Сервер без DSN выглядит рабочим, пока журнал пуст.
 
         Буфер при этом честно теряет каждое событие, но агент об этом не узнаёт.
         Молчаливая потеря журнала хуже отказа на старте.
+
+        DSN приходит из ``platform.json`` через подстановки, поэтому «нет DSN»
+        — это пустой ключ в файле плюс пустое окружение: локальный
+        ``.secrets.env`` подставил бы значение и проверка стала бы зелёной
+        вхолостую.
         """
+        import json
+
         from libs.enterprise_data import db as data_db
 
         monkeypatch.setattr(data_db, "_dsn", "")
         monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.delenv("PG_DSN", raising=False)
+
+        raw = json.loads(
+            (PLATFORM_ROOT / "platform.json").read_text(encoding="utf-8")
+        )
+        raw["db"]["dsn"] = ""
+        no_dsn = tmp_path / "platform.json"
+        no_dsn.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
         with pytest.raises(InfrastructureError, match="не задан DSN"):
-            enterprise_server._check_dependencies(Settings())
+            enterprise_server._check_dependencies(
+                Settings(env={}, secrets={}, file_path=no_dsn)
+            )
 
 
 class TestNoManualToolRegistration:

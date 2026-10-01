@@ -36,13 +36,16 @@ from libs.enterprise_common.settings import (
     BY_FILE_KEY,
     BY_NAME,
     CAPABILITIES,
+    FROM_FILE,
     OWNER_AGENT,
     OWNER_PLATFORM,
     PLATFORM_CONFIG_PATH,
+    SECRETS_PATH,
     SETTINGS,
     SHARED_SECTIONS,
     SHARED_SETTINGS,
     Settings,
+    settings_owned_by,
 )
 
 PLATFORM_ROOT = Path(__file__).resolve().parent.parent
@@ -471,6 +474,104 @@ class TestCapabilityTree:
         sections = {key.split(".", 1)[0] for key in _flatten(raw)}
         unused = sorted(set(SHARED_SECTIONS) - sections)
         assert not unused, f"SHARED_SECTIONS объявляет неиспользуемые секции: {unused}"
+
+
+class TestFileIsTheSingleSourceOfTruth:
+    """``platform.json`` — единственное место, где живут значения MCP.
+
+    Требование владельца: никаких настроек в куче других мест. Закрывает три
+    класса отказа, и каждый уже случался:
+
+    * значение осталось в коде (дефолт у настройки) — пул работал на значениях
+      из кода, а файл с настройками выглядел рабочим и не влиял ни на что;
+    * ключ файла уехал не в свою секцию — ``vectors.enable`` отвечал на
+      вопрос, на который отвечал ``project.json`` агента, и всегда проигрывал
+      окружению, то есть был декоративным;
+    * секция файла не повторяет структуру проекта — и через полгода никто не
+      знает, где искать ручку capability.
+    """
+
+    def test_no_platform_setting_carries_a_value_in_code(self) -> None:
+        """У платформенной настройки в коде нет значения.
+
+        Проверяется ссылка на сентинел, а не сравнение с файлом: сравнение
+        проходило бы и на состоянии, которое запрещает (список в коде,
+        повторяющий файл).
+        """
+        with_values = sorted(
+            s.name
+            for s in settings_owned_by(OWNER_PLATFORM)
+            if s.file_key and s.default is not FROM_FILE and s.name != "DATABASE_URL"
+        )
+        assert not with_values, (
+            "платформенные настройки с ключом в файле, но со значением в коде: "
+            f"{with_values}. Значение обязано жить только в platform.json."
+        )
+
+    def test_every_platform_key_exists_in_the_file(self) -> None:
+        """Каждому ключу реестра — ключ в файле.
+
+        Пропущенный ключ означал бы, что при старте реестр упадёт с
+        «нет ключа», и это правильно; но дешевле и понятнее сказать об этом
+        в тесте реестра, а не на развёртывании.
+        """
+        import json
+
+        from libs.enterprise_common.settings import _flatten
+
+        raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+        in_file = set(_flatten(raw))
+        missing = sorted(
+            s.key for s in settings_owned_by(OWNER_PLATFORM) if s.key not in in_file
+        )
+        assert not missing, (
+            f"в platform.json нет ключей: {missing}. Они обязаны быть в файле — "
+            "в коде их нет намеренно."
+        )
+
+    def test_file_sections_mirror_the_project(self) -> None:
+        """Секции файла повторяют структуру проекта.
+
+        Одна секция на capability из ``servers/enterprise/capabilities/`` плюс
+        общий код платформы из ``SHARED_SECTIONS``. Пропавшая capability
+        означала бы, что её ручки негде искать, а лишняя секция — что
+        кто-то завёл настройку вне своего места.
+        """
+        import json
+
+        raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+        sections = {k for k in raw if not str(k).startswith("_")}
+        capabilities = {c.name for c in CAPABILITIES}
+        assert capabilities <= sections, (
+            f"в файле нет секций capability: {sorted(capabilities - sections)}. "
+            "Секция обязана называться как каталог в capabilities/."
+        )
+        unknown = sorted(sections - capabilities - set(SHARED_SECTIONS))
+        assert not unknown, (
+            f"секции файла не принадлежат ни capability, ни общему коду: {unknown}"
+        )
+
+    def test_secrets_file_is_not_tracked_by_git(self) -> None:
+        """Файл секретов платформы не должен попасть под git.
+
+        ``platform.json`` под git, и если рядом появится файл с паролем от
+        рабочей базы, он уедет в историю вместе с ним. Проверяется правилом
+        ``.gitignore``, а не содержимым файла: читать секреты для проверки
+        нельзя.
+        """
+        import subprocess
+
+        if not SECRETS_PATH.exists():
+            return
+        repo = PLATFORM_ROOT.parent
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", str(SECRETS_PATH.relative_to(repo))],
+            cwd=repo,
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"{SECRETS_PATH.name} не покрыт .gitignore — секреты уедут в git"
+        )
 
 
 class TestOnlyTheRegistryReadsTheEnvironment:

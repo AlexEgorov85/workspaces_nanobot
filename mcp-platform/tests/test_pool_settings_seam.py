@@ -39,11 +39,48 @@ sys.path.insert(0, str(PLATFORM_ROOT))
 from libs.enterprise_common.errors import InfrastructureError  # noqa: E402
 from libs.enterprise_common.settings import (  # noqa: E402
     BY_NAME,
+    FROM_FILE,
     POOL_SETTING_KEYS,
     Settings,
     pool_config,
-    pool_defaults,
 )
+
+#: Подстановки DSN для тестов, которым нужен полностью разрешённый
+#: platform.json. Настоящие секреты живут в ``mcp-platform/.secrets.env`` и в
+#: тесты не попадают; набор тот же, что задаёт conftest на сессию.
+DUMMY_SECRETS: dict[str, str] = {
+    "DB_USER": "test",
+    "DB_PASSWORD": "test",
+    "DB_HOST": "localhost",
+    "DB_PORT": "5432",
+    "DB_NAME": "test",
+}
+
+def _settings(
+    env: dict | None = None,
+    *,
+    file_path: Path | None = None,
+    with_dsn_defaults: bool = True,
+) -> Settings:
+    """Настройки для теста: явное окружение, пустые секреты, файл по умолчанию.
+
+    Три изоляции разом, потому что поодиночке они не работают:
+
+    * ``secrets={}`` — иначе локальный ``mcp-platform/.secrets.env`` подставит
+      свои значения и результат станет зависимым от машины;
+    * ``env`` дополнен заглушками подстановок DSN — иначе разбор файла
+      падает на ``db.dsn`` в тесте, который проверяет вообще другое. Тестам
+      про сами подстановки заглушки не нужны, и они выключаются флагом;
+    * ``file_path`` по умолчанию настоящий — иначе тест проверяет огрызок
+      конфигурации, а не ту, с которой сервер поднимается.
+    """
+    base = DUMMY_SECRETS if with_dsn_defaults else {}
+    return Settings(
+        env={**base, **(env or {})},
+        secrets={},
+        file_path=file_path,
+    )
+
 
 SERVER_PATH = PLATFORM_ROOT / "servers" / "enterprise" / "server.py"
 
@@ -66,63 +103,100 @@ def _pool_cfg() -> dict:
     return dict(data_db._pool_cfg)
 
 
-def _write_file(tmp_path: Path, pool: dict) -> Path:
+#: Полный набор ключей пула с нейтральными значениями. Основа для тестовых
+#: файлов: раздел обязан быть полным, иначе реестр откажется его читать.
+POOL_BASE: dict[str, object] = {
+    "min_conn": 1,
+    "max_conn": 4,
+    "pool_timeout": 5.0,
+    "queue_maxsize": 10000,
+    "reconnect_backoff_sec": 1.0,
+    "reconnect_backoff_max_sec": 60.0,
+    "connect_max_retries": 5,
+    "idle_timeout_sec": 60.0,
+    "job_max_retries": 3,
+    "print_activity": False,
+}
+
+
+def _config_file(tmp_path: Path, section: str, values: dict) -> Path:
+    """Копия настоящего ``platform.json`` с подменённой секцией.
+
+    Не огрызок: файл обязан быть полным, иначе реестр честно откажется его
+    читать. Тесты, которые строили ``{"pool": {...}}``, проверяли не сборку
+    настроек, а одну функцию — и молчали о том, что остальные настройки в
+    такой сборке не приходят вовсе.
+    """
+    raw = json.loads((PLATFORM_ROOT / "platform.json").read_text(encoding="utf-8"))
+    raw[section] = {**raw.get(section, {}), **values}
     target = tmp_path / "platform.json"
-    target.write_text(json.dumps({"pool": pool}), encoding="utf-8")
+    target.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
     return target
 
 
+def _pool_file(tmp_path: Path, **overrides: object) -> Path:
+    """``platform.json`` с подменёнными ключами секции ``pool``."""
+    return _config_file(tmp_path, "pool", overrides)
+
+
 class TestPoolIsConfiguredFromSettings:
-    def test_pool_defaults_come_from_the_registry(self) -> None:
-        """Дефолты пула объявлены в реестре, а не вторым списком в коде.
+    def test_no_pool_values_are_declared_in_code(self) -> None:
+        """В коде нет ни одного значения пула — только контракт ключей.
 
-        Два списка дефолтов разъезжаются при первом же изменении: пул пошёл бы
-        по одному, а ``platform.json`` обещал бы оператору другое.
-        """
-        from libs.enterprise_data import db as data_db
-
-        assert data_db._DEFAULT_POOL == pool_defaults()
-        assert set(data_db._DEFAULT_POOL) == set(POOL_SETTING_KEYS)
-
-    def test_pool_defaults_are_not_declared_in_code(self) -> None:
-        """Словарь дефолтов в коде запрещён — проверяется форма, а не числа.
-
-        Сравнение значений для этого не годится: ручной список, повторяющий
-        реестр, даёт тот же результат и разъезжается при первом же правом
-        изменении в любую сторону. Такой страж зеленел бы ровно на том
-        состоянии, которое запрещает.
+        ``platform.json`` — единственное место, где живут значения. Список
+        дефолтов рядом с кодом был третьим местом: он тихо перебивал файл, и
+        вопрос «что применяется» получал два ответа. Это не теория: пока
+        размеры пула жили в ``_DEFAULT_POOL``, задать их было нечем, а файл
+        с настройками выглядел рабочим и не влиял ни на что.
         """
         source = (PLATFORM_ROOT / "libs" / "enterprise_data" / "db.py").read_text(
             encoding="utf-8"
         )
         tree = ast.parse(source, filename="db.py")
         offenders = [
-            ast.unparse(node)
+            node.target.id
             for node in ast.walk(tree)
             if isinstance(node, ast.AnnAssign)
             and isinstance(node.target, ast.Name)
             and node.target.id == "_DEFAULT_POOL"
-            and not (
-                isinstance(node.value, ast.Call)
-                and getattr(node.value.func, "id", "") == "pool_defaults"
-            )
         ]
         assert not offenders, (
-            "_DEFAULT_POOL обязан выводиться из реестра (pool_defaults()), а "
-            f"не объявляться в коде: {offenders}"
+            f"в db.py снова появился словарь значений пула: {offenders}"
+        )
+
+    def test_pool_settings_have_no_value_in_the_registry(self) -> None:
+        """Объявление настройки пула не содержит значения.
+
+        Проверяется форма, а не числа: сравнение с файлом проходило бы и на
+        состоянии, которое запрещает, — ручной список, повторяющий файл.
+        """
+        carried = sorted(
+            name
+            for name in POOL_SETTING_KEYS.values()
+            if BY_NAME[name].default is not FROM_FILE
+        )
+        assert not carried, (
+            "у настроек пула в коде остались значения: "
+            f"{carried}. Значение обязано жить в platform.json."
         )
 
     def test_every_pool_key_is_a_declared_setting(self) -> None:
         """Ключ пула, не объявленный настройкой, — ручка вне реестра.
 
         Настоящий отказ, который этот тест ловит: добавили ``idle_timeout_sec``
-        в ``_DEFAULT_POOL``, а настройки нет — и изменить значение нечем, при
-        том что оператор уверен, что реестр полон.
+        в контракт пула, а настройки нет — и файл не может его задать, при
+        том что оператор уверен, что настроек полно.
         """
         missing = sorted(
             name for name in POOL_SETTING_KEYS.values() if name not in BY_NAME
         )
         assert not missing, f"ключи пула ссылаются на необъявленные настройки: {missing}"
+
+    def test_pool_contract_matches_the_settings(self) -> None:
+        """Контракт пула и настройки — один и тот же набор ключей."""
+        from libs.enterprise_data import db as data_db
+
+        assert set(data_db._POOL_SPEC) == set(POOL_SETTING_KEYS)
 
     def test_file_value_reaches_the_pool(self, tmp_path: Path) -> None:
         """Значение из файла доезжает до пула, а не остаётся в файле.
@@ -134,15 +208,30 @@ class TestPoolIsConfiguredFromSettings:
         """
         from servers.enterprise import server as enterprise_server
 
-        file_path = _write_file(tmp_path, {"min_conn": 2, "max_conn": 7})
-        enterprise_server._apply_pool_settings(Settings(env={}, file_path=file_path))
+        file_path = _pool_file(tmp_path, min_conn=2, max_conn=7)
+        enterprise_server._apply_pool_settings(_settings(file_path=file_path))
 
         cfg = _pool_cfg()
         assert cfg["min_conn"] == 2, cfg
         assert cfg["max_conn"] == 7, cfg
-        # Значения, которых в файле нет, остались дефолтами — файл не должен
-        # обнулять то, чего не касается.
-        assert cfg["queue_maxsize"] == pool_defaults()["queue_maxsize"], cfg
+        # Файл обязан быть полным: «остальное как было» означало бы, что у
+        # пула есть запасные значения где-то ещё. Поэтому здесь ровно столько
+        # ключей, сколько объявлено контрактом.
+        assert set(cfg) == set(POOL_SETTING_KEYS), cfg
+        assert cfg["queue_maxsize"] == POOL_BASE["queue_maxsize"], cfg
+
+    def test_incomplete_pool_section_is_refused(self, tmp_path: Path) -> None:
+        """Файл без части ключей — ошибка конфигурации, а не добор из кода.
+
+        Проверка на заведомо плохих данных: именно такой файл и породил
+        исходный дефект, когда пул молча работал на дефолтах из кода.
+        """
+        raw = json.loads((PLATFORM_ROOT / "platform.json").read_text(encoding="utf-8"))
+        raw["pool"].pop("queue_maxsize")
+        file_path = tmp_path / "platform.json"
+        file_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        with pytest.raises(InfrastructureError, match="queue_maxsize"):
+            _settings(file_path=file_path)
 
     def test_environment_wins_over_file(self, tmp_path: Path) -> None:
         """Окружение старше файла — намеренно, а не по недосмотру.
@@ -154,8 +243,8 @@ class TestPoolIsConfiguredFromSettings:
         """
         from servers.enterprise import server as enterprise_server
 
-        file_path = _write_file(tmp_path, {"max_conn": 7})
-        settings = Settings(env={"ENTERPRISE_POOL_MAX_CONN": "3"}, file_path=file_path)
+        file_path = _pool_file(tmp_path, max_conn=7)
+        settings = _settings(env={"ENTERPRISE_POOL_MAX_CONN": "3"}, file_path=file_path)
         assert settings.get("ENTERPRISE_POOL_MAX_CONN") == 3
         assert settings.source("ENTERPRISE_POOL_MAX_CONN") == "env:ENTERPRISE_POOL_MAX_CONN"
 
@@ -168,8 +257,8 @@ class TestPoolIsConfiguredFromSettings:
         Иначе нельзя объяснить, почему пул не такой, как ожидал оператор:
         «дефолт» и «файл» выглядят одинаково.
         """
-        file_path = _write_file(tmp_path, {"max_conn": 7})
-        settings = Settings(env={}, file_path=file_path)
+        file_path = _pool_file(tmp_path, max_conn=7)
+        settings = _settings(file_path=file_path)
         assert "ENTERPRISE_POOL_MAX_CONN" in settings.file_backed()
 
     def test_bad_value_stops_the_server(self, tmp_path: Path) -> None:
@@ -178,9 +267,9 @@ class TestPoolIsConfiguredFromSettings:
         Молчаливый откат выглядит как «настройка не применилась»: оператор
         ищет опечатку не там, а пул с неверными размерами работает.
         """
-        file_path = _write_file(tmp_path, {"max_conn": "много"})
+        file_path = _pool_file(tmp_path, max_conn="много")
         with pytest.raises(InfrastructureError, match="ENTERPRISE_POOL_MAX_CONN"):
-            Settings(env={}, file_path=file_path)
+            _settings(file_path=file_path)
 
     def test_pool_config_shape_matches_set_pool_config(self) -> None:
         """Словарь, который уходит в пул, не должен содержать мусорных ключей.
@@ -191,8 +280,8 @@ class TestPoolIsConfiguredFromSettings:
         """
         from libs.enterprise_data import db as data_db
 
-        config = pool_config(Settings(env={}))
-        assert set(config) == set(data_db._DEFAULT_POOL)
+        config = pool_config(_settings())
+        assert set(config) == set(data_db._POOL_SPEC)
         assert set(config) == set(POOL_SETTING_KEYS)
 
 
@@ -205,11 +294,11 @@ class TestListSettingsKeepBothSeparators:
         таблица, и capability ``audit`` отвечала бы «таблица не найдена» на
         вполне корректной конфигурации.
         """
-        settings = Settings(env={"ENTERPRISE_AUDIT_TABLES": "oarb.audits\noarb.violations"})
+        settings = _settings(env={"ENTERPRISE_AUDIT_TABLES": "oarb.audits\noarb.violations"})
         assert settings.get("ENTERPRISE_AUDIT_TABLES") == ["oarb.audits", "oarb.violations"]
 
     def test_mixed_separators_are_split(self) -> None:
-        settings = Settings(
+        settings = _settings(
             env={"ENTERPRISE_AUDIT_TABLES": "oarb.audits, oarb.violations\noarb.reports"}
         )
         assert settings.get("ENTERPRISE_AUDIT_TABLES") == [
@@ -233,15 +322,13 @@ class TestDsnIsConfigurableInTheFile:
     TEMPLATE = "postgresql://${DB_USER}:${DB_PASSWORD}@db-host:5432/oarb"
 
     def _file(self, tmp_path: Path, dsn: str) -> Path:
-        target = tmp_path / "platform.json"
-        target.write_text(json.dumps({"db": {"dsn": dsn}}), encoding="utf-8")
-        return target
+        return _config_file(tmp_path, "db", {"dsn": dsn})
 
     def test_file_dsn_reaches_the_pool(self, tmp_path: Path) -> None:
         from servers.enterprise import server as enterprise_server
 
         file_path = self._file(tmp_path, self.TEMPLATE)
-        settings = Settings(
+        settings = _settings(
             env={"DB_USER": "svc", "DB_PASSWORD": "p@ss:word"},
             file_path=file_path,
         )
@@ -264,7 +351,7 @@ class TestDsnIsConfigurableInTheFile:
         подключался бы к чужой базе.
         """
         file_path = self._file(tmp_path, self.TEMPLATE)
-        settings = Settings(
+        settings = _settings(
             env={
                 "DATABASE_URL": "postgresql://agent@agent-host/agent-db",
                 "DB_USER": "svc",
@@ -282,7 +369,7 @@ class TestDsnIsConfigurableInTheFile:
         ломать развёртывание, где DSN приходит из окружения.
         """
         file_path = self._file(tmp_path, "")
-        settings = Settings(
+        settings = _settings(
             env={"DATABASE_URL": "postgresql://from-env@host/db"}, file_path=file_path
         )
         assert settings.get("DATABASE_URL") == "postgresql://from-env@host/db"
@@ -290,7 +377,7 @@ class TestDsnIsConfigurableInTheFile:
 
     def test_pg_dsn_is_still_the_fallback(self, tmp_path: Path) -> None:
         file_path = self._file(tmp_path, "")
-        settings = Settings(env={"PG_DSN": "postgresql://from-pg@host/db"}, file_path=file_path)
+        settings = _settings(env={"PG_DSN": "postgresql://from-pg@host/db"}, file_path=file_path)
         assert settings.get("DATABASE_URL") == "postgresql://from-pg@host/db"
         assert settings.source("DATABASE_URL") == "env:PG_DSN"
 
@@ -302,17 +389,27 @@ class TestDsnIsConfigurableInTheFile:
         """
         file_path = self._file(tmp_path, self.TEMPLATE)
         with pytest.raises(InfrastructureError, match="DB_PASSWORD"):
-            Settings(env={"DB_USER": "svc"}, file_path=file_path)
+            _settings(
+                env={"DB_USER": "svc"},
+                file_path=file_path,
+                with_dsn_defaults=False,
+            )
 
-    def test_substitution_does_not_touch_environment_values(self) -> None:
+    def test_substitution_does_not_touch_environment_values(self, tmp_path: Path) -> None:
         """Значение из окружения не разворачивается.
 
         Разворачивать его повторно опасно: пароль, содержащий ``${`` (обычная
         последовательность), был бы съеден, и платформа подключилась бы с
-        изменённым паролем.
+        изменённым паролем. Проверяется на пути, где DSN действительно приходит
+        из окружения, — пустой ключ в файле.
         """
-        settings = Settings(env={"DATABASE_URL": "postgresql://u:pa${ss}@h/db"})
+        file_path = self._file(tmp_path, "")
+        settings = _settings(
+            env={"DATABASE_URL": "postgresql://u:pa${ss}@h/db"},
+            file_path=file_path,
+        )
         assert settings.get("DATABASE_URL") == "postgresql://u:pa${ss}@h/db"
+        assert settings.source("DATABASE_URL") == "env:DATABASE_URL"
 
     def test_dsn_is_never_logged(self, tmp_path: Path) -> None:
         """Баннер показывает источник, но не значение.
@@ -321,7 +418,7 @@ class TestDsnIsConfigurableInTheFile:
         список «пришло из файла» тоже не разворачивается в текст.
         """
         file_path = self._file(tmp_path, self.TEMPLATE)
-        settings = Settings(
+        settings = _settings(
             env={"DB_USER": "svc", "DB_PASSWORD": "s3cret"}, file_path=file_path
         )
         assert settings.as_dict()["DATABASE_URL"] == "***"
@@ -395,9 +492,11 @@ class TestLlmGetsResolvedValues:
         Второй разбор — это «настройка прописана в двух местах»: файл меняет
         значение для одного потребителя, а для другого остаётся окружение.
         """
-        file_path = tmp_path / "platform.json"
-        file_path.write_text(json.dumps({"data": {"max_rows": 25}}), encoding="utf-8")
-        settings = Settings(env={"ENTERPRISE_LLM_MODEL": "qwen3:8b"}, file_path=file_path)
+        file_path = _config_file(tmp_path, "data", {"max_rows": 25})
+        settings = _settings(
+            env={"ENTERPRISE_LLM_MODEL": "qwen3:8b", **DUMMY_SECRETS},
+            file_path=file_path,
+        )
 
         resolved = settings.as_env()
         assert resolved["ENTERPRISE_MAX_ROWS"] == "25", resolved
@@ -405,7 +504,7 @@ class TestLlmGetsResolvedValues:
 
     def test_as_env_encodes_lists_for_string_lookups(self) -> None:
         """Список уезжает строкой, потому что потребитель ищет по строке."""
-        settings = Settings(env={"ENTERPRISE_AUDIT_TABLES": "a,b\nc"})
+        settings = _settings(env={"ENTERPRISE_AUDIT_TABLES": "a,b\nc"})
         assert settings.as_env()["ENTERPRISE_AUDIT_TABLES"] == "a,b,c"
 
     def test_as_env_skips_unset_values(self) -> None:
@@ -415,5 +514,5 @@ class TestLlmGetsResolvedValues:
         ``ENTERPRISE_EMBED_DIMENSION`` приводится как ``None`` реестром, и
         потребитель обязан увидеть именно отсутствие.
         """
-        resolved = Settings(env={}).as_env()
+        resolved = _settings().as_env()
         assert "ENTERPRISE_EMBED_DIMENSION" not in resolved

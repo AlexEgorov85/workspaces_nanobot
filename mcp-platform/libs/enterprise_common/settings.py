@@ -90,13 +90,35 @@ DSN — через ``resolve_dsn()``. Перечислить настройки,
 списком: секция, которой нет ни в capability, ни в ``SHARED_SECTIONS``, —
 это опечатка, которая выглядела бы как «настройка прочитана».
 
-Дефолты пула
-------------
+Значений в коде нет
+-------------------
 
-``_DEFAULT_POOL`` в ``libs/enterprise_data/db.py`` **выводится** из этого
-реестра (``pool_defaults()``), а не объявлен рядом с ним. Два списка
-дефолтов разъезжаются при первом же изменении: пул работал бы на одних
-значениях, а реестр обещал бы оператору другие.
+У платформенной настройки в реестре нет значения — есть ``FROM_FILE``, то
+есть «это значение обязано прийти из ``platform.json``». Нет ключа в файле —
+сервер не поднимается и говорит какой.
+
+Это не украшение, а запрет второго места. Именно дефолт в коде породил
+исходный дефект: размеры пула жили в ``_DEFAULT_POOL``, в реестре для них не
+было записей, и изменить их было нечем — при том что файл с настройками
+выглядел рабочим. Второй список дефолтов рядом с первым разъезжается при
+первом же изменении, и вопрос «что применяется на самом деле» получает два
+ответа.
+
+Поэтому в ``libs/enterprise_data/db.py`` нет ``_DEFAULT_POOL``: там
+``_POOL_SPEC`` — только ключи и типы, а набор значений приходит из файла
+целиком. Неполный набор — ошибка конфигурации, а не «остальное как было».
+
+Секреты — отдельный слой
+------------------------
+
+``mcp-platform/.secrets.env`` лежит под тем же ``.gitignore``, что и
+агентский: пароль от рабочей базы и ключ провайдера не должны жить в файле,
+который под git. Подстановки ``${DB_USER}`` в ``platform.json`` читаются
+сначала оттуда, потом из окружения процесса.
+
+Секреты здесь — **секреты самого MCP**, а не копия агентских. Сервер может
+жить на другой машине; общий секрет связал бы развёртывания в одно, и
+правка одного повредила бы другому.
 """
 
 from __future__ import annotations
@@ -121,8 +143,35 @@ PLATFORM_ROOT = Path(__file__).resolve().parent.parent.parent
 #: ``config`` агента, который платформе импортировать запрещено.
 PLATFORM_CONFIG_PATH = PLATFORM_ROOT / "platform.json"
 
+#: Секреты платформы. Отдельный файл рядом с конфигурацией, под тем же
+#: ``.gitignore``, что и агентский: ``platform.json`` живёт под git, пароль от
+#: рабочей базы и ключ провайдера — нет. Сервер может жить на другой машине,
+#: поэтому у него должны быть **свои** секреты: у агента свои, и делить их
+#: через окружение процесса — значит связать их судьбой.
+SECRETS_PATH = PLATFORM_ROOT / ".secrets.env"
+
 OWNER_PLATFORM = "platform"
 OWNER_AGENT = "agent"
+
+
+class FromFile:
+    """Значение обязано прийти из ``platform.json``.
+
+    Смысл — не «умолчание», а **запрет второго места**. У платформенной
+    настройки значение живёт в файле, и в коде его нет: иначе появляется
+    дефолт, который тихо перебивает файл, и вопрос «что применяется на
+    самом деле» получает два ответа. Конкретный случай, который это
+    стоил: размеры пула жили в ``_DEFAULT_POOL``, и задать их было нечем.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - только для сообщений
+        return "<из platform.json>"
+
+
+#: Подставьте вместо значения настройки, которая обязана быть в файле.
+FROM_FILE = FromFile()
 
 #: Подстановка ``${ПЕРЕМЕННАЯ}`` в значении из ``platform.json``. Имена —
 #: как в окружении, без префиксов: файл читает человек, и ``${DB_USER}``
@@ -257,8 +306,13 @@ SETTINGS: tuple[Setting, ...] = (
     # базы в коммитируемом файле недопустим, а хост, порт и имя базы — это и
     # есть то, ради чего DSN вообще хочется видеть в конфигурации: по умолчанию
     # процесс молча унаследует чужой DSN из окружения агента, и непонятно, к
-    # какой базе он подключится. Поэтому: ``postgresql://${DB_USER}:${DB_PASSWORD}@хост:5432/база``.
-    _s("DATABASE_URL", "secret", None, OWNER_PLATFORM,
+    # какой базе он подключится. Поэтому:
+    # ``postgresql://${DB_USER}:${DB_PASSWORD}@хост:5432/база``.
+    #
+    # Пустое значение — не «умолчание», а осознанный ответ «это развёртывание
+    # держит DSN в окружении»; тогда сервер падает на старте с внятным
+    # текстом, а не подключается не туда.
+    _s("DATABASE_URL", "secret", "", OWNER_PLATFORM,
        "servers/enterprise/server.py:_configure_dsn",
        "DSN рабочей базы; пусто — воркер падает внятно, а не подключается не туда",
        aliases=("PG_DSN",), required=True, file_key="db.dsn", file_first=True),
@@ -270,9 +324,13 @@ SETTINGS: tuple[Setting, ...] = (
     _s("ENTERPRISE_AUDIT_TABLES", "list", (), OWNER_AGENT,
        "servers/enterprise/server.py:_audit_config",
        "белый список таблиц для аудита; реестр скриптов сюда не входит"),
-    _s("ENTERPRISE_AUDIT_ROW_CEILING", "int", 0, OWNER_AGENT,
+    _s("ENTERPRISE_AUDIT_ROW_CEILING", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_audit_config",
-       "потолок строк для generate_sql; 0 — не применять"),
+       "потолок строк для generate_sql; 0 — не применять. Потолок защищает "
+       "базу от сгенерированного запроса, поэтому решение платформенное: "
+       "агент его не экспортирует, и до появления ключа в файле действовал "
+       "дефолт из кода, то есть значение никто не задавал",
+       file_key="audit.row_ceiling"),
     # -- capability vectors --------------------------------------------------
     _s("ENTERPRISE_SNAPSHOT_PATH", "str", "", OWNER_AGENT,
        "servers/enterprise/server.py:_snapshot",
@@ -286,9 +344,12 @@ SETTINGS: tuple[Setting, ...] = (
     _s("ENTERPRISE_VECTOR_STORAGE_TABLE", "str", "", OWNER_AGENT,
        "servers/enterprise/server.py:_vectors_config",
        "инфраструктурная таблица хранения векторов"),
-    _s("ENTERPRISE_VECTOR_ENABLE", "bool", True, OWNER_PLATFORM,
+    _s("ENTERPRISE_VECTOR_ENABLE", "bool", True, OWNER_AGENT,
        "servers/enterprise/server.py:_vectors_config",
-       "выключатель capability vectors", file_key="vectors.enable"),
+       "выключатель capability vectors; берётся из project.json агента "
+       "(gateway.vector.index.enable), потому что тем же флагом агент "
+       "решает, строить ли индексы. Ключ в platform.json был бы вторым "
+       "ответом на тот же вопрос и всегда проигрывал бы окружению"),
     _s("ENTERPRISE_EMBED_MODEL", "str", "", OWNER_AGENT,
        "servers/enterprise/server.py:_vectors_config",
        "модель эмбеддера; пусто — capability llm остаётся ненастроенной"),
@@ -327,70 +388,72 @@ SETTINGS: tuple[Setting, ...] = (
        "libs/llm/config.py:_ENV_NAMES",
        "путь эндпойнта эмбеддингов, если адрес задан полным URL"),
     # -- журнал и бюджеты запросов: собственные ручки платформы ---------------
-    _s("ENTERPRISE_LOG_TABLE", "str", "public.agent_gateway_logs", OWNER_PLATFORM,
+    _s("ENTERPRISE_LOG_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_log_table",
        "таблица долговечного журнала gateway", file_key="data.log_table"),
-    _s("ENTERPRISE_LOG_BUFFER_MAXLEN", "int", 2048, OWNER_PLATFORM,
+    _s("ENTERPRISE_LOG_BUFFER_MAXLEN", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "потолок буфера журнала; переполнение теряет события, а не растёт",
        file_key="data.log_buffer_maxlen"),
-    _s("ENTERPRISE_LOG_FLUSH_INTERVAL", "float", 5.0, OWNER_PLATFORM,
+    _s("ENTERPRISE_LOG_FLUSH_INTERVAL", "float", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "период сброса буфера журнала в базу, сек",
        file_key="data.log_flush_interval"),
-    _s("ENTERPRISE_STATEMENT_TIMEOUT_MS", "int", 30000, OWNER_PLATFORM,
+    _s("ENTERPRISE_STATEMENT_TIMEOUT_MS", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "SET statement_timeout для запросов capability data, мс",
        file_key="data.statement_timeout_ms"),
-    _s("ENTERPRISE_MAX_ROWS", "int", 1000, OWNER_PLATFORM,
+    _s("ENTERPRISE_MAX_ROWS", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "потолок строк в ответах операций", file_key="data.max_rows"),
-    _s("ENTERPRISE_EXPECTED_TABLES", "list", (), OWNER_PLATFORM,
+    _s("ENTERPRISE_EXPECTED_TABLES", "list", (), OWNER_AGENT,
        "servers/enterprise/server.py:_build_container",
-       "обязательные runtime-таблицы для schema_check",
-       file_key="data.expected_tables"),
+       "обязательные runtime-таблицы для schema_check. Это факт о схеме "
+       "агента, а не ручка платформы: список собирается агентом из его "
+       "конфигурации и отдаётся аргументом процесса. Ключ в platform.json "
+       "был вторым ответом на тот же вопрос и всегда проигрывал окружению"),
     # -- пул соединений -----------------------------------------------------
     # Размеры и таймауты пула — ручки платформы: агент о них не знает и
     # знать не должен. До этого они жили только в ``_DEFAULT_POOL``, то
     # есть задать их было нечем, а реестр молчал. Тот же отказ, что был
     # с ``ENTERPRISE_SCRIPTS_REGISTRY_TABLE``: значение не имеет пути из
     # конфигурации.
-    _s("ENTERPRISE_POOL_MIN_CONN", "int", 1, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_MIN_CONN", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "воркеров пула, поднимаемых на старте", file_key="pool.min_conn"),
-    _s("ENTERPRISE_POOL_MAX_CONN", "int", 4, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_MAX_CONN", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "потолок пула: больше соединений не открывается никогда",
        file_key="pool.max_conn"),
-    _s("ENTERPRISE_POOL_TIMEOUT", "float", 5.0, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_TIMEOUT", "float", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "ожидание места в очереди и порог warning'а при ожидании аренды, сек",
        file_key="pool.pool_timeout"),
-    _s("ENTERPRISE_POOL_QUEUE_MAXSIZE", "int", 10000, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_QUEUE_MAXSIZE", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "предел длины очереди; переполнение — PoolTimeoutError, а не вечный блок",
        file_key="pool.queue_maxsize"),
-    _s("ENTERPRISE_POOL_RECONNECT_BACKOFF_SEC", "float", 1.0, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_RECONNECT_BACKOFF_SEC", "float", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "первая пауза перед повтором подключения, сек",
        file_key="pool.reconnect_backoff_sec"),
-    _s("ENTERPRISE_POOL_RECONNECT_BACKOFF_MAX_SEC", "float", 60.0, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_RECONNECT_BACKOFF_MAX_SEC", "float", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "потолок паузы между попытками подключения, сек",
        file_key="pool.reconnect_backoff_max_sec"),
-    _s("ENTERPRISE_POOL_CONNECT_MAX_RETRIES", "int", 5, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_CONNECT_MAX_RETRIES", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "попыток подключения воркера до отказа",
        file_key="pool.connect_max_retries"),
-    _s("ENTERPRISE_POOL_IDLE_TIMEOUT_SEC", "float", 60.0, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_IDLE_TIMEOUT_SEC", "float", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "простой воркера, после которого он снимается до min_conn, сек",
        file_key="pool.idle_timeout_sec"),
-    _s("ENTERPRISE_POOL_JOB_MAX_RETRIES", "int", 3, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_JOB_MAX_RETRIES", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "повторов задания при повторяемой ошибке",
        file_key="pool.job_max_retries"),
-    _s("ENTERPRISE_POOL_PRINT_ACTIVITY", "bool", False, OWNER_PLATFORM,
+    _s("ENTERPRISE_POOL_PRINT_ACTIVITY", "bool", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "вывод активности db-worker'ов в stderr процесса",
        file_key="pool.print_activity"),
@@ -523,15 +586,15 @@ SHARED_SETTINGS: tuple[str, ...] = (
     "ENTERPRISE_POOL_PRINT_ACTIVITY",
 )
 
-#: Секции ``platform.json`` для настроек вне capability. Список объявлен
-#: явно, потому что страж сверяет с ним файл: секция, не принадлежащая ни
-#: capability, ни этому списку, выглядела бы как «настройка прочитана».
-SHARED_SECTIONS: tuple[str, ...] = ("pool", "db")
+#: Секции ``platform.json``, которых нет в ``servers/enterprise/capabilities``:
+#: они принадлежат общему коду платформы. Объявлены явно, потому что страж
+#: сверяет с ними файл — секция, не принадлежащая ни capability, ни этому
+#: списку, выглядела бы как «настройка прочитана».
+SHARED_SECTIONS: tuple[str, ...] = ("db", "pool")
 
-#: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуются
-#: и :func:`pool_defaults`, и :func:`pool_config`: иначе второй список
-#: ключей разошёлся бы с первым, и неизвестный ключ уехал бы в
-#: ``set_pool_config`` молча.
+#: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуется
+#: :func:`pool_config`: иначе второй список ключей разошёлся бы с первым, и
+#: неизвестный ключ уехал бы в ``set_pool_config`` молча.
 POOL_SETTING_KEYS: dict[str, str] = {
     "min_conn": "ENTERPRISE_POOL_MIN_CONN",
     "max_conn": "ENTERPRISE_POOL_MAX_CONN",
@@ -544,11 +607,6 @@ POOL_SETTING_KEYS: dict[str, str] = {
     "job_max_retries": "ENTERPRISE_POOL_JOB_MAX_RETRIES",
     "print_activity": "ENTERPRISE_POOL_PRINT_ACTIVITY",
 }
-
-
-def pool_defaults() -> dict[str, Any]:
-    """Дефолты пула в форме ``set_pool_config`` — из реестра, а не из кода."""
-    return {key: BY_NAME[name].default for key, name in POOL_SETTING_KEYS.items()}
 
 
 def pool_config(settings: "Settings") -> dict[str, Any]:
@@ -582,6 +640,50 @@ def capabilities_of(setting_name: str) -> tuple[str, ...]:
 BY_FILE_KEY: dict[str, Setting] = {
     s.key: s for s in SETTINGS if s.owner == OWNER_PLATFORM
 }
+
+
+def read_secrets(path: Path | None = None) -> dict[str, str]:
+    """Прочитать ``mcp-platform/.secrets.env`` в вид ``имя -> значение``.
+
+    Формат как у агентского ``.secrets.env``: ``ИМЯ=значение``, ``#`` —
+    комментарий, ``export`` в начале допустим. Файла может не быть — тогда
+    секреты приходят из окружения процесса.
+
+    Файл читает только реестр. Секреты из двух источников — это тот же второй
+    путь, от которого мы ушли: значение начинает расходиться между
+    окружением и файлом, и непонятно, какое из них применилось.
+
+    Raises:
+        InfrastructureError: строка не ``ИМЯ=значение`` или значение
+            повторяется. Молча пропущенная строка означала бы пустой секрет
+            при виде заполненного файла.
+    """
+    target = path or SECRETS_PATH
+    if not target.exists():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InfrastructureError(f"{target.name}: не читается ({exc})") from exc
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        name, separator, value = line.partition("=")
+        if not separator or not name.strip():
+            raise InfrastructureError(
+                f"{target.name}, строка {number}: ожидалось ИМЯ=значение"
+            )
+        name = name.strip()
+        if name in values:
+            raise InfrastructureError(
+                f"{target.name}, строка {number}: {name} уже задан выше"
+            )
+        values[name] = value.strip()
+    return values
 
 
 def _flatten(raw: dict[str, Any]) -> dict[str, Any]:
@@ -653,8 +755,26 @@ class Settings:
         self,
         env: Mapping[str, str] | None = None,
         file_path: Path | None = None,
+        secrets_path: Path | None = None,
+        secrets: Mapping[str, str] | None = None,
     ) -> None:
+        """
+        Args:
+            env: источник окружения; по умолчанию ``os.environ``. Реестр —
+                единственный, кто его читает, поэтому остальным достаётся уже
+                разрешённое значение.
+            file_path: ``platform.json``; по умолчанию рядом с пакетом.
+            secrets_path: ``.secrets.env`` платформы; по умолчанию рядом.
+            secrets: готовый словарь секретов вместо чтения файла. Нужен там,
+                где окружение передано явно: тест с ``env={}`` рассчитывает на
+                полную изоляцию, а локальный ``.secrets.env`` разработчика
+                подставился бы в него и сделал бы результат зависимым от
+                машины.
+        """
         self._env: Mapping[str, str] = os.environ if env is None else env
+        self._secrets: dict[str, str] = (
+            dict(secrets) if secrets is not None else read_secrets(secrets_path)
+        )
         self._file: dict[str, str] = read_platform_file(file_path)
         self._values: dict[str, Any] = {}
         self._sources: dict[str, str] = {}
@@ -688,37 +808,72 @@ class Settings:
             self._values[setting.name] = setting.coerce(from_file[0])
             self._sources[setting.name] = from_file[1]
             return
+        if setting.owner == OWNER_PLATFORM and setting.default is FROM_FILE:
+            present = setting.name in self._file
+            raise InfrastructureError(
+                f"platform.json: {'пустое значение' if present else 'нет ключа'} "
+                f"{setting.key!r}. Значение платформенной настройки живёт "
+                "только в файле — в коде её нет намеренно, чтобы у вопроса "
+                "«что применяется» не было двух ответов. "
+                + (
+                    "Заполните ключ в platform.json."
+                    if present
+                    else "Добавьте ключ в platform.json."
+                )
+            )
         self._values[setting.name] = setting.default
         self._sources[setting.name] = "default"
 
+    def _secret(self, name: str) -> tuple[str, str] | None:
+        """Секрет по имени: сначала ``.secrets.env``, потом окружение процесса.
+
+        Секрет — это то же имя переменной, но живёт он в другом файле: рядом с
+        настройками платформы, а не в репозитории агента. Окружение остаётся
+        запасным источником, потому что развёртывание может задать секрет там
+        (docker-compose, systemd), и требовать правки файла на каждый запуск
+        было бы лишней церемонией.
+        """
+        for store, label in ((self._secrets, "secrets:.secrets.env"), (self._env, None)):
+            value = store.get(name)
+            if value is not None and value.strip():
+                return value, label or f"env:{name}"
+        return None
+
     def _expand(self, text: str, setting: Setting) -> str:
-        """Развернуть ``${ПЕРЕМЕННАЯ}`` из окружения в значении из файла.
+        """Развернуть ``${ПЕРЕМЕННАЯ}`` в значении из файла.
 
-        Нужно для DSN: хост, порт и имя базы — это то, что хочется видеть в
-        конфигурации, а логин и пароль в коммитируемый файл класть нельзя.
-        Поэтому в файле лежит ``postgresql://${DB_USER}:${DB_PASSWORD}@хост``.
+        Нужно для DSN и ключей: хост, порт и имя базы — это то, что хочется
+        видеть в конфигурации, а логин с паролем в коммитируемый файл
+        класть нельзя. Поэтому в файле лежит
+        ``postgresql://${DB_USER}:${DB_PASSWORD}@хост``.
 
-        Отсутствующая переменная — ошибка, а не пустая строка: подставленная
-        пустота дала бы ``postgresql://:@хост`` и отказ соединения там, где
-        виновата опечатка в имени переменной.
+        Подстановка ищется в ``.secrets.env`` платформы и в окружении
+        процесса. Отсутствующая переменная — ошибка, а не пустая строка:
+        подставленная пустота дала бы ``postgresql://:@хост`` и отказ
+        соединения там, где виновата опечатка в имени переменной.
+
+        Разворачивается **только** значение из файла. Окружение — уже готовое
+        значение: разворачивать его повторно опасно, потому что пароль,
+        содержащий ``${`` (вполне обычная последовательность), был бы съеден.
         """
         missing: list[str] = []
 
         def _substitute(match: re.Match[str]) -> str:
             name = match.group(1)
-            value = self._env.get(name)
-            if value is None or not value.strip():
+            found = self._secret(name)
+            if found is None:
                 missing.append(name)
                 return ""
-            return value
+            return found[0]
 
         expanded = _PLACEHOLDER.sub(_substitute, text)
         if missing:
             raise InfrastructureError(
-                f"platform.json, {setting.key}: не задана переменная окружения "
+                f"platform.json, {setting.key}: не задана "
                 + ", ".join(sorted(set(missing)))
-                + ". Подстановка ${имя} в файле читается из окружения "
-                "процесса; задайте переменную или уберите подстановку."
+                + ". Подстановка ${имя} читается из mcp-platform/.secrets.env "
+                "или из окружения процесса; задайте значение или уберите "
+                "подстановку."
             )
         return expanded
 

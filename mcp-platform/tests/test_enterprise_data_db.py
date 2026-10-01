@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,6 +41,40 @@ from libs.enterprise_data.db import (
     transaction,
 )
 import libs.enterprise_data.db as _db_module
+from libs.enterprise_common.settings import Settings, pool_config
+
+#: Корень платформы — нужен тестам, читающим настоящий platform.json.
+PLATFORM_ROOT = Path(__file__).resolve().parent.parent
+
+#: Заглушки для подстановок DSN. Тесты пула не подключаются к базе, но реестр
+#: требует, чтобы ``platform.json`` разрешился целиком: незаполненная
+#: подстановка останавливает сборку настроек, и это правильно. Настоящие
+#: секреты живут в ``mcp-platform/.secrets.env`` и в тесты не попадают.
+_DUMMY_SECRETS = {
+    "DB_USER": "test",
+    "DB_PASSWORD": "test",
+    "DB_HOST": "localhost",
+    "DB_PORT": "5432",
+    "DB_NAME": "test",
+}
+
+
+def _pool(overrides: dict | None = None, **kwargs) -> dict:
+    """Полный набор ключей пула с подменой: как на процессе, только из файла.
+
+    Значений в коде нет — ``set_pool_config`` требует всего набора, иначе
+    «остальное как было» означало бы наличие собственных дефолтов у пула.
+    Принимает и словарь, и пары-ключи: в тестах встречаются оба вида.
+    """
+    merged = dict(_POOL_FROM_FILE)
+    merged.update(overrides or {})
+    merged.update(kwargs)
+    return merged
+
+
+#: Пул для тестов настраивается так же, как на процессе: реестр читает
+#: platform.json. Значений в коде нет, и взять их больше неоткуда.
+_POOL_FROM_FILE = pool_config(Settings(env=dict(_DUMMY_SECRETS), secrets={}))
 
 
 @pytest.fixture(autouse=True)
@@ -70,8 +105,11 @@ def mock_psycopg2():
         # Reset DSN и пул перед каждым тестом. ``configure("")`` ничего
         # не сбрасывает (пустой DSN игнорируется), поэтому глобал чистим
         # напрямую — иначе тест, оставивший DSN, ломал бы соседний.
+        # Пул тоже чист: значений в коде нет, и ненастроенный пул честно
+        # отказывается подключаться, а не берёт «какие есть».
         _db._dsn = ""
-        _db._pool_cfg = dict(_db._DEFAULT_POOL)
+        _db._pool_cfg = {}
+        set_pool_config(_POOL_FROM_FILE)
 
         yield {
             "mock_connect": mock_connect,
@@ -166,20 +204,36 @@ class TestResolveDsn:
         assert mock_psycopg2["resolve_dsn"]() == ""
 
     def test_registry_resolved_dsn_is_what_the_pool_uses(
-        self, mock_psycopg2, monkeypatch
+        self, mock_psycopg2, monkeypatch, tmp_path
     ):
-        """Конец цепочки: то, что решил реестр, — то, с чем работает пул."""
+        """Конец цепочки: то, что решил реестр, — то, с чем работает пул.
+
+        Путь через файл: ``db.dsn`` приоритетнее окружения, и это нормальный
+        случай развёртывания, где платформа владеет своим подключением.
+        """
+        import json
+
         from libs.enterprise_common.settings import Settings
         from libs.enterprise_data import db as data_db
         from servers.enterprise import server as enterprise_server
 
         self._clean_env(monkeypatch)
-        settings = Settings(
-            env={"DATABASE_URL": "postgresql://resolved@x/y"},
+        raw = json.loads(
+            (PLATFORM_ROOT / "platform.json").read_text(encoding="utf-8")
         )
+        raw["db"]["dsn"] = "postgresql://${DB_USER}:${DB_PASSWORD}@host/db"
+        config = tmp_path / "platform.json"
+        config.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+        settings = Settings(
+            env={**_DUMMY_SECRETS, "DB_USER": "svc", "DB_PASSWORD": "resolved"},
+            secrets={},
+            file_path=config,
+        )
+        assert settings.source("DATABASE_URL") == "file:platform.json"
         enterprise_server._configure_dsn(settings)
-        assert data_db.resolve_dsn() == "postgresql://resolved@x/y"
-        assert mock_psycopg2["resolve_dsn"]() == "postgresql://resolved@x/y"
+        assert data_db.resolve_dsn() == "postgresql://svc:resolved@host/db"
+        assert mock_psycopg2["resolve_dsn"]() == "postgresql://svc:resolved@host/db"
 
     def test_empty_env_value_changes_nothing(self, mock_psycopg2, monkeypatch):
         self._clean_env(monkeypatch)
@@ -349,7 +403,7 @@ class TestTransaction:
 class TestPool:
     def test_single_connection_reused(self, mock_psycopg2):
         """Пул N=1: все операции на одном соединении."""
-        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 1})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 1}))
         mock_psycopg2["configure"]("dsn")
         mock_psycopg2["mock_cur"].fetchone.return_value = (1,)
         for _ in range(5):
@@ -365,7 +419,7 @@ class TestPool:
 
     def test_parallel_transactions_use_separate_connections(self, mock_psycopg2):
         """Две параллельные транзакции получают разные соединения (max_conn=2)."""
-        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 2})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
 
         results: list = []
@@ -389,7 +443,7 @@ class TestPool:
 
     def test_auto_scale_when_worker_leased(self, mock_psycopg2):
         """Пока транзакция держит воркер, обычная операция уходит на новый."""
-        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 3})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 3}))
         mock_psycopg2["configure"]("dsn")
 
         tx_done = threading.Event()
@@ -441,7 +495,7 @@ class TestPool:
     def test_queue_full_raises_timeout(self, mock_psycopg2):
         """Переполненная очередь → PoolTimeoutError, а не вечный блок."""
         mock_psycopg2["set_pool_config"](
-            {"min_conn": 1, "max_conn": 1, "queue_maxsize": 1, "pool_timeout": 0.2}
+            _pool({"min_conn": 1, "max_conn": 1, "queue_maxsize": 1, "pool_timeout": 0.2})
         )
         mock_psycopg2["configure"]("dsn")
         lock = threading.Lock()
@@ -472,7 +526,7 @@ class TestPool:
     def test_third_transaction_waits_for_free_worker(self, mock_psycopg2):
         """Сценарий из прода: при занятых 2 воркерах 3-я транзакция
         ждёт в очереди и дожидается (вместо PoolTimeoutError)."""
-        mock_psycopg2["set_pool_config"]({"min_conn": 2, "max_conn": 2})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 2, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
 
         # Событие срабатывает ТОЛЬКО когда оба воркера заняты.
@@ -568,7 +622,7 @@ class TestPool:
         мимо ожидания. На старой версии сценарий воспроизводился в 15
         раундах из 40.
         """
-        mock_psycopg2["set_pool_config"]({"min_conn": 2, "max_conn": 2})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 2, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
 
         errors: list[str] = []
@@ -597,7 +651,7 @@ class TestPool:
 
     def test_lease_released_when_begin_fails(self, mock_psycopg2):
         """Утечка лиза: если begin-задача падает, воркер возвращается в пул."""
-        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 1})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 1}))
         mock_psycopg2["configure"]("dsn")
         mock_psycopg2["mock_cur"].fetchone.return_value = (1,)
         _db = mock_psycopg2["_db"]
@@ -619,7 +673,7 @@ class TestPool:
     def test_lease_waiter_released_on_shutdown(self, mock_psycopg2):
         """Ждущая транзакция при shutdown не висит вечно — получает
         RuntimeError, а не блокируется навсегда."""
-        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 1})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 1}))
         mock_psycopg2["configure"]("dsn")
         _db = mock_psycopg2["_db"]
         mgr = _db._get_manager()
@@ -661,13 +715,16 @@ class TestPool:
         все задачи, а неподключённые не жгут время на retry-connect.
         """
         mock_psycopg2["set_pool_config"](
-            {
+            _pool(
+                {
                 "min_conn": 1,
                 "max_conn": 5,
                 "connect_max_retries": 1,
                 "reconnect_backoff_sec": 0.01,
-            }
+                }
+            )
         )
+        
         mock_psycopg2["configure"]("dsn")
         import psycopg2
 
@@ -709,13 +766,16 @@ class TestPool:
     def test_connect_failure_returns_error_fast(self, mock_psycopg2):
         """Полная недоступность БД: задача падает с ошибкой, а не висит."""
         mock_psycopg2["set_pool_config"](
-            {
+            _pool(
+                {
                 "min_conn": 1,
                 "max_conn": 1,
                 "connect_max_retries": 2,
                 "reconnect_backoff_sec": 0.01,
-            }
+                }
+            )
         )
+        
         mock_psycopg2["configure"]("dsn")
         import psycopg2
 
@@ -741,7 +801,7 @@ class TestPool:
         warm-up может быть 1 живое соединение — суть probe в проверке
         доступности БД, а не в прогреве всех min_conn.
         """
-        mock_psycopg2["set_pool_config"]({"min_conn": 2, "max_conn": 2})
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 2, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
         _db = mock_psycopg2["_db"]
         _db.probe_connections(timeout=5)
@@ -756,13 +816,16 @@ class TestPool:
         import psycopg2
 
         mock_psycopg2["set_pool_config"](
-            {
+            _pool(
+                {
                 "min_conn": 2,
                 "max_conn": 2,
                 "connect_max_retries": 1,
                 "reconnect_backoff_sec": 0.01,
-            }
+                }
+            )
         )
+        
         mock_psycopg2["configure"]("dsn")
         mock_psycopg2["mock_connect"].side_effect = psycopg2.OperationalError("down")
         _db = mock_psycopg2["_db"]
@@ -775,7 +838,7 @@ class TestPool:
     def test_db_activity_flag_enables_printing(self, mock_psycopg2, capsys):
         """print_activity включает вывод [db-worker] активности при выполнении job."""
         mock_psycopg2["set_pool_config"](
-            {"min_conn": 1, "max_conn": 1, "print_activity": True}
+            _pool({"min_conn": 1, "max_conn": 1, "print_activity": True})
         )
         mock_psycopg2["configure"]("dsn")
         mgr = mock_psycopg2["_db"]._get_manager()
@@ -790,7 +853,7 @@ class TestPool:
     def test_transaction_jobs_have_tag_not_unknown(self, mock_psycopg2, capsys):
         """begin/end транзакции тегируются, без [unknown] (никто не остаётся без метки)."""
         mock_psycopg2["set_pool_config"](
-            {"min_conn": 1, "max_conn": 1, "print_activity": True}
+            _pool({"min_conn": 1, "max_conn": 1, "print_activity": True})
         )
         mock_psycopg2["configure"]("dsn")
         with mock_psycopg2["transaction"]() as conn:
@@ -803,7 +866,7 @@ class TestPool:
 
     def test_set_pool_config_accepts_print_activity(self, mock_psycopg2):
         """print_activity — известный ключ конфига пула (не глотается)."""
-        mock_psycopg2["_db"].set_pool_config({"print_activity": True})
+        mock_psycopg2["_db"].set_pool_config(_pool({"print_activity": True}))
         _db = mock_psycopg2["_db"]
         assert _db._pool_cfg.get("print_activity") is True
 
