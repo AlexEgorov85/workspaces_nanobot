@@ -19,11 +19,7 @@ from libs.enterprise_common.errors import (  # noqa: E402
     InfrastructureError,
     InvalidRequestError,
 )
-from servers.enterprise.capabilities.data.service.main import (  # noqa: E402
-    AUDIENCE_MODEL,
-    AUDIENCE_RUNTIME,
-    DataService,
-)
+from servers.enterprise.capabilities.data.service.main import DataService  # noqa: E402
 from servers.enterprise.capabilities.data.service.writer import (  # noqa: E402
     DROPPED,
     EventBuffer,
@@ -294,20 +290,6 @@ class TestHistorySearchFilters:
             for s in svc._db.conn.statements
             if s[0].lstrip().startswith("SELECT")
         ]
-
-
-# --- права очереди ---------------------------------------------------------
-
-
-class TestQueuePermissions:
-    def test_update_status_rejects_model_audience(self, service: DataService) -> None:
-        with pytest.raises(InvalidRequestError, match="только рантайму"):
-            service.update_task_status("tasks", "t1", "done", audience=AUDIENCE_MODEL)
-
-    def test_unknown_status_rejected(self) -> None:
-        svc = _service(db=_fake_db(), buffer_flush_interval=0.0)
-        with pytest.raises(InvalidRequestError, match="недопустимый статус"):
-            svc.update_task_status("tasks", "t1", "archived", audience=AUDIENCE_RUNTIME)
 
 
 # --- schema_check ----------------------------------------------------------

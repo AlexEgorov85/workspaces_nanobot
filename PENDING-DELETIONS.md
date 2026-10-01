@@ -14,6 +14,7 @@
 | Файл | Почему | Команда |
 |---|---|---|
 | `mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py` | Заглушка на месте удалённой операции `claim_task` (коммит `944535e`). Код операции вырезан, файл оставлен пустым намеренно: загрузчик по соглашению пропускает модули с именем, начинающимся с `_`, поэтому операция не публикуется. Сам файл не нужен | `git rm mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py` |
+| `mcp-platform/servers/enterprise/capabilities/data/tools/_update_task_status.py` | То же для `update_task_status`: обе операции над очередью задач удалены решением владельца, в capability `data` очередь не осталась | `git rm mcp-platform/servers/enterprise/capabilities/data/tools/_update_task_status.py` |
 | `mcp-platform/_live_audit_tables.py` | Черновой прогон по таблицам аудита, в git не отслеживается, к миграции не относится | удалить вручную (файл не отслеживается, `git rm` не подходит) |
 
 ## Черновики в корне

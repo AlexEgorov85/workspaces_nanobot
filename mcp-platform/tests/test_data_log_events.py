@@ -16,6 +16,10 @@
   журнал пишет поток оборота, а не модельный запрос.
 * **схема входа описывает элемент.** ``build_input_schema`` из подписи дал бы
   ``{"type": "array"}`` — контракт был бы не описан.
+* **идентичность приходит из контекста вызова, а не из тела батча.** В схеме
+  элемента ``session_id``/``user_id``/``request_id`` нет, и сервис игнорирует их
+  в пришедшем событии: иначе батч умел бы подписать журнал чужой сессией, и
+  след выглядел бы правдоподобным и неверным.
 """
 
 from __future__ import annotations
@@ -42,7 +46,37 @@ def _service(*, maxlen: int = 2048) -> DataService:
     buffer = EventBuffer(written.extend, maxlen=maxlen, flush_interval=10_000.0)
     service = DataService(db=None, log_table=LOGS, question_runs_table=RUNS)
     service._buffer = buffer  # подмена транспорта: тут проверяем только приём
+    service._written = written  # что именно доехало до буфера
     return service
+
+
+def _rows(service: DataService) -> list[dict[str, Any]]:
+    """Сбросить буфер и вернуть события в том виде, в каком их увидит база."""
+    service._buffer.flush()
+    return list(service._written)
+
+
+def _ctx(
+    session_id: str = "s-ctx",
+    user_id: str = "u-ctx",
+    request_id: str = "r-ctx",
+):
+    """Контекст вызова ровно такой формы, какую собирает конвейер."""
+    from datetime import datetime, timezone
+
+    from libs.enterprise_common.execution.context import (
+        McpCallContext,
+        ToolExecutionContext,
+    )
+
+    return ToolExecutionContext(
+        call=McpCallContext(
+            request_id=request_id, session_id=session_id, user_id=user_id
+        ),
+        tool_name="log_events",
+        capability="data",
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
 
 
 def _tool(service: DataService):
@@ -66,7 +100,10 @@ class TestLogEventsHappyPath:
     def test_events_reach_the_buffer_normalised(self) -> None:
         service = _service()
         service.log_events(
-            [{"event_type": "x", "level": "warning", "session_id": "s1", "user_id": "u1"}]
+            [{"event_type": "x", "level": "warning"}],
+            "s1",
+            "u1",
+            "r1",
         )
         assert service._buffer.flush() == 1
 
@@ -139,6 +176,67 @@ class TestLogEventsFailsFastOnGarbage:
         assert "events[1]" in str(exc.value)
 
 
+class TestIdentityComesFromCallContext:
+    """Идентичность вызова — единственный источник личности событий.
+
+    Проверяется не «значение записалось», а откуда оно взялось: батч, присланный
+    под видом журналирования оборота, не должен уметь подписать журнал чужой
+    сессией. Если бы сервис читал ``session_id`` из тела события, оба теста ниже
+    прошли бы наоборот — и дефект был бы невидим.
+    """
+
+    def test_identity_of_call_reaches_every_event(self) -> None:
+        service = _service()
+        service.log_events(
+            [{"event_type": "a"}, {"event_type": "b"}],
+            "s-call",
+            "u-call",
+            "r-call",
+        )
+        rows = _rows(service)
+        assert len(rows) == 2
+        for row in rows:
+            assert row["session_id"] == "s-call"
+            assert row["user_id"] == "u-call"
+            assert row["request_id"] == "r-call"
+
+    def test_identity_inside_event_is_ignored(self) -> None:
+        service = _service()
+        service.log_events(
+            [
+                {
+                    "event_type": "a",
+                    "session_id": "s-чужой",
+                    "user_id": "u-чужой",
+                    "request_id": "r-чужой",
+                }
+            ],
+            "s-call",
+            "u-call",
+            "r-call",
+        )
+        row = _rows(service)[0]
+        assert row["session_id"] == "s-call"
+        assert row["user_id"] == "u-call"
+        assert row["request_id"] == "r-call"
+
+    def test_operation_passes_context_identity_to_the_service(self) -> None:
+        """Шов целиком: обработчик получает ``ctx`` и не путает его с ``events``."""
+        service = _service()
+        _tool(service).handler(ctx=_ctx(), events=[{"event_type": "a"}])
+        row = _rows(service)[0]
+        assert row["session_id"] == "s-ctx"
+        assert row["request_id"] == "r-ctx"
+
+    def test_item_schema_does_not_offer_identity_fields(self) -> None:
+        """В схеме элемента личности нет: объявлять её в теле батча нельзя."""
+        properties = _tool(_service()).input_schema["properties"]["events"]["items"][
+            "properties"
+        ]
+        for field in ("session_id", "user_id", "request_id"):
+            assert field not in properties, f"{field} в схеме элемента события"
+
+
 class TestLogEventsOperation:
     def test_operation_file_is_discovered(self) -> None:
         from pathlib import Path
@@ -161,9 +259,15 @@ class TestLogEventsOperation:
     def test_operation_returns_counters_as_json(self) -> None:
         service = _service()
         result = json.loads(
-            _tool(service).handler(events=[{"event_type": "a"}, {"event_type": "b"}])
+            _tool(service).handler(
+                ctx=_ctx(), events=[{"event_type": "a"}, {"event_type": "b"}]
+            )
         )
         assert result == {"status": "ok", "accepted": 2, "dropped": 0}
+
+    def test_operation_declares_execution_context(self) -> None:
+        """Без ``ctx`` в подписи конвейер не подаст контекст, и личность пропадёт."""
+        assert _tool(_service()).wants_context()
 
     def test_definition_loads_through_registry(self) -> None:
         from libs.enterprise_common.registry import ToolRegistry

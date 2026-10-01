@@ -403,6 +403,9 @@ class DataService:
     def log_events(
         self,
         events: list[dict[str, Any]],
+        session_id: str | None = None,
+        user_id: str | None = None,
+        request_id: str | None = None,
         *,
         audience: str = AUDIENCE_MODEL,
     ) -> dict[str, int]:
@@ -420,6 +423,13 @@ class DataService:
         негодное событие означает ошибку на стороне агента, и молча выбросить
         его — значит похоронить дефект. Частичный приём здесь был бы хуже:
         вызывающий увидел бы «принято 99 из 100» и не узнал бы, что потерял.
+
+        Идентичность приходит **на уровень вызова**, а не внутри события:
+        ``session_id``, ``user_id`` и ``request_id`` — параметры метода, а в
+        теле батча они игнорируются. Иначе батч, присланный под видом
+        журналирования оборота, записал бы события в чужую сессию, и след в
+        журнале был бы правдоподобным и неверным. Событие получает ровно ту
+        личность, с которой пришёл вызов.
 
         Уровень проходит через ``normalize_level`` на границе запроса — до
         буфера. Иначе недопустимый уровень уехал бы в сброс и упал бы там на
@@ -450,9 +460,9 @@ class DataService:
                     "level": normalize_level(event.get("level", "info")),
                     "summary": str(event.get("summary") or ""),
                     "payload": event.get("payload") or {},
-                    "session_id": event.get("session_id"),
-                    "user_id": event.get("user_id"),
-                    "request_id": event.get("request_id"),
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "request_id": request_id,
                     "channel": event.get("channel"),
                     "actor": event.get("actor"),
                     "metadata": event.get("metadata") or {},
@@ -599,35 +609,6 @@ class DataService:
             raise InvalidRequestError(
                 f"{operation} доступна только рантайму агента, профиль вызова: {audience}"
             )
-
-    def update_task_status(
-        self,
-        task_table: str,
-        task_id: str,
-        status: str,
-        *,
-        error: str | None = None,
-        retry_after_sec: int | None = None,
-        audience: str = AUDIENCE_RUNTIME,
-    ) -> bool:
-        """Вернуть задачу в нужный статус. ``False`` — такой задачи нет."""
-        self._require_runtime(audience, "update_task_status")
-        allowed = {"pending", "processing", "done", "error", "failed"}
-        if status not in allowed:
-            raise InvalidRequestError(f"недопустимый статус: {status!r}, допустимы {sorted(allowed)}")
-        sql = (
-            f"UPDATE {task_table} SET status = %s, error = %s"
-            + (" , available_at = now() + (%s || ' seconds')::interval" if retry_after_sec else "")
-            + " WHERE id = %s RETURNING id"
-        )
-        params: list[Any] = [status, error]
-        if retry_after_sec:
-            params.append(str(int(retry_after_sec)))
-        params.append(task_id)
-        rows = self.submit(lambda conn: _fetch(conn, sql, params), audience=audience)
-        return bool(rows)
-
-
 
     # ------------------------------------------------------------------
     # Контекст вопроса и очистка журнала (фаза 7)

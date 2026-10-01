@@ -691,7 +691,6 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
             "log_events",
             "purge_logs",
             "schema_check",
-            "update_task_status",
             "upsert_question_run",
         ),
         settings=(
