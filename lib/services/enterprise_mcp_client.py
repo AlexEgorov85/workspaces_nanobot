@@ -84,6 +84,7 @@ class EnterpriseMcpClient:
         tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
         server_name: str = "enterprise-mcp",
         snapshot_path: str | None = None,
+        expected_tables: tuple[str, ...] = (),
     ) -> None:
         self._command = command
         self._args = list(args or [])
@@ -96,6 +97,13 @@ class EnterpriseMcpClient:
         # агента (resolve_cache_path). None = «снимок не задан», и capability
         # vectors остаётся ненастроенной с внятной ошибкой на операции.
         self._snapshot_path = str(snapshot_path) if snapshot_path else None
+        # Обязательные runtime-таблицы для операции ``schema_check``. Список
+        # приходит аргументом, а не вычисляется здесь: единственный источник
+        # — ``SchemaValidationService.expected_table_names``, и второе
+        # вычисление того же списка разошлось бы с ним при первой правке.
+        # Пустой список — не «таблиц нет», а «оператор их не объявил»: так и
+        # отвечает платформа, и это правда.
+        self._expected_tables = tuple(expected_tables or ())
         self._stack: AsyncExitStack | None = None
         self._session: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -275,6 +283,8 @@ class EnterpriseMcpClient:
         env.update(_llm_env_from_settings())
         env.update(_vectors_env_from_settings(self._snapshot_path))
         env.update(_audit_env_from_project())
+        if self._expected_tables:
+            env["ENTERPRISE_EXPECTED_TABLES"] = ",".join(self._expected_tables)
         return env
 
 
@@ -465,7 +475,10 @@ def _llm_env_from_settings() -> dict[str, str]:
 
 
 def client_from_settings(
-    settings: Any, *, snapshot_path: str | None = None
+    settings: Any,
+    *,
+    snapshot_path: str | None = None,
+    expected_tables: tuple[str, ...] = (),
 ) -> EnterpriseMcpClient | None:
     """Собрать клиента из ``project.json → enterprise_mcp``.
 
@@ -476,6 +489,12 @@ def client_from_settings(
     через ``resolve_cache_path()``. Клиент его не вычисляет: единственный
     механизм вычисления пути в агенте один, и второе вычисление того же пути
     разошлось бы с ним при первой же правке.
+
+    ``expected_tables`` — полные имена обязательных runtime-таблиц для
+    операции ``schema_check``, полученные вызывающей стороной из
+    ``SchemaValidationService.expected_table_names``. Без них операция
+    отвечает «не задано ни одной ожидаемой таблицы»: она связана и видна,
+    но сказать что-либо не может.
     """
     section = settings.get("enterprise_mcp") if settings is not None else None
     if not section:
@@ -493,4 +512,5 @@ def client_from_settings(
             section.get("tool_timeout_sec") or DEFAULT_TOOL_TIMEOUT_SEC
         ),
         snapshot_path=snapshot_path,
+        expected_tables=expected_tables,
     )
