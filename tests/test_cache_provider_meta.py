@@ -1,103 +1,14 @@
+"""Подпись векторного индекса и её проверка (``cache_provider_impl``).
+
+Раньше здесь же лежали тесты ``_capture_schema_meta`` — функции без единого
+production-вызова, удалённой как дубликат ``DuckDbCacheStore._save_schema_meta``.
+Живой путь метаданных схемы покрыт в ``tests/test_duckdb_cache_store.py``
+(``class TestSchema``).
+"""
+
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
-import duckdb
-import pytest
-
 from tests.conftest import TEST_TABLE as _TEST_TABLE
-
-from lib.services.cache_provider_impl import (
-    _META_SCHEMA,
-    _META_TABLE,
-    _capture_schema_meta,
-)
-
-
-def _pg_rows():
-    """Строки SELECT в _capture_schema_meta:
-    (table_name, column_name, data_type, character_maximum_length,
-     column_comment, table_comment).
-    """
-    return [
-        ("audits", "id", "integer", None, "Идентификатор", "Аудиторские проверки"),
-        ("audits", "title", "character varying", 500, "Название проверки", "Аудиторские проверки"),
-        ("audits", "actual_date", "date", None, "Дата проверки", "Аудиторские проверки"),
-        ("violations", "id", "bigint", None, None, None),
-    ]
-
-
-def _read_meta(conn):
-    rows = conn.execute(
-        f'SELECT schema_name, table_name, column_name, comment, pg_type '
-        f'FROM "{_META_SCHEMA}"."{_META_TABLE}"'
-    ).fetchall()
-    return sorted(rows, key=lambda r: (r[0], r[1], r[2] or ""))
-
-
-def test_capture_schema_meta_populates_duckdb(tmp_path):
-    conn = duckdb.connect(str(tmp_path / "cache.duckdb"))
-    pg_conn = MagicMock()
-    cur = MagicMock()
-    cur.fetchall.return_value = _pg_rows()
-    pg_conn.cursor.return_value = cur
-
-    _capture_schema_meta(conn, pg_conn, [("oarb", ["audits", "violations"])])
-
-    rows = _read_meta(conn)
-    assert rows == [
-        ("oarb", "audits", None, "Аудиторские проверки", None),
-        ("oarb", "audits", "actual_date", "Дата проверки", "date"),
-        ("oarb", "audits", "id", "Идентификатор", "integer"),
-        ("oarb", "audits", "title", "Название проверки", "varchar(500)"),
-        ("oarb", "violations", "id", None, "bigint"),
-    ]
-    conn.close()
-
-
-def test_capture_schema_meta_multiple_schemas(tmp_path):
-    conn = duckdb.connect(str(tmp_path / "cache.duckdb"))
-    pg_conn = MagicMock()
-    cur = MagicMock()
-    cur.fetchall.side_effect = [
-        [("audits", "id", "integer", None, "Идентификатор", "Аудиторские проверки")],
-        [("predefined_scripts", "name", "text", None, "Имя скрипта", "Реестр скриптов")],
-    ]
-    pg_conn.cursor.return_value = cur
-
-    _capture_schema_meta(
-        conn, pg_conn,
-        [("oarb", ["audits"]), ("public", ["predefined_scripts"])],
-    )
-
-    rows = _read_meta(conn)
-    assert len(rows) == 4
-    assert ("oarb", "audits", None, "Аудиторские проверки", None) in rows
-    assert ("public", "predefined_scripts", "name", "Имя скрипта", "text") in rows
-    conn.close()
-
-
-def test_capture_schema_meta_drops_previous(tmp_path):
-    conn = duckdb.connect(str(tmp_path / "cache.duckdb"))
-    pg_conn = MagicMock()
-    cur = MagicMock()
-    cur.fetchall.return_value = [("audits", "id", "integer", None, "Идентификатор", "Аудиторские проверки")]
-    pg_conn.cursor.return_value = cur
-    _capture_schema_meta(conn, pg_conn, [("oarb", ["audits"])])
-
-    # второй прогон — старая таблица должна быть пересоздана, а не дополнена
-    cur.fetchall.return_value = []
-    _capture_schema_meta(conn, pg_conn, [("oarb", ["audits"])])
-    assert _read_meta(conn) == []
-    conn.close()
-
-
-def test_capture_schema_meta_empty_tables_ok(tmp_path):
-    conn = duckdb.connect(str(tmp_path / "cache.duckdb"))
-    pg_conn = MagicMock()
-    _capture_schema_meta(conn, pg_conn, [("oarb", [])])
-    assert _read_meta(conn) == []
-    conn.close()
 
 
 class TestIndexSignature:

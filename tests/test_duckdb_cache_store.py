@@ -277,6 +277,23 @@ class TestSchema:
         assert t["columns"]["title"]["comment"] == "Название проверки"
         assert t["columns"]["amount"]["comment"] is None
 
+    def test_ensure_schema_replaces_previous_meta(self, store):
+        # повторная запись схемы заменяет метаданные, а не дописывает их:
+        # без DELETE старые комментарии остались бы вторым набором строк
+        store.ensure_schema(TEST_TABLE, _COLS)
+        store.ensure_schema(TEST_TABLE, [
+            {"name": "__table__", "type": "", "not_null": False, "comment": "Проверки (новое)"},
+            {"name": "id", "type": "integer", "not_null": True, "comment": "Идентификатор"},
+            {"name": "title", "type": "character varying(500)", "not_null": False, "comment": None},
+            {"name": "amount", "type": "numeric(10,2)", "not_null": False, "comment": None},
+            {"name": "checked_on", "type": "date", "not_null": False, "comment": None},
+        ])
+        t = store.get_schema()["tables"]["audits"]
+        assert t["comment"] == "Проверки (новое)"
+        # старый комментарий не сохранился рядом с новым
+        assert t["columns"]["title"]["comment"] is None
+        assert t["columns"]["id"]["comment"] == "Идентификатор"
+
     def test_empty_table_created_via_schema(self, store):
         store.ensure_schema(TEST_TABLE, _COLS)
         r = store.query_sql(f"SELECT COUNT(*) AS n FROM {TEST_TABLE}")

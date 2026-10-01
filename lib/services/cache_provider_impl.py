@@ -8,7 +8,6 @@
   * чтение конфигурации эмбеддингов и векторных индексов
   * вычисление эмбеддинга запроса
   * подпись конфигурации индекса и её проверка
-  * сохранение комментариев таблиц/колонок в DuckDB-кэш
   * каталог runtime-векторных индексов
 
 Реализаций интерфейса в рантайме ровно одна; вторая (``PostgresDuckDbProvider``)
@@ -244,17 +243,15 @@ def _is_missing_relation(error: str) -> bool:
     )
 
 
+# ``sys.path`` правится здесь ради посторонних модулей: около тридцати файлов
+# в ``lib/``, ``tools/`` и ``workspace/`` делают ``from utils.db import ...``,
+# а ``utils`` — это каталог внутри ``workspace/``. Модуль сам ``utils`` больше
+# не импортирует, но побочный эффект загрузки на них завязан, поэтому хак
+# остаётся: удалять его — отдельное решение на границе импортов.
 _WORKSPACE = _ROOT / "workspace"
 for _p in (str(_ROOT), str(_WORKSPACE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
-from lib.services.cache_provider import CacheProvider, SearchResult  # noqa: E402
-
-# Внутренняя таблица метаданных схемы (комментарии таблиц/колонок, PG-типы).
-# Та же структура, что в cache_store, но в файле SQL-кэша навыка.
-_META_SCHEMA = "__nanobot_meta"
-_META_TABLE = "__schema_meta"
 
 
 # =============================================================================
@@ -386,91 +383,3 @@ def read_vector_index_config() -> dict[str, Any]:
             "enabled": c.get("enabled", True),
         }
     return result
-
-
-
-def _capture_schema_meta(
-    conn: Any,
-    pg_conn: Any,
-    schema_pairs: list[tuple],
-) -> None:
-    """
-    Сохранить комментарии таблиц/колонок и исходные PG-типы в DuckDB-кэш.
-
-    ``schema_pairs`` — список ``(schema, [table, ...])``. Для каждой таблицы
-    из PostgreSQL снимаются ``COMMENT ON TABLE``/``COMMENT ON COLUMN`` и
-    ``data_type`` из ``information_schema``, результат кладётся в
-    ``__nanobot_meta.__schema_meta`` (строка с ``column_name = NULL`` — это
-    комментарий таблицы).
-
-    ``build_schema()`` (lib/utils/duckdb_query.py) подставляет эти комментарии
-    в промпт при формировании описания схемы, а ``pg_type`` (точнее инференса
-    DuckDB из CSV) использует вместо типов, выведенных ``read_csv_auto``.
-    """
-    conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{_META_SCHEMA}"')
-    conn.execute(f'DROP TABLE IF EXISTS "{_META_SCHEMA}"."{_META_TABLE}"')
-    conn.execute(
-        f'CREATE TABLE "{_META_SCHEMA}"."{_META_TABLE}" ('
-        "schema_name TEXT, table_name TEXT, column_name TEXT, "
-        "comment TEXT, pg_type TEXT)"
-    )
-
-    insert_rows: list[tuple] = []
-    for schema, table_list in schema_pairs:
-        if not table_list:
-            continue
-        cur = pg_conn.cursor()
-        try:
-            cur.execute(
-                """
-                SELECT
-                    c.table_name,
-                    c.column_name,
-                    c.data_type,
-                    c.character_maximum_length,
-                    pgd.description AS column_comment,
-                    obj_description(pc.oid) AS table_comment
-                FROM information_schema.columns c
-                JOIN pg_class pc
-                    ON pc.relname = c.table_name
-                   AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = %s)
-                LEFT JOIN pg_catalog.pg_description pgd
-                    ON pgd.objsubid = c.ordinal_position
-                   AND pgd.objoid = pc.oid
-                WHERE c.table_schema = %s
-                  AND c.table_name = ANY(%s)
-                ORDER BY c.table_name, c.ordinal_position
-                """,
-                [schema, schema, table_list],
-            )
-            rows = cur.fetchall()
-        except Exception as e:
-            print(f"[LOAD] Не удалось снять схему-мета для {schema}: {e}",
-                  file=sys.stderr)
-            continue
-        finally:
-            cur.close()
-
-        per_table: dict[str, tuple] = {}
-        for row in rows:
-            tbl, col, data_type, max_len, col_comment, table_comment = row
-            if tbl not in per_table:
-                per_table[tbl] = (table_comment, [])
-            col_type = data_type
-            if max_len and col_type in ("character varying", "character"):
-                col_type = f"varchar({max_len})"
-            per_table[tbl][1].append((col, col_type, col_comment))
-
-        for tbl, (table_comment, cols) in per_table.items():
-            if table_comment:
-                insert_rows.append((schema, tbl, None, table_comment, None))
-            for col, col_type, col_comment in cols:
-                insert_rows.append((schema, tbl, col, col_comment, col_type))
-
-    if insert_rows:
-        conn.executemany(
-            f'INSERT INTO "{_META_SCHEMA}"."{_META_TABLE}" '
-            "(schema_name, table_name, column_name, comment, pg_type) "
-            "VALUES (?, ?, ?, ?, ?)",
-            insert_rows,
-        )
