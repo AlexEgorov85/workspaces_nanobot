@@ -179,16 +179,18 @@ quality.*   check
 
 #### Scenario: Корреляция не влияет на данные
 
-- **WHEN** операция вызвана с `request_id` и без него
+- **WHEN** один и тот же вызов повторён с разными `request_id`
 - **THEN** результат SHALL быть одинаковым
 - **AND** различаться SHALL только метаданные журнала
+- **AND** вызов без `request_id` SHALL NOT происходить: поле обязательно в конверте
+  (§ `runtime/call-contract`)
 
 ---
 
 ### Requirement: Файл сессии — представление события, а не вторая система логирования
 
 Каталог сессии SHALL содержать `events/` рядом с `artifacts/`, `results/`,
-`requests/`, `responses/`, `errors/`. Отдельный `logs/mcp.log` рядом с журналом
+`calls/`, `responses/`, `errors/`. Отдельный `logs/mcp.log` рядом с журналом
 Nanobot SHALL NOT заводиться.
 
 Файл события SHALL быть вторым представлением того же события, а не отдельной
