@@ -34,6 +34,7 @@ import asyncio
 import os
 import re
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,41 @@ DEFAULT_TOOL_TIMEOUT_SEC = 30.0
 
 #: ``[code] message`` — формат доменной ошибки операции (см. build_server).
 _ERROR_PREFIX = re.compile(r"^\[([a-z_]+)\]\s*(.*)$", re.DOTALL)
+
+#: Префикс проектных ключей в ``params._meta``. Обязан совпадать с
+#: ``META_PREFIX`` из ``mcp-platform/libs/enterprise_common/execution/context.py``:
+#``MCP`` резервирует ``io.modelcontextprotocol/*`` под свой служебный обмен,
+# поэтому голые имена без префикса — шаг к коллизии с чужим расширением.
+META_PREFIX = "workspaces/"
+
+
+@dataclass(frozen=True, slots=True)
+class CallIdentity:
+    """Идентичность одного вызова: сессия, пользователь, оборот.
+
+    ``session_id`` и ``user_id`` обязательны: вызов без изоляции выполнять
+    нельзя, и сервер отклоняет его сам (``identity_missing``). Подставляет
+    их вызывающая сторона агента — из ``RequestContext`` и журнала, а не
+    модель: значение, присланное моделью, границей изоляции не является.
+
+    ``request_id`` — PK оборота в ``agent_question_runs``. Значение может
+    быть ``None``: вызов вне оборота — законное состояние, отсутствие не
+    ошибка. Когда ``request_id`` задан, он обязан совпадать с PK оборота;
+    отдельный ``question_id`` не заводится.
+    """
+
+    session_id: str
+    user_id: str
+    request_id: str | None = None
+
+    def as_meta(self) -> dict[str, str]:
+        meta = {
+            f"{META_PREFIX}session_id": self.session_id,
+            f"{META_PREFIX}user_id": self.user_id,
+        }
+        if self.request_id:
+            meta[f"{META_PREFIX}request_id"] = self.request_id
+        return meta
 
 
 class EnterpriseMcpUnavailable(RuntimeError):
@@ -161,8 +197,20 @@ class EnterpriseMcpClient:
         tools = sorted(getattr(result, "tools", None) or [], key=lambda t: t.name)
         return [str(t.name) for t in tools]
 
-    async def call(self, operation: str, arguments: dict[str, Any] | None = None) -> str:
+    async def call(
+        self,
+        operation: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        identity: "CallIdentity | None" = None,
+    ) -> str:
         """Вызвать операцию и вернуть её текстовый ответ.
+
+        ``identity`` едет в ``params._meta`` вызова, а не в аргументы: сервер
+        читает идентичность только оттуда (см. ``execution/context.py``),
+        поэтому в аргументах её быть не должно — иначе у вызова появляется
+        второй источник идентичности, а событие в журнале и каталог сессии
+        могут описывать разные вызовы.
 
         Raises:
             EnterpriseOperationError: операция ответила доменной ошибкой.
@@ -171,7 +219,11 @@ class EnterpriseMcpClient:
         session = await self._ensure_session()
         try:
             result = await asyncio.wait_for(
-                session.call_tool(operation, arguments or {}),
+                session.call_tool(
+                    operation,
+                    arguments or {},
+                    meta=identity.as_meta() if identity is not None else None,
+                ),
                 timeout=self._timeout,
             )
         except asyncio.TimeoutError as exc:

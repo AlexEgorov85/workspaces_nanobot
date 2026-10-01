@@ -46,7 +46,9 @@ class _FakeSession:
         self._behaviour = behaviour
         self.calls: list[tuple[str, dict]] = []
 
-    async def call_tool(self, operation: str, arguments: dict) -> Any:
+    async def call_tool(
+        self, operation: str, arguments: dict, *, meta: dict | None = None
+    ) -> Any:
         self.calls.append((operation, arguments))
         outcome = self._behaviour
         if callable(outcome):
