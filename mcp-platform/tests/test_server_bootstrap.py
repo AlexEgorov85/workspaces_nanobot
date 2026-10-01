@@ -61,6 +61,10 @@ class TestBootstrap:
             # владельцем того же ресурса.
             "upsert_question_run",
             "purge_logs",
+            # Фаза 7, п. 7.2: батчевый сброс буфера журнала. Без этой операции
+            # агент отправлял бы по одному MCP-вызову на каждое событие
+            # оборота — круговой оборот на каждый чих вместо одного на пачку.
+            "log_events",
         }
 
     def test_every_capability_has_a_registered_service(self) -> None:

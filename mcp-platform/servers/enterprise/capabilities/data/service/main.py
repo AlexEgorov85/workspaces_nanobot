@@ -333,6 +333,63 @@ class DataService:
         )
         return "dropped" if result is not None else "accepted"
 
+    def log_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        audience: str = AUDIENCE_MODEL,
+    ) -> dict[str, int]:
+        """Записать батч событий журнала одним вызовом.
+
+        Зачем батч, если есть ``log_event``: агент копит события у себя
+        (пункт 7.2 плана миграции) и за один MCP-вызов отправляет их пачкой.
+        Без батча каждый чих оборота платил бы круговым оборотом по stdio.
+
+        Здесь важна другая ступень, чем у буфера: ``log_events`` кладёт в буфер
+        N событий одним заходом, а когда писать в базу — по-прежнему решает
+        ``EventBuffer``.
+
+        Валидация — fail-fast на первом негодном событии, как у ``log_event``:
+        негодное событие означает ошибку на стороне агента, и молча выбросить
+        его — значит похоронить дефект. Частичный приём здесь был бы хуже:
+        вызывающий увидел бы «принято 99 из 100» и не узнал бы, что потерял.
+
+        Уровень проходит через ``normalize_level`` на границе запроса — до
+        буфера. Иначе недопустимый уровень уехал бы в сброс и упал бы там на
+        ``valid_level CHECK``, унося с собой весь батч, хотя вызывающий уже
+        получил бы «accepted».
+
+        Returns:
+            ``{"accepted": n, "dropped": m}``. Переполнение буфера видно
+            вызывающему, а не растворяется внутри.
+        """
+        del audience  # логирование не пишет в журнал входа в журнал
+        if not isinstance(events, list) or not events:
+            raise InvalidRequestError("events должен быть непустым списком")
+        prepared: list[dict[str, Any]] = []
+        for position, event in enumerate(events):
+            if not isinstance(event, dict):
+                raise InvalidRequestError(f"events[{position}] должен быть объектом")
+            event_type = event.get("event_type")
+            if not isinstance(event_type, str) or not event_type.strip():
+                raise InvalidRequestError(
+                    f"events[{position}].event_type не должен быть пустым"
+                )
+            prepared.append(
+                {
+                    "id": event.get("id"),
+                    "event_type": event_type,
+                    "name": str(event.get("name") or ""),
+                    "level": normalize_level(event.get("level", "info")),
+                    "summary": str(event.get("summary") or ""),
+                    "payload": event.get("payload") or {},
+                    "session_id": event.get("session_id"),
+                    "user_id": event.get("user_id"),
+                }
+            )
+        dropped = self._buffer.accept_many(prepared)
+        return {"accepted": len(prepared) - dropped, "dropped": dropped}
+
     # -- чтение журнала -----------------------------------------------------
 
     def history_search(
