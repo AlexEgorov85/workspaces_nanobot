@@ -18,7 +18,6 @@ import threading
 import time
 from typing import Any
 
-import pytest
 
 from libs.enterprise_data.loader import SnapshotLoadService
 

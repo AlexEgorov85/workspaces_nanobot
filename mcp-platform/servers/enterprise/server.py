@@ -82,8 +82,40 @@ def _check_dependencies() -> None:
         )
 
 
+def _audit_config_from_env() -> dict[str, Any]:
+    """Собрать конфигурацию capability ``audit`` из окружения.
+
+    Имя таблицы реестра и список разрешённых таблиц — источник истины агента:
+    реестр скриптов помечен в ``TableRegistry`` меткой ``scripts_registry``, и
+    платформа его не читает. Оба значения приходят аргументом операции, а не
+    знанием о проекте.
+
+    Белый список таблиц разбирается с ``\\n`` и ``,`` — одна переменная
+    окружения, а не JSON: список короткий, разбирается глазами в логе старта, и
+    ошибка разбора JSON здесь стоила бы отдельного кода ошибки ради значения,
+    которое оператор и так напишет руками.
+    """
+    raw_tables = os.environ.get("ENTERPRISE_AUDIT_TABLES", "")
+    tables = [
+        item.strip()
+        for line in raw_tables.splitlines()
+        for item in line.split(",")
+        if item.strip()
+    ]
+    return {
+        "scripts_registry": {
+            "table": os.environ.get("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "").strip(),
+        },
+        "audit": {
+            "tables": tables,
+            "row_ceiling": os.environ.get("ENTERPRISE_AUDIT_ROW_CEILING", "").strip(),
+        },
+    }
+
+
 def _build_container() -> ToolContainer:
     """Собрать контейнер: сервисы capability и конфигурация из окружения."""
+    from servers.enterprise.capabilities.audit.service.main import AuditService
     from servers.enterprise.capabilities.data.service.main import DataService
     from servers.enterprise.capabilities.llm.service.main import LlmService
     from servers.enterprise.capabilities.vectors.service.main import VectorsService
@@ -110,17 +142,24 @@ def _build_container() -> ToolContainer:
     # работы ``data``. Незаданный провайдер отдаёт ``infrastructure_error``
     # на своей операции и виден как ``configured: false`` в health-отчёте.
     llm = LlmService()
-    container = ToolContainer(
-        services={"data": data, "llm": llm},
-        config={"statement_timeout_ms": statement_timeout_ms, "max_rows": max_rows},
-    )
+    config = {
+        "statement_timeout_ms": statement_timeout_ms,
+        "max_rows": max_rows,
+        **_audit_config_from_env(),
+    }
+    container = ToolContainer(services={"data": data, "llm": llm}, config=config)
     # Регистрация ПОСЛЕ сборки контейнера: конструктор VectorsService берёт
     # сервисы ``data`` и ``llm`` из контейнера сразу, а не на первом запросе.
     # Причина — диагностика: отсутствие эмбеддера должно падать на сборке,
     # а не отдавать агенту «индексов нет» там, где на самом деле нет провайдера.
     container.register(
-        "vectors", VectorsService(container=container, config=_vectors_config_from_env())
+        "vectors", VectorsService(container=container, config=config)
     )
+    # Конвейер аудита берёт снимок у ``data``, модель у ``llm`` — те же
+    # колбэки, а не собственные подключения. Регистрация тоже после сборки
+    # контейнера: сервис обращается к нему в момент первого вызова, и
+    # отсутствие владельца должно быть видно на старте, а не в рантайме хода.
+    container.register("audit", AuditService(container=container, config=config))
     return container
 
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
 
 from libs.enterprise_common.errors import (
     EnterpriseError,

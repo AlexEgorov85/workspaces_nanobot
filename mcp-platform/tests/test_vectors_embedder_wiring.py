@@ -25,10 +25,8 @@ from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.errors import (
     InfrastructureError,
     InvalidRequestError,
-    NotFoundError,
 )
 from libs.llm.config import LlmConfig
-from libs.vectors.embedding import Embedder
 from servers.enterprise.capabilities.llm.service.main import (
     AUDIENCE_RUNTIME,
     EmbeddingResult,
@@ -36,7 +34,6 @@ from servers.enterprise.capabilities.llm.service.main import (
 )
 from servers.enterprise.capabilities.llm.tools import embed as embed_tool
 from servers.enterprise.capabilities.vectors.service.main import VectorsService
-from servers.enterprise.capabilities.vectors.tools import vector_search
 
 PLATFORM_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_LIB = PLATFORM_ROOT / "libs" / "vectors"

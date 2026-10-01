@@ -36,7 +36,6 @@ from libs.enterprise_data.snapshot import (
     resolve_snapshot_path,
 )
 from libs.enterprise_data.snapshot.store import (
-    DuckDbSnapshotStore,
     UnsupportedFilesystemError,
 )
 

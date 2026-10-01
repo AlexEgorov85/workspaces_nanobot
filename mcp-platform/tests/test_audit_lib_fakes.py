@@ -191,6 +191,19 @@ class FakeSnapshot:
             return {"valid": True, "plan": []}
         return {"valid": False, "error": self.explain_error or "syntax error"}
 
+    # --- имена, под которыми capability ждёт владельца снимка -----------
+    #
+    # Сервис capability ``audit`` обращается к снимку как к ``DataService``, то
+    # есть через ``snapshot_query``/``snapshot_schema``. Подписи даны явно, а не
+    # через ``__getattr__``, чтобы подмена в тестах capability была обычной
+    # подстановкой объекта, а не совпадением имён по счастливой случайности.
+
+    def snapshot_query(self, sql: str, params: list[Any] | None = None) -> Any:
+        return self.query(sql, params)
+
+    def snapshot_schema(self, schema_name: str | None = None, table_names: list[str] | None = None) -> Any:
+        return self.schema()
+
     # --- утверждения для тестов ----------------------------------------
 
     @property
