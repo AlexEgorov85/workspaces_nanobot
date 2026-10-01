@@ -188,8 +188,10 @@ python -m servers.enterprise.server --capabilities llm
 ```python
 # capabilities/data/tools/history_search.py
 def create_tool(container):
+    service = container.get("data")          # достаётся здесь, при сборке
+
     def history_search(query: str, limit: int = 20) -> str:
-        return container.data.history_search(query, limit)   # сервис, не соединение
+        return service.history_search(query, limit)   # сервис, не соединение
 
     return ToolDefinition(
         name="history_search",
@@ -199,6 +201,12 @@ def create_tool(container):
         version="1.0",
     )
 ```
+
+Сервис достаётся в `create_tool` и замыкается обработчиком. Модульная
+переменная (`global service = ...`) запрещена: вторая регистрация в том же
+процессе тихо переписала бы сервис первой операции, а отсутствие сервиса
+обнаружилось бы на вызове вместо сборки. За это отвечает страж
+`test_operation_owns_its_service`.
 
 Имена инструментов плоские и уникальные в пределах сервера: MCP-клиент Nanobot
 и так приклеивает префикс `mcp_enterprise_`, а namespace внутри него только

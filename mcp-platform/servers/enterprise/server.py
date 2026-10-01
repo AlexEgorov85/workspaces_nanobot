@@ -228,12 +228,15 @@ def _build_container(
     # и виден как ``configured: false`` в баннере ниже.
     set_gateway(LlmGateway(settings=settings))
     services: dict[str, Any] = {"llm": LlmService()}
+    # Объявления собираются здесь и передаются сервисам в конструктор.
+    # Контейнер их не хранит: у значения должен быть один владелец, и им
+    # является тот, кто это значение использует.
     config: dict[str, Any] = {}
 
     if not _needs_data(wanted):
         # Единственная capability, которой не нужен доступ к данным.
         # Ни пула, ни снимка, ни настроек журнала: см. ``_needs_data``.
-        return ToolContainer(services=services, config=config)
+        return ToolContainer(services=services)
 
     from servers.enterprise.capabilities.audit.service.main import AuditService
     from servers.enterprise.capabilities.data.service.main import DataService
@@ -258,7 +261,7 @@ def _build_container(
         **_vectors_config(settings),
         **_audit_config(settings),
     }
-    container = ToolContainer(services=services, config=config)
+    container = ToolContainer(services=services)
     # Регистрация ПОСЛЕ сборки контейнера: конструктор VectorsService берёт
     # сервисы ``data`` и ``llm`` из контейнера сразу, а не на первом запросе.
     # Причина — диагностика: отсутствие эмбеддера должно падать на сборке,

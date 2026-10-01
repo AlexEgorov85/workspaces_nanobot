@@ -74,7 +74,7 @@ def _container(snapshot: Any, *, tables: Any = ALL_TABLES, registry: str = REGIS
         "scripts_registry": {"table": registry},
         "audit": {"tables": list(tables or []), "row_ceiling": "1000"},
     }
-    container = ToolContainer(services={"data": snapshot, "llm": FakeLlm()}, config=config)
+    container = ToolContainer(services={"data": snapshot, "llm": FakeLlm()})
     container.register("audit", AuditService(container=container, config=config))
     return container
 
@@ -249,7 +249,7 @@ class TestConfiguration:
             "scripts_registry": {"table": REGISTRY_TABLE},
             "audit": {"tables": list(ALL_TABLES), "row_ceiling": "много"},
         }
-        container = ToolContainer(services={"data": snapshot, "llm": FakeLlm()}, config=config)
+        container = ToolContainer(services={"data": snapshot, "llm": FakeLlm()})
         with pytest.raises(EnterpriseError) as caught:
             AuditService(container=container, config=config)
         assert caught.value.code == "infrastructure_error", caught.value.code
@@ -260,7 +260,7 @@ class TestConfiguration:
             "scripts_registry": {"table": REGISTRY_TABLE},
             "audit": {"tables": list(ALL_TABLES), "row_ceiling": "1000"},
         }
-        container = ToolContainer(services={"data": _snapshot()}, config=config)
+        container = ToolContainer(services={"data": _snapshot()})
         service = AuditService(container=container, config=config)
         with pytest.raises(EnterpriseError) as caught:
             service.generate_sql(query="сколько аудитов")

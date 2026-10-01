@@ -13,34 +13,27 @@ from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition
 from servers.enterprise.capabilities.vectors.service.main import VectorsService
 
-#: Контейнер подставляется загрузчиком при регистрации операции.
-container: ToolContainer | None = None
-
-
-def handle_list_indexes() -> str:
-    """Показать известные векторные индексы и состояние каждого.
-
-    Состояние: ``missing`` (не собран), ``building`` (собирается прямо сейчас),
-    ``ready`` (готов), ``error`` (сборка провалилась).
-    """
-    if container is None:  # pragma: no cover - защита от неверной сборки
-        raise RuntimeError("контейнер не инициализирован")
-    service: VectorsService = container.get("vectors")
-    indexes = service.list_indexes()
-    return json.dumps(
-        {
-            "count": len(indexes),
-            "indexes": indexes,
-            "note": "состояние отдаётся без сборки индекса",
-        },
-        ensure_ascii=False,
-        default=str,
-    )
-
-
+#: Сервис замыкается обработчиком: модульная глобальная переменная зависела бы
+#: от порядка регистрации операций.
 def create_tool(registry_container: ToolContainer) -> ToolDefinition:
-    global container
-    container = registry_container
+    service: VectorsService = registry_container.get("vectors")
+
+    def handle_list_indexes() -> str:
+        """Показать известные векторные индексы и состояние каждого.
+
+        Состояние: ``missing`` (не собран), ``building`` (собирается прямо сейчас),
+        ``ready`` (готов), ``error`` (сборка провалилась).
+        """
+        indexes = service.list_indexes()
+        return json.dumps(
+            {
+                "count": len(indexes),
+                "indexes": indexes,
+                "note": "состояние отдаётся без сборки индекса",
+            },
+            ensure_ascii=False,
+            default=str,
+        )
     return ToolDefinition(
         name="list_indexes",
         description=(

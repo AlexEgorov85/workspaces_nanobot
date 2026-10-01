@@ -250,7 +250,7 @@ class TestOperationsAreNotModelFacing:
             create_tool as create_upsert,
         )
 
-        container = ToolContainer(services={"data": _service()}, config={})
+        container = ToolContainer(services={"data": _service()})
         for factory in (create_upsert, create_purge):
             tool = factory(container)
             assert "runtime-only" in tool.tags, tool.name
@@ -269,7 +269,7 @@ class TestOperationsAreNotModelFacing:
             create_tool as create_purge,
         )
 
-        container = ToolContainer(services={"data": _service()}, config={})
+        container = ToolContainer(services={"data": _service()})
         tool = create_purge(container)
         properties = set((tool.input_schema.get("properties") or {}))
         assert properties <= {"retention_days", "remove_empty_outbound"}, properties

@@ -325,7 +325,7 @@ class TestEmbedOperation:
             "llm", self._service(embed=lambda *_a, **_k: [0.5, 0.25])
         )
         definition = embed_tool.create_tool(container)
-        payload = json.loads(embed_tool.handle_embed(text="договор"))
+        payload = json.loads(definition.handler(text="договор"))
 
         assert definition.name == "embed"
         assert definition.category == "llm"

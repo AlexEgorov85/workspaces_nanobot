@@ -17,25 +17,18 @@ from servers.enterprise.capabilities.data.service.main import (
     DataService,
 )
 
-#: Контейнер подставляется загрузчиком при регистрации операции.
-container: ToolContainer | None = None
-
-
-def handle_schema_check(expected: list[str] | None = None) -> str:
-    """Проверить наличие таблиц и вернуть отчёт с недостающими."""
-    if container is None:  # pragma: no cover - защита от неверной сборки
-        raise RuntimeError("контейнер не инициализирован")
-    service: DataService = container.get("data")
-    report = service.schema_check(
-        expected=tuple(expected) if expected else None,
-        audience=AUDIENCE_MODEL,
-    )
-    return json.dumps(report, ensure_ascii=False)
-
-
+#: Сервис замыкается обработчиком, а не лежит в модульной переменной: значение
+#: глобальной зависело бы от порядка регистрации операций.
 def create_tool(registry_container: ToolContainer) -> ToolDefinition:
-    global container
-    container = registry_container
+    service: DataService = registry_container.get("data")
+
+    def handle_schema_check(expected: list[str] | None = None) -> str:
+        """Проверить наличие таблиц и вернуть отчёт с недостающими."""
+        report = service.schema_check(
+            expected=tuple(expected) if expected else None,
+            audience=AUDIENCE_MODEL,
+        )
+        return json.dumps(report, ensure_ascii=False)
     return ToolDefinition(
         name="schema_check",
         description=(

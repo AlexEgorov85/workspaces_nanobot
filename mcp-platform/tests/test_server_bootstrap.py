@@ -336,12 +336,15 @@ class TestContainerWiring:
         )
         monkeypatch.setenv("ENTERPRISE_EMBED_MODEL", "mxbai-embed-large:latest")
         container = enterprise_server._build_container(_settings())
-        config = container.config
-        vector = ((config.get("gateway") or {}).get("vector") or {})
-        index = vector.get("index") or {}
-        assert index.get("storage_table") == "oarb.audit_vectors", config
-        assert "audits_index" in (index.get("indexes") or {}), config
-        assert (vector.get("embedding") or {}).get("model") == "mxbai-embed-large:latest"
+        # Проверяется **разобранное состояние сервиса**, а не словарь объявлений:
+        # объявление, которое доехало и не было прочитано, в словаре выглядит
+        # так же, как прочитанное.
+        service = container.get("vectors")
+        declared = service._declared  # noqa: SLF001 - состояние сервиса под проверкой
+        assert "audits_index" in declared, declared
+        assert declared["audits_index"]["table"] == "oarb.audits", declared
+        embedding = service._embedding_config  # noqa: SLF001
+        assert embedding["model"] == "mxbai-embed-large:latest", embedding
 
     def test_audit_config_reaches_the_service(self) -> None:
         """Объявление доезжает до capability из файла, а не из окружения.
@@ -351,21 +354,22 @@ class TestContainerWiring:
         может нести метку, а значит не может сказать «это реестр».
         """
         container = enterprise_server._build_container(_settings())
-        config = container.config
-        registry = config["scripts_registry"]["table"]
-        assert registry == "public.agent_predefined_scripts", config
+        service = container.get("audit")
+        # Снова состояние сервиса, а не конфигурация: иначе проверка сказала бы
+        # «словарь собрался», а не «сервис его прочитал».
+        assert service._registry_table == "public.agent_predefined_scripts"  # noqa: SLF001
         # Реестр помечен и в доменные таблицы не попадает.
-        assert registry not in config["audit"]["tables"], config
-        assert config["audit"]["tables"] == [
+        assert "public.agent_predefined_scripts" not in service._allowed_tables  # noqa: SLF001
+        assert list(service._allowed_tables) == [  # noqa: SLF001
             "oarb.audits",
             "oarb.violations",
             "oarb.audit_reports",
             "oarb.report_items",
         ]
         # Число, а не строка: потолок строк — счётчик, и раньше он доезжал
-        # строкой, которую сервис аудита приводил сам. Приводит теперь реестр,
+        # строкой, которую сервис аудита приводит сам. Приводит теперь реестр,
         # и потолок приходит числом туда же, где проверяется на тип.
-        assert config["audit"]["row_ceiling"] == 500
+        assert service._row_ceiling == 500  # noqa: SLF001
 
     def test_both_sections_coexist(self, monkeypatch) -> None:
         """Секции не должны затирать друг друга.
@@ -376,11 +380,14 @@ class TestContainerWiring:
         """
         monkeypatch.setenv("ENTERPRISE_VECTOR_STORAGE_TABLE", "oarb.audit_vectors")
         monkeypatch.setenv("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "public.agent_predefined_scripts")
-        config = enterprise_server._build_container(_settings()).config
-        assert config.get("gateway"), "секция gateway потеряна"
-        assert config.get("scripts_registry"), "секция scripts_registry потеряна"
-        assert config.get("audit"), "секция audit потеряна"
-        assert config.get("statement_timeout_ms") is not None
+        container = enterprise_server._build_container(_settings())
+        # Обе секции обязаны дойти до сервисов, а не просто существовать в
+        # словаре: словарь проверяет сборка, сервисы — потребители.
+        assert container.get("vectors")._declared  # noqa: SLF001
+        assert container.get("audit")._registry_table == "public.agent_predefined_scripts"  # noqa: SLF001
+        # Секция capability ``data`` обязана дойти до своего сервиса: раньше её
+        # presence проверялась по словарю контейнера, который никто не читал.
+        assert container.get("data")._statement_timeout_ms is not None  # noqa: SLF001
 
     def test_no_sql_surface_on_operations(self) -> None:
         """Произвольного SQL на поверхности агента не существует."""

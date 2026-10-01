@@ -30,8 +30,15 @@ logger = logging.getLogger(__name__)
 
 
 def build_container() -> ToolContainer:
-    """Контейнер сервисов. В реальном сервере здесь создаются доменные сервисы."""
-    return ToolContainer()
+    """Контейнер сервисов. В реальном сервере здесь создаются доменные сервисы.
+
+    Регистрация — единственное место, где сервис появляется. Операции его
+    достают, но не создают: иначе одна и та же доменная логика жила бы в двух
+    экземплярах с разным состоянием.
+    """
+    from servers._template.capabilities.template.service.main import EchoService
+
+    return ToolContainer(services={"template": EchoService()})
 
 
 def build() -> tuple[Any, ToolRegistry, ToolContainer]:

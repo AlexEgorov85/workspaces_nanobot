@@ -17,32 +17,25 @@ from servers.enterprise.capabilities.vectors.service.main import (
     VectorsService,
 )
 
-#: Контейнер подставляется загрузчиком при регистрации операции.
-container: ToolContainer | None = None
-
-
-def handle_index_stats(index_name: str = DEFAULT_INDEX) -> str:
-    """Метрики индекса: векторы, размерность, время сборки, число запросов.
-
-    Args:
-        index_name: Имя индекса.
-
-    Returns:
-        JSON с метриками индекса.
-    """
-    if container is None:  # pragma: no cover - защита от неверной сборки
-        raise RuntimeError("контейнер не инициализирован")
-    service: VectorsService = container.get("vectors")
-    return json.dumps(
-        service.index_stats(index_name),
-        ensure_ascii=False,
-        default=str,
-    )
-
-
+#: Сервис замыкается обработчиком: модульная глобальная переменная зависела бы
+#: от порядка регистрации операций.
 def create_tool(registry_container: ToolContainer) -> ToolDefinition:
-    global container
-    container = registry_container
+    service: VectorsService = registry_container.get("vectors")
+
+    def handle_index_stats(index_name: str = DEFAULT_INDEX) -> str:
+        """Метрики индекса: векторы, размерность, время сборки, число запросов.
+
+        Args:
+            index_name: Имя индекса.
+
+        Returns:
+            JSON с метриками индекса.
+        """
+        return json.dumps(
+            service.index_stats(index_name),
+            ensure_ascii=False,
+            default=str,
+        )
     return ToolDefinition(
         name="index_stats",
         description=(

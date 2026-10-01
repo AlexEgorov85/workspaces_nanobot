@@ -89,11 +89,13 @@ def service() -> VectorsService:
 
 
 def _handler(tool_module: Any, container: ToolContainer):
-    """Прогнать ``create_tool`` и вернуть обработчик с контейнером подставленным."""
-    tool_module.create_tool(container)
-    return tool_module.handle_vector_search, tool_module.handle_list_indexes, (
-        tool_module.handle_index_stats
-    )
+    """Собрать операцию и достать её обработчик.
+
+    Обработчик живёт внутри ``create_tool`` и замыкает сервис: держать
+    модульную глобальную переменную ради теста не нужно и нельзя — иначе
+    тест проверял бы не тот объект, который регистрируется в сервере.
+    """
+    return tool_module.create_tool(container).handler
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -259,8 +261,7 @@ class TestVectorSearchTool:
     def _call(self, service, **kwargs: Any) -> dict[str, Any]:
         container = ToolContainer()
         container.register("vectors", service)
-        search_tool.create_tool(container)
-        return json.loads(search_tool.handle_vector_search(**kwargs))
+        return json.loads(_handler(search_tool, container)(**kwargs))
 
     def test_returns_results_and_state(self, service) -> None:
         payload = self._call(service, query="договор", index_name="idx_a", top_k=2)
@@ -301,8 +302,7 @@ class TestListIndexesTool:
     def _call(self, service) -> dict[str, Any]:
         container = ToolContainer()
         container.register("vectors", service)
-        list_tool.create_tool(container)
-        return json.loads(list_tool.handle_list_indexes())
+        return json.loads(_handler(list_tool, container)())
 
     def test_lists_indexes_with_state(self, service) -> None:
         payload = self._call(service)
@@ -323,8 +323,7 @@ class TestIndexStatsTool:
     def _call(self, service, **kwargs: Any) -> dict[str, Any]:
         container = ToolContainer()
         container.register("vectors", service)
-        index_stats_tool.create_tool(container)
-        return json.loads(index_stats_tool.handle_index_stats(**kwargs))
+        return json.loads(_handler(index_stats_tool, container)(**kwargs))
 
     def test_reports_required_metrics(self, service) -> None:
         payload = self._call(service, index_name="idx_a")
@@ -405,10 +404,8 @@ class TestGuardsFireOnGarbage:
         """Хеш-мусор в эмбеддинге не должен попасть в выдачу как «документ»."""
         container = ToolContainer()
         container.register("vectors", service)
-        search_tool.create_tool(container)
-        payload = json.loads(
-            search_tool.handle_vector_search(query="x", index_name="idx_a", top_k=3)
-        )
+        handle = _handler(search_tool, container)
+        payload = json.loads(handle(query="x", index_name="idx_a", top_k=3))
         assert all(isinstance(r["content"], str) for r in payload["results"])
         assert all(isinstance(r["score"], float) for r in payload["results"])
 
