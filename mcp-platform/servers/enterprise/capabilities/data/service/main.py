@@ -101,8 +101,8 @@ class DataService:
         self,
         *,
         db: ModuleType | None = None,
-        log_table: tuple[str, str] = ("public", "agent_gateway_logs"),
-        question_runs_table: tuple[str, str] = ("public", "agent_question_runs"),
+        log_table: tuple[str, str] | None = None,
+        question_runs_table: tuple[str, str] | None = None,
         expected_tables: tuple[str, ...] = (),
         statement_timeout_ms: int = 30_000,
         max_rows: int = 1000,
@@ -111,8 +111,14 @@ class DataService:
         snapshot: Any | None = None,
     ) -> None:
         self._db = db
-        self._log_schema, self._log_table = log_table
-        self._question_runs_table = tuple(question_runs_table)
+        # Имена таблиц приходят из platform.json (ENTERPRISE_LOG_TABLE и
+        # вопросы прогонов). Дефолта-имени здесь нет намеренно: литерал в
+        # подписи делал бы значение декоративным — сервер поднимался бы и
+        # писал бы не туда, если файл забыт.
+        self._log_table = tuple(log_table) if log_table else None
+        self._question_runs_table = (
+            tuple(question_runs_table) if question_runs_table else None
+        )
         self._expected_tables = tuple(expected_tables)
         self._statement_timeout_ms = int(statement_timeout_ms)
         self._max_rows = int(max_rows)
@@ -125,6 +131,28 @@ class DataService:
         # открывает и пути к нему не знает. Открывает его composition root
         # (server.py) через libs.enterprise_data.snapshot.open_snapshot_store.
         self._snapshot = snapshot
+
+    def _require_log_table(self, operation: str) -> tuple[str, str]:
+        """Таблица журнала — из настройки, иначе явная ошибка.
+
+        ``None`` означает «операция не настроена», а не «писать в таблицу
+        по умолчанию»: молчаливая подстановка здесь означала бы, что
+        переименование таблицы в ``platform.json`` не мешает работе.
+        """
+        if not self._log_table:
+            raise InfrastructureError(
+                f"{operation}: ENTERPRISE_LOG_TABLE не задан — "
+                f"операция журнала недоступна"
+            )
+        return self._log_table
+
+    def _require_question_runs_table(self, operation: str) -> tuple[str, str]:
+        if not self._question_runs_table:
+            raise InfrastructureError(
+                f"{operation}: таблица прогонов вопросов не задана — "
+                f"операция недоступна"
+            )
+        return self._question_runs_table
 
     # -- снимок -------------------------------------------------------------
     #
@@ -267,7 +295,7 @@ class DataService:
         Все строки батча идут в одном задании пула, то есть в одной
         транзакции: половина батча в журнале хуже, чем ничего.
         """
-        schema, table = self._log_schema, self._log_table
+        schema, table = self._require_log_table("log_events")
         sql = (
             f'INSERT INTO "{schema}"."{table}" '
             '(id, "timestamp", event_type, name, level, summary, payload, session_id, user_id) '
@@ -453,7 +481,7 @@ class DataService:
             needle = f"%{query.strip()}%"
             params.extend([needle, needle])
 
-        schema, table = self._log_schema, self._log_table
+        schema, table = self._require_log_table("search_logs")
         # ``LIMIT N+1`` — лишняя строка детектирует наличие следующей страницы
         # одним запросом, без отдельного счётчика.
         sql = (
@@ -646,7 +674,7 @@ class DataService:
         if not request_id or not str(request_id).strip():
             raise InvalidRequestError("upsert_question_run: не задан request_id")
 
-        table = _qualified(question_runs_table or self._question_runs_table)
+        table = _qualified(question_runs_table or self._require_question_runs_table("upsert_question_run"))
         # media хранится JSON-строкой в TEXT-колонке.
         media_json = json.dumps(media, ensure_ascii=False) if media else None
 
@@ -735,8 +763,16 @@ class DataService:
                 f"purge_logs: retention_days не может быть отрицательным ({days})"
             )
 
-        logs = _qualified(log_table or self._log_table)
-        runs = _qualified(question_runs_table or self._question_runs_table)
+        logs = _qualified(log_table or self._require_log_table("purge_logs"))
+        # Таблица прогонов требуется только когда реально чистим по сроку:
+        # ``days == 0`` её не касается, и отсутствие настройки тут не ошибка.
+        runs = (
+            _qualified(
+                question_runs_table or self._require_question_runs_table("purge_logs")
+            )
+            if days > 0
+            else None
+        )
         counters = {"empty_outbound": 0, "events": 0, "question_runs": 0}
 
         def _work(conn: Any) -> dict[str, int]:
