@@ -225,6 +225,36 @@ EXPECTED_RUNTIME_TABLE_NAMES: dict[str, dict[str, str]] = {
 }
 
 
+def runtime_table(role: str, profile: str = "prod") -> str:
+    """Имя runtime-таблицы по роли — читать отсюда, а не писать литералом.
+
+    ``role`` — ключ из :data:`EXPECTED_RUNTIME_TABLE_NAMES`
+    (``conversation_messages``, ``session_messages``, ``session_meta``,
+    ``gateway_logs``, ``question_runs``).
+
+    Единственная причина существования функции: имя таблицы меняется в
+    конфигурации, и код/тесты, зашившие литерал, молча поедут мимо нового
+    имени. Здесь — чтение объявления, а не вторая копия.
+
+    Неизвестный профиль или роль — ``ConfigurationError``: подставлять
+    «что-нибудь» здесь нельзя, это ровно тот класс дефекта, который
+    функция закрывает.
+    """
+    tables = EXPECTED_RUNTIME_TABLE_NAMES.get(profile)
+    if tables is None:
+        raise ConfigurationError(
+            f"runtime_table: неизвестный профиль {profile!r}. "
+            f"Допустимые: {sorted(EXPECTED_RUNTIME_TABLE_NAMES)}."
+        )
+    name = tables.get(role)
+    if not name:
+        raise ConfigurationError(
+            f"runtime_table: роль {role!r} не объявлена для профиля "
+            f"{profile!r}. Доступные: {sorted(tables)}."
+        )
+    return name
+
+
 class ConfigurationError(ValueError):
     """Ошибка конфигурации: обязательный ключ отсутствует или некорректен.
 
