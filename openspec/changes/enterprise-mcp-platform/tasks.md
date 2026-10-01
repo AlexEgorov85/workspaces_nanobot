@@ -530,8 +530,15 @@
 
 - [ ] 6.1 `turn_delivery_fail` → хук на `finalize_content` (замена текста) +
       `on_error` (логирование `turn_failed`). Проверить: пользователь получает
-      **один** fallback-ответ. **Не начато:** патч остаётся, спека
-      `turn_delivery_fail` на месте
+      **один** fallback-ответ.
+      **Формулировка плана нереализуема на nanobot 0.3.5** — исправлено
+      решением `docs/architecture/decisions/turn-delivery-public-extension.md`:
+      `finalize_content` вызывается только `runner.py` на `response.content`
+      и текст ошибки из `turn_delivery.py:341` не видит никогда.
+      Перенос делается **внедрением через публичный параметр**
+      `AgentLoop(turn_delivery_factory=...)`: подкласс `TurnDelivery`
+      переопределяет `fail()`, фабрика-подкласс отдаёт его вместо upstream.
+      Патч удаляется целиком, `_OutboundSilencer` уходит вместе с ним
 - [x] 6.2 `save_turn` → хук на `after_execute_tool`: архивирование результата
       в момент возврата tool'а. **Сделано:** `lib/hooks/tool_result_archive_hook.py`
       (`ToolResultArchiveHook`), фабрика `_make_tool_result_archive_hook` в
@@ -549,10 +556,16 @@
       (диагностика расследована, нужды нет)
 - [ ] 6.6 `assemble_outbound` → удалить целиком: `_final_turn` перевести на
       `TurnEndEvent`, `media` и `_tool_audit` — на публикацию из хука через
-      `turn_context.events`, потребитель — канал. **Не начато.** Патч
-      работает; его спека была возвращена в `_PATCH_SPECS` в этом шаге —
-      реализация и вызов в `apply_all` остались, а канон молчал о патче,
-      из-за чего `diagnose_startup` печатал ложный дрейф
+      `turn_context.events`, потребитель — канал.
+      **Нереализуемо в этой формулировке:** `TurnEndEvent` в nanobot 0.3.5
+      не существует (в `agent.loop` есть `AgentEvent`, `StreamDeltaEvent`,
+      `StreamEndEvent`, `StreamedResponseEvent`, `TurnContext`, `EventSink`,
+      `TurnRoute`; модуля `nanobot.agent.events` нет).
+      Нужно отдельное решение: оставить `_final_turn`/`media` на патче либо
+      спроектировать перенос на существующие `EventSink` /
+      `RuntimeEventPublisher`. Патч работает; спека возвращена в
+      `_PATCH_SPECS` (её вычеркнули при реализации 6.2–6.5, из-за чего
+      `diagnose_startup` печатал ложный DRIFT)
 - [x] 6.7 `document_text_threshold` → порог переносится в нативный
       document-tool агента; патч удаляется. **Сделано** вместе с 6.11:
       `workspace/tools/document_read.py` (auto-discover, `config_key=document_read`),
