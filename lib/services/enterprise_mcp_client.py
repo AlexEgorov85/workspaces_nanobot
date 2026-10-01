@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,22 @@ from typing import Any
 from loguru import logger
 
 DEFAULT_TOOL_TIMEOUT_SEC = 30.0
+
+
+def _new_request_id() -> str:
+    """``request_id`` для вызова, у которого нет оборота.
+
+    Форма та же, что у остальных ``request_id`` агента (``db_logging_bus``,
+    ``DbLoggingService``): ``str(uuid4())``. Именно агент создаёт это значение —
+    сервер не придумывает его по двум причинам: во-первых, он не знает, к
+    какому обороту вызов относится, во-вторых, выдуманный на сервере ключ
+    выглядел бы в журнале как существующий оборот.
+
+    Отдельная префиксная форма платформы (``local-``) тут не нужна: она
+    помечает локальные вызовы самой платформы, а этот ``request_id`` держит
+    агент, у которого своя форма во всём остальном журнале.
+    """
+    return str(uuid.uuid4())
 
 #: ``[code] message`` — формат доменной ошибки операции (см. build_server).
 _ERROR_PREFIX = re.compile(r"^\[([a-z_]+)\]\s*(.*)$", re.DOTALL)
@@ -61,24 +78,66 @@ class CallIdentity:
     их вызывающая сторона агента — из ``RequestContext`` и журнала, а не
     модель: значение, присланное моделью, границей изоляции не является.
 
-    ``request_id`` — PK оборота в ``agent_question_runs``. Значение может
-    быть ``None``: вызов вне оборота — законное состояние, отсутствие не
-    ошибка. Когда ``request_id`` задан, он обязан совпадать с PK оборота;
-    отдельный ``question_id`` не заводится.
+    ``request_id`` — PK оборота в ``agent_question_runs``. Поле может быть
+    ``None``: в момент, когда личность собирается, оборота может ещё не
+    существовать, и это не повод отказывать в вызове. Но **перед отправкой
+    ``request_id`` обязателен** — его дополняет :meth:`EnterpriseMcpClient.call`,
+    единственная точка сборки ``_meta``.
+
+    Обход этого правила на стороне сервера выглядел бы безобидно, пока не
+    посчитать: сервер требует все три ключа и отвечает ``identity_missing``
+    на двухключевой ``_meta``. То есть вызов вне оборота, для которого не нашли
+    PK, тихо не проходил бы — а падал бы отказом, который выглядит как
+    «платформа не работает».
     """
 
     session_id: str
     user_id: str
     request_id: str | None = None
 
+    def with_request_id(self, request_id: str) -> CallIdentity:
+        """Возвращает копию с заданным ``request_id``."""
+        return CallIdentity(
+            session_id=self.session_id,
+            user_id=self.user_id,
+            request_id=request_id,
+        )
+
     def as_meta(self) -> dict[str, str]:
-        meta = {
+        """Собрать ``params._meta``. Требует полного набора ключей.
+
+        Отказ здесь, а не молчаливое опускание ``request_id``: два ключа вместо
+        трёх отвергаются на сервере одинаково — с ``identity_missing``, — но
+        приходят с другого конца и выглядят совсем иначе. Здесь виден вызов и
+        видно, чего в нём не хватило.
+        """
+        missing = [
+            name
+            for name, value in (
+                ("session_id", self.session_id),
+                ("user_id", self.user_id),
+                ("request_id", self.request_id),
+            )
+            if not str(value or "").strip()
+        ]
+        if missing:
+            raise CallIdentityIncomplete(
+                "идентичность вызова неполна: " + ", ".join(missing)
+            )
+        return {
             f"{META_PREFIX}session_id": self.session_id,
             f"{META_PREFIX}user_id": self.user_id,
+            f"{META_PREFIX}request_id": str(self.request_id),
         }
-        if self.request_id:
-            meta[f"{META_PREFIX}request_id"] = self.request_id
-        return meta
+
+
+class CallIdentityIncomplete(ValueError):
+    """Идентичность вызова собрана не полностью.
+
+    Отдельный тип, а не ``ValueError``, потому что это не ошибка значения, а
+    нарушение контракта на границе: сначала должен быть найден оборот, и только
+    потом отправлен вызов.
+    """
 
 
 class EnterpriseMcpUnavailable(RuntimeError):
@@ -212,20 +271,32 @@ class EnterpriseMcpClient:
         второй источник идентичности, а событие в журнале и каталог сессии
         могут описывать разные вызовы.
 
+        ``request_id`` дополняется здесь, если вызывающая сторона его не
+        нашла: сервер требует все три ключа и создавать ``request_id`` не
+        вправе, поэтому единственное место, где его можно получить законно, —
+        эта сборка. Отсутствие связи с ``agent_question_runs`` выражается не
+        отказом, а признаком ``metadata.correlated = false``, который сервер
+        проставит сам.
+
+        Без ``identity`` ``_meta`` не отправляется вовсе, а не отправляется
+        пустым: пустой ``_meta`` на сервере неотличим от «идентичность была и
+        оказалась пустой».
+
         Raises:
             EnterpriseOperationError: операция ответила доменной ошибкой.
             EnterpriseMcpUnavailable: сервер недоступен или не ответил.
         """
         session = await self._ensure_session()
+        meta = self._meta_for(identity)
         try:
-            result = await asyncio.wait_for(
-                session.call_tool(
-                    operation,
-                    arguments or {},
-                    meta=identity.as_meta() if identity is not None else None,
-                ),
-                timeout=self._timeout,
+            # ``meta`` не передаётся вовсе, когда идентичности нет: пустой
+            # ``_meta`` на сервере неотличим от «идентичность была и пустая».
+            call = (
+                session.call_tool(operation, arguments or {}, meta=meta)
+                if meta is not None
+                else session.call_tool(operation, arguments or {})
             )
+            result = await asyncio.wait_for(call, timeout=self._timeout)
         except asyncio.TimeoutError as exc:
             await self._reset()
             raise EnterpriseMcpUnavailable(
@@ -242,6 +313,31 @@ class EnterpriseMcpClient:
             code, message = _split_error_code(text)
             raise EnterpriseOperationError(code, message)
         return text
+
+    def _meta_for(self, identity: "CallIdentity | None") -> dict[str, str] | None:
+        """``_meta`` для вызова: полный набор ключей или ничего.
+
+        ``request_id`` вызывающая сторона знает не всегда — оборот мог ещё не
+        зарегистрироваться, а журнал мог не ответить. Здесь он досоставляется
+        самостоятельным значением, и именно поэтому сервер не станет
+        придумывать его сам: единственное место, где значение можно получить
+        законно, — сборка вызова на стороне агента.
+
+        Сервер определит, ссылается ли полученный ``request_id`` на реальный
+        оборот, и проставит ``metadata.correlated = false`` сам. Поэтому
+        сгенерированное значение не выдаёт себя за существующий оборот: в
+        журнале связь просто не найдётся, и это нормально.
+        """
+        if identity is None:
+            return None
+        if not identity.request_id:
+            generated = _new_request_id()
+            logger.info(
+                "вызов без request_id оборота: подставлен самостоятельный "
+                f"request_id={generated}, связь с agent_question_runs не появится"
+            )
+            identity = identity.with_request_id(generated)
+        return identity.as_meta()
 
     # -- жизненный цикл ----------------------------------------------------
 
