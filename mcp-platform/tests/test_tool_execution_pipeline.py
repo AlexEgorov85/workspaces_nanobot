@@ -481,14 +481,40 @@ def test_zero_threshold_means_no_measurement(tmp_path: Path) -> None:
     assert EXECUTION_KEY not in body(result) or "artifact" not in body(result)[EXECUTION_KEY]
 
 
-def test_response_is_unchanged_when_there_is_nothing_to_add(tmp_path: Path) -> None:
-    """Побайтово равен доменному: вызывающий разбирает ответ как раньше."""
+def test_plain_text_body_is_never_rewrapped(tmp_path: Path) -> None:
+    """Обычный текст уходит байт-в-байт: метаданные в строку не вписать.
+
+    Обёртка превратила бы ответ в описание ответа, и вызывающий, который
+    сегодня читает текст как есть, получил бы JSON вместо своих данных. Это
+    единственный случай, где тело не трогают.
+    """
+    layer = make_layer(
+        tmp_path, ENTERPRISE_EXEC_QUALITY_CHECK=False, ENTERPRISE_EXEC_LOGGING=False
+    )
+    result = layer.pipeline.execute(definition(lambda: "просто текст"), {}, call_meta())
+    assert result.text == "просто текст"
+    assert EXECUTION_KEY not in result.text
+
+
+def test_json_string_body_receives_execution_metadata(tmp_path: Path) -> None:
+    """JSON-строка — структурное тело, и метаданные в неё дописываются.
+
+    Регрессия на форму, которую возвращают все операции платформы: ``json.dumps``
+    по доменному объекту. Если тело собирать из сырой строки, а не из
+    разобранного значения, метаданные теряются, и по проводу уходит ровно то,
+    что вернул обработчик. Почти две тысячи тестов этого не видели: они звали
+    обработчики, возвращающие словари, а живые операции возвращают строки.
+    """
     raw = json.dumps({"hits": [], "next_offset": None, "truncated": False}, ensure_ascii=False)
     layer = make_layer(
         tmp_path, ENTERPRISE_EXEC_QUALITY_CHECK=False, ENTERPRISE_EXEC_LOGGING=False
     )
     result = layer.pipeline.execute(definition(lambda: raw), {}, call_meta())
-    assert result.text == raw
+    payload = body(result)
+    assert payload["hits"] == []
+    assert payload["next_offset"] is None
+    assert payload[EXECUTION_KEY]["request_id"] == "req-1"
+    assert payload[EXECUTION_KEY]["tool"] == "probe"
 
 
 def test_execution_metadata_is_added_as_a_key(tmp_path: Path) -> None:
@@ -847,7 +873,14 @@ def test_meta_reaches_the_context_through_the_wire(tmp_path: Path) -> None:
 
     result = anyio.run(call)
     assert result.isError is False
-    assert json.loads(result.content[0].text) == {"ok": True, "query": "проверка"}
+    payload = json.loads(result.content[0].text)
+    # Доменное тело сохраняется как есть, а ``_execution`` доезжает по проводу
+    # вместе с ним: иначе вызывающий не прочитал бы из ответа ``request_id``
+    # своего вызова и не связал бы ответ с журналом.
+    assert payload["ok"] is True
+    assert payload["query"] == "проверка"
+    assert payload[EXECUTION_KEY]["request_id"] == "req-wire"
+    assert payload[EXECUTION_KEY]["tool"] == "probe"
     assert seen == {
         "session_id": "sess-wire",
         "user_id": "user-wire",

@@ -211,7 +211,13 @@ class ToolExecutionPipeline:
         # ответ, включая однострочный, и платил бы за это двумя лишними
         # файловыми операциями на вызов.
         large_result = policy.max_inline_result_bytes > 0 and size > policy.max_inline_result_bytes
-        body: Any = raw
+        # Тело ответа собирается из ``parsed``, а не из ``raw``: операции
+        # возвращают JSON-строкой, и взятый из ``raw`` текст не является
+        # объектом — тогда ``_compose_response`` оставил бы его байт-в-байт и
+        # метаданные вызова не дошли бы до вызывающего ни разу. Для обычного
+        # текста ``_as_json_value`` возвращает ``raw`` без изменений, так что
+        # правило «строку не оборачивать» продолжает действовать.
+        body: Any = parsed
         if large_result:
             try:
                 artifact, body, notes = self._persist_large(
