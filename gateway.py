@@ -233,54 +233,9 @@ async def _run(ctx) -> None:
     for msg in messages:
         console.print(msg)
 
-    cache_store = ctx.cache_store
-    if cache_store is not None:
-        _cache_file = cache_store.get_stats().get("cache_path")
-        if _cache_file:
-            console.print(
-                f"[green]✓[/green] audit_analyzer кэш загружен "
-                f"(cache -> {_cache_file})"
-            )
-        else:
-            console.print(
-                "[green]✓[/green] audit_analyzer кэш загружен"
-            )
-
-        # Прогрев FAISS-индексов в память. Ожидать
-        # первого синхрона не нужно: кэш уже
-        # загружен синхронно до открытия такого
-        # здесь, и предыдущему читать есть чему.
-        async def _preload_and_report() -> None:
-            loaded = await ctx.preload_service.preload_vector_indexes(
-
-                cache_store
-            )
-            errs = cache_store.preload_errors()
-            if errs:
-                console.print(
-                    f"[yellow]⚠[/yellow] vector index build errors: "
-                    f"{len(errs)}"
-                )
-                for err in errs:
-                    name = err.get("index_name") or "?"
-                    console.print(
-                        f"  [red]✗[/red] '{name}': "
-                        f"{err.get('error_type')}: {err.get('error')}"
-                    )
-            if not loaded:
-                if not errs:
-                    console.print(
-                        "[dim]audit_analyzer vector indexes: "
-                        "нет данных в кэше[/dim]"
-                    )
-                return
-            for item in loaded:
-                console.print(
-                    f"[green]✓[/green] vector index '{item['index_name']}' "
-                    f"built in memory: {item['vectors']} vectors"
-                )
-
-        asyncio.create_task(_preload_and_report())
+    # Блок «audit_analyzer кэш загружен / vector indexes» снят в фазе 5
+    # (п. 5.8): снимком и FAISS-индексами владеет платформа, у которой свои
+    # capability ``data`` и ``vectors`` и своя точка их подготовки.
 
     # enterprise-mcp поднимается ДО каналов и ДО работы агента: его процесс —
     # единственный владелец пула PostgreSQL и единственный, кто даёт модели

@@ -16,7 +16,6 @@ Change ``drop-local-cache-read-from-pg``, задачи 3.6 и 4.2.
 from __future__ import annotations
 
 import sys
-from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,25 +29,8 @@ if _WS not in sys.path:  # тот же приём, что и в production-ко�
 
 
 # --------------------------------------------------------------------------
-# 4.2 — READY только после загрузки кэша
+# 4.2 — readiness больше не зависит от снимка
 # --------------------------------------------------------------------------
-
-
-class _ReadyStore:
-    """Провайдер кэша, который загружен и готов отдавать данные."""
-
-    def is_ready(self) -> bool:
-        return True
-
-    def search_vector(self, *args: Any, **kwargs: Any) -> Any:
-        return []
-
-
-class _NotReadyStore(_ReadyStore):
-    """Провайдер, который ещё не готов отдавать данные."""
-
-    def is_ready(self) -> bool:
-        return False
 
 
 class _PGSessionManagerStub:
@@ -59,10 +41,9 @@ class _PGSessionManagerStub:
 class _StubCtx:
     """Минимальный контекст, который читает ``_register_readiness_checks``."""
 
-    def __init__(self, cache_store: Any, session_manager: Any) -> None:
+    def __init__(self, session_manager: Any) -> None:
         from lib.services.runtime_health import RuntimeReadiness
 
-        self.cache_store = cache_store
         self.session_manager = session_manager
         self.runtime_readiness = RuntimeReadiness()
 
@@ -100,58 +81,50 @@ def _component(report: Any, name: str) -> Any:
     return matches[0]
 
 
-def test_loaded_cache_yields_ready(pg_ping_ok: None) -> None:
-    """Кэш загружен → READY, а не NOT_READY."""
-    ctx = _StubCtx(_ReadyStore(), _PGSessionManagerStub())
+def test_only_postgres_is_registered(pg_ping_ok: None) -> None:
+    """Компонентов кэша в readiness больше нет — и это проверяется.
+
+    Проверка на отсутствие, а не «просто удалили тесты»: если бы регистрация
+    ``duckdb_cache`` вернулась, компонент, которого нет, всегда отдавал бы
+    DOWN, и ``RuntimeReadiness`` **никогда** не смог бы стать READY. Отсюда
+    был бы тихий отказ всей системы стартовать нормально, при этом без
+    единого исключения — поэтому и нужен явный страж.
+    """
+    ctx = _StubCtx(_PGSessionManagerStub())
+    _register(ctx)
+
+    names = [c.name for c in ctx.runtime_readiness.check().components]
+    assert names == ["postgres"], (
+        f"в readiness остались посторонние компоненты: {names} — любой из "
+        "них, читающий отсутствующий ресурс, заблокирует READY навсегда"
+    )
+
+
+def test_readiness_can_reach_ready(pg_ping_ok: None) -> None:
+    """При доступной БД система обязана доходить до READY."""
+    ctx = _StubCtx(_PGSessionManagerStub())
     _register(ctx)
 
     report = ctx.runtime_readiness.check()
 
-    assert _component(report, "duckdb_cache").status == "UP"
+    assert _component(report, "postgres").status == "UP"
     assert report.status == "READY", report.components
 
 
-def test_cache_absent_blocks_ready(pg_ping_ok: None) -> None:
-    """Кэша нет (загрузка не дала провайдера) → required-компонент DOWN."""
-    ctx = _StubCtx(None, _PGSessionManagerStub())
+def test_postgres_down_is_reported(pg_ping_ok: None) -> None:
+    """Проверка PG честно падает — регистрация не пустая и не декоративная."""
+    from lib.core.application_context import _register_readiness_checks
+    from lib.services.runtime_health import RuntimeReadiness
+
+    ctx = _StubCtx(None)  # нет session_manager -> postgres DOWN
+    ctx.runtime_readiness = RuntimeReadiness()
     _register(ctx)
 
     report = ctx.runtime_readiness.check()
 
-    component = _component(report, "duckdb_cache")
-    assert component.status == "DOWN"
-    assert component.required is True
+    assert _component(report, "postgres").status == "DOWN"
     assert report.status == "NOT_READY", report.components
-
-
-def test_unloaded_cache_blocks_ready(pg_ping_ok: None) -> None:
-    """Провайдер есть, но ``is_ready()=False`` → тоже DOWN.
-
-    Это ровно то состояние, в котором система оказывается между созданием
-    провайдера и завершением загрузки.
-    """
-    ctx = _StubCtx(_NotReadyStore(), _PGSessionManagerStub())
-    _register(ctx)
-
-    report = ctx.runtime_readiness.check()
-
-    assert _component(report, "duckdb_cache").status == "DOWN"
-    assert report.status == "NOT_READY", report.components
-
-
-def test_is_ready_failure_is_reported_not_swallowed(
-    pg_ping_ok: None,
-) -> None:
-    """Исключение из ``is_ready()`` — DOWN с текстом, а не тишина."""
-    exploding = SimpleNamespace(is_ready=lambda: (_ for _ in ()).throw(OSError("boom")))
-    ctx = _StubCtx(exploding, _PGSessionManagerStub())
-    _register(ctx)
-
-    report = ctx.runtime_readiness.check()
-
-    component = _component(report, "duckdb_cache")
-    assert component.status == "DOWN"
-    assert "boom" in (component.detail or "")
+    assert _register_readiness_checks is not None
 
 
 def test_unready_store_answers_explicit_error_not_empty_result() -> None:
@@ -174,60 +147,6 @@ def test_unready_store_answers_explicit_error_not_empty_result() -> None:
 # --------------------------------------------------------------------------
 # 3.6 — навык получает роль только для чтения
 # --------------------------------------------------------------------------
-
-
-def test_skill_entry_point_is_annotated_cache_provider() -> None:
-    """Skill-side точка входа объявлена как ``CacheProvider``, не как
-    реализация и не как объединение ролей."""
-    from lib.core.skill_config import build_cache_provider
-
-    hints = getattr(build_cache_provider, "__annotations__", {})
-    assert hints.get("return") == "CacheProvider", hints
-
-
-def test_skill_entry_point_requests_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Навык получает файл в режиме READ_ONLY — записи у него нет."""
-    from lib.core import skill_config
-    from lib.services import cache_provider as provider_mod
-
-    seen: dict[str, Any] = {}
-
-    class _ReadOnlyProvider:
-        """Ровно те методы, что есть у роли чтения."""
-
-        def is_ready(self) -> bool:
-            return True
-
-        def query_sql(self, sql: str) -> list[dict[str, Any]]:
-            return []
-
-        def get_schema(self) -> dict[str, str]:
-            return {}
-
-        def explain(self, sql: str) -> str:
-            return ""
-
-        def search_vector(self, *a: Any, **k: Any) -> list[Any]:
-            return []
-
-        def preload_indexes(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    def _fake_open(*, mode: Any) -> Any:
-        seen["mode"] = mode
-        return _ReadOnlyProvider()
-
-    monkeypatch.setattr(provider_mod, "open_cache_provider", _fake_open)
-
-    result = skill_config.build_cache_provider("audit_analyzer", _REPO / "workspace")
-
-    from lib.services.cache_provider import CacheAccessMode
-
-    assert seen["mode"] is CacheAccessMode.READ_ONLY
-    assert isinstance(result, _ReadOnlyProvider)
 
 
 def test_ingestion_role_unreachable_from_skill_provider() -> None:

@@ -141,7 +141,7 @@ def _discover(workspace_dir: Path) -> list[type]:
     return candidates
 
 
-def _build_tool_context(agent: Any, settings: Any, cache_store: Any,
+def _build_tool_context(agent: Any, settings: Any,
                         db_logging_service: Any, enterprise_mcp: Any = None) -> Any:
     """Собрать ``ToolContext`` из атрибутов ``AgentLoop``.
 
@@ -153,9 +153,9 @@ def _build_tool_context(agent: Any, settings: Any, cache_store: Any,
     ``image_generation_provider_configs`` / ``timezone`` /
     ``workspace_sandbox`` / ``runtime_control``.
 
-    DI-расширения (``agent`` / ``settings`` / ``cache_store`` /
-    ``db_logging_service``) прокидываются через ``setattr`` —
-    ``ToolContext`` остаётся frozen=False в nanobot 0.3.5.
+    DI-расширения (``agent`` / ``settings`` / ``db_logging_service``)
+    прокидываются через ``setattr`` — ``ToolContext`` остаётся frozen=False
+    в nanobot 0.3.5.
     """
     from nanobot.agent.tools.context import ToolContext
 
@@ -186,8 +186,6 @@ def _build_tool_context(agent: Any, settings: Any, cache_store: Any,
     ctx._agent_ref = agent
     if settings is not None:
         ctx._settings_ref = settings
-    if cache_store is not None:
-        ctx._cache_store_ref = cache_store
     if db_logging_service is not None:
         ctx._db_logging_service = db_logging_service
     if enterprise_mcp is not None:
@@ -200,7 +198,6 @@ def register_project_tools(
     workspace_dir: Any,
     *,
     settings: Any = None,
-    cache_store: Any = None,
     db_logging_service: Any = None,
     enterprise_mcp: Any = None,
 ) -> ProjectToolsLoadResult:
@@ -213,8 +210,6 @@ def register_project_tools(
         agent: ``AgentLoop`` (target ``agent.tools.register``).
         workspace_dir: ``Path`` — корень workspace, в нём лежит ``tools/``.
         settings: ``SETTINGS`` (опционально) — для ``ctx._settings_ref``.
-        cache_store: ``CacheProvider`` (опционально) — DI в tool'ы с
-            ``set_provider`` / ``set_connection_factory``.
         db_logging_service: ``DbLoggingService`` (опционально) — для
             ``ctx._db_logging_service``.
         enterprise_mcp: ``EnterpriseMcpClient`` (опционально) — для
@@ -270,7 +265,7 @@ def register_project_tools(
         if not candidates:
             return ProjectToolsLoadResult(detail="no project tools found")
 
-        ctx = _build_tool_context(agent, settings, cache_store, db_logging_service, enterprise_mcp)
+        ctx = _build_tool_context(agent, settings, db_logging_service, enterprise_mcp)
 
         registered: list[str] = []
         skipped_disabled: list[str] = []
@@ -287,25 +282,6 @@ def register_project_tools(
                 if agent.tools.get(tool.name) is not None:
                     skipped_duplicate.append(tool.name)
                     continue
-                if cache_store is not None:
-                    if hasattr(tool, "set_provider"):
-                        try:
-                            tool.set_provider(cache_store)
-                        except Exception:
-                            logger.exception(
-                                "set_provider failed for {}", canonical,
-                            )
-                    elif hasattr(tool, "set_connection_factory"):
-                        try:
-                            tool.set_connection_factory(
-                                getattr(cache_store, "get_duckdb_connection", None)
-                                or getattr(cache_store, "connect", None),
-                            )
-                        except Exception:
-                            logger.exception(
-                                "set_connection_factory failed for {}",
-                                canonical,
-                            )
                 agent.tools.register(tool)
                 registered.append(tool.name)
             except Exception:

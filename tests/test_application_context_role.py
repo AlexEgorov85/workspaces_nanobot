@@ -13,9 +13,11 @@
   * любой kwarg вне ``DEPRECATED_ENABLE_KWARGS`` MUST приводить к
     ``TypeError`` (allowlist, а не молчаливое игнорирование);
   * при ``role="cli"`` ``CronService`` MUST NOT создаваться, даже если
-    ``enable_cron=True`` был передан (gateway-only invariant);
-  * cache_provider field MUST существовать (Stage D plumbing); legacy
-    ``cache_store`` сохраняется как alias.
+    ``enable_cron=True`` был передан (gateway-only invariant).
+
+Поля ``cache_provider`` / ``cache_store`` в контракт не входят: с фазой 5
+(п. 5.8) снимком владеет capability ``data`` платформы, и держать его файл
+в контексте агента было вторым владельцем одного и того же файла.
 """
 
 from __future__ import annotations
@@ -93,26 +95,46 @@ class TestCompositionFields:
 
         sig = inspect.signature(ApplicationContext.create)
         expected = {"role", "enable_db_logging", "enable_audit", "enable_cron",
-                   "print_llm_calls", "cache_provider", "cache_store"}
+                   "print_llm_calls"}
         all_attrs = set(dir(ApplicationContext))
         for attr in expected:
             assert attr in all_attrs or attr in sig.parameters, (
                 f"{attr!r} SHOULD be either class attr or named param"
             )
 
+    def test_context_carries_no_cache_field(self) -> None:
+        """Контекст не держит снимок — это часть контракта, а не деталь.
 
-class TestStopClosesCacheProvider:
-    """``ApplicationContext.stop()`` MUST закрывать ``cache_provider``.
+        Проверка на отсутствие, а не на наличие: оставшийся ``cache_provider``
+        молча продолжил бы подавать признак готовности там, где снимка
+        уже нет, и читатель получил бы «всё хорошо» при отсутствии данных.
+        """
+        from lib.core.application_context import ApplicationContext
 
-    Регрессия: до этого ``stop()`` останавливал sync service, db-logging,
-    ownership coordinator, usage store и db pool, но НЕ закрывал
-    DuckDB-коннект на ``cache.duckdb``. На Windows файл оставался
-    залоченным процессом (ERROR_SHARING_VIOLATION), и следующий
-    инстанс (другая сессия CLI или gateway на той же машине) не
-    мог открыть кэш — даже после явного ``exit``.
+        all_attrs = set(dir(ApplicationContext))
+        for gone in ("cache_store", "cache_provider", "cache_loader",
+                     "preload_service", "ownership_coordinator"):
+            assert gone not in all_attrs, (
+                f"поле {gone!r} снято в фазе 5 и не должно возвращаться"
+            )
+
+
+class TestStopLeavesNoCacheBehind:
+    """``ApplicationContext.stop()`` MUST NOT трогать снимок.
+
+    Раньше здесь стоял обратный тест: ``stop()`` обязан был закрывать
+    ``cache_provider``, иначе на Windows файл оставался залоченным
+    процессом (ERROR_SHARING_VIOLATION) и следующий инстанс не мог его
+    открыть. С фазой 5 (п. 5.8) предмета проверки не осталось: контекст
+    вообще не держит снимок, и ``stop()`` не должен ни закрывать, ни даже
+    упоминать его.
+
+    Оставлен обратный вариант — ``stop()`` обязан быть идемпотентным и не
+    падать, даже если кто-то всё же проставит снятое поле руками: снятое
+    поле не должно превращать остановку в исключение.
     """
 
-    def test_stop_closes_cache_provider(self) -> None:
+    def test_stop_tolerates_removed_cache_field(self) -> None:
         from lib.core.application_context import ApplicationContext
 
         ctx = ApplicationContext.__new__(ApplicationContext)
@@ -122,25 +144,11 @@ class TestStopClosesCacheProvider:
         ctx.runtime_events_subscriber = None
         ctx.usage_store = None
         ctx.runtime_health = None
+        # Поле снято в фазе 5; проставляем его вручную — stop() не должен
+        # ни обращаться к нему, ни падать из-за него.
         ctx.cache_provider = MagicMock(name="cache_provider")
-        ctx.cache_store = ctx.cache_provider  # alias, выставляется в start()
         ctx.stop()
-        ctx.cache_provider.close.assert_called_once_with()
-
-    def test_stop_skips_close_when_no_cache_provider(self) -> None:
-        from lib.core.application_context import ApplicationContext
-
-        ctx = ApplicationContext.__new__(ApplicationContext)
-        ctx._started = True
-        ctx._shutdown = None
-        ctx.bus = None
-        ctx.runtime_events_subscriber = None
-        ctx.usage_store = None
-        ctx.runtime_health = None
-        ctx.cache_provider = None
-        ctx.cache_store = None
-        # НЕ должно быть AttributeError при ``getattr(...,None) == None``.
-        ctx.stop()
+        ctx.cache_provider.close.assert_not_called()
 
     def test_stop_is_idempotent_when_not_started(self) -> None:
         """Повторный stop (или stop до start) — no-op."""

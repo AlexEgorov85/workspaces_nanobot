@@ -239,9 +239,13 @@ class TestCreate:
         assert ctx.tool_audit_hook in ctx.hooks
         assert ctx.runtime_patcher is not None
         assert ctx.transcription_service is not None
-        assert ctx.preload_service is not None
         assert ctx.db_logging_service is None
-        assert ctx.cache_loader is None
+        # Снимком агент не владеет (фаза 5, п. 5.8): полей cache_* на
+        # контексте больше нет, и их отсутствие — часть контракта, а не
+        # «ещё не загрузилось».
+        for gone in ("cache_store", "cache_provider", "cache_loader",
+                     "preload_service"):
+            assert not hasattr(ctx, gone), f"поле {gone!r} должно быть снято"
 
     def test_storage_file_when_no_dsn(self, full_fake_modules):
         from lib.core.application_context import ApplicationContext
@@ -437,7 +441,7 @@ class TestResolvePublishPath:
         Подменяем ``Path.home()`` через ``tmp_path``, чтобы тест был
         детерминирован и не зависел от реальной ``$HOME`` на CI.
         """
-        from lib.core.application_context import resolve_cache_path
+        from lib.services.cache_provider_impl import resolve_cache_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             result = resolve_cache_path(str(tmp_path / "workspace"), None)
@@ -449,7 +453,7 @@ class TestResolvePublishPath:
 
     def test_default_uses_local_cache_under_home_with_empty_cfg(self, tmp_path):
         """Пустой cache_cfg → то же поведение, что и None."""
-        from lib.core.application_context import resolve_cache_path
+        from lib.services.cache_provider_impl import resolve_cache_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             result = resolve_cache_path(str(tmp_path / "workspace"), {})
@@ -459,7 +463,7 @@ class TestResolvePublishPath:
         ), result
 
     def test_local_path_absolute(self, tmp_path):
-        from lib.core.application_context import resolve_cache_path
+        from lib.services.cache_provider_impl import resolve_cache_path
 
         custom = tmp_path / "my-cache"
         result = resolve_cache_path(
@@ -469,7 +473,7 @@ class TestResolvePublishPath:
         assert Path(result).parent.exists()
 
     def test_local_path_relative_resolved_from_workspace(self, tmp_path):
-        from lib.core.application_context import resolve_cache_path
+        from lib.services.cache_provider_impl import resolve_cache_path
 
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -480,7 +484,7 @@ class TestResolvePublishPath:
 
     def test_local_path_unwritable_raises(self, tmp_path):
         """Если ``local_path`` нельзя создать — громкая OSError, не silent fallback."""
-        from lib.core.application_context import resolve_cache_path
+        from lib.services.cache_provider_impl import resolve_cache_path
 
         # ``local_path`` указывает на невозможный путь (файл как родитель).
         impossible = tmp_path / "a_file_not_dir"
@@ -493,7 +497,7 @@ class TestResolvePublishPath:
 
     def test_unknown_keys_are_silently_ignored(self, tmp_path):
         """Любой неизвестный ключ в cache_cfg (типа ``use_workspace_path`` из старой версии) — игнорируется."""
-        from lib.core.application_context import resolve_cache_path
+        from lib.services.cache_provider_impl import resolve_cache_path
 
         # Старые user-конфиги могут содержать use_workspace_path / publish_to_workspace
         # — больше нет shim'ов, эти ключи молча игнорируются.
@@ -512,56 +516,61 @@ class TestResolvePublishPath:
 
 
 class TestSingleMechanism:
-    """КРИТИЧНО: gateway и CLI/skill должны сходиться на одном пути.
+    """В проекте существует ровно ОДИН резолвер пути к снимку.
 
-    До v2.5.2 ``build_cache_provider`` хардкодил
-    ``table_registry.snapshot_path(workspace_root)``, а gateway писал
-    в ``~/.cache/...``. После деплоя CLI читал устаревший/пустой снимок.
+    Исторически тут проверялось, что gateway и ``build_cache_provider``
+    возвращают один и тот же путь. После фазы 5 такой тест стал бы
+    тавтологией — обе точки вызывали бы одну и ту же функцию, то есть
+    сравнивать было бы нечего. Исходный баг был не в том, что пути
+    разошлись, а в том, что резолвер **размножился**: skill-слой держал
+    собственную копию и gateway писал в один файл, а читался другой.
+
+    Поэтому страж смотрит на корень проблемы: определить второй резолвер
+    негде. Проверяется статически по всему дереву агента, потому что
+    копия может появиться в любом новом модуле.
     """
 
-    def test_gateway_and_cache_provider_agree_on_default(self, tmp_path, monkeypatch):
-        """С дефолтным конфигом обе точки возвращают один и тот же путь."""
-        from lib.core.application_context import resolve_cache_path
+    #: Единственное допустимое место определения. Функция переехала сюда из
+    #: ``application_context`` в фазе 5, потому что composition root больше
+    #: не открывает снимок, а резолвер нужен фабрике провайдера и
+    #: standalone-утилитам сборки индексов.
+    HOME = "lib/services/cache_provider_impl.py"
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
-            # Gateway path
-            gw_path = resolve_cache_path("/workspace", {})
+    #: Имена, которые ищет страж. ``resolve_publish_path`` — историческое
+    #: имя, ``resolve_snapshot_path`` — платформенное (``snapshot/store.py``).
+    #: Все три в списке: вернуться может любое, и любое молча размножит
+    #: резолвер, пока кто-то не посмотрит на импорт.
+    KNOWN = ("resolve_cache_path", "resolve_publish_path", "resolve_snapshot_path")
 
-            # Что build_cache_provider ВЫЧИСЛЯЕТ сейчас (после фикса)
-            cp_path = resolve_cache_path("/workspace", {})
+    def test_only_one_cache_path_resolver_exists(self) -> None:
+        import ast
 
-        assert gw_path == cp_path, (
-            f"Gateway ({gw_path}) и cache_provider ({cp_path}) "
-            f"должны давать одинаковый путь"
+        root = Path(__file__).resolve().parent.parent
+        # ``.worktrees`` — параллельные чекауты того же репозитория, не
+        # часть этого дерева (их код меняется в других ветках работы, и
+        # считать его за «второй резолвер» нельзя).
+        skip = {".git", ".worktrees", "__pycache__", "mcp-platform",
+                "data_store", "node_modules"}
+        found: list[str] = []
+        for path in root.rglob("*.py"):
+            rel = path.relative_to(root)
+            if any(part in skip for part in rel.parts):
+                continue
+            # tombstone'ы (имя с подчёркиванием) не считаются реализацией
+            if any(part.startswith("_") for part in rel.parts):
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError, OSError):
+                continue
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name in self.KNOWN:
+                    found.append(f"{rel.as_posix()}:{node.name}")
+
+        assert len(found) == 1 and found[0] == f"{self.HOME}:resolve_cache_path", (
+            "резолвер пути к снимку должен быть ровно один, с именем "
+            f"resolve_cache_path, в {self.HOME}; найдено: {found} — вторая "
+            "копия или переименование означает, что писать будут в один файл, "
+            "а читать из другого"
         )
-        assert gw_path == str(
-            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
-        )
 
-
-class TestWarnIfPublishPathOnNfs:
-    """``_warn_if_cache_path_on_nfs`` — Linux-only, no-op на других ОС."""
-
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="/proc/mounts отсутствует на Windows",
-    )
-    def test_warns_on_nfs_path(self, tmp_path, caplog):
-        """Если ``/proc/mounts`` указывает NFS — печатаем warning."""
-        from lib.core.application_context import _warn_if_cache_path_on_nfs
-
-        fake_mounts = f"{tmp_path} nfs rw,vers=3 0 0\n"
-        with patch("pathlib.Path.exists", return_value=True), \
-             patch.object(Path, "read_text", return_value=fake_mounts), \
-             patch("lib.core.application_context.Path.exists", return_value=True):
-            with caplog.at_level("WARNING"):
-                _warn_if_cache_path_on_nfs(str(tmp_path / "cache.duckdb"))
-        # Допускаем что warning может быть, а может и не быть — главное
-        # что функция не упала; для строгой проверки нужен реальный /proc/mounts.
-
-    def test_noop_on_windows(self):
-        from lib.core.application_context import _warn_if_cache_path_on_nfs
-
-        with patch("platform.system", return_value="Windows"):
-            _warn_if_cache_path_on_nfs("C:\\fake\\cache.duckdb")
-        # Просто не упасть — на Windows функция возвращает молча.

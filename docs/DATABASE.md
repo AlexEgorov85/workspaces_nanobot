@@ -49,13 +49,18 @@
   импортируются **лениво** внутри функций — импорт модуля остаётся лёгким,
   и gateway может управлять жизненным циклом без побочных эффектов.
 
-**Точка создания провайдера** — `lib/services/cache_provider.py::open_cache_provider(*, mode)`,
-единственная в рантайме. Она сама резолвит путь (`resolve_cache_path()`),
+**Точка создания провайдера** — `lib/services/cache_provider.py::open_cache_provider(*, mode)`.
+В runtime агента она больше не зовётся: снимком владеет capability `data`
+платформы (фаза 5, п. 5.8). Осталась для standalone-утилит сборки индексов.
+Она сама резолвит путь (`resolve_cache_path()` из
+`lib/services/cache_provider_impl.py`),
 настраивает экземпляр и открывает файл; вызывающий код получает `CacheStore`
-и не знает, какая реализация стоит за интерфейсом. Навык делегирует ей через
-`lib/core/skill_config.build_cache_provider()` (skill-side —
-`scripts/skill_config.build_cache_provider()`), тот же путь использует
-`tools/build_vectors.py`.
+и не знает, какая реализация стоит за интерфейсом. Раньше навык делегировал
+ей через `lib/core/skill_config.build_cache_provider()` (skill-side —
+`scripts/skill_config.build_cache_provider()`), тот же путь использовал
+`tools/build_vectors.py`. **После фазы 9 и 5 ни навык, ни runtime к ней не
+обращаются:** данные аудита идут операциями capability `audit` по MCP, файл
+снимка открывает capability `data` платформы.
 
 ## 🔌 Единый пул соединений PostgreSQL (`workspace/utils/db.py`)
 
@@ -171,7 +176,7 @@
 | `gateway.vector.index.default_root` | Каталог FAISS-индексов (в runtime не персистится — FAISS в памяти) | `data_store/vectors` |
 | `gateway.vector.index.indexes.<name>` | Декларативный конфиг индексов (`table`, `pk`, `source_table`, `content_columns`, `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`, `enabled`) — единственный источник; PG-реестр не читается | `audits_index`, `violations_index`, `audit_reports_index` |
 | `gateway.sync.*` | **удалена** — поллинга и пересинхронизации больше нет | — |
-| `gateway.cache.local_path` | Каталог файла кэша (имя `cache.duckdb` добавляется внутри `resolve_cache_path()`) | `~/.cache/nanobot/duckdb` |
+| `gateway.cache.local_path` | **Убран в фазе 5 (п. 5.7).** Тип `CacheSettings` и поле `GatewaySettings.cache` сняты: агент больше не открывает файл, а путь снимка объявляет платформа — `mcp-platform/platform.json` → `data.snapshot_path`. Ключ в `project.json` и раньше не был объявлен | — |
 
 > **Дубликат объявлений, который пока живёт.** `skills.audit_analyzer.tables[*]`
 > и `skills.audit_analyzer.vector_indexes[*]` нужны агенту для загрузки снимка
@@ -198,6 +203,17 @@ DSN подключается только через `channels.postgres.dsn` в 
 ---
 
 ## 🔄 Жизненный цикл кеша
+
+> **Раздел описывает платформенную сторону (фаза 5, п. 5.8).** В агенте этой
+> подсистемы больше нет: `ApplicationContext` не загружает снимок, не держит
+> провайдер и не прогревает индексы; полей `cache_provider` / `cache_store` /
+> `cache_loader` / `preload_service` на контексте не осталось, а
+> `resolve_cache_path` переехал в `lib/services/cache_provider_impl.py`.
+> Всё, что описано ниже как «сервис агента», теперь выполняет capability
+> `data` платформы. Кластер `lib/services/duckdb_cache_store.py`,
+> `cache_provider.py`, `cache_load_service.py` в дереве агента пока лежит, но
+> не подключён к runtime — он живёт на standalone-утилиты сборки индексов.
+> Полное описание работающей стороны: `mcp-platform/libs/enterprise_data/`.
 
 **Кеш — снимок, а не зеркало.** Он наполняется один раз при старте процесса и
 больше не обращается к PostgreSQL. Дельт, фонового поллинга, очереди задач и
@@ -236,8 +252,9 @@ DSN подключается только через `channels.postgres.dsn` в 
   DuckDB-тип из information_schema).
 
   Путь файла вычисляется через `resolve_cache_path()`
-  (`lib/core/application_context.py`) — **единый механизм**, общий для runtime и
-  навыка:
+  (`lib/services/cache_provider_impl.py`; до фазы 5 он жил в
+  `lib/core/application_context.py`) — **единый механизм**, общий для всех
+  потребителей:
 
   1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
   2. **default** → `~/.cache/nanobot/duckdb/cache.duckdb`.
@@ -316,7 +333,7 @@ writer; поскольку writer'ом является только загру�
 |------|-----------|--------|
 | `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Таблица векторов, включается в загрузку и прогревается в FAISS (имя настраивается) |
 | `gateway.vector.index.indexes` | `{}` | Декларация индексов (`<name>` → `VectorIndexConfig`); единственный источник конфигурации индексов (реестр `agent_vector_index_config` не читается) |
-| `gateway.cache.local_path` | `~/.cache/nanobot/duckdb/cache.duckdb` | Путь файла кэша (`resolve_cache_path()`); legacy `<workspace>/data_store/duckdb/` не поддерживается |
+| `gateway.cache.local_path` | — | **Снято в фазе 5 (п. 5.7)**, см. таблицу `project.json` выше. Путь снимка объявляет платформа: `platform.json` → `data.snapshot_path` |
 | `channels.postgres.pool.max_conn` | `4` | Число слотов пула; оно же ограничивает число потоков загрузки |
 
 Секции `gateway.sync.*` **удалена**: поллинга и пересинхронизации больше нет,

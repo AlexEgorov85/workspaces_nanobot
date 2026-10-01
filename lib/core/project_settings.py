@@ -222,7 +222,6 @@ class GatewaySettings(_StrictOptional):
     # duckdb_query / vector_search: Agent-facing tools удалены (этап 18).
     vector: VectorInfrastructureSettings | None = None
     heartbeat: HeartbeatSettings | None = None
-    cache: CacheSettings | None = None
     usage_store: UsageStoreSettings | None = None
     session_cold_sync: SessionColdSyncSettings | None = None
     startup: StartupSettings | None = None
@@ -257,43 +256,6 @@ class GatewaySettings(_StrictOptional):
                 + "\n".join(problems)
             )
         return data
-
-
-class CacheSettings(_StrictOptional):
-    """Параметры runtime-кеша (DuckDB-снапшот).
-
-    **ЕДИНЫЙ механизм вычисления пути к кешу** —
-    :func:`lib.core.application_context.resolve_cache_path`. Все
-    слои runtime'а (gateway + CLI/skill) обязаны звать её, чтобы
-    путь записи и путь чтения **совпадали**.
-
-    Без настройки default — ``~/.cache/nanobot/duckdb/cache.duckdb``
-    (POSIX ``fcntl`` работает там штатно; на NFS ATTACH падает с
-    ``"Conflicting lock is held in PID 0"`` даже на свежем файле после
-    ``rm`` — проверено эмпирически). Legacy
-    ``<workspace>/data_store/duckdb/cache.duckdb`` **не поддерживается**
-    (на NFS гарантированно ломается, и именно это расхождение между
-    gateway и CLI было исходным багом v2.5.1 и ниже).
-
-    Единственный knob:
-
-      * ``local_path`` (str, опц.) — абсолютный/относительный (от workspace)
-        путь к каталогу на **локальной** ФС, где будет лежать
-        ``cache.duckdb``. Полезно, когда у ``~/.cache`` нет места или
-        нужна отдельная ФС.
-
-    Пример для jupyter-инсталляции, где ``~/.cache`` не подходит:
-
-    .. code-block:: jsonc
-
-        "gateway": {
-          "cache": {
-            "local_path": "/var/lib/nanobot/duckdb"
-          }
-        }
-    """
-
-    local_path: str | None = None
 
 
 class CliSettings(_StrictOptional):

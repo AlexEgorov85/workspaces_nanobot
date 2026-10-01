@@ -1,9 +1,14 @@
-"""Тесты для ``lib/core/skill_config.py`` — единый API для всех skill'ов."""
+"""Тесты для ``lib/core/skill_config.py`` — единый API для всех skill'ов.
+
+Модуль перестал выдавать доступ к снимку (фаза 5, п. 5.6): ``build_cache_provider``,
+``get_in_memory_cache_path``, ``get_vector_index_path``, ``get_vector_db_table``,
+``get_vector_indexes``, ``get_embedding_config``/``get_embedding_model`` убраны
+вместе с их тестами. Осталось конфиг-навыка и состав данных через TableRegistry.
+"""
 
 from __future__ import annotations
-from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
+from tests.conftest import TEST_TABLE, TEST_TABLE_2
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -85,37 +90,6 @@ class TestDbSchema:
         with patch("config.SETTINGS", _settings_with({"audit_analyzer": cfg})):
             with pytest.raises(ValueError, match="fully qualified"):
                 skill_config.get_db_schema("audit_analyzer")
-
-
-class TestVectorDbTable:
-    def test_from_gateway_config(self) -> None:
-        from lib.core import skill_config
-
-        settings = {
-            "skills": {"audit_analyzer": {"tables": []}},
-            "gateway": {"vector": {"index": {"storage_table": TEST_VECTOR_TABLE}}},
-        }
-        with patch("config.SETTINGS", settings):
-            assert skill_config.get_vector_db_table("audit_analyzer") == TEST_VECTOR_TABLE
-
-    def test_fallback_to_tables_type_vector(self) -> None:
-        from lib.core import skill_config
-
-        settings = {
-            "skills": {"audit_analyzer": {"tables": [
-                {"name": TEST_VECTOR_TABLE, "type": "vector"},
-            ]}},
-            "gateway": {},
-        }
-        with patch("config.SETTINGS", settings):
-            assert skill_config.get_vector_db_table("audit_analyzer") == TEST_VECTOR_TABLE
-
-    def test_returns_empty_when_no_storage(self) -> None:
-        from lib.core import skill_config
-
-        settings = {"skills": {"audit_analyzer": {"tables": []}}, "gateway": {}}
-        with patch("config.SETTINGS", settings):
-            assert skill_config.get_vector_db_table("audit_analyzer") == ""
 
 
 class TestMultiSkill:
@@ -227,3 +201,65 @@ class TestPredefinedScripts:
                     skill_config.get_predefined_scripts_table("audit_analyzer")
         finally:
             table_registry.clear()
+
+
+class TestNoCacheApiRemains:
+    """Cache-API не должен вернуться в skill-side API (фаза 5, п. 5.6).
+
+    Проверка на **отсутствие**, а не на поведение: у снятой функции нет
+    предмета для вызова, но её можно снова объявить — и тогда навык снова
+    начнёт доставать снимок у агента, то есть у файла появятся два
+    владельца: capability ``data`` платформы и агент. Расхождение при этом
+    молчаливое, поэтому нужен явный страж.
+
+    Проверено мутацией: возврат ``build_cache_provider`` в
+    ``lib/core/skill_config.py`` ловится этим тестом, а не падением
+    какого-нибудь импорта.
+    """
+
+    #: Все функции, выдававшие доступ к снимку, векторам и эмбеддингам.
+    GONE = (
+        "build_cache_provider",
+        "get_in_memory_cache_path",
+        "get_vector_index_path",
+        "get_vector_db_table",
+        "get_vector_indexes",
+        "get_embedding_config",
+        "get_embedding_model",
+        "_vector_indexes_list",
+    )
+
+    def test_no_skill_module_exposes_cache_api(self) -> None:
+        from lib.core import skill_config
+
+        for name in self.GONE:
+            assert not hasattr(skill_config, name), (
+                f"{name!r} возвращён в skill-side API — снимком владеет "
+                "capability data платформы, а агент был бы вторым владельцем"
+            )
+
+    def test_skill_config_does_not_import_cache_provider(self) -> None:
+        """Модуль не должен тянуть реализацию хранилища даже лениво.
+
+        Даже без объявленных функций остаточная ссылка на
+        ``lib.services.cache_provider`` означала бы, что skill-side API
+        всё ещё считает хранилище своим делом.
+        """
+        import ast
+        import inspect
+
+        source = inspect.getsource(
+            __import__("lib.core.skill_config", fromlist=["skill_config"])
+        )
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+            elif isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+
+        for module in sorted(imported):
+            assert "cache_provider" not in module, (
+                f"skill_config импортирует {module!r} — доступ к хранилищу "
+                "снят вместе с cache-API"
+            )

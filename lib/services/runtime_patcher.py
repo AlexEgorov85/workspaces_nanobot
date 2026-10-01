@@ -481,7 +481,6 @@ class RuntimePatcher:
         db_logging_service: Any = None,
         session_manager: Any = None,
         recent_files_hook: Any = None,
-        cache_store: Any = None,
         bus: Any = None,
     ) -> PatchReport:
         """Применить все патчи и вернуть отчёт.
@@ -500,9 +499,10 @@ class RuntimePatcher:
                 ``None`` — патч пропускается).
             session_manager: ``SessionManager``/``PGSessionManager`` — для
                 персиста истории подагентов (может быть ``None``).
-            cache_store: ``CacheProvider`` (резерв для будущих патчей;
-                сейчас не используется — DI project tools переехал в
-                ``lib/services/project_tool_loader.py``).
+
+            Параметр ``cache_store`` снят в фазе 5 (п. 5.8): он был резервом
+            «на будущее», ни один патч его не читал, а DI project tools
+            переехал в ``lib/services/project_tool_loader.py``.
 
         Returns:
             ``PatchReport`` со списками ``applied`` / ``skipped`` (с причиной).

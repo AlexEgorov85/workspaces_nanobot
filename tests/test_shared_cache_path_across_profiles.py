@@ -74,22 +74,23 @@ class TestResolvePublishPathConsistencyAcrossProfiles:
     def test_default_path_is_workspace_independent(self) -> None:
         """``resolve_cache_path`` возвращает единый дефолтный путь.
 
-        Без явного ``local_path`` в конфиге оба профиля MUST получить
+        Без явного ``local_path`` в конфиге вызывающий MUST получить
         ``~/.cache/nanobot/duckdb/cache.duckdb``.
         """
-        from lib.core.application_context import (
-            resolve_cache_path,
+        from lib.services.cache_provider_impl import (
             _default_local_cache_dir,
+            resolve_cache_path,
         )
 
         default_dir = _default_local_cache_dir()
-        path_gateway = resolve_cache_path(None, cache_cfg=None)
-        path_cli = resolve_cache_path(None, cache_cfg=None)
-        assert path_gateway == path_cli
+        path_with_ws = resolve_cache_path("/some/workspace", cache_cfg=None)
+        path_without_ws = resolve_cache_path(None, cache_cfg=None)
+        assert path_with_ws == path_without_ws
+        assert default_dir not in (None, "")
 
     def test_explicit_local_path_shared(self) -> None:
         """Явный ``local_path`` в cache_cfg -> путь НЕ зависит от workspace."""
-        from lib.core.application_context import resolve_cache_path
+        from lib.services.cache_provider_impl import resolve_cache_path
 
         cfg = {"local_path": "/tmp/shared-cache"}
         path1 = resolve_cache_path(None, cache_cfg=cfg)

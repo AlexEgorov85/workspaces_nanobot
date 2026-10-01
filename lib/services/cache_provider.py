@@ -392,8 +392,10 @@ def open_cache_provider(
     """
     # Импорты внутри функции: модули реализации импортируют этот модуль
     # (ABC, SearchResult, исключения), и на уровне модулей получился бы цикл.
-    from lib.core.application_context import resolve_cache_path
-    from lib.services.cache_provider_impl import read_embedding_config
+    from lib.services.cache_provider_impl import (
+        read_embedding_config,
+        resolve_cache_path,
+    )
     from lib.services.duckdb_cache_store import DuckDbCacheStore
     from lib.services.table_registry import table_registry
 

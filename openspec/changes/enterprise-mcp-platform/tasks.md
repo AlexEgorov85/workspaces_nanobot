@@ -564,6 +564,20 @@
 
 Атомарный коммит без MCP-работы. Ни одна строка кластера не удаляется.
 
+> **Уточнение преамбулы, 2026-10-01.** Пункт «ни одна строка кластера не
+> удаляется» писался, когда агент ещё был обязан читать снимок, и после
+> фазы 9 оно перестало быть правдой: навык ходит к данным по MCP. Снята
+> именно **обвязка** (5.6–5.8) — 465 строк в `application_context.py` плюс
+> мёртвая DI-ветка в `project_tool_loader.py`. Сами модули кластера
+> (`duckdb_cache_store.py`, `cache_provider.py`, `cache_load_service.py`,
+> `cache_provider_impl.py`, `preload_service.py`, `vector_index_service.py`)
+> **в дереве агента пока остаются** и подключены только к standalone-утилитам
+> сборки индексов — удаление их отдельным пунктом не запланировано ни в фазе
+> 5, ни в 10, и это отдельное решение: оно затрагивает `tools/build_vectors.py`
+> и `tools/check_indexes.py`, у которых нет заявленных аналогов на платформе.
+> Пока кластер лежит, `duckdb`/`faiss`/`pyarrow` обязаны оставаться в
+> `requirements.txt` агента — снять их можно только вместе с ним (10.3).
+
 - [x] 5.1 Перенести `duckdb_cache_store.py` (1455) в `libs/enterprise_data`.
       **Сделано частично, в фазе 3:** читающая половина портирована в
       `libs/enterprise_data/snapshot/`, писатель — `snapshot/writer.py`
@@ -601,33 +615,50 @@
       `lib/`, `tools/` и `workspace/` делают `from utils.db import ...`, а
       `gateway.py` добавляет пути уже внутри `main()`, то есть после импорта
       модулей. Удаление хака — отдельное решение на границе импортов.
-- [ ] 5.6 Убрать cache-API из `lib/core/skill_config.py`. `TableRegistry` и
+- [x] 5.6 Убрать cache-API из `lib/core/skill_config.py`. `TableRegistry` и
       `skill_registration.py` **остаются** — они описывают состав снимка
-      **Заблокировано фазой 9.** `workspace/skills/audit_analyzer` ходит в
-      данные через `build_cache_provider()` → `CacheProvider.query_sql` /
-      `search_vector` / `get_schema`, и это его основной путь доступа, а не
-      вспомогательный. Агент по условию границы не может импортировать
-      `libs/enterprise_data`, поэтому единственный выход — перевести навык на
-      операции capability `audit` (фаза 9), и только потом убирать cache-API
-- [ ] 5.7 Секция `CacheSettings` переезжает из `project_settings.py` в конфиг
+      **Сделано 2026-10-01.** Сняты `build_cache_provider`,
+      `get_in_memory_cache_path`, `get_vector_index_path`,
+      `get_vector_db_table`, `get_vector_indexes`, `get_embedding_config`,
+      `get_embedding_model` и хелпер `_vector_indexes_list` — модуль 244 → 193
+      строки. Проверено потребителями, а не на глаз: production-вызовов не
+      осталось ни у одного (единственный был у `audit_analyzer`, уехавшего в
+      фазу 9); `legal_summarizer` берёт только `get_cli_config`,
+      `get_max_retries`, `get_chunking_config`, `get_brief_context_config`, и все
+      четыре остались. Вместе с ними ушли три теста `TestVectorDbTable` и два
+      теста `build_cache_provider` в `test_cache_readiness_and_skill_role.py`
+- [x] 5.7 Секция `CacheSettings` переезжает из `project_settings.py` в конфиг
       сервера как путь снимка
       **Сторона платформы сделана (пункт 2.19a, коммит `507d895`):** путь
       объявляется в `platform.json → data.snapshot_path`, и `_about` этой
       секции прямо говорит, что снимком владеет capability `data` и объявлять
       его должна она, а не получать окружением агента — два владельца одного
       файла означали бы, что снимок читают не оттуда, откуда пишут.
-      **Осталось:** убрать `CacheSettings` из агента — заблокировано вместе с
-      5.6 и 5.8
-- [ ] 5.8 Убрать 88 строк кэш-обвязки из `application_context.py`:
+      **Агентская сторона сделана 2026-10-01:** класс `CacheSettings` и поле
+      `GatewaySettings.cache` удалены (`CacheSettings` не был в `__all__`, так
+      что чистка внутренняя). Ключа `gateway.cache` в `project.json` и раньше не
+      было — секция была мёртвой, типизировался пустой класс
+- [x] 5.8 Убрать 88 строк кэш-обвязки из `application_context.py`:
       `resolve_cache_path`, `_warn_if_cache_path_on_nfs`, `_init_cache_runtime`,
       `check_duckdb_cache`, `check_vector_search`
-      **Заблокировано фазой 9** — по той же причине, что и 5.6: снять обвязку
-      нельзя, пока `audit_analyzer` читает снимок напрямую. Обвязка больше не
-      висячая и её размер измерен точно: `_init_cache_runtime` — 190 строк,
-      `_warn_if_cache_path_on_nfs` — 60, `resolve_cache_path` — 73,
-      `_default_local_cache_dir` — 17, `_make_preload` импортирует
-      `PreloadService`, `check_duckdb_cache`/`check_vector_search` регистрируются
-      в readiness как обязательные компоненты
+      **Сделано 2026-10-01, 1936 → 1471 строку (−465).** Сняты все пять
+      перечисленных плюс `_default_local_cache_dir`, `_make_preload` и
+      `_record_sync_skipped` (DEPRECATED-shim с нулём вызывающих, ссылавшийся
+      ровно на удаляемую функцию). Следом: поля `cache_loader` /
+      `cache_provider` / `cache_store` / `preload_service` на контексте, вызов
+      `_init_cache_runtime` из `create()`, передача `cache_store` в
+      `register_project_tools` и в `RuntimePatcher.apply_all` (там он был
+      резервом, который не читал ни один патч), `cache_provider.close()` в
+      `shutdown()`, регистрации `duckdb_cache`/`vector_search` в readiness, и
+      блок печати «audit_analyzer кэш загружен» в `gateway.py`.
+      **Заодно снята мёртвая DI-ветка в `project_tool_loader.py`:**
+      `set_provider` / `set_connection_factory` не определяет ни один project
+      tool — после фазы 9 доступ к данным аудита идёт через MCP-клиент.
+      **Про `resolve_cache_path`:** функция не исчезла, а переехала в
+      `lib/services/cache_provider_impl.py` — её единственный потребитель,
+      `open_cache_provider()`, живёт там же и зовётся standalone-утилитами
+      сборки индексов. Ссылаться на `application_context` после снятия обвязки
+      было бы ссылкой на несуществующий символ
 - [x] 5.9 Удалить `sql/vectors/create_vector_index_config.sql` и
       `create_vector_index_store.sql` — это legacy прошлого шага, а не снимок
       **Мёртвость проверена, а не предположена:** `tools/migrate.py` обходит
@@ -671,8 +702,51 @@
       ловится, и что слово «duckdb» в тексте ошибки нарушением не считается.
       Маркер `httpx` расширен на эмбеддер: строковое правило по
       `chat/completions` пропускало копию HTTP-клиента в `libs/vectors`.
-- [ ] 5.12 Переписать `tests/test_application_context*` (5 файлов)
-- [ ] 5.13 **Пересобрать baseline** и зафиксировать новую строку падений
+- [x] 5.12 Переписать `tests/test_application_context*` (5 файлов)
+      **Сделано 2026-10-01.** Из 5 файлов затронуты 4; `test_application_context_logging.py`,
+      `test_application_context_schema_validation.py` и
+      `test_application_context_single_application_point.py` кэша не касались
+      и остались нетронутыми. Что и почему:
+      * `test_application_context.py` — `TestResolvePublishPath` (6 тестов)
+        перенаправлен на новый домен `cache_provider_impl`; класс
+        `TestWarnIfPublishPathOnNfs` удалён вместе с функцией;
+        `TestSingleMechanism` **переписан, а не перенаправлен**: после переноса
+        обе «точки» вызывали одну и ту же функцию, то есть тест стал
+        тавтологией, сравнивающей функцию с собой. Теперь он проверяет
+        корень исходного бага — что в дереве **ровно одно** определение
+        резолвера пути (AST-обход, tombstone'ы и `.worktrees` исключены);
+        страж сразу нашёл живую проблему: в `.worktrees/` лежит параллельный
+        чекаут с собственной копией, то есть проверка не была декоративной
+      * `test_application_context_cache_lifecycle.py` — удалены
+        `TestInitCacheRuntimeReturnsProviderAndLoader` и
+        `TestCacheRuntimeLoadThenReadOrdering` (−139 строк). Инварианты не
+        потеряны, а портированы пунктом 5.10: порядок «загрузка → закрытие
+        writer → чтение» — `test_snapshot_load_service.py::test_snapshot_becomes_readable`,
+        отсутствие фоновых потоков — `test_load_is_blocking_and_leaves_no_threads`,
+        потолок по `max_conn` — `test_snapshot_load_service_bounds.py`
+      * `test_application_context_role.py` — `TestStopClosesCacheProvider`
+        перевёрнут в `TestStopLeavesNoCacheBehind`: прежний требовал, чтобы
+        `stop()` закрывал снимок; теперь предмет проверки снят, и полезно
+        проверить обратное — что `stop()` снятое поле не трогает и не падает
+        на нём
+      * `test_cache_readiness_and_skill_role.py` — четыре теста компонента
+        `duckdb_cache` заменены на `test_only_postgres_is_registered`
+        (проверка **на отсутствие**: вернулась бы регистрация — компонент без
+        ресурса всегда DOWN, и `RuntimeReadiness` не смог бы стать READY
+        никогда, то есть тихо сломался бы старт всей системы), плюс
+        `test_readiness_can_reach_ready` и `test_postgres_down_is_reported`
+      * `test_shared_cache_path_across_profiles.py` — два теста
+        перенаправлены на новый домен; сравнение «gateway vs cli» заменено на
+        «с workspace vs без workspace»
+- [x] 5.13 **Пересобрать baseline** и зафиксировать новую строку падений
+      **Сделано 2026-10-01.** Было 3734 passed / 31 skipped / 4 xfailed,
+      стало **3737 passed / 30 skipped / 4 xfailed**, 0 failed. Чистая
+      разница — это разница удалённых классов и добавленных стражей; skip
+      потерян один, потому что `test_warns_on_nfs_path` пропускался на
+      Windows и ушёл вместе с `_warn_if_cache_path_on_nfs`.
+      Ручные прогоны агента в этой фазе не делались: правило владельца
+      «тестировать только MCP» для агента, изменения проверены полным
+      прогоном `tests`
 - [x] 5.14 Проверить, что `duckdb` и `pyarrow` в зависимостях сервера, а в
       зависимостях агента — нет.
       **Проверка нашла ровно то, зачем пункт и писался: сторона сервера была

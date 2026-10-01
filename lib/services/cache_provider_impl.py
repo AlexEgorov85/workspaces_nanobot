@@ -383,3 +383,106 @@ def read_vector_index_config() -> dict[str, Any]:
             "enabled": c.get("enabled", True),
         }
     return result
+
+# ---------------------------------------------------------------------------
+# Путь к файлу снимка (перенесено из application_context, фаза 5, п. 5.8)
+#
+# Живёт здесь, а не в composition root: единственный потребитель —
+# open_cache_provider() в cache_provider.py и standalone-утилиты сборки
+# индексов. Сам агент снимок больше не открывает, но объявленный путь
+# всё ещё вычисляетcя в одном месте, иначе «писать сюда, читать оттуда».
+# ---------------------------------------------------------------------------
+
+
+def _default_local_cache_dir() -> "Path":
+    """Безопасный default для runtime-кеша: ``~/.cache/nanobot/duckdb``.
+
+    DuckDB ATTACH берёт эксклюзивный flock, который NFS не отдаёт
+    (``"Conflicting lock is held in PID 0"`` на свежем файле после ``rm``).
+    Поэтому default для snapshot'а — **локальный** кеш-пользовательский
+    каталог (POSIX ``fcntl`` работает штатно на ext4/tmpfs/overlay2/xfs).
+    На Windows ``Path.home()`` указывает на ``%USERPROFILE%`` (``C:\\Users\\X\\``);
+    на Linux/macOS — ``/home/X`` / ``/Users/X``.
+
+    Структура каталога — ``<home>/.cache/nanobot/duckdb/cache.duckdb``.
+    Совпадает с XDG Base Directory Specification для user-level cache
+    (``$XDG_CACHE_HOME`` или ``~/.cache``).
+    """
+    from pathlib import Path
+
+    return Path.home() / ".cache" / "nanobot" / "duckdb"
+
+
+def resolve_cache_path(workspace_path, cache_cfg: dict | None = None) -> str:
+    """**ЕДИНЫЙ** механизм вычисления пути к файлу кэша ``cache.duckdb``.
+
+    Имя функции исторически было ``resolve_publish_path``, хотя публикации
+    не существует: файл кэша один, и «снимок для читателей» снят вместе с
+    ``publish()``. Старое имя вводило в заблуждение при каждом чтении
+    call-site'а, поэтому переименовано.
+
+    **Безопасный default**: ``~/.cache/nanobot/duckdb/cache.duckdb``.
+    Решение осознанное: DuckDB берёт эксклюзивный file lock, который
+    NFS не отдаёт (``"Conflicting lock is held in PID 0"`` на свежем файле
+    после ``rm`` — проверено эмпирически).
+
+    Управление через ``cache_cfg`` (как срез из
+    ``project.json::gateway.cache``):
+
+    * ``local_path`` (str, опц.) — абсолютный/относительный (от workspace)
+      путь к **каталогу** на локальной ФС, в котором будет лежать
+      ``cache.duckdb``. Имя файла добавляется здесь, поэтому
+      ``local_path`` = ``/opt/duckdb``, а не ``/opt/duckdb/cache.duckdb``.
+      Полезно, когда у ``~/.cache`` нет места или нужна отдельная ФС.
+
+    **Никаких escape-hatch'ей и режимов совместимости.** Один механизм,
+    один путь: либо явный ``gateway.cache.local_path``, либо default
+    ``~/.cache/nanobot/duckdb/cache.duckdb``. Legacy
+    ``<workspace>/data_store/duckdb/cache.duckdb`` на NFS **не
+    поддерживается** и больше не доступен через эту функцию — он
+    приводил к расхождению между gateway и CLI/skill.
+
+    **Согласованность gateway ↔ CLI/skill.** Эту функцию зовёт и
+    composition root (``_init_cache_runtime`` — для NFS-предупреждения), и
+    единственная точка создания провайдера (``open_cache_provider``), а
+    значит — runtime, skills, tools и standalone-утилиты.
+
+    Если эти слои дадут разные пути — владелец пишет в одно место,
+    читатель открывает другое, и скилл видит пустой кэш. До v2.5.2
+    ``build_cache_provider`` хардкодил
+    ``table_registry.snapshot_path(workspace_root)``, который расходился
+    с новым safe default после деплоя. v2.5.2+ все точки вызывают
+    эту pure-функцию с одними и теми же ``gateway.cache.*``.
+
+    Args:
+        workspace_path: путь к workspace (для разрешения относительного
+            ``local_path``).
+        cache_cfg: dict — подсекция ``gateway.cache`` из project.json
+            (или ``None``/пустой dict, если не задана).
+
+    Returns:
+        str-путь к ``cache.duckdb`` (всегда на локальной ФС).
+
+    Raises:
+        OSError: если ни явный путь, ни default, ни workspace-local
+            fallback не могут быть созданы. **Не молчит** — падает
+            громко, чтобы проблема была видна сразу.
+    """
+    from pathlib import Path
+
+    if not isinstance(cache_cfg, dict):
+        cache_cfg = {}
+
+    # 1) Явный override: gateway.cache.local_path.
+    local_path = cache_cfg.get("local_path")
+    if isinstance(local_path, str) and local_path.strip():
+        p = Path(local_path).expanduser()
+        if not p.is_absolute() and workspace_path:
+            p = Path(workspace_path) / p
+        p.mkdir(parents=True, exist_ok=True)
+        return str(p / "cache.duckdb")
+
+    # 2) Default: ~/.cache/nanobot/duckdb/cache.duckdb на локальной ФС.
+    default = _default_local_cache_dir()
+    default.mkdir(parents=True, exist_ok=True)
+    return str(default / "cache.duckdb")

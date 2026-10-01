@@ -1,4 +1,4 @@
-"""Runtime API для skill'ов: конфигурация, таблицы, FAISS.
+"""Runtime API для skill'ов: конфигурация и состав данных.
 
 Параметризован по ``skill_name``. Каждый skill вызывает функции со своим
 именем (например, ``get_db_tables("audit_analyzer")``). Это единая точка
@@ -7,21 +7,24 @@
 Реализация читает секцию ``project.json::skills.<name>`` через
 ``config.SETTINGS`` и табличный реестр через ``lib.services.table_registry``.
 
-Embedding-конфиг (``get_embedding_config``, ``get_embedding_model``)
-больше НЕ параметризован по ``skill_name``: embedding — общая
-runtime-инфраструктура. Эти функции читают из
-``cache_provider_impl.read_embedding_config()`` — параметры подключения
-захардкожены модульными константами (``_EMBED_*``), ``auth_token`` —
-из ``os.environ['EMBED_TOKEN']``.
+**Чего здесь больше нет (фаза 5, п. 5.6).** Функции, которые выдавали доступ к
+снимку — ``build_cache_provider``, ``get_in_memory_cache_path``,
+``get_vector_index_path``, ``get_vector_db_table``, ``get_vector_indexes``,
+``get_embedding_config``, ``get_embedding_model``. Снимок, FAISS-индексы и
+эмбеддинги принадлежат capability ``data``/``vectors`` платформы; навык ходит к
+ним по MCP. Единственный production-потребитель этого API был
+``audit_analyzer`` (``scripts/_skill_config.py``), который после фазы 9
+запрашивает данные операциями capability ``audit``; ``legal_summarizer``
+берёт отсюда только конфиг — ``get_cli_config``, ``get_max_retries``,
+``get_chunking_config``, ``get_brief_context_config``.
+
+``TableRegistry`` и ``skill_registration.py`` остаются: они описывают состав
+снимка, а не способ доступа к нему.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
-    from lib.services.cache_provider import CacheProvider
+from typing import Any
 
 
 def _skills() -> dict[str, Any]:
@@ -42,12 +45,6 @@ def _tables_list(skill_name: str) -> list[dict]:
     cfg = _skill_cfg(skill_name)
     raw = cfg.get("tables") or []
     return [t if isinstance(t, dict) else {"name": t} for t in raw]
-
-
-def _vector_indexes_list(skill_name: str) -> list[dict]:
-    cfg = _skill_cfg(skill_name)
-    raw = cfg.get("vector_indexes") or []
-    return [v for v in raw if isinstance(v, dict)]
 
 
 def get_db_tables(skill_name: str) -> list[str]:
@@ -194,126 +191,3 @@ def get_brief_context_config(skill_name: str) -> dict[str, Any]:
             else None
         ),
     }
-
-
-def get_in_memory_cache_path(skill_root: Path | str) -> str:
-    """Путь к файлу runtime-кэша (``cache.duckdb``).
-
-    Файл общий для всех skill'ов. v2.5.2+ путь вычисляется через
-    :func:`resolve_cache_path` (``lib/core/application_context.py``) — ту же
-    pure-функцию, что вызывает и точка создания провайдера, поэтому
-    расхождение путей между читателем и владельцем невозможно
-    (см. ``gateway.cache.*``).
-
-    Безопасный default — ``~/.cache/nanobot/duckdb/cache.duckdb``
-    (на NFS DuckDB не отдаёт file lock). Override — через
-    ``gateway.cache.local_path`` (это **каталог**) в ``project.json``.
-
-    Функция НЕ параметризована ``skill_name`` (файл кэша — свойство
-    runtime-инфраструктуры, не skill-домена).
-
-    Раньше называлась «путём к снимку»: модель «снимок для читателей» снята,
-    путь указывает на единственный рабочий файл.
-    """
-    from lib.core.application_context import resolve_cache_path
-    from config import SETTINGS
-
-    workspace_root = Path(skill_root).parent.parent
-    gateway_cache_cfg = (SETTINGS.get("gateway") or {}).get("cache") or {}
-    if not isinstance(gateway_cache_cfg, dict):
-        gateway_cache_cfg = {}
-    return resolve_cache_path(str(workspace_root), gateway_cache_cfg)
-
-
-def get_vector_index_path(skill_name: str, skill_root: Path | str) -> str:
-    """Путь к FAISS-индексу: ``<default_root>/<index_name>``.
-
-    Берёт первый индекс из ``vector_indexes[]``. Путь относительный —
-    резолвится относительно ``skill_root`` (``workspace/skills/<name>``).
-    """
-    from config import SETTINGS
-
-    vi_list = _vector_indexes_list(skill_name)
-    vi_first = vi_list[0] if vi_list else {}
-    name = vi_first.get("name", "")
-    if not name:
-        return ""
-    vector_cfg = SETTINGS.get("gateway", {}).get("vector") or {}
-    index_cfg = vector_cfg.get("index") or {}
-    root = index_cfg.get("default_root") or "data_store/vectors"
-    p = Path(root) / name
-    return str(p) if p.is_absolute() else str(Path(skill_root) / p)
-
-
-def get_vector_db_table(skill_name: str) -> str:
-    """Имя таблицы-хранилища векторов.
-
-    Источник — ``gateway.vector.index.storage_table``. Fallback —
-    ``tables[type="vector"]`` (для standalone-утилит без ``gateway.*``).
-    """
-    from config import SETTINGS
-
-    vector_cfg = SETTINGS.get("gateway", {}).get("vector") or {}
-    index_cfg = vector_cfg.get("index") or {}
-    storage_table = index_cfg.get("storage_table") or ""
-    if storage_table:
-        return storage_table
-
-    for t in _tables_list(skill_name):
-        if t.get("type") == "vector" and t.get("name"):
-            return t["name"]
-    return ""
-
-
-def build_cache_provider(skill_name: str, skill_root: Path | str) -> CacheProvider:
-    """Провайдера кэша для skill'а — через ту же точку создания, что и у runtime.
-
-    Тонкий делегат в :func:`lib.services.cache_provider.open_cache_provider`.
-    Имя и сигнатура сохранены, потому что skill-side CLI
-    (``workspace/skills/audit_analyzer/scripts/cli.py``) вызывает их как
-    утверждённую точку входа (``docs/skill-tool-architecture.md`` §8) — и
-    skill, и runtime MUST получать один и тот же провайдер.
-
-    ``skill_root`` намеренно не участвует в разрешении пути: путь к файлу
-    кэша вычисляет сама фабрика единой функцией ``resolve_cache_path()``.
-    Раньше skill-слой разрешал его отдельно — это и было причиной расхождения
-    путей между двумя процессами.
-
-    Returns:
-        Экземпляр реализации ``CacheProvider``. Конкретный класс вызывающему
-        неизвестен.
-
-    Raises:
-        CacheBusyError: файл кэша держит другой процесс (кэш
-            process-exclusive) — skill не сможет работать и MUST сообщить об
-            этом явно, а не превращать конфликт в «файл не найден».
-    """
-    from lib.services.cache_provider import CacheAccessMode
-    from lib.services.cache_provider import open_cache_provider
-
-    return open_cache_provider(mode=CacheAccessMode.READ_ONLY)
-
-
-def get_vector_indexes(skill_name: str) -> dict[str, Any]:
-    """Метаданные индексов из ``gateway.vector.index.indexes``
-    (см. ``VectorIndexSettings.indexes`` и
-    ``cache_provider_impl.read_vector_index_config``)."""
-    from lib.services.cache_provider_impl import read_vector_index_config
-
-    return read_vector_index_config()
-
-
-def get_embedding_config() -> dict[str, Any]:
-    """Embedding-конфиг из захардкоженных констант.
-
-    Источник — ``cache_provider_impl.read_embedding_config()``
-    (``_EMBED_*``-константы; ``auth_token`` из ``os.environ['EMBED_TOKEN']``).
-    Не параметризовано ``skill_name``: embedding — общая инфраструктура.
-    """
-    from lib.services.cache_provider_impl import read_embedding_config
-
-    return read_embedding_config()
-
-
-def get_embedding_model() -> str:
-    return get_embedding_config().get("model", "mxbai-embed-large:latest")
