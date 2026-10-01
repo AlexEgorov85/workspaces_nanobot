@@ -21,9 +21,21 @@ FORBIDDEN_IDENTIFIERS = {
 # ``audit`` как самостоятельное слово здесь НЕ включено намеренно — имя
 # ``tool_audit_hook`` (инфра) легитимно; проверка идёт по уникальным
 # домен-маркерам (``oarb``, именам таблиц/индексов конкретного домена).
+#
+# **Имя навыка здесь НЕ запрещено** (изменено 2026-10-01, фаза 9). Правило
+# задумывалось против утечки имён таблиц, индексов и схем в generic-слой — и
+# именно они остались в списке. Запрет на ``audit_analyzer`` ловил не это, а
+# само упоминание навыка, то есть не то, что §22.3 защищает: рядом с ним
+# ``legal_summarizer_query`` жил с самого начала и проходил только потому, что
+# список был написан под один домен. Теперь данные отдаёт платформа по
+# capability, и каждому домену нужен свой вход, названный как этот домен.
+#
+# При этом импорт навыка из tool по-прежнему запрещён — ``audit_analyzer``
+# остаётся в ``FORBIDDEN_IDENTIFIERS``. Именно импорт через ``importlib`` был
+# причиной удаления ``workspace/tools/audit_analyzer_tool.py`` (§3, §22.1,
+# §22.2), а не упоминание в тексте.
 FORBIDDEN_STRING_TOKENS = (
     "oarb",
-    "audit_analyzer",
     "audits_index",
     "violations_index",
     "audit_reports_index",
@@ -43,6 +55,21 @@ def _collect_identifiers(tree: ast.AST) -> list[tuple[str, int]]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name:
                 out.append((node.name, node.lineno))
+        elif isinstance(node, ast.alias):
+            # Импорт skill'а из generic tool — то самое нарушение §3, из-за
+            # которого был удалён ``workspace/tools/audit_analyzer_tool.py``.
+            # Раньше страж ловил его лишь попутно, через токен в докстринге
+            # (``FORBIDDEN_STRING_TOKENS``); после смягчения того правила ловить
+            # больше нечего, поэтому имена импортов собираются явно.
+            #
+            # ``asname`` важнее оригинала: ``import x as y`` вводит в код имя
+            # ``y``, а ``alias.name`` — часть пути импорта, а не идентификатор
+            # дерева. Проверяем оба: и переименованное, и исходное имя.
+            if node.asname:
+                out.append((node.asname, node.lineno))
+            leaf = node.name.split(".")[-1]
+            if leaf and "*" not in node.name:
+                out.append((leaf, node.lineno))
         elif isinstance(node, ast.Name):
             out.append((node.id, node.lineno))
         elif isinstance(node, ast.Attribute):

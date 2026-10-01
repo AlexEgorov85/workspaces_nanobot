@@ -167,6 +167,17 @@ def canonical_project_tools() -> list[ToolSpec]:
             config_key=None,
         ),
         ToolSpec(
+            name="audit_analyzer_query",
+            module="audit_analyzer_query",
+            required=True,
+            description=(
+                "доступ к данным аудита через capability audit платформы "
+                "(list_scripts / run_script / generate_sql / vector_search); "
+                "заменяет skill-side scripts/cli.py навыка audit_analyzer"
+            ),
+            config_key="tools.audit_analyzer_query.enable",
+        ),
+        ToolSpec(
             name="document_read",
             module="document_read",
             required=True,
