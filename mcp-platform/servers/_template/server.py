@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
+from libs.enterprise_common.execution.factory import build_execution_layer
 from libs.enterprise_common.loader import build_server, load_registry
 from libs.enterprise_common.registry import ToolRegistry
 
@@ -45,8 +46,14 @@ def build() -> tuple[Any, ToolRegistry, ToolContainer]:
     """Собрать сервер и вернуть ``(server, registry, container)``."""
     container = build_container()
     registry = load_registry(CAPABILITIES_DIR, container, root=SERVER_ROOT)
+    # Слой исполнения обязателен и здесь: ``build_server`` без конвейера
+    # означал бы вызов операции без идентичности, без журнала и без предела
+    # времени. Настройки у заготовки нет — она поднимается как есть, поэтому
+    # пороги не заданы, а не заданы значениями в коде.
+    execution = build_execution_layer({}, session_root=SERVER_ROOT / ".sessions")
     transport = build_server(
         registry,
+        pipeline=execution.pipeline,
         name="enterprise-template",
         instructions="Эталонный сервер. Копируется при создании нового.",
     )

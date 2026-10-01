@@ -43,4 +43,5 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         tags=("infrastructure", "runtime-only"),
         permissions=("audit:run_script",),
         input_schema=build_input_schema(run_script),
+        quality_policy="sql_result",
     )

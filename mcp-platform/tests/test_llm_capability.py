@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import re
 import sys
 from pathlib import Path
@@ -64,6 +65,17 @@ class _Recorder:
 def _service(answer: Any = "ответ", error: BaseException | None = None) -> tuple[LlmService, _Recorder]:
     recorder = _Recorder(answer=answer, error=error)
     return LlmService(config=CONFIG, call=recorder), recorder
+
+
+def _handler(tool_module: Any) -> Any:
+    """Собрать операцию с живым сервисом и достать её обработчик.
+
+    Обработчик замыкает сервис внутри ``create_tool``: держать ради теста
+    модульную глобальную переменную значило бы проверять не тот объект,
+    который регистрируется в сервере.
+    """
+    service, _recorder = _service()
+    return tool_module.create_tool(ToolContainer(services={"llm": service})).handler
 
 
 class TestConstruction:
@@ -442,7 +454,8 @@ class TestProviderFailures:
 
 class TestOperation:
     def test_definition_metadata(self) -> None:
-        definition = complete_tool.create_tool(ToolContainer())
+        service, _ = _service()
+        definition = complete_tool.create_tool(ToolContainer(services={"llm": service}))
         assert isinstance(definition, ToolDefinition)
         assert definition.name == "complete"
         assert definition.category == "llm"
@@ -452,17 +465,24 @@ class TestOperation:
 
     def test_handler_returns_service_text(self) -> None:
         service, _ = _service("текст ответа")
-        complete_tool.create_tool(ToolContainer(services={"llm": service}))
-        assert complete_tool.handle_complete("вопрос") == "текст ответа"
+        definition = complete_tool.create_tool(ToolContainer(services={"llm": service}))
+        assert definition.handler("вопрос") == "текст ответа"
 
     def test_handler_without_service_reports_infrastructure_error(self) -> None:
-        complete_tool.create_tool(ToolContainer())
+        """Отсутствие сервиса видно на регистрации, а не на первом вызове.
+
+        Раньше операция держала контейнер в модульной переменной и падала
+        в момент вызова — то есть сервер поднимался, публиковал операцию и
+        отвечал отказом уже на первом обращении к ней.
+        """
         with pytest.raises(InfrastructureError, match="не зарегистрирован"):
-            complete_tool.handle_complete("вопрос")
+            complete_tool.create_tool(ToolContainer())
 
     def test_handler_never_uses_model_audience(self) -> None:
         """Профиль в операции зашит: вызывающая сторона его не выбирает."""
-        assert "audience" not in inspect.signature(complete_tool.handle_complete).parameters
+        service, _ = _service()
+        definition = complete_tool.create_tool(ToolContainer(services={"llm": service}))
+        assert "audience" not in inspect.signature(definition.handler).parameters
 
         tree = ast.parse(inspect.getsource(complete_tool))
         audiences = [
@@ -478,7 +498,9 @@ class TestOperation:
             assert keyword.value.id == "AUDIENCE_RUNTIME"
 
     def test_registry_schema_is_built_from_signature(self) -> None:
-        schema = build_input_schema(complete_tool.handle_complete)
+        service, _ = _service()
+        definition = complete_tool.create_tool(ToolContainer(services={"llm": service}))
+        schema = build_input_schema(definition.handler)
         assert schema["required"] == ["prompt"]
         assert schema["properties"]["prompt"] == {"type": "string"}
 
@@ -505,47 +527,115 @@ class TestLoaderAndWire:
         names = {path.name for path in discover_tool_files(CAPABILITY_DIR.parent)}
         assert "complete.py" in names
 
-    def test_wire_call_returns_text(self) -> None:
+    def test_wire_call_returns_text(self, tmp_path: Path) -> None:
         import anyio
         from libs.enterprise_common.loader import build_server
 
+        from conftest import call_tool, make_layer
+
         service, _ = _service("текст по проводу")
-        transport = build_server(self._registry(service), name="enterprise-mcp")
-        result = anyio.run(_call, transport, {"prompt": "вопрос"})
+        transport = build_server(
+            self._registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
+        )
+        result = anyio.run(call_tool, transport, "complete", {"prompt": "вопрос"})
         assert result.isError is False
         assert result.content[0].text == "текст по проводу"
 
-    def test_wire_error_carries_domain_code(self) -> None:
+    def test_wire_error_carries_domain_code(self, tmp_path: Path) -> None:
         """Агент читает код, а не разбирает текст."""
         import anyio
         from libs.enterprise_common.loader import build_server
 
+        from conftest import call_tool, make_layer
+
         service, recorder = _service("ok")
-        transport = build_server(self._registry(service), name="enterprise-mcp")
-        result = anyio.run(_call, transport, {"prompt": "   "})
+        transport = build_server(
+            self._registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
+        )
+        result = anyio.run(call_tool, transport, "complete", {"prompt": "   "})
         assert result.isError is True
-        assert result.content[0].text.startswith("[invalid_request]")
+        # Отказ приходит конвертом ``{"error": {...}}``, а не префиксом в
+        # тексте: код читается разбором, а не глазами.
+        body = json.loads(result.content[0].text)
+        assert body["error"]["code"] == "invalid_request"
         assert "Traceback" not in result.content[0].text
         assert recorder.calls == []
 
-    def test_wire_call_without_service_is_reported_not_crashed(self) -> None:
-        """Сервер, поднятый без регистрации сервиса, отвечает доменной ошибкой
-        по каждому вызову — падать он не должен."""
+    def test_missing_service_is_refused_at_assembly(self) -> None:
+        """Операция без сервиса не собирается вовсе — полусобранный сервер хуже
+        отсутствующего: он поднялся и отвечает на вызовы.
+
+        Отказ громкий и называет, чего не хватило, поэтому «сломанная» сборка
+        видна сразу, а не первым вызовом в проде.
+        """
+        from libs.enterprise_common.loader import load_definition
+        from libs.enterprise_common.registry import ToolLoadError
+
+        path = CAPABILITY_DIR / "tools" / "complete.py"
+        with pytest.raises(ToolLoadError) as excinfo:
+            load_definition(path, ToolContainer(), PLATFORM_ROOT)
+        assert "llm" in str(excinfo.value)
+
+    def test_wire_call_with_failing_handler_is_reported_not_crashed(
+        self, tmp_path: Path
+    ) -> None:
+        """Если домен падает уже после сборки, по проводу уходит доменная ошибка.
+
+        Сервер остаётся живым: следующий вызов обязан быть обработан, а не
+        упасть вместе с предыдущим.
+        """
+        import anyio
+        from libs.enterprise_common.loader import build_server
+        from libs.enterprise_common.registry import ToolDefinition, ToolRegistry
+
+        from conftest import call_tool, make_layer
+
+        def handler(prompt: str = "") -> str:
+            raise InfrastructureError("провайдер модели недоступен")
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="complete",
+                    description="Проверка",
+                    handler=handler,
+                    category="llm",
+                )
+            ]
+        )
+        transport = build_server(
+            registry, name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
+        )
+        result = anyio.run(call_tool, transport, "complete", {"prompt": "вопрос"})
+        assert result.isError is True
+        body = json.loads(result.content[0].text)
+        assert body["error"]["code"] == "infrastructure_error"
+        assert "Traceback" not in result.content[0].text
+        # Сервер пережил отказ и обслуживает следующий вызов.
+        again = anyio.run(call_tool, transport, "complete", {"prompt": "ещё раз"})
+        assert json.loads(again.content[0].text)["error"]["code"] == (
+            "infrastructure_error"
+        )
+
+    def test_call_without_meta_is_refused(self, tmp_path: Path) -> None:
+        """Без ``params._meta`` вызов не начинается: операция не запускается.
+
+        Идентичность не достраивается на сервере, поэтому отказ приходит
+        ``identity_missing``, а счётчик вызовов домена остаётся нулевым.
+        """
         import anyio
         from libs.enterprise_common.loader import build_server
 
-        transport = build_server(self._registry_for_missing(), name="enterprise-mcp")
-        result = anyio.run(_call, transport, {"prompt": "вопрос"})
+        from conftest import call_tool, make_layer
+
+        service, recorder = _service("ok")
+        transport = build_server(
+            self._registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
+        )
+        result = anyio.run(call_tool, transport, "complete", {"prompt": "вопрос"}, {})
         assert result.isError is True
-        assert result.content[0].text.startswith("[infrastructure_error]")
-
-    @staticmethod
-    def _registry_for_missing() -> Any:
-        from libs.enterprise_common.loader import load_definition
-        from libs.enterprise_common.registry import ToolRegistry
-
-        path = CAPABILITY_DIR / "tools" / "complete.py"
-        return ToolRegistry([load_definition(path, ToolContainer(), PLATFORM_ROOT)])
+        assert json.loads(result.content[0].text)["error"]["code"] == "identity_missing"
+        assert recorder.calls == [], "домен не должен запускаться без идентичности"
 
 
 async def _call(transport: Any, arguments: dict[str, Any]) -> Any:
@@ -563,7 +653,7 @@ class TestNoArbitraryEndpoint:
     )
 
     def test_operation_schema_has_no_transport_arguments(self) -> None:
-        schema = build_input_schema(complete_tool.handle_complete)
+        schema = build_input_schema(_handler(complete_tool))
         assert not self.FORBIDDEN & set(schema["properties"])
 
     def test_service_signature_has_no_transport_arguments(self) -> None:
@@ -589,9 +679,8 @@ class TestNoArbitraryEndpoint:
         assert recorder.calls == []
 
     def test_operation_handler_ignores_unknown_transport_arguments(self) -> None:
-        complete_tool.create_tool(ToolContainer())
         with pytest.raises(TypeError):
-            complete_tool.handle_complete("q", url="https://evil.invalid")  # type: ignore[call-arg]
+            _handler(complete_tool)("q", url="https://evil.invalid")  # type: ignore[call-arg]
 
 
 class TestCapabilityOwnsNoHttpClient:

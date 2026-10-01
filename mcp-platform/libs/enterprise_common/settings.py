@@ -128,6 +128,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 #: Плохой файл настройки — это проблема развёртывания, а не плохой запрос
@@ -598,6 +599,59 @@ SETTINGS: tuple[Setting, ...] = (
     # таблицы аудита, реестр скриптов), а список runtime-таблиц агента был
     # принесён окружением и всегда проигрывал файлу, когда тот появлялся.
     # Runtime-таблицы агента он проверяет сам, на своём старте.
+    #
+    # Секция ``execution`` — слой исполнения операций (change
+    # ``enterprise-mcp-platform``, фаза 8). Пороги и флаги живут здесь, а не в
+    # коде операций: литерал в коде сделал бы значение декоративным, сервер
+    # поднялся бы и применил бы не тот порог, который написан в документации.
+    _s("ENTERPRISE_EXEC_MAX_INLINE_BYTES", "int", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/policy.py",
+       "порог сериализованного результата, выше которого он сохраняется "
+       "артефактом, байт",
+       file_key="execution.max_inline_result_bytes"),
+    _s("ENTERPRISE_EXEC_PREVIEW_BYTES", "int", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/policy.py",
+       "сколько байт превью отдаётся вместо тела крупного результата",
+       file_key="execution.preview_bytes"),
+    _s("ENTERPRISE_EXEC_TIMEOUT_SEC", "float", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/pipeline.py",
+       "предел времени на один вызов операции, с",
+       file_key="execution.execution_timeout_sec"),
+    _s("ENTERPRISE_EXEC_PERSIST_LARGE", "bool", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/pipeline.py",
+       "сохранять крупный результат артефактом; false — отдать целиком и "
+       "пометить превышение",
+       file_key="execution.persist_large_results"),
+    _s("ENTERPRISE_EXEC_QUALITY_CHECK", "bool", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/quality.py",
+       "выполнять проверки качества результата",
+       file_key="execution.quality_check_enabled"),
+    _s("ENTERPRISE_EXEC_LOGGING", "bool", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/logger.py",
+       "писать события исполнения в журнал",
+       file_key="execution.logging_enabled"),
+    _s("ENTERPRISE_EXEC_SESSION_ROOT", "str", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/session/workspace.py",
+       "корень файлов сессий: каталоги сессий, крупные результаты, артефакты",
+       file_key="execution.session_root"),
+    _s("ENTERPRISE_EXEC_LOG_ARG_FIELDS", "str", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/logger.py",
+       "белый список полей аргументов, попадающих в журнал как метаданные; "
+       "всё остальное логируется размером и хешем",
+       file_key="execution.log_argument_fields"),
+    _s("ENTERPRISE_EXEC_SESSION_EVENTS", "bool", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/eventing/writer.py",
+       "писать события оборота файлом в каталог сессии; по умолчанию "
+       "выключено — журнал в базе уже долговечен, вторая копия была бы "
+       "вторым источником правды",
+       file_key="execution.persist_session_events"),
+    _s("ENTERPRISE_EXEC_REQUIRE_CALL_META", "bool", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/loader.py",
+       "требовать params._meta на каждом вызове (contract "
+       "runtime/call-contract). false — принимать вызов без метаданных и "
+       "писать предупреждение: переключается вместе с агентской стороной, "
+       "иначе сервер откажет в вызовах, которые ещё не научились их слать",
+       file_key="execution.require_call_meta"),
     # -- пул соединений -----------------------------------------------------
     # Размеры и таймауты пула — ручки платформы: агент о них не знает и
     # знать не должен. До этого они жили только в ``_DEFAULT_POOL``, то
@@ -766,13 +820,25 @@ SHARED_SETTINGS: tuple[str, ...] = (
     "ENTERPRISE_POOL_IDLE_TIMEOUT_SEC",
     "ENTERPRISE_POOL_JOB_MAX_RETRIES",
     "ENTERPRISE_POOL_PRINT_ACTIVITY",
+    # Слой исполнения операций: платформенный, ни одной capability
+    # не принадлежит — порог ответа или таймаут вызова не дело домена.
+    "ENTERPRISE_EXEC_MAX_INLINE_BYTES",
+    "ENTERPRISE_EXEC_PREVIEW_BYTES",
+    "ENTERPRISE_EXEC_TIMEOUT_SEC",
+    "ENTERPRISE_EXEC_PERSIST_LARGE",
+    "ENTERPRISE_EXEC_QUALITY_CHECK",
+    "ENTERPRISE_EXEC_LOGGING",
+    "ENTERPRISE_EXEC_SESSION_ROOT",
+    "ENTERPRISE_EXEC_LOG_ARG_FIELDS",
+    "ENTERPRISE_EXEC_SESSION_EVENTS",
+    "ENTERPRISE_EXEC_REQUIRE_CALL_META",
 )
 
 #: Секции ``platform.json``, которых нет в ``servers/enterprise/capabilities``:
 #: они принадлежат общему коду платформы. Объявлены явно, потому что страж
 #: сверяет с ними файл — секция, не принадлежащая ни capability, ни этому
 #: списку, выглядела бы как «настройка прочитана».
-SHARED_SECTIONS: tuple[str, ...] = ("db", "pool")
+SHARED_SECTIONS: tuple[str, ...] = ("db", "pool", "execution")
 
 #: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуется
 #: :func:`pool_config`: иначе второй список ключей разошёлся бы с первым, и
@@ -1120,6 +1186,17 @@ class Settings:
         if name not in self._sources:
             raise InfrastructureError(f"настройка {name!r} не объявлена в реестре")
         return self._sources[name]
+
+    def sections(self) -> Mapping[str, Any]:
+        """Секции ``platform.json`` как есть, без разбора значений.
+
+        Нужно потребителям, которым важна **структура** файла, а не отдельные
+        значения: слою исполнения, чтобы разрешить политику «операция →
+        capability → платформа», и стражам, сверяющим объявленные секции с
+        каталогами. Значения отсюда не читаются напрямую — только структура;
+        конкретные ключи по-прежнему проходят через :meth:`get`.
+        """
+        return MappingProxyType(self._file)
 
     def as_dict(self, *, reveal_secrets: bool = False) -> dict[str, Any]:
         """Снимок значений — для баннера запуска и диагностики.

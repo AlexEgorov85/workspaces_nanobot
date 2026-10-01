@@ -55,6 +55,10 @@ _EVENT_ITEM = {
         },
         "summary": {"type": "string", "description": "Краткое описание одной строкой."},
         "payload": {"type": "object", "description": "Данные события."},
+        "metadata": {
+            "type": "object",
+            "description": "Служебные признаки события (source, component).",
+        },
     },
     "required": ["event_type"],
 }
@@ -66,39 +70,28 @@ INPUT_SCHEMA = {
 }
 
 
-def handle_log_events(ctx: ToolExecutionContext, events: list[dict[str, Any]]) -> str:
-    """Записать пачку событий журнала и вернуть счётчики приёма.
-
-    ``session_id``, ``user_id`` и ``request_id`` берутся из контекста вызова и
-    достаются каждому событию: событие без них не связать с оборотом, а
-    принимать их из тела батча — значит разрешить вызовцу подписать журнал
-    чужой сессией.
-    """
-    service: DataService = container_get("data")
-    counters = service.log_events(
-        events,
-        session_id=ctx.session_id,
-        user_id=ctx.user_id,
-        request_id=ctx.request_id,
-        audience=AUDIENCE_RUNTIME,
-    )
-    return json.dumps({"status": "ok", **counters}, ensure_ascii=False)
-
-
-#: Контейнер подставляется загрузчиком; глобальная привязка нужна, чтобы
-#: сигнатура обработчика оставалась плоской и читалась в discovery агента.
-container: ToolContainer | None = None
-
-
-def container_get(capability: str) -> Any:
-    if container is None:  # pragma: no cover - защита от неверной сборки
-        raise RuntimeError("контейнер не инициализирован: операция вызвана вне загрузчика")
-    return container.get(capability)
-
-
 def create_tool(registry_container: ToolContainer) -> ToolDefinition:
-    global container
-    container = registry_container
+    # Сервис замыкается обработчиком: глобальная привязка означала, что вызов
+    # уходит в сервис той регистрации, которая отработала последней, а не той,
+    # ради которой эта операция объявлена.
+    service: DataService = registry_container.get("data")
+
+    def handle_log_events(ctx: ToolExecutionContext, events: list[dict[str, Any]]) -> str:
+        """Записать пачку событий журнала и вернуть счётчики приёма.
+
+        ``session_id``, ``user_id`` и ``request_id`` берутся из контекста вызова и
+        достаются каждому событию: событие без них не связать с оборотом, а
+        принимать их из тела батча — значит разрешить вызовцу подписать журнал
+        чужой сессией.
+        """
+        counters = service.log_events(
+            events,
+            session_id=ctx.session_id,
+            user_id=ctx.user_id,
+            request_id=ctx.request_id,
+            audience=AUDIENCE_RUNTIME,
+        )
+        return json.dumps({"status": "ok", **counters}, ensure_ascii=False)
 
     description = (
         "Записать пачку событий в долговечный журнал gateway одним вызовом. "

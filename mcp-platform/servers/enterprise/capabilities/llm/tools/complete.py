@@ -16,47 +16,44 @@ from __future__ import annotations
 from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
-from libs.enterprise_common.registry import ToolDefinition
+from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 from servers.enterprise.capabilities.llm.service.main import (
     AUDIENCE_RUNTIME,
     LlmService,
 )
 
-#: Контейнер подставляется загрузчиком при регистрации операции.
-container: ToolContainer | None = None
-
-
-def handle_complete(
-    prompt: str,
-    system: str = "",
-    context: list[dict[str, Any]] | None = None,
-    model: str | None = None,
-    max_tokens: int | None = None,
-    temperature: float | None = None,
-    max_retries: int = 3,
-    timeout: float = 60.0,
-) -> str:
-    """Получить текстовый ответ провайдера по ``prompt``."""
-    if container is None:  # pragma: no cover - защита от неверной сборки
-        raise RuntimeError("контейнер не инициализирован")
-    service: LlmService = container.get("llm")
-    result = service.complete(
-        prompt=prompt,
-        system=system,
-        context=context,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        max_retries=max_retries,
-        timeout=timeout,
-        audience=AUDIENCE_RUNTIME,
-    )
-    return result.text
-
 
 def create_tool(registry_container: ToolContainer) -> ToolDefinition:
-    global container
-    container = registry_container
+    # Сервис достаётся один раз, здесь, и замыкается обработчиком. Модульная
+    # глобальная переменная выглядела бы тем же, но её значение зависело бы от
+    # порядка регистрации операций: вторая ``create_tool`` в процессе тихо
+    # перезаписала бы первую, и операция пошла бы в чужой сервис.
+    service: LlmService = registry_container.get("llm")
+
+    def handle_complete(
+        prompt: str,
+        system: str = "",
+        context: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        max_retries: int = 3,
+        timeout: float = 60.0,
+    ) -> str:
+        """Получить текстовый ответ провайдера по ``prompt``."""
+        result = service.complete(
+            prompt=prompt,
+            system=system,
+            context=context,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_retries=max_retries,
+            timeout=timeout,
+            audience=AUDIENCE_RUNTIME,
+        )
+        return result.text
+
     return ToolDefinition(
         name="complete",
         description=(
@@ -67,4 +64,6 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         category="llm",
         tags=("infrastructure", "runtime-only"),
         permissions=("llm:complete",),
+        quality_policy="llm_result",
+        input_schema=build_input_schema(handle_complete),
     )

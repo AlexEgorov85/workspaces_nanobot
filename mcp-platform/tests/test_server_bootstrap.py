@@ -45,11 +45,30 @@ async def _discover(transport: Any) -> list[Any]:
         return (await session.list_tools()).tools
 
 
-async def _call(transport: Any, name: str, arguments: dict[str, Any]) -> Any:
+async def _call(transport: Any, name: str, arguments: dict[str, Any], meta: Any = None) -> Any:
+    """Вызов по протоколу MCP с идентичностью оборота в ``params._meta``.
+
+    Метаданные обязательны для любого вызова (§ ``runtime/call-contract``),
+    поэтому подставляет их хелпер, а не каждый тест по-своему: вызов без них
+    отклоняется на границе, и «домен не ответил» выглядело бы как дефект
+    домена.
+    """
     from mcp.shared.memory import create_connected_server_and_client_session as connect
 
+    from libs.enterprise_common.execution.context import (
+        KEY_REQUEST_ID,
+        KEY_SESSION_ID,
+        KEY_USER_ID,
+    )
+
+    if meta is None:
+        meta = {
+            KEY_REQUEST_ID: "req-bootstrap",
+            KEY_SESSION_ID: "sess-bootstrap",
+            KEY_USER_ID: "user-bootstrap",
+        }
     async with connect(transport) as session:
-        return await session.call_tool(name, arguments=arguments)
+        return await session.call_tool(name, arguments=arguments, meta=meta)
 
 
 def _main_statements() -> list[str]:
@@ -367,7 +386,7 @@ class TestContainerWiring:
             "oarb.report_items",
         ]
         # Число, а не строка: потолок строк — счётчик, и раньше он доезжал
-        # строкой, которую сервис аудита приводит сам. Приводит теперь реестр,
+        # строкой, которую сервис аудита приводил сам. Приводит теперь реестр,
         # и потолок приходит числом туда же, где проверяется на тип.
         assert service._row_ceiling == 500  # noqa: SLF001
 
@@ -476,6 +495,35 @@ class TestWireContract:
         assert result.isError is True
         assert "invalid_request" in text
         assert "Traceback" not in text
+
+    def test_server_without_data_capability_still_starts(self) -> None:
+        """Режим «только LLM» поднимается, и журнал просто некуда писать.
+
+        Отсутствие capability ``data`` — не сбой сборки: это штатный сервер для
+        скиллов, которым нужны только ``complete``/``embed``. Сборка спрашивает
+        приёмник журнала, и на отсутствующем ключе бросать исключение нельзя:
+        сервер для скиллов не поднялся бы вовсе.
+        """
+        transport, registry, container = enterprise_server.build(capabilities=["llm"])
+        assert set(registry.names()) == {"complete", "embed"}
+        assert "data" not in container.services
+
+    def test_event_writer_counts_absent_sink_instead_of_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        """Без приёмника писатель считает отказ и не поднимает исключение.
+
+        Операция обязана выполняться и возвращать результат: журнал — побочный
+        след, и потеря события не должна превращаться в отказ вызова.
+        """
+        from libs.enterprise_common.eventing.models import AgentEvent
+        from libs.enterprise_common.eventing.types import TOOL_STARTED
+        from libs.enterprise_common.eventing.writer import NO_SINK
+        from libs.enterprise_common.execution.factory import build_execution_layer
+
+        layer = build_execution_layer({}, sink=None, session_root=tmp_path / "sessions")
+        assert layer.writer.emit(AgentEvent(event_type=TOOL_STARTED)) == NO_SINK
+        assert layer.writer.stats()["rejected"] == 1
 
     def test_unknown_operation_is_reported_as_error(self) -> None:
         import anyio

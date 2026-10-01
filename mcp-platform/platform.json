@@ -1,14 +1,11 @@
 {
   "_about": "Настройки платформенной части enterprise-mcp. Это ЕДИНСТВЕННОЕ место, где живут значения настроек MCP: в коде их нет (см. libs/enterprise_common/settings.py — платформенная настройка объявлена как FROM_FILE, а не со значением), поэтому если ключа нет здесь, его нет нигде и сервер не поднимется. Приоритет: окружение > этот файл, с одним исключением — db.dsn (см. ниже). Ключ чужой настройки в этом файле — ошибка, сервер не поднимется.",
   "_owner": "platform",
-
   "_structure": "Секции повторяют структуру проекта. Сверху — общий код платформы: db (libs/enterprise_data/db.py) и pool (тот же модуль). Ниже — capability в том же порядке и составе, что каталоги servers/enterprise/capabilities/: audit, data, llm, vectors. Настроек, которыми владеет агент, здесь нет и быть не должно: MCP ничего не получает от агента, поэтому весь раздел — только то, что платформа объявляет сама.",
-
   "db": {
     "_about": "Подключение к базе — владелец libs/enterprise_data/db.py. DSN приоритетнее окружения: переменная DATABASE_URL в окружении процесса унаследована от агента (dict(os.environ) целиком), а не объявлена платформой, и без file_first значение из файла было бы декоративным — сервер показывал бы в конфигурации одну базу, а подключался бы к другой. Учётная и адресная части — подстановками ${ПЕРЕМЕННАЯ}: они читаются из mcp-platform/.secrets.env (свои секреты платформы, файл под .gitignore), а при отсутствии файла — из окружения процесса. Незаданная переменная останавливает сервер на старте с её именем: молча подставиться не может, а молча не подключиться хуже.",
     "dsn": "postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
   },
-
   "pool": {
     "_about": "Пул соединений — владелец libs/enterprise_data/db.py. Общий для всех capability, поэтому вынесен отдельно от них. Значений в коде нет: _POOL_SPEC объявляет только ключи и типы, а сам набор приходит отсюда целиком. Неполный набор — ошибка конфигурации, а не «остальное как было».",
     "min_conn": 1,
@@ -22,19 +19,41 @@
     "job_max_retries": 3,
     "print_activity": false
   },
-
+  "execution": {
+    "_about": "Слой исполнения операций (change enterprise-mcp-platform, фаза 8). Пороги и флаги конвейера: он проходит вокруг каждой операции. Значения по умолчанию живут здесь, а не в коде операций.",
+    "max_inline_result_bytes": 65536,
+    "preview_bytes": 2048,
+    "execution_timeout_sec": 120.0,
+    "persist_large_results": true,
+    "quality_check_enabled": true,
+    "logging_enabled": true,
+    "session_root": "./.sessions",
+    "log_argument_fields": "tool_name,event_type,session_scope",
+    "persist_session_events": false,
+    "require_call_meta": false
+  },
   "audit": {
     "_about": "capability audit — servers/enterprise/capabilities/audit/. Объявление таблиц переехало из окружения агента (project.json → skills.audit_analyzer.tables) сюда: MCP держал знание о проекте в чужом окружении, и сломанный экспорт выключал capability целиком и молча — registry_unavailable на каждую операцию. Форма прежняя, список записей: у реестра предустановленных скриптов стоит label, и именно он отделяет метаданные от доменных таблиц — аудит не должен читать собственные скрипты в обход проверки строк, поэтому запись с меткой в таблицы не попадает. Значение приходит из файла (file:platform.json) и видно в баннере; окружение приоритетнее, но тогда источник виден как env:* — молчаливого дубля не остаётся. Потолок строк тоже платформенный: он защищает базу от сгенерированного запроса.",
     "tables": [
-      {"name": "oarb.audits"},
-      {"name": "oarb.violations"},
-      {"name": "oarb.audit_reports"},
-      {"name": "oarb.report_items"},
-      {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
+      {
+        "name": "oarb.audits"
+      },
+      {
+        "name": "oarb.violations"
+      },
+      {
+        "name": "oarb.audit_reports"
+      },
+      {
+        "name": "oarb.report_items"
+      },
+      {
+        "name": "public.agent_predefined_scripts",
+        "label": "scripts_registry"
+      }
     ],
     "row_ceiling": 500
   },
-
   "data": {
     "_about": "capability data — servers/enterprise/capabilities/data/. Журнал, прогоны вопросов, очередь задач, чтение журнала, schema_check. Здесь же путь к снимку DuckDB: снимком владеет capability data (libs/enterprise_data/snapshot/), и объявлять его должен она, а не получать окружением агента — два владельца одного файла означали бы, что снимок читают не оттуда, откуда пишут. Путь здесь OPTIONAL, и это честно: пустое значение означает «снимок ненастроен» (сервер поднимается, операции со снимком отвечают snapshot_unavailable), а не «сервер не запустится» — capability data от снимка не зависит. schema_check проверяет собственные таблицы платформы (журнал, прогоны вопросов, таблицы аудита, реестр скриптов), а не runtime-таблицы агента: их список приезжал окружением и молча перебивал файл.",
     "log_table": "public.agent_gateway_logs",
@@ -45,7 +64,6 @@
     "statement_timeout_ms": 30000,
     "max_rows": 1000
   },
-
   "llm": {
     "_about": "capability llm — servers/enterprise/capabilities/llm/. Здесь живут настройки внутреннего сервиса общения с моделью (libs/llm/gateway.py): он владеет единственным HTTP-вызовом к провайдеру, поэтому адрес, модель и ключ чата — его. Раньше это был выбор агента (project.json → agents.defaults / providers.*), и вторая копия здесь разъехалась бы с ним при первой же смене модели. Ключ провайдера лежит в llm.key (в окружении та же настройка называется ENTERPRISE_LLM_API_KEY): в файле платформенных настроек секрет не хранится даже в виде подстановки под «настоящим» именем ключа, иначе в файл рано или поздно попал бы сам ключ вместо ссылки на него. Подстановка ${LLM_API_KEY} разворачивается из mcp-platform/.secrets.env (свои секреты платформы, файл под .gitignore), а при отсутствии файла — из окружения процесса; незаданная переменная останавливает сервер на старте с её именем. Окружение приоритетнее файла: развёртывание, задающее ENTERPRISE_LLM_* вручную, продолжает работать. Пустые значения — законное состояние (настройки чата объявлены OPTIONAL, capability необязательна): оно не мешает подняться capability data, видно в баннере по llm.model и llm.api_base и приходит на операции complete как infrastructure_error. Эмбеддер (embed_*) — тоже платформенный, потому что HTTP-вызов к нему делает тот же владелец libs/llm. Объявлялся он раньше агентом на том основании, что в подпись индекса входит модель эмбеддера: проверяющая сторона оттуда ушла, подпись считает libs.vectors.signature в этом процессе, и объявление модели в чужом окружении означало, что половина подписи живёт здесь, а половина там, а расхождение видно только как «индекс STALE». Эмбеддер и чат — разные провайдеры (эмбеддер локальный Ollama, чат облачный), поэтому у эмбеддера свои адрес, путь и модель. embed_key — подстановка ${EMBED_TOKEN} из .secrets.env платформы. Он нужен не ради безопасности: локальный Ollama авторизацию не проверяет, но код при пустом embed-ключе подставляет в запрос ключ чата, то есть облачный секрет, которому там не место. Общий с чатом секрет ошибка и здесь: эмбеддер локальный, чат облачный, развёртывания разные.",
     "provider": "minimax",
@@ -61,7 +79,6 @@
     "embed_dimension": 1024,
     "embed_timeout": 60.0
   },
-
   "vectors": {
     "_about": "capability vectors — servers/enterprise/capabilities/vectors/. Поиск по эмбеддингам поверх снимка (путь к нему объявлен в секции data, владельцем снимка является capability data). Здесь объявления индексов, инфраструктурная таблица хранения векторов и выключатель capability. Форма объявлений повторяет прежнюю (project.json → gateway.vector.index) целиком, включая колонки, чанкинг и метрику: перенос не должен переписывать объявления руками, иначе подпись индекса (libs.vectors.signature) считалась бы по одной форме, а строилась по другой. Индексы не склеиваются в строку — это объект, и его форма здесь и есть смысл объявления. Дубликат, который остаётся до переноса build-инструментов (фаза 8): то же объявление индексов в project.json для build_vectors.py у агента.",
     "enable": true,
@@ -71,8 +88,18 @@
         "table": "oarb.audits",
         "pk": "id",
         "source_table": "audits",
-        "content_columns": ["title", "audit_type", "auditee_entity", "status"],
-        "embedding_columns": ["title", "audit_type", "auditee_entity", "status"],
+        "content_columns": [
+          "title",
+          "audit_type",
+          "auditee_entity",
+          "status"
+        ],
+        "embedding_columns": [
+          "title",
+          "audit_type",
+          "auditee_entity",
+          "status"
+        ],
         "track_column": "updated_at",
         "chunk_size": 500,
         "chunk_overlap": 80,
@@ -83,9 +110,19 @@
         "table": "oarb.violations",
         "pk": "id",
         "source_table": "violations",
-        "content_columns": ["description", "recommendation", "violation_code", "severity"],
+        "content_columns": [
+          "description",
+          "recommendation",
+          "violation_code",
+          "severity"
+        ],
         "embedding_columns": [
-          {"column": "description", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+          {
+            "column": "description",
+            "chunk": true,
+            "chunk_size": 500,
+            "chunk_overlap": 80
+          },
           "violation_code"
         ],
         "track_column": "updated_at",
@@ -98,9 +135,19 @@
         "table": "oarb.audit_reports",
         "pk": "id",
         "source_table": "audit_reports",
-        "content_columns": ["full_text", "title", "report_number", "report_date"],
+        "content_columns": [
+          "full_text",
+          "title",
+          "report_number",
+          "report_date"
+        ],
         "embedding_columns": [
-          {"column": "full_text", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+          {
+            "column": "full_text",
+            "chunk": true,
+            "chunk_size": 500,
+            "chunk_overlap": 80
+          },
           "title"
         ],
         "track_column": "updated_at",

@@ -91,14 +91,49 @@ class TestAdapterDiscovery:
 
         from mcp.shared.memory import create_connected_server_and_client_session as connect
 
+        from libs.enterprise_common.execution.context import (
+            KEY_REQUEST_ID,
+            KEY_SESSION_ID,
+            KEY_USER_ID,
+        )
+
         transport, _, _ = build()
 
         async def call() -> Any:
             async with connect(transport) as session:
-                return await session.call_tool("lookup", arguments={"key": "нет-такого"})
+                return await session.call_tool(
+                    "lookup",
+                    arguments={"key": "нет-такого"},
+                    meta={
+                        KEY_REQUEST_ID: "req-template",
+                        KEY_SESSION_ID: "sess-template",
+                        KEY_USER_ID: "user-template",
+                    },
+                )
 
         result = anyio.run(call)
         text = result.content[0].text
         assert result.isError is True
         assert "not_found" in text
         assert "Traceback" not in text
+
+    def test_call_without_meta_is_refused(self) -> None:
+        """Заготовка поднимается с конвейером, а не с прямым вызовом обработчика.
+
+        Без метаданных оборота операция не выполняется: идентичность на сервере
+        не достраивается, и «работающая заготовка без ``_meta``» была бы
+        приглашением собрать новый сервер не по контракту.
+        """
+        import anyio
+
+        from mcp.shared.memory import create_connected_server_and_client_session as connect
+
+        transport, _, _ = build()
+
+        async def call() -> Any:
+            async with connect(transport) as session:
+                return await session.call_tool("echo", arguments={"text": "привет"})
+
+        result = anyio.run(call)
+        assert result.isError is True
+        assert "identity_missing" in result.content[0].text

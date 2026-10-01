@@ -42,6 +42,7 @@ from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.errors import InfrastructureError
+from libs.enterprise_common.execution.factory import build_execution_layer
 from libs.enterprise_common.loader import build_server, load_registry
 from libs.enterprise_common.registry import ToolRegistry
 from libs.enterprise_common.settings import (
@@ -447,9 +448,18 @@ def build(
     registry = load_registry(
         CAPABILITIES_DIR, container, root=PLATFORM_ROOT, capabilities=wanted
     )
+    # Слой исполнения собирается после реестра и получает приёмником журнала
+    # сервис ``data``: второй писатель событий означал бы, что журнал читают
+    # двое, а порядок записей определяет тот, кто быстрее.
+    execution = build_execution_layer(
+        settings,
+        sink=_event_sink(container),
+        session_root=PLATFORM_ROOT / _session_root(settings),
+    )
     transport = build_server(
         registry,
         name="enterprise-mcp",
+        pipeline=execution.pipeline,
         instructions=(
             "Enterprise-слой проекта. Операции данных, векторов, аудита и LLM. "
             "Операций произвольного SQL здесь нет и не будет."
@@ -461,10 +471,65 @@ def build(
     if wanted != _ALL_CAPABILITIES:
         logger.info("подняты только capability: %s", ", ".join(sorted(wanted)))
     _log_llm_settings(container.get("llm"))
+    _log_execution_settings(execution)
     logger.info("операций загружено: %d", len(registry))
     for name in registry.names():
         logger.info("  операция: %s", name)
     return transport, registry, container
+
+
+def _event_sink(container: Any) -> Any | None:
+    """Приёмник событий журнала — неблокирующий вход сервиса ``data``.
+
+    Доступ именно к ``container.services``, а не через ``container.get()``:
+    ``get()`` по отсутствующему ключу бросает ``InfrastructureError`` (сервис не
+    зарегистрирован — это сбой сборки), а сервер **без** capability ``data``
+    (режим «только LLM» для скиллов) — не сбой. Там приёмника просто нет,
+    писатель считает отказы и не пишет никуда.
+    """
+    data = container.services.get("data")
+    accept = getattr(data, "accept", None)
+    return accept if callable(accept) else None
+
+
+def _session_root(settings: Settings) -> str:
+    """Каталог файлов сессий относительно корня платформы.
+
+    Относительный путь из ``platform.json`` разворачивается против корня
+    платформы, а не против текущего каталога процесса: сервер запускают из
+    разных мест, и «тот же самый» ``./.sessions`` в двух каталогах — это два
+    разных хранилища, о потере файлов которого узнают по отсутствию
+    артефактов.
+    """
+    return str(settings.get("ENTERPRISE_EXEC_SESSION_ROOT") or ".sessions")
+
+
+def _log_execution_settings(execution: Any) -> None:
+    """Показать пороги и флаги слоя исполнения.
+
+    Те же соображения, что у баннера LLM: «применяется 64 КиБ» и «в коде 64
+    КиБ» — разные утверждения, и проверить можно только первое.
+    """
+    stats = execution.stats()
+    policy = stats.get("execution_policy", {})
+    logger.info(
+        "исполнение: порог=%s байт, превью=%s байт, таймаут=%s с, крупный=%s, "
+        "качество=%s, журнал=%s, файлы событий=%s, требуется _meta=%s",
+        policy.get("max_inline_result_bytes"),
+        policy.get("preview_bytes"),
+        policy.get("execution_timeout_sec"),
+        "артефакт" if policy.get("persist_large_results") else "целиком",
+        "вкл" if policy.get("quality_check_enabled") else "выкл",
+        "вкл" if policy.get("logging_enabled") else "выкл",
+        "вкл" if policy.get("persist_session_events") else "выкл",
+        "строго" if policy.get("require_call_meta") else "совместимо",
+    )
+    if not policy.get("require_call_meta"):
+        logger.warning(
+            "execution.require_call_meta = false: вызов без params._meta принимается, "
+            "идентичность берётся из arguments. Это переходное окно — переключите "
+            "флаг в platform.json, когда вызывающая сторона перейдёт на meta="
+        )
 
 
 def _log_llm_settings(llm: Any) -> None:

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
 
 from libs.enterprise_common.errors import EnterpriseError
+from libs.enterprise_common.execution.quality import POLICY_NAMES
 
 
 class ToolLoadError(EnterpriseError):
@@ -65,6 +66,11 @@ class ToolDefinition:
     tags: tuple[str, ...] = ()
     permissions: tuple[str, ...] = ()
     input_schema: Mapping[str, Any] = field(default_factory=dict)
+    quality_policy: str = "default"
+
+    def wants_context(self) -> bool:
+        """Заявляет ли обработчик служебный параметр ``context``."""
+        return CONTEXT_PARAM in inspect.signature(self.handler).parameters
 
     def to_summary(self) -> dict[str, Any]:
         """Урезанное описание для логов и health-отчёта."""
@@ -74,7 +80,84 @@ class ToolDefinition:
             "version": self.version,
             "enabled": self.enabled,
             "tags": list(self.tags),
+            "quality_policy": self.quality_policy,
         }
+
+
+#: Служебный параметр контекста. Объявлен в слое исполнения и импортируется
+#: оттуда: имя-параметр обработчика принадлежит контракту вызова, а не реестру.
+from libs.enterprise_common.execution.context import CONTEXT_PARAM  # noqa: E402
+
+#: Параметры идентичности. Их появление в сигнатуре — нарушение контракта
+#: вызова: идентичность приходит в ``params._meta`` (§ ``runtime/call-contract``)
+#: и в опубликованной схеме ей не места.
+IDENTITY_PARAMS: frozenset[str] = frozenset({"session_id", "user_id", "request_id"})
+
+
+def validate_handler(
+    handler: Callable[..., Any], *, name: str = "", path: str = ""
+) -> None:
+    """Проверить форму обработчика операции.
+
+    Проверка на загрузке, а не на первом вызове: поднятый сервер с операцией,
+    которая упала бы на первой же сессии, выглядит рабочим ровно до первого
+    обращения к ней.
+    """
+    try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError) as exc:
+        raise ToolLoadError(
+            f"не удалось прочитать сигнатуру обработчика: {exc}", path=path, name=name
+        ) from exc
+
+    offending = sorted(IDENTITY_PARAMS.intersection(signature.parameters))
+    if offending:
+        raise ToolLoadError(
+            f"обработчик объявляет параметр(ы) идентичности {', '.join(offending)}; "
+            "идентичность приходит в params._meta и доставляется через параметр "
+            f"'{CONTEXT_PARAM}' (ToolExecutionContext)",
+            path=path,
+            name=name,
+        )
+
+    if CONTEXT_PARAM not in signature.parameters:
+        return
+    positional = [
+        p
+        for p in list(signature.parameters.values())[:1]
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if not positional or positional[0].name != CONTEXT_PARAM:
+        raise ToolLoadError(
+            f"параметр {CONTEXT_PARAM!r} обязан быть первым: конвейер подставляет "
+            "контекст до доменных аргументов",
+            path=path,
+            name=name,
+        )
+    try:
+        hints = get_type_hints(handler)
+    except Exception as exc:  # noqa: BLE001 - неразрешимые аннотации
+        raise ToolLoadError(
+            f"не удалось разрешить аннотации обработчика: {exc}", path=path, name=name
+        ) from exc
+    annotation = hints.get(CONTEXT_PARAM)
+    if annotation is None:
+        raise ToolLoadError(
+            f"параметр {CONTEXT_PARAM!r} без аннотации типа", path=path, name=name
+        )
+    # Строковое сравнение: `from __future__ import annotations` оставляет в
+    # подсказках строки, и `get_type_hints` их разрешает, но аннотация может
+    # прийти и как строка из замыкания — тогда единственное честное сравнение
+    # это по имени класса.
+    actual = annotation if isinstance(annotation, type) else type(annotation)
+    if getattr(actual, "__name__", "") != "ToolExecutionContext":
+        raise ToolLoadError(
+            f"параметр {CONTEXT_PARAM!r} должен быть аннотирован ToolExecutionContext, "
+            f"а не {getattr(actual, '__name__', annotation)!r}",
+            path=path,
+            name=name,
+        )
 
 
 def build_input_schema(handler: Callable[..., Any]) -> dict[str, Any]:
@@ -103,6 +186,11 @@ def build_input_schema(handler: Callable[..., Any]) -> dict[str, Any]:
                 name=getattr(handler, "__name__", ""),
             )
         if param_name in ("self", "cls"):
+            continue
+        if param_name == CONTEXT_PARAM:
+            # Служебный параметр конвейера. В схему он не попадает: модель его
+            # не заполняет и не должна видеть — всё назначение `context` в том,
+            # что подставляет его сервер.
             continue
         if param_name not in hints:
             raise ToolLoadError(
@@ -190,6 +278,12 @@ class ToolRegistry:
             raise ToolLoadError("handler обязан быть вызываемым", name=definition.name)
         if not definition.category.strip():
             raise ToolLoadError("категория (capability) не должна быть пустой", name=definition.name)
+        if definition.quality_policy not in POLICY_NAMES:
+            raise ToolLoadError(
+                f"неизвестная политика качества {definition.quality_policy!r}; "
+                f"допустимы: {', '.join(sorted(POLICY_NAMES))}",
+                name=definition.name,
+            )
         if definition.name in self._by_name:
             raise ToolLoadError("имя уже зарегистрировано", name=definition.name)
         self._by_name[definition.name] = definition

@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
+from libs.enterprise_common.execution.context import ToolExecutionContext
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 
 AUDIENCE_RUNTIME = "runtime"
@@ -18,11 +19,9 @@ AUDIENCE_RUNTIME = "runtime"
 
 def create_tool(container: ToolContainer) -> ToolDefinition:
     def upsert_question_run(
-        request_id: str,
+        ctx: ToolExecutionContext,
         status: str | None = None,
         summary: str | None = None,
-        session_id: str | None = None,
-        user_id: str | None = None,
         chat_id: str | None = None,
         channel: str | None = None,
         agent_id: str | None = None,
@@ -34,11 +33,15 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         media: list[Any] | None = None,
         update_only: bool = False,
     ) -> str:
+        # ``request_id`` — ключ оборота, а не доменное поле: он приходит в
+        # ``params._meta`` и подставляется конвейером. Объявление его параметром
+        # означало бы, что модель может подменить оборот, записав контекст
+        # чужого вопроса.
         data = container.get("data")
         data.upsert_question_run(
-            request_id,
-            session_id=session_id,
-            user_id=user_id,
+            ctx.request_id,
+            session_id=ctx.session_id,
+            user_id=ctx.user_id,
             chat_id=chat_id,
             channel=channel,
             agent_id=agent_id,
@@ -51,9 +54,11 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
             response=response,
             media=media,
             update_only=update_only,
-            audience="runtime",
+            audience=AUDIENCE_RUNTIME,
         )
-        return json.dumps({"status": "ok", "request_id": request_id}, ensure_ascii=False)
+        return json.dumps(
+            {"status": "ok", "request_id": ctx.request_id}, ensure_ascii=False
+        )
 
     description = (
         "Записать или обновить контекст вопроса агента. Контекст пишется один "
@@ -71,4 +76,5 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         tags=("infrastructure", "runtime-only"),
         permissions=("data:upsert_question_run",),
         input_schema=build_input_schema(upsert_question_run),
+        quality_policy="none",
     )

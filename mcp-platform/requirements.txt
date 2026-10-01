@@ -4,8 +4,16 @@
 # в проекте агента содержит смешанный список (nanobot + enterprise +
 # office + vectors); цель миграции — сделать установку Nanobot
 # независимой от enterprise-стека.
+#
+# ИСТОЧНИК ИСТИНЫ — pyproject.toml ([project.dependencies]). Этот файл
+# держит тот же runtime-набор для `pip install -r` и не имеет права
+# отставать от него: расхождение проверяет страж
+# tests/test_dependency_declaration.py.
 
 mcp>=1.27
+# Разгрузка синхронных обработчиков с event loop транспорта. Объявлен
+# явно: платформа зовёт anyio сама, а не получает его из списка mcp.
+anyio>=4.0
 
 # --- владение данными (libs/enterprise_data) ---
 psycopg2-binary==2.9.12
@@ -14,6 +22,22 @@ psycopg2-binary==2.9.12
 # information_schema и UPDATE/DELETE после -- комментария. Сервер не
 # поднимается без него.
 sqlglot==30.17.0
+
+# --- снимок и индексы (libs/enterprise_data/snapshot, libs/vectors) ---
+# Импортируются лениво, но объявлены обязательными: установленный пакет
+# платформы должен быть функционален целиком, а history_search обязан
+# работать и без FAISS.
+duckdb>=1.0
+numpy>=1.26
+faiss-cpu>=1.8
+# Сериализация батчей снимка в Arrow: без пакета writer.py обязан отказать
+# громко, а не записать пустую таблицу.
+pyarrow>=23.0
+# Вывод пула PostgreSQL в консоль.
+rich>=13.0
+
+# --- LLM-провайдер (libs/llm) ---
+httpx>=0.27
 
 # --- dev ---
 pytest>=8

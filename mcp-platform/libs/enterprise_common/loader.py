@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -36,7 +35,14 @@ from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.errors import EnterpriseError
-from libs.enterprise_common.registry import ToolDefinition, ToolLoadError, ToolRegistry, build_input_schema
+from libs.enterprise_common.execution.quality import POLICY_NAMES
+from libs.enterprise_common.registry import (
+    ToolDefinition,
+    ToolLoadError,
+    ToolRegistry,
+    build_input_schema,
+    validate_handler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,12 +130,28 @@ def load_definition(path: Path, container: ToolContainer, root: Path) -> ToolDef
     if not callable(definition.handler):
         raise ToolLoadError("handler обязан быть вызываемым", path=str(path), name=name)
 
+    # Форма обработчика проверяется до схемы: объявление параметра идентичности —
+    # нарушение контракта вызова, и сообщение о нём должно называть параметр, а
+    # не приходить обёрнутым в «ошибка построения схемы».
+    try:
+        validate_handler(definition.handler, name=name, path=str(path))
+    except ToolLoadError as exc:
+        raise ToolLoadError(exc.message, path=str(path), name=name) from exc
+
     # Схема строится здесь, а не автором файла: иначе описание параметра и его
     # сигнатура разъезжаются, и расхождение всплывает в рантайме.
     try:
         schema = build_input_schema(definition.handler)
     except ToolLoadError as exc:
         raise ToolLoadError(exc.message, path=str(path), name=name) from exc
+
+    if definition.quality_policy not in POLICY_NAMES:
+        raise ToolLoadError(
+            f"неизвестная политика качества {definition.quality_policy!r}; "
+            f"допустимы: {', '.join(sorted(POLICY_NAMES))}",
+            path=str(path),
+            name=name,
+        )
 
     return ToolDefinition(
         name=definition.name,
@@ -141,6 +163,7 @@ def load_definition(path: Path, container: ToolContainer, root: Path) -> ToolDef
         tags=definition.tags,
         permissions=definition.permissions,
         input_schema=schema,
+        quality_policy=definition.quality_policy,
     )
 
 
@@ -177,6 +200,7 @@ def build_server(
     registry: ToolRegistry,
     *,
     name: str,
+    pipeline: Any,
     version: str = "1",
     instructions: str | None = None,
 ) -> Any:
@@ -190,6 +214,11 @@ def build_server(
     Единственное место в платформе, где встречается протокол MCP: реестр,
     сервисы и определения о нём не знают, иначе тест сервиса без протокола
     перестал бы быть возможным.
+
+    Метаданные вызова читаются **здесь и один раз**: обработчик операции
+    получает ``ToolExecutionContext`` от конвейера, а разбирать ``params._meta``
+    в шестнадцати файлах операций означало бы шестнадцать мест, где это можно
+    сделать по-разному.
     """
     import anyio
     from mcp.server.lowlevel import Server
@@ -221,38 +250,47 @@ def build_server(
         except EnterpriseError as exc:
             return _error(exc.code, exc.message)
 
+        # ``server.request_context.meta`` — разобранные метаданные запроса,
+        # которые mcp положил в RequestContext. Значение может быть None:
+        # вызов без `_meta` законен на проводе и обязан быть отклонён конвейером
+        # с `identity_missing`, а не разыгран как пустой словарь.
+        meta = _request_meta(server)
+
         # Обработчики синхронные и ходят в пул PostgreSQL. Вызов из event loop
         # без разгрузки заблокировал бы весь сервер, включая отмену хода.
         def invoke() -> Any:
-            return definition.handler(**arguments)
+            return pipeline.execute(definition, arguments, meta)
 
         try:
-            result = await anyio.to_thread.run_sync(invoke)
-        except EnterpriseError as exc:
-            # Доменная ошибка: агент получает код и текст, а не traceback.
-            return _error(exc.code, exc.message)
-        except Exception as exc:  # noqa: BLE001
+            outcome = await anyio.to_thread.run_sync(invoke)
+        except Exception as exc:  # noqa: BLE001 - конвейер не должен ронять сервер
             return _error("internal_error", f"{type(exc).__name__}: {exc}")
 
         return CallToolResult(
-            content=[TextContent(type="text", text=_as_text(result))],
-            isError=False,
+            content=[TextContent(type="text", text=outcome.text)],
+            isError=bool(outcome.is_error),
         )
 
     return server
 
 
-def _as_text(result: Any) -> str:
-    """Привести результат операции к тексту ответа.
+def _request_meta(server: Any) -> dict[str, Any] | None:
+    """Метаданные текущего вызова из ``RequestContext`` low-level сервера.
 
-    Операции возвращают JSON-строку сами: формат ответа — часть контракта
-    операции, а не решение транспорта.
+    Метаданные приходят в запросе MCP, а не в аргументах инструмента: это
+    служебный канал, недоступный модели. ``mcp`` кладёт их в
+    ``request_context.meta``; собирать их из ``arguments`` было бы возвратом к
+    контракту, который как раз отменяется.
     """
-    if isinstance(result, str):
-        return result
-    if isinstance(result, (dict, list)):
-        return json.dumps(result, ensure_ascii=False)
-    return str(result)
+    request_context = getattr(server, "request_context", None)
+    if request_context is None:
+        return None
+    meta = getattr(request_context, "meta", None)
+    if isinstance(meta, dict):
+        return meta
+    if meta is None:
+        return None
+    return dict(meta)
 
 
 def iter_definitions(registry: ToolRegistry) -> Iterable[ToolDefinition]:

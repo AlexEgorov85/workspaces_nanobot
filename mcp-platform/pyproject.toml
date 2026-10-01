@@ -12,6 +12,11 @@ requires-python = ">=3.11"
 # Установка этого пакета не должна тянуть agent runtime.
 dependencies = [
     "mcp>=1.27",
+    # Разгрузка синхронных обработчиков с event loop транспорта
+    # (anyio.to_thread.run_sync в libs/enterprise_common/loader.py и
+    # servers/*/server.py). Объявлен явно, а не «приедет из mcp»: платформа
+    # зовёт его сама, и на чужом списке зависимостей держаться нельзя.
+    "anyio>=4.0",
     # Владелец доступа к данным. psycopg2 существует ровно в одном пакете
     # платформы — libs/enterprise_data.
     "psycopg2-binary==2.9.12",
@@ -28,6 +33,13 @@ dependencies = [
     "duckdb>=1.0",
     "numpy>=1.26",
     "faiss-cpu>=1.8",
+    # Сериализация батчей снимка в Arrow (libs/enterprise_data/snapshot/
+    # writer.py). Импорт ленивый, но отсутствие пакета — не «мягкая деградация»:
+    # writer.py:304 обязан отказать громко, иначе молча уходит пустая таблица.
+    "pyarrow>=23.0",
+    # Вывод пула PostgreSQL в консоль (libs/enterprise_data/db.py). Тоже
+    # ленивый: без него платформа обязана работать, просто молча.
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
