@@ -11,6 +11,7 @@ FastMCP и ручной регистрации операций.
 from __future__ import annotations
 
 import ast
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,188 @@ async def _call(transport: Any, name: str, arguments: dict[str, Any]) -> Any:
 
     async with connect(transport) as session:
         return await session.call_tool(name, arguments=arguments)
+
+
+def _main_statements() -> list[str]:
+    """Тела верхнего уровня ``main`` как список распарсенных выражений.
+
+    AST, а не поиск подстроки: определение функции содержит её же имя, и
+    страж на ``source.index(...)`` принимал удаление вызова за «вызов на
+    месте». Здесь утверждение есть только если вызов действительно есть.
+    """
+    tree = ast.parse(Path(enterprise_server.__file__).read_text(encoding="utf-8"))
+    main = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
+    )
+    return [ast.unparse(statement) for statement in main.body]
+
+
+def _loop_statement_index() -> int:
+    """Позиция оператора верхнего уровня ``main``, где запускается loop.
+
+    Внутри него может лежать вложенный ``_serve`` (он объявлен в ``try``),
+    поэтому ищем по развёрнутому тексту оператора, а не по узлу функции.
+    """
+    statements = _main_statements()
+    for index, statement in enumerate(statements):
+        if "anyio.run(_serve)" in statement:
+            return index
+    raise AssertionError("в main нет оператора с anyio.run(_serve)")
+
+
+class TestHeavyImportWarmup:
+    """Прогрев numpy/pandas до старта loop.
+
+    Дефект, который он закрывает: DuckDB тянет эти пакеты лениво на первом
+    же ``execute`` с параметрами, а обработчики операций идут в воркерах
+    AnyIO — импорт оттуда зависает намертво (на живом процессе больше
+    180 с вместо 0,2 с).
+    """
+
+    def test_warmup_imports_packages(self) -> None:
+        for name in ("numpy", "pandas"):
+            sys.modules.pop(name, None)
+
+        enterprise_server._warm_heavy_imports()
+
+        for name in ("numpy", "pandas"):
+            assert name in sys.modules, f"{name} не прогрет"
+
+    def test_warmup_survives_missing_package(self, monkeypatch) -> None:
+        """Отсутствие пакета не должно ронять старт: DuckDB работает и без
+        pandas, и прогрев — оптимизация, а не условие подъёма."""
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "pandas":
+                raise ImportError("нет pandas")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", fake_import)
+
+        enterprise_server._warm_heavy_imports()
+
+    def test_warmup_runs_before_loop_starts(self) -> None:
+        statements = _main_statements()
+        loop = _loop_statement_index()
+
+        assert "_warm_heavy_imports()" in statements, (
+            "прогрев тяжёлых импортов не вызывается в main"
+        )
+        assert statements.index("_warm_heavy_imports()") < loop, (
+            "прогрев после старта loop: первый запрос снова платит за импорт из воркера"
+        )
+
+
+class TestStartupPreparation:
+    """Подготовка capability до старта loop: ленивых загрузок быть не должно.
+
+    Инвариант владельца: на старте сервера все операции доступны быстро.
+    Без этого шага первая же операция платит за реестр и за сборку FAISS, и
+    это выглядит как «индексы не ищутся» — дефект там, где его нет.
+    """
+
+    class _Audit:
+        def __init__(self, result: Any = None, error: Exception | None = None):
+            self.calls = 0
+            self._result = result if result is not None else {"count": 6}
+            self._error = error
+
+        def list_scripts(self) -> Any:
+            self.calls += 1
+            if self._error is not None:
+                raise self._error
+            return self._result
+
+    class _Owner:
+        def __init__(self, error: Exception | None = None):
+            self.built: list[str] = []
+            self._error = error
+
+        def ensure_index(self, name: str) -> None:
+            self.built.append(name)
+            if self._error is not None:
+                raise self._error
+
+    class _Vectors:
+        def __init__(self, declared: list[str], owner: Any):
+            self.owner = owner
+            self._declared = declared
+
+        def list_indexes(self) -> list[dict[str, Any]]:
+            return [{"index_name": name, "declared": True} for name in self._declared]
+
+        def state(self, name: str) -> str:
+            return "ready"
+
+    class _Container:
+        def __init__(self, **services: Any):
+            self.services = services
+
+    def test_registry_is_read_at_startup(self) -> None:
+        audit = self._Audit()
+        enterprise_server._prepare_capabilities(self._Container(audit=audit))
+
+        assert audit.calls == 1, "реестр скриптов обязан читаться на старте"
+
+    def test_declared_indexes_are_built_at_startup(self) -> None:
+        vectors = self._Vectors(["audits_index", "violations_index"], self._Owner())
+
+        enterprise_server._prepare_capabilities(self._Container(vectors=vectors))
+
+        assert vectors.owner.built == ["audits_index", "violations_index"]
+
+    def test_broken_registry_does_not_stop_startup(self) -> None:
+        """Снимок по контракту необязателен: подняться без него — законное
+        состояние. Но отказ обязан быть назван, а не проглочен."""
+        audit = self._Audit(error=RuntimeError("снимок недоступен"))
+
+        enterprise_server._prepare_capabilities(self._Container(audit=audit))
+
+        assert audit.calls == 1
+
+    def test_failed_index_build_does_not_stop_startup(self) -> None:
+        owner = self._Owner(error=RuntimeError("нет эмбеддера"))
+        vectors = self._Vectors(["audits_index"], owner=owner)
+
+        enterprise_server._prepare_capabilities(self._Container(vectors=vectors))
+
+        assert owner.built == ["audits_index"]
+
+    def test_missing_services_are_not_an_error(self) -> None:
+        """Процесс ``--capabilities llm`` поднимает один сервис."""
+        enterprise_server._prepare_capabilities(self._Container())
+
+    def test_startup_log_reports_real_index_state(self, caplog) -> None:
+        """В баннер идёт настоящее состояние индекса.
+
+        Зашитое ``ready`` выглядело бы как «всё поднялось» там, где индекс
+        собрать не удалось, — то есть молчаливое враньё вместо отказа.
+        """
+
+        class _Broken(self._Vectors):
+            def state(self, name: str) -> str:
+                return "error"
+
+        vectors = _Broken(["audits_index"], self._Owner())
+
+        with caplog.at_level(logging.INFO):
+            enterprise_server._prepare_capabilities(self._Container(vectors=vectors))
+
+        assert "error" in caplog.text, "состояние индекса в логе не отражено"
+
+    def test_preparation_runs_before_loop_starts(self) -> None:
+        statements = _main_statements()
+        loop = _loop_statement_index()
+
+        assert "_prepare_capabilities(container)" in statements, (
+            "подготовка capability не вызывается в main"
+        )
+        assert statements.index("_prepare_capabilities(container)") < loop, (
+            "подготовка capability после старта loop: ленивая загрузка вернулась на горячий путь"
+        )
 
 
 class TestBootstrap:

@@ -501,6 +501,108 @@ def _log_llm_settings(llm: Any) -> None:
     )
 
 
+def _warm_heavy_imports() -> None:
+    """Прогреть ``numpy``/``pandas`` до старта event loop.
+
+    DuckDB тянет их лениво, на первом же ``execute` **с параметрами**:
+    замерено — ``execute`` без параметров не добавляет в ``sys.modules``
+    ничего, а с параметрами добавляет оба пакета (0,6 с) и ещё 3,4 с
+    уходит на ``fetchall``. Обработчики операций выполняются в воркерах
+    AnyIO, а импорт numpy из не-main-потока на Windows **зависает
+    намертво**: операция не падает, а перестаёт отвечать навсегда (проверено
+    на живом процессе — больше 180 с вместо 0,2 с, стек стоял в
+    ``numpy/_core/multiarray.py``).
+
+    Поэтому тяжёлое поднимается на старте, а не посреди оборота: так же,
+    как сам процесс сервера. Суммарно меньше секунды один раз за процесс.
+
+    Отказ импорта не роняет сервер: DuckDB умеет работать без pandas, и
+    отсутствие пакета — не причина отказывать в подъёме. Предупреждение в
+    лог означает лишь, что первый такой запрос снова заплатит за импорт.
+    """
+    import time
+
+    for name in ("numpy", "pandas"):
+        started = time.monotonic()
+        try:
+            __import__(name)
+        except Exception as exc:  # noqa: BLE001 - прогрев не должен ронять старт
+            logger.warning("прогрев %s не удался: %s", name, exc)
+            continue
+        logger.info("прогрет %s за %.1fс", name, time.monotonic() - started)
+
+
+def _prepare_capabilities(container: Any) -> None:
+    """Довести capability до готового состояния **до** старта event loop.
+
+    Инвариант: на старте сервера все операции доступны быстро, ленивых
+    загрузок на горячем пути нет. Иначе первая же операция платит за чужую
+    подготовку, и это выглядит как «индексы не ищутся» — дефект там, где
+    его нет.
+
+    Что именно готовится и почему:
+
+    * **реестр скриптов** (``audit.list_scripts``) — единственная проверка
+      того, что снимок не просто открывается, а отдаёт данные. Пока она не
+      прошла, про снимок сказать нечего: он может быть доступен и пуст.
+    * **векторные индексы** (``vectors``) — ``ensure_index`` для каждого
+      объявленного индекса. Сборка FAISS ленивая по построению: без этого
+      шага она случалась на первом же поиске, и на большом снимке это
+      секунды молчания на горячем пути.
+
+    Отказ не роняет сервер: снимок по контракту необязателен (``OPTIONAL``),
+    и подниматься без него — законное состояние. Но отказ **называется** в
+    логе и виден в ответе операций (``list_indexes``, ``index_stats``,
+    ``list_scripts``), поэтому «не работает» и «не настроено» не путаются.
+
+    ``None``-сервис пропускается: процесс ``--capabilities llm`` поднимает
+    один сервис, и отсутствие остальных — его норма, а не дефект.
+    """
+    import time
+
+    audit = container.services.get("audit")
+    if audit is not None:
+        started = time.monotonic()
+        try:
+            catalog = audit.list_scripts()
+        except Exception as exc:  # noqa: BLE001 - причина уходит в лог целиком
+            logger.error("реестр скриптов недоступен на старте: %s", exc)
+        else:
+            logger.info(
+                "аудит: %s скриптов в реестре, снимок читается (%.1fс)",
+                (catalog or {}).get("count", "?"),
+                time.monotonic() - started,
+            )
+
+    vectors = container.services.get("vectors")
+    if vectors is None:
+        return
+    try:
+        declared = [
+            item["index_name"]
+            for item in vectors.list_indexes()
+            if item.get("declared") and item.get("index_name")
+        ]
+    except Exception as exc:  # noqa: BLE001 - состояние и так проверяется ниже
+        logger.error("не удалось перечислить объявленные индексы: %s", exc)
+        return
+
+    for name in declared:
+        started = time.monotonic()
+        try:
+            vectors.owner.ensure_index(name)
+        except Exception as exc:  # noqa: BLE001 - состояние индекса уже записано владельцем
+            logger.error("индекс %r не собран на старте: %s", name, exc)
+            continue
+        state = vectors.state(name)
+        logger.info(
+            "индекс %r на старте: %s (%.1fс)",
+            name,
+            state,
+            time.monotonic() - started,
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     """Поднять сервер по stdio. Точка входа для MCP-клиента агента.
 
@@ -523,6 +625,11 @@ def main(argv: list[str] | None = None) -> None:
     data = container.services.get("data")
     if data is not None:
         data.start()
+    # До ``anyio.run``: воркеры AnyIO не должны платить за первый импорт
+    # numpy/pandas — из них он зависает (см. _warm_heavy_imports), а сборка
+    # индексов и чтение реестра обязаны случиться до первого запроса.
+    _warm_heavy_imports()
+    _prepare_capabilities(container)
     try:
         async def _serve() -> None:
             async with stdio_server() as (read_stream, write_stream):
