@@ -37,6 +37,7 @@ from libs.enterprise_common.settings import (
     BY_NAME,
     CAPABILITIES,
     FROM_FILE,
+    OPTIONAL,
     OWNER_AGENT,
     OWNER_PLATFORM,
     PLATFORM_CONFIG_PATH,
@@ -45,6 +46,7 @@ from libs.enterprise_common.settings import (
     SHARED_SECTIONS,
     SHARED_SETTINGS,
     Settings,
+    capabilities_of,
     settings_owned_by,
 )
 
@@ -283,10 +285,17 @@ class TestRegistryShape:
             assert setting.owner in (OWNER_PLATFORM, OWNER_AGENT), setting.name
 
     def test_required_settings_have_no_default(self) -> None:
-        """Обязательная настройка с дефолтом — не обязательная."""
+        """Обязательная настройка с дефолтом — не обязательная.
+
+        ``OPTIONAL`` здесь не считается дефолтом: он разрешается в пустое
+        значение, то есть ровно в «настройки нет» — и ``missing_required()``
+        такую настройку по-прежнему называет. Смысл проверки в том, чтобы
+        обязательная настройка не оказалась всегда заполненной, а не в том,
+        чтобы у неё не было маркера наподобие ``FROM_FILE``.
+        """
         for setting in SETTINGS:
             if setting.required:
-                assert setting.default in (None, ""), (
+                assert setting.default in (None, "", OPTIONAL), (
                     f"{setting.name}: помечена required, но имеет дефолт "
                     f"{setting.default!r} — она никогда не будет missing"
                 )
@@ -497,16 +506,44 @@ class TestFileIsTheSingleSourceOfTruth:
         Проверяется ссылка на сентинел, а не сравнение с файлом: сравнение
         проходило бы и на состоянии, которое запрещает (список в коде,
         повторяющий файл).
+
+        Допустимы ровно три формы: ``FROM_FILE`` (значение обязано быть в
+        файле), ``OPTIONAL`` (настройка может остаться незаданной — так
+        объявлены настройки необязательной capability ``llm``) и пустое
+        значение ``DATABASE_URL``, у которого свой отдельный смысл. Всё
+        остальное — ошибка: молчаливый ``default=""`` выглядит как забытое
+        значение, и вопрос «применяется ли настройка из файла» снова получает
+        два ответа.
         """
         with_values = sorted(
             s.name
             for s in settings_owned_by(OWNER_PLATFORM)
-            if s.file_key and s.default is not FROM_FILE and s.name != "DATABASE_URL"
+            if s.file_key
+            and s.default is not FROM_FILE
+            and s.default is not OPTIONAL
+            and s.name != "DATABASE_URL"
         )
         assert not with_values, (
             "платформенные настройки с ключом в файле, но со значением в коде: "
-            f"{with_values}. Значение обязано жить только в platform.json."
+            f"{with_values}. Значение обязано жить только в platform.json "
+            "(или настройка объявлена OPTIONAL, если capability необязательна)."
         )
+
+    def test_optional_is_only_used_by_capabilities_that_may_be_absent(self) -> None:
+        """``OPTIONAL`` — не «второй способ задать значение дефолтом».
+
+        Он означает ровно одно: capability может быть не настроена, и её
+        отсутствие не имеет права снимать из работы остальные. Поэтому
+        настройку с ``OPTIONAL`` обязана читать хотя бы одна capability из
+        реестра — иначе это просто «значение по умолчанию с красивым
+        названием», которое прошло бы проверку выше.
+        """
+        optional = {
+            s.name for s in settings_owned_by(OWNER_PLATFORM) if s.default is OPTIONAL
+        }
+        assert optional, "в реестре не осталось ни одной OPTIONAL-настройки"
+        for name in sorted(optional):
+            assert capabilities_of(name), f"{name} не читается ни одной capability"
 
     def test_every_platform_key_exists_in_the_file(self) -> None:
         """Каждому ключу реестра — ключ в файле.
@@ -591,6 +628,15 @@ class TestOnlyTheRegistryReadsTheEnvironment:
 
     ALLOWED = "libs/enterprise_common/settings.py"
 
+    #: Клиент платформы поднимает процесс сервера, и окружение уходит
+    #: ему **целиком**, неразобранным. Это не чтение настройки: модуль не
+    #: обращается ни к одному имени из реестра и не решает, какое значение
+    #: применять, — он передаёт дальше то, что и так есть у процесса, и
+    #: разбирать его будет реестр в дочернем процессе. Исключение поэтому
+    #: узкое: копирование окружения разрешено, обращение к конкретной
+    #: переменной — нет (проверяется отдельным тестом ниже).
+    FORWARDS_ENVIRONMENT = "libs/enterprise_client/llm.py"
+
     def _touches_environment(self, path: Path) -> list[str]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         hits: list[str] = []
@@ -601,11 +647,33 @@ class TestOnlyTheRegistryReadsTheEnvironment:
                 hits.append(f"getenv (строка {node.lineno})")
         return hits
 
+    def _reads_a_named_variable(self, path: Path) -> list[str]:
+        """Обращения к окружению как к словарю на **чтение**: ``env["NAME"]``.
+
+        Копирование (``dict(os.environ)``) и запись в словарь, который уйдёт
+        дочернему процессу, сюда не попадают — это обвязка процесса, а не
+        выбор значения. А вот ``env["ENTERPRISE_..."]`` на чтение мимо
+        реестра — да, и это ровно то, что запрещено.
+        """
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        hits: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Subscript):
+                continue
+            if not isinstance(node.ctx, ast.Load):
+                continue
+            target = node.value
+            if isinstance(target, ast.Attribute) and target.attr == "environ":
+                hits.append(f"os.environ[...] (строка {node.lineno})")
+            elif isinstance(target, ast.Name) and target.id == "env":
+                hits.append(f"env[...] (строка {node.lineno})")
+        return hits
+
     def test_no_module_besides_the_registry_reads_the_environment(self) -> None:
         offenders: dict[str, list[str]] = {}
         for path in _python_files():
             relative = path.relative_to(PLATFORM_ROOT).as_posix()
-            if relative == self.ALLOWED:
+            if relative in (self.ALLOWED, self.FORWARDS_ENVIRONMENT):
                 continue
             hits = self._touches_environment(path)
             if hits:
@@ -614,6 +682,19 @@ class TestOnlyTheRegistryReadsTheEnvironment:
             "окружение читает не только реестр: "
             + "; ".join(f"{k}: {', '.join(v)}" for k, v in offenders.items())
             + ". Значение приходит из Settings, а не из процесса."
+        )
+
+    def test_forwarding_client_does_not_pick_settings_itself(self) -> None:
+        """Исключение — про передачу окружения, а не про свой разбор.
+
+        Если клиент начнёт выбирать переменные сам, у настройки появятся
+        два читателя, и проверка выше перестанет что-либо значить.
+        """
+        path = PLATFORM_ROOT / self.FORWARDS_ENVIRONMENT
+        hits = self._reads_a_named_variable(path)
+        assert not hits, (
+            f"{self.FORWARDS_ENVIRONMENT} обращается к переменным окружения "
+            f"поимённо: {', '.join(hits)}"
         )
 
     def test_the_registry_really_reads_the_environment(self) -> None:

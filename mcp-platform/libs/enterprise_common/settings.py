@@ -173,6 +173,43 @@ class FromFile:
 #: Подставьте вместо значения настройки, которая обязана быть в файле.
 FROM_FILE = FromFile()
 
+
+class OptionalValue:
+    """Платформенная настройка, которой **можно** не иметь значения.
+
+    Третья форма рядом с ``FROM_FILE``, и она нужна ровно для
+    необязательных capability. ``FROM_FILE`` означал бы «без значения из
+    файла сервер не поднимется», а capability ``llm`` не имеет права делать
+    это обязательной для всего процесса: забытый ключ провайдера уронил бы
+    ``data`` и ``vectors``, которые к нему отношения не имеют.
+
+    Отличие от молчаливого ``default=""`` — в читаемости реестра. Пустая
+    строка выглядит как забытое значение, ``OPTIONAL`` — как решение. И
+    страж реестра проверяет, что у платформенной настройки нет иных форм:
+    значение в коде не проскочит ни под каким видом.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - только для сообщений
+        return "<необязательно>"
+
+
+#: Подставьте вместо значения настройки, которая может остаться незаданной.
+OPTIONAL = OptionalValue()
+
+#: Чем заменяется ``OPTIONAL`` при разрешении: пустое значение по типу.
+#: Для чисел это ``None``, а не ``0``: ноль — это заданное значение, и
+#: ``max_tokens=0`` ведёт себя не так же, как «параметра нет».
+_OPTIONAL_EMPTY: dict[str, Any] = {
+    "str": "",
+    "secret": "",
+    "int": None,
+    "float": None,
+    "bool": False,
+    "list": [],
+}
+
 #: Подстановка ``${ПЕРЕМЕННАЯ}`` в значении из ``platform.json``. Имена —
 #: как в окружении, без префиксов: файл читает человек, и ``${DB_USER}``
 #    понятнее, чем ``${ENTERPRISE_DB_USER}``, которого не существует.
@@ -317,13 +354,21 @@ SETTINGS: tuple[Setting, ...] = (
        "DSN рабочей базы; пусто — воркер падает внятно, а не подключается не туда",
        aliases=("PG_DSN",), required=True, file_key="db.dsn", file_first=True),
     # -- capability audit ----------------------------------------------------
-    _s("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "str", "", OWNER_AGENT,
+    # Список таблиц аудита и реестр скриптов переехали из окружения агента в
+    # platform.json: это знание о проекте, которым владеет MCP, и держать
+    # его в чужом окружении означало, что у одного факта два владельца.
+    # ``required`` здесь не нужен и противоречил бы FROM_FILE: отсутствие
+    # ключа в файле останавливает сервер на старте с именем ключа, то есть
+    # настройка не может разрешиться в «нет значения». Маркер required
+    # означает «может быть пустым, но тогда назови меня в баннере».
+    _s("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_audit_config",
-       "таблица реестра предустановленных скриптов; пусто — registry_unavailable",
-       required=True),
-    _s("ENTERPRISE_AUDIT_TABLES", "list", (), OWNER_AGENT,
+       "таблица реестра предустановленных скриптов; в tables не входит",
+       file_key="audit.scripts_registry_table"),
+    _s("ENTERPRISE_AUDIT_TABLES", "list", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_audit_config",
-       "белый список таблиц для аудита; реестр скриптов сюда не входит"),
+       "белый список таблиц для аудита; реестр скриптов сюда не входит",
+       file_key="audit.tables"),
     _s("ENTERPRISE_AUDIT_ROW_CEILING", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_audit_config",
        "потолок строк для generate_sql; 0 — не применять. Потолок защищает "
@@ -350,9 +395,6 @@ SETTINGS: tuple[Setting, ...] = (
        "(gateway.vector.index.enable), потому что тем же флагом агент "
        "решает, строить ли индексы. Ключ в platform.json был бы вторым "
        "ответом на тот же вопрос и всегда проигрывал бы окружению"),
-    _s("ENTERPRISE_EMBED_MODEL", "str", "", OWNER_AGENT,
-       "servers/enterprise/server.py:_vectors_config",
-       "модель эмбеддера; пусто — capability llm остаётся ненастроенной"),
     _s("ENTERPRISE_EMBED_DIMENSION", "int", None, OWNER_AGENT,
        "servers/enterprise/server.py:_vectors_config",
        "размерность вектора эмбеддера; входит в подпись индекса"),
@@ -360,33 +402,72 @@ SETTINGS: tuple[Setting, ...] = (
        "servers/enterprise/server.py:_vectors_config",
        "таймаут HTTP-запроса к эмбеддеру, сек"),
     # -- capability llm ------------------------------------------------------
-    _s("ENTERPRISE_LLM_PROVIDER", "str", "", OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "провайдер чата", aliases=("LLM_PROVIDER",), required=True),
-    _s("ENTERPRISE_LLM_MODEL", "str", "", OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "модель чата", aliases=("LLM_MODEL",), required=True),
-    _s("ENTERPRISE_LLM_API_BASE", "str", "", OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "адрес эндпойнта чата", aliases=("LLM_API_BASE",)),
-    _s("ENTERPRISE_LLM_API_KEY", "secret", "", OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "ключ чата", aliases=("LLM_API_KEY",)),
-    _s("ENTERPRISE_LLM_MAX_TOKENS", "int", None, OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "потолок токенов ответа", aliases=("LLM_MAX_TOKENS",)),
-    _s("ENTERPRISE_LLM_TEMPERATURE", "float", None, OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "температура чата", aliases=("LLM_TEMPERATURE",)),
+    #
+    # Владелец — платформа, а не агент. Сервис общения с моделью живёт
+    # здесь, и настройки его провайдера обязаны жить рядом с ним: агентская
+    # копия конфига была второй копией, которая разъезжалась с этой при
+    # первой правке модели. Ключ — подстановкой ``${LLM_API_KEY}``: он
+    # разворачивается из ``mcp-platform/.secrets.env`` (свои секреты
+    # платформы), а не из репозитория агента, и общая жизнь ключа связала
+    # бы развёртывания, которые обязаны жить отдельно.
+    #
+    # Дефолт — пустая строка, а **не** ``FROM_FILE``, и это единственное
+    # отступление от правила платформенных настроек. Причина в назначении
+    # capability: ``llm`` необязательна, и её отсутствие не имеет права
+    # снимать из работы ``data``, ``audit`` и ``vectors``. ``FROM_FILE``
+    # означал бы, что сервер не поднимется без ключа провайдера, то есть
+    # необязательная capability стала бы обязательной для всего процесса.
+    # Пустое значение — законное состояние, а не забытый ключ: оно видно в
+    # баннере (``configured: false``) и приходит как ``infrastructure_error``
+    # на своей операции. Настройки, отсутствие которых действительно ломает
+    # сервер, объявлены ``FROM_FILE`` — см. ``db.dsn``, ``pool.*``, ``data.*``.
+    _s("ENTERPRISE_LLM_PROVIDER", "str", OPTIONAL, OWNER_PLATFORM,
+       "libs/llm/config.py:resolve_llm_config",
+       "провайдер чата", aliases=("LLM_PROVIDER",), required=True,
+       file_key="llm.provider"),
+    _s("ENTERPRISE_LLM_MODEL", "str", OPTIONAL, OWNER_PLATFORM,
+       "libs/llm/config.py:resolve_llm_config",
+       "модель чата", aliases=("LLM_MODEL",), required=True,
+       file_key="llm.model"),
+    _s("ENTERPRISE_LLM_API_BASE", "str", OPTIONAL, OWNER_PLATFORM,
+       "libs/llm/config.py:resolve_llm_config",
+       "адрес эндпойнта чата", aliases=("LLM_API_BASE",),
+       file_key="llm.api_base"),
+    _s("ENTERPRISE_LLM_API_KEY", "secret", OPTIONAL, OWNER_PLATFORM,
+       "libs/llm/config.py:resolve_llm_config",
+       "ключ чата; в файле — подстановка ${LLM_API_KEY} из .secrets.env",
+       aliases=("LLM_API_KEY",), file_key="llm.key"),
+    _s("ENTERPRISE_LLM_MAX_TOKENS", "int", OPTIONAL, OWNER_PLATFORM,
+       "libs/llm/config.py:resolve_llm_config",
+       "потолок токенов ответа", aliases=("LLM_MAX_TOKENS",),
+       file_key="llm.max_tokens"),
+    _s("ENTERPRISE_LLM_TEMPERATURE", "float", OPTIONAL, OWNER_PLATFORM,
+       "libs/llm/config.py:resolve_llm_config",
+       "температура чата", aliases=("LLM_TEMPERATURE",),
+       file_key="llm.temperature"),
+    # Эмбеддер объявлен здесь, но остаётся **агентским**: HTTP-вызов к нему
+    # делает тот же владелец (``libs/llm``), а вот модель эмбеддера входит в
+    # подпись индекса, которую агент и строит, и проверяет. Перенос её в
+    # ``platform.json`` дал бы второе место для одного и того же имени, и они
+    # разошлись бы при первой смене модели — индекс был бы помечен
+    # актуальным, будучи построенным на другом эмбеддере.
+    #
+    # Следствие: ``describe()`` сервиса показывает источник этих значений
+    # (окружение), а не файл. Это честнее, чем файл с ключами, которые
+    # ничего не меняют.
     _s("ENTERPRISE_EMBED_API_BASE", "str", "", OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "адрес эндпойнта эмбеддингов; эмбеддер и чат — разные провайдеры"),
+       "servers/enterprise/server.py:_vectors_config",
+       "адрес эндпойнта эмбеддингов; эмбеддер и чат — разные провайдеры, "
+       "поэтому адрес приходит своим"),
     _s("ENTERPRISE_EMBED_API_KEY", "secret", "", OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
-       "ключ эмбеддингов"),
+       "libs/llm/config.py:resolve_llm_config",
+       "ключ эмбеддингов; пусто — запрос без Authorization"),
     _s("ENTERPRISE_EMBED_PATH", "str", "", OWNER_AGENT,
-       "libs/llm/config.py:_ENV_NAMES",
+       "libs/llm/config.py:resolve_llm_config",
        "путь эндпойнта эмбеддингов, если адрес задан полным URL"),
+    _s("ENTERPRISE_EMBED_MODEL", "str", "", OWNER_AGENT,
+       "servers/enterprise/server.py:_vectors_config",
+       "модель эмбеддера; входит в подпись индекса, поэтому объявляет агент"),
     # -- журнал и бюджеты запросов: собственные ручки платформы ---------------
     _s("ENTERPRISE_LOG_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_log_table",
@@ -821,7 +902,11 @@ class Settings:
                     else "Добавьте ключ в platform.json."
                 )
             )
-        self._values[setting.name] = setting.default
+        self._values[setting.name] = (
+            _OPTIONAL_EMPTY[setting.kind]
+            if setting.default is OPTIONAL
+            else setting.default
+        )
         self._sources[setting.name] = "default"
 
     def _secret(self, name: str) -> tuple[str, str] | None:

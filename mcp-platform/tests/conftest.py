@@ -23,13 +23,17 @@ PLATFORM_ROOT = Path(__file__).resolve().parent.parent
 if str(PLATFORM_ROOT) not in sys.path:
     sys.path.insert(0, str(PLATFORM_ROOT))
 
-#: Подстановки ``platform.json -> db.dsn``, которых должно хватать для разбора.
+#: Подстановки ``platform.json``, которых должно хватать для разбора: DSN и
+#: ключ провайдера. Пока в файле есть обе, заглушек быть должно обе — новая
+#: подстановка обязана заставлять поправить этот словарь, иначе она тихо
+#: валит половину прогона вместо одной понятной ошибки.
 DUMMY_SECRETS: dict[str, str] = {
     "DB_USER": "test",
     "DB_PASSWORD": "test",
     "DB_HOST": "localhost",
     "DB_PORT": "5432",
     "DB_NAME": "test",
+    "LLM_API_KEY": "test",
 }
 
 

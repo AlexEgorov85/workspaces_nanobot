@@ -45,8 +45,13 @@ logger = logging.getLogger(__name__)
 ENTRY_POINT = "create_tool"
 
 
-def discover_tool_files(capabilities_dir: Path) -> list[Path]:
+def discover_tool_files(
+    capabilities_dir: Path, capabilities: Iterable[str] | None = None
+) -> list[Path]:
     """Рекурсивно найти файлы операций: ``capabilities/*/tools/*.py``.
+
+    Args:
+        capabilities: оставить только эти capability. ``None`` — все.
 
     Порядок стабильный: ``sorted``. Недетерминированный порядок даёт
     непредсказуемый порядок регистрации, а с ним — разный порядок в discovery
@@ -54,9 +59,12 @@ def discover_tool_files(capabilities_dir: Path) -> list[Path]:
     """
     if not capabilities_dir.is_dir():
         return []
+    wanted = set(capabilities) if capabilities is not None else None
     found: list[Path] = []
     for path in sorted(capabilities_dir.glob("*/tools/**/*.py")):
         if path.name == "__init__.py" or path.name.startswith("_"):
+            continue
+        if wanted is not None and path.relative_to(capabilities_dir).parts[0] not in wanted:
             continue
         found.append(path)
     return found
@@ -140,14 +148,18 @@ def load_registry(
     capabilities_dir: Path,
     container: ToolContainer,
     root: Path | None = None,
+    capabilities: Iterable[str] | None = None,
 ) -> ToolRegistry:
-    """Собрать реестр из всех capability-каталогов.
+    """Собрать реестр из capability-каталогов.
+
+    Args:
+        capabilities: собрать только эти capability. ``None`` — все.
 
     Бросает ``ToolLoadError`` на первой проблеме — см. модульный докстринг.
     """
     platform_root = root if root is not None else capabilities_dir.parent.parent
     registry = ToolRegistry()
-    for path in discover_tool_files(capabilities_dir):
+    for path in discover_tool_files(capabilities_dir, capabilities):
         definition = load_definition(path, container, platform_root)
         try:
             registry.register(definition)

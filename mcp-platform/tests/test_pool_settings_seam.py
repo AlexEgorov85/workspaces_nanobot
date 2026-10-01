@@ -45,15 +45,17 @@ from libs.enterprise_common.settings import (  # noqa: E402
     pool_config,
 )
 
-#: Подстановки DSN для тестов, которым нужен полностью разрешённый
-#: platform.json. Настоящие секреты живут в ``mcp-platform/.secrets.env`` и в
-#: тесты не попадают; набор тот же, что задаёт conftest на сессию.
+#: Подстановки ``platform.json`` для тестов, которым нужен полностью
+#: разрешённый файл: DSN и ключ провайдера. Настоящие секреты живут в
+#: ``mcp-platform/.secrets.env`` и в тесты не попадают; набор тот же, что
+#: задаёт conftest на сессию, и расти он обязан вместе с файлом.
 DUMMY_SECRETS: dict[str, str] = {
     "DB_USER": "test",
     "DB_PASSWORD": "test",
     "DB_HOST": "localhost",
     "DB_PORT": "5432",
     "DB_NAME": "test",
+    "LLM_API_KEY": "test",
 }
 
 def _settings(

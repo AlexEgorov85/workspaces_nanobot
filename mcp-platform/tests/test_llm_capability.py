@@ -29,6 +29,7 @@ from libs.enterprise_common.container import ToolContainer  # noqa: E402
 from libs.enterprise_common.errors import InfrastructureError, InvalidRequestError  # noqa: E402
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema  # noqa: E402
 from libs.llm.config import LlmConfig  # noqa: E402
+from libs.llm.gateway import LlmGateway  # noqa: E402
 from servers.enterprise.capabilities.llm.service.main import (  # noqa: E402
     AUDIENCE_MODEL,
     AUDIENCE_RUNTIME,
@@ -115,10 +116,17 @@ class TestConstruction:
         assert "sk-secret" not in repr(payload)
 
     def test_default_call_is_platform_client(self) -> None:
-        """Сервис по умолчанию зовёт клиент-владелец, а не свой HTTP-клиент."""
+        """Сервис по умолчанию зовёт клиент-владелец, а не свой HTTP-клиент.
+
+        Владельцем вызова стал ``LlmGateway`` — сервис общения с моделью, а
+        не сам HTTP-клиент. Проверяется именно он: значение по умолчанию
+        вызова обязано совпадать с владельцем, иначе capability однажды
+        позовёт сеть мимо слоя.
+        """
         from libs.llm.client import call_llm
 
-        assert LlmService(config=CONFIG)._call is call_llm
+        assert LlmGateway()._call is call_llm
+        assert LlmService(config=CONFIG).service._call is call_llm
 
     def test_complete_works_without_constructor_config(self) -> None:
         """Путь боя: сервис собран БЕЗ ``config=`` и конфиг резолвится лениво.
@@ -574,7 +582,14 @@ class TestCapabilityOwnsNoHttpClient:
             assert expected == self._offenders(source, "capabilities/llm/service/main.py")
 
     def test_capability_does_not_import_the_owner_as_a_client(self) -> None:
-        """Capability зовёт функцию клиента-владельца, а не строит клиент."""
+        """Capability зовёт слой-владелец, а не строит клиент.
+
+        Владелец — ``libs.llm.gateway``: это сервис общения с моделью, внутри
+        которого живут и настройки, и HTTP-вызов. Импорт самого
+        ``libs.llm.client`` capability больше не делает и не должна: чем
+        глубже она заходит внутрь слоя, тем меньше остаётся у неё собственных
+        проверок — именно там обычно и появляется вторая копия правил.
+        """
         source = (CAPABILITY_DIR / "service" / "main.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         modules: set[str] = set()
@@ -583,6 +598,10 @@ class TestCapabilityOwnsNoHttpClient:
                 modules.add(node.module)
             elif isinstance(node, ast.Import):
                 modules.update(alias.name for alias in node.names)
-        assert "libs.llm.client" in modules, "сервис должен звать клиент-владелец"
+        assert "libs.llm.gateway" in modules, "сервис должен звать слой-владелец"
+        assert "libs.llm.client" not in modules, (
+            "capability не должна спускаться до HTTP-клиента: "
+            "её дело — контракт операции, а не вызов провайдера"
+        )
         assert not {"httpx", "requests"} & {m.split(".")[0] for m in modules}
         assert "chat/completions" not in source

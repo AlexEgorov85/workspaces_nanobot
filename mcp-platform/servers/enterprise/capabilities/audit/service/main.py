@@ -114,11 +114,20 @@ class AuditService:
         return _explain
 
     def _chat(self):
-        """Вызов модели. HTTP принадлежит capability ``llm``."""
+        """Вызов модели. HTTP и настройки принадлежат capability ``llm``.
+
+        Через ``send``, а не ``complete``: генератор собирает историю сам —
+        после неудачной попытки он дописывает предыдущий обмен и текст
+        ошибки. Раньше здесь стоял вызов с ключевым словом ``messages=``,
+        которого у ``complete`` нет вовсе (у него ``prompt``), плюс
+        ``audience="infrastructure"`` — значение, которого нет ни в одном
+        профиле. Обе ошибки не могли проявиться в тестах с подставным
+        сервисом и выглядели как «генерация SQL не работает».
+        """
         llm = self._container.get(LLM_SERVICE)
 
         def _ask(messages: list[dict[str, Any]]) -> str:
-            return llm.complete(messages=messages, audience="infrastructure").text
+            return llm.send(messages=messages).text
 
         return _ask
 

@@ -150,7 +150,7 @@ def call_llm_json(
     except Exception:
         return None
 
-    return _parse_json_object(text)
+    return parse_json_object(text)
 
 
 def _post_json(
@@ -192,8 +192,15 @@ def _post_json(
     )
 
 
-def _parse_json_object(text: str) -> dict[str, Any] | None:
-    """Распарсить ответ LLM в JSON-объект (с чисткой markdown-обёрток)."""
+def parse_json_object(text: str) -> dict[str, Any] | None:
+    """Распарсить ответ LLM в JSON-объект (с чисткой markdown-обёрток).
+
+    Имена функции, а не ``_parse_json_object``, потому что её использует
+    сервис ``libs/llm/gateway.py``: ответ модели в JSON приходит одним и тем
+    же способом — с markdown-обёрткой ```json и внятным объектом в середине
+    мусора, и вторая копия этого разбора разъехалась бы с первой при первой
+    же правке чистки.
+    """
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
