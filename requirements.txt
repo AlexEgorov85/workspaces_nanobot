@@ -1,13 +1,17 @@
 psycopg2-binary==2.9.12
-duckdb==1.5.4
 httpx==0.28.1
 loguru==0.7.3
-faiss-cpu==1.13.2
-numpy==2.4.2
-pyarrow==23.0.1
 PyYAML==6.0.3
 redis==8.0.0
 nanobot-ai==0.3.5
+
+# Пакеты снимка удалены 2026-10-01 (фаза 5 миграции enterprise-mcp-platform):
+# duckdb, faiss-cpu, numpy, pyarrow, sqlglot. Снимком, FAISS-индексами,
+# эмбеддингами и проверкой SQL владеют capability data / vectors / llm платформы,
+# и каждый из этих пакетов объявлен в её манифесте:
+#   mcp-platform/requirements.txt и mcp-platform/pyproject.toml
+# Перед удалением проверено разбором AST по 509 файлам агента (lib, tools,
+# workspace, tests, contracts) — ни один исполняемый модуль их не импортирует.
 
 # Транспорт к MCP-серверу enterprise-mcp (lib/services/enterprise_mcp_client.py).
 # Раньше приходил транзитивно через nanobot; теперь импортируется напрямую,
@@ -23,7 +27,3 @@ pdfplumber==0.11.10
 python-pptx==1.0.2
 Pillow==12.3.0
 chardet==7.6.0
-
-# sqlglot убран (фаза 9 миграции enterprise-mcp-platform): SQL Security Guard
-# агента удалён вместе с навыком audit_analyzer. Пакет обязателен платформе и
-# объявлен там — mcp-platform/requirements.txt и mcp-platform/pyproject.toml.

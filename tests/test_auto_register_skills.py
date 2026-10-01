@@ -26,7 +26,6 @@ from lib.core.application_context import _auto_register_skills
 from lib.core.skill_registration import register_skill_from_config
 from lib.services.table_registry import (
     TableResource,
-    VectorResource,
     table_registry,
 )
 
@@ -258,37 +257,6 @@ class TestAutoRegisterSkillSkipping:
         _auto_register_skills(ctx)
         assert table_registry.get("x") is None
         assert table_registry.get("y") is not None
-
-
-class TestEmbeddingConfigHardcoded:
-    """Embedding-параметры захардкожены в ``cache_provider_impl``.
-
-    Секция ``gateway.vector.embedding`` удалена (``register_embedding_config``
-    удалён). Источник — модульные константы ``_EMBED_*`` +
-    ``os.environ['EMBED_TOKEN']``; читается через ``read_embedding_config``.
-    """
-
-    def test_reads_hardcoded_constants(self) -> None:
-        from lib.services.cache_provider_impl import read_embedding_config
-
-        emb = read_embedding_config()
-        assert emb["base_url"] == "http://localhost:11434/api/embed"
-        assert emb["model"] == "mxbai-embed-large:latest"
-        assert emb["dimension"] == 1024
-
-    def test_auth_token_from_env(self, monkeypatch) -> None:
-        from lib.services.cache_provider_impl import read_embedding_config
-
-        monkeypatch.setattr("os.environ", {"EMBED_TOKEN": "tok-123"})
-        emb = read_embedding_config()
-        assert emb["auth_token"] == "tok-123"
-
-    def test_no_env_token_none(self, monkeypatch) -> None:
-        from lib.services.cache_provider_impl import read_embedding_config
-
-        monkeypatch.setattr("os.environ", {})
-        emb = read_embedding_config()
-        assert emb["auth_token"] is None
 
 
 class TestRegisterSkillFromConfigStandalone:

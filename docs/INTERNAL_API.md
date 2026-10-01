@@ -152,13 +152,13 @@ Reference: `nanobot/agent/tools/image_generation.py`
 
 | Источник | Как подхватывается |
 |---|---|
-| **`workspace/tools/*.py`** | `RuntimePatcher.patch_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (модуль грузится под именем `workspace.tools.<name>`, без зависимости от наличия `__init__.py`). |
+| **`workspace/tools/*.py`** | `lib/services/project_tool_loader.py::register_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (модуль грузится под именем `workspace.tools.<name>`, без зависимости от наличия `__init__.py`). Регистрация project tools в `RuntimePatcher` запрещена: патч `project_tools` удалён в фазе 4. |
 | **Внешние pip-плагины** | `entry_points(group="nanobot.tools")` в `pyproject.toml` пакета. Встроенный `ToolLoader._discover_plugins` (`nanobot/agent/tools/loader.py:62`) подхватывает их автоматически. |
 | **Тесты/явная регистрация** | `agent.tools.register(MyTool(...))` напрямую (для unit-тестов или особых сценариев DI). |
 
 ### `ToolContext` и DI
 
-`RuntimePatcher.patch_project_tools` собирает `ToolContext` из полей
+`lib/services/project_tool_loader.py::register_project_tools` собирает `ToolContext` из полей
 `AgentLoop` тем же способом, что `AgentLoop._register_default_tools`
 (`loop.py:597-630`):
 
@@ -201,7 +201,7 @@ setattr(ctx, "_agent_ref", agent)   # для tool'ов, которым нуже�
 
 ### Конфликты имён
 
-`patch_project_tools` пропускает tool, если `agent.tools.get(name)`
+`register_project_tools` пропускает tool, если `agent.tools.get(name)`
 уже возвращает не-`None` (т.е. встроенный loader его зарегистрировал
 первым через `_register_default_tools`). Это страхует от случайного
 затирания встроенных tool'ов.
@@ -265,9 +265,9 @@ class MyTool(Tool):
 
 ### Отладка
 
-`RuntimePatcher.apply_all` пишет результат `patch_project_tools` в
-`PatchReport` (логируется через loguru): `"3 project tools
-registered: foo, bar, baz; skipped: qux (disabled by config)"`.
+`ProjectToolLoader` (вызывается из `ApplicationContext.create()`) пишет результат
+в отчёт регистрации (логируется через loguru): `"3 project tools registered:
+foo, bar, baz; skipped: qux (disabled by config)"`.
 
 Если tool не регистрируется — проверьте:
 1. `cls.__module__` начинается с `workspace.tools.` (имена в
@@ -351,97 +351,49 @@ gateway автоматически — запустите его (python gateway
 
 ## 🛠 tools/ — инфраструктурные утилиты
 
-В корне `tools/` живут CLI-утилиты, **отдельные от навыков** — инфраструктура, не аналитика.
+В корне `tools/` живут CLI-утилиты, **отдельные от навыков** — инфраструктура,
+не аналитика.
 
-### `tools/build_vectors.py`
+### ~~`tools/build_vectors.py`~~ — уехала на платформу (2026-10-01)
 
-Перестроение векторных индексов из PostgreSQL-данных. **Полная документация — в [Векторная индексация](VECTOR_INDEXES.md)**, включая:
-
-- как добавить/обновить/удалить индекс,
-- формат `embedding_cols` (с чанкованием и без),
-- алгоритм сборки и классификации NEW/CHANGED/DELETED,
-- типичные проблемы и их решения,
-- мониторинг через SQL-запросы.
-
-Краткая шпаргалка по флагам:
+Сборка векторных индексов больше не является обязанностью агента: она
+использовала снимок DuckDB, а снимком владеет capability `data`. Утилита
+переехала и **уже была заменена** — `mcp-platform/servers/enterprise/build_index.py`;
+её докстринг прямо называет `tools/build_vectors.py` предшественником и
+объясняет, из-за чего capability `vectors` не должна зависеть от агентского
+кода (пункт 3.6).
 
 ```bash
-# Статус без изменений
-python tools/build_vectors.py --status
-
-# Полная перестройка всех индексов (осторожно: долго + нагрузка на Ollama)
-python tools/build_vectors.py --full-rebuild
-
-# Только проверка сигнатуры (COUNT + MAX track_column) — для cron
-python tools/build_vectors.py --check
-
-# Один индекс
-python tools/build_vectors.py --index audits_index
-
-# Dry-run без записи в БД
-python tools/build_vectors.py --dry-run
-
-# Параметры эмбеддинга (пауза между запросами + ожидание перед повтором при ошибке)
-python tools/build_vectors.py --batch-size 32 --pause-sec 3 --embedding-retry-wait 5
-
-# Проверка конфигурации без записи (валидация project.json + индексов)
-python tools/build_vectors.py --validate-only
-
-# Другая таблица векторов
-python tools/build_vectors.py --db-table my_app.vectors
-
-# Подробный лог (DEBUG): конфиг, каждый чанк/строка — для диагностики
-python tools/build_vectors.py --verbose
+cd mcp-platform
+python -m servers.enterprise.build_index --dry-run      # план без записи
+python -m servers.enterprise.build_index --index <имя> --full-rebuild
+python -m servers.enterprise.server --health
 ```
 
-| Флаг | Дефолт | Описание |
-|------|--------|----------|
-| *(без флагов)* | — | Инкрементальная синхронизация (NEW / CHANGED / DELETED) |
-| `--full-rebuild` | — | Полная перестройка (все строки, не только новые) |
-| `--check` | — | Сравнить сигнатуру (COUNT DISTINCT pk + MAX track); синхронизировать только при diff |
-| `--status` | — | Сводное состояние индексов без синхронизации |
-| `--dry-run` | — | План без записей в БД |
-| `--validate-only` | — | Валидация конфигурации (`project.json::gateway.vector.index`) без записи в БД |
-| `--index <name>` | все | Собрать только индекс `name` |
-| `--db-table` | `gateway.vector.index.storage_table` | Таблица сырых векторов |
-| `--batch-size` | 10 | Батч эмбеддинга |
-| `--pause-sec` | 5.0 | Пауза между батчами эмбеддинга (сек) |
-| `--embedding-retry-wait` | 5 | При ошибке получения эмбеддинга: ждать это время (сек) и повторить один раз |
-| `--verbose` | — | Подробный лог каждого чанка/строки (уровень DEBUG) |
+Полное описание флагов — в докстринге самой утилиты (она читает конфигурацию
+из реестра платформы, поэтому второй пересказ флагов здесь бы разъехался).
 
-Размер чанка и перекрытие **не управляются флагами** — они берутся из
-декларации индекса (`gateway.vector.index.indexes.<name>.chunk_size` /
-`chunk_overlap`, fallback 500/80). Аналогично `metric` и состав
-`embedding_columns`.
+Что важно помнить при переезде:
 
-**Логирование.** Все сообщения идут через `loguru` в stderr (без ANSI-цветов,
-удобно при `>> build.log 2>&1`) и разбиты по этапам: конфиг → состояние
-БД/источника → классификация (новые/изменённые/удалённые) → удаление →
-чанки → эмбеддинг с прогрессом → пересборка FAISS → итог. Ошибка любого
-этапа печатается с traceback, поэтому падение без причины маловероятно;
-сбой отдельного индекса не роняет весь прогон (фиксируется в сводке `ИТОГО`).
+* **Сборка — писатель PostgreSQL, снимок она не открывает.** Вектора попадают
+  в снимок при следующей загрузке, поэтому после успешной сборки снимок надо
+  перезагрузить, иначе поиск продолжит читать прежние вектора. Это единственное
+  место, где важен порядок действий.
+* **Это не capability.** Операций у утилиты нет, в реестр она не попадает и
+  модель её не видит: сборка — пакетная работа администратора, а не действие в
+  обороте.
+* **Настройки берутся из `mcp-platform/platform.json`**, а не из
+  `project.json` агента. Держать объявление индексов в обоих файлах — значит
+  завести два источника правды; до удаления кластера так и было, и именно это
+  породило расхождение между тем, куда пишут, и откуда читают.
+* Диагностика (`MISSING` / `ORPHAN` / `STALE` / `INVALID`) — операция
+  `index_stats` capability `vectors` и `libs/vectors/signature.py`.
 
-**Гарантии инкрементальной сборки:**
-- `pk_value` сравнивается как строка (`TEXT` в БД vs числовой PK в источнике
-  нормализуются через `_norm_pk`) — детект CHANGED/DELETED работает, а не
-  переписывает индекс на каждом запуске.
-- CHANGED-строки: сначала вставляются новые чанки, старые удаляются
-  **после** успешной вставки (`DELETE ... content_hash <> <new>`). Если
-  эмбеддинг упал — старый вектор сохраняется (без потери данных).
-- Быстрая проверка `--check` использует `COUNT(DISTINCT pk_value)`, поэтому
-  чанкование (несколько чанков на строку) не заставляет `--check` всегда
-  запускать синхронизацию.
-
-**Важно:** при первом запуске проверить, что установлены зависимости FAISS:
-`pip install faiss-cpu numpy`. Без них вектора вставляются в `audit_vectors`,
-но поиск `--mode vector` через `lib/services/cache_provider_impl.py` не работает
-(индекс FAISS собирается в памяти).
-
-**Типичные сценарии:**
-- **После изменений в DDL таблиц** — `--full-rebuild`.
-- **Проверка готовности системы** (cron / healthcheck) — `--check`.
-- **Мониторинг без записи** — `--status`.
-- **Большой источник + экономия памяти Ollama** — `--batch-size 8` + `--chunk-size 300`.
+`tools/check_indexes.py` удалён вместе с ним; его логика целиком перенесена в
+`preload.py::compute_index_health` и `signature.py::verify_index_signature`.
+Не переносилась только CLI-обёртка с exit-кодами 0/1/2 для CI/pre-deploy —
+если она понадобится, это отдельная маленькая точка входа поверх
+`compute_index_health`.
 
 ## ➕ Добавление новой настройки
 

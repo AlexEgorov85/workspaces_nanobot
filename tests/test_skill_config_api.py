@@ -4,6 +4,13 @@
 ``get_in_memory_cache_path``, ``get_vector_index_path``, ``get_vector_db_table``,
 ``get_vector_indexes``, ``get_embedding_config``/``get_embedding_model`` убраны
 вместе с их тестами. Осталось конфиг-навыка и состав данных через TableRegistry.
+
+Класс ``TestVectorIndexConfigFromSettings`` удалён 2026-10-01 вместе с
+``cache_provider_impl``: он проверял, что объявление индексов читается из
+``project.json``. Индексы объявляет платформа (``platform.json → vectors``), и
+читает их ``libs/vectors/config.py``; держать второй источник правды в
+``project.json`` было бы ровно тем расхождением, которое породило баг с
+расхождением путей к снимку.
 """
 
 from __future__ import annotations
@@ -128,42 +135,6 @@ class TestMultiSkill:
 # ``skill_config.get_vector_store_table`` удалена (persisted FAISS-кеш
 # больше не существует). Класс ``TestVectorStoreTable`` удалён вместе с
 # ней.
-
-
-class TestVectorIndexConfigFromSettings:
-    def test_defaults_from_settings(self) -> None:
-        """``read_vector_index_config`` читает индексы из SETTINGS (project.json).
-
-        Источник — ``gateway.vector.index.indexes`` (перенесено из
-        PG-реестра ``agent_vector_index_config``).
-        """
-        from lib.services.cache_provider_impl import read_vector_index_config
-
-        cfg = read_vector_index_config()
-        assert "audits_index" in cfg
-        assert cfg["audits_index"]["table"] == "oarb.audits"
-        assert cfg["audits_index"]["pk"] == "id"
-
-    def test_overridden_via_settings(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Per-index значения из ``gateway.vector.index.indexes`` побеждают."""
-        import config as _config
-        from lib.services.cache_provider_impl import read_vector_index_config
-
-        monkeypatch.setattr(
-            _config, "SETTINGS",
-            {"gateway": {"vector": {"index": {"indexes": {
-                "audits_index": {
-                    "table": "oarb.audits",
-                    "pk": "id",
-                    "chunk_size": 777,
-                },
-            }}}}},
-            raising=False,
-        )
-        cfg = read_vector_index_config()
-        assert cfg["audits_index"]["chunk_size"] == 777
 
 
 class TestPredefinedScripts:

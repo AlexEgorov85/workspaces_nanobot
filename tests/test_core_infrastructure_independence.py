@@ -14,17 +14,35 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 LIB_DIRS = ["lib/services", "lib/utils"]
-CORE_SERVICES = [
-    "lib/services/cache_provider.py",
-    "lib/services/cache_provider_impl.py",
-    "lib/services/duckdb_cache_store.py",
-    "lib/services/preload_service.py",
-    "lib/services/table_registry.py",
-    "lib/services/vector_index_service.py",
-    "lib/utils/duckdb_query.py",
-    "lib/utils/sql_safety.py",
-    "lib/utils/text_utils.py",
-]
+
+
+def _core_services() -> list[str]:
+    """Ядро, к которому применяются доменные запреты, — выводится из дерева.
+
+    Раньше список был зашит в константу ``CORE_SERVICES``. После того как из
+    агента уехал кластер снимка, записи из списка начали указывать на
+    несуществующие файлы, а фильтр ``if (REPO_ROOT / p).exists()`` молча их
+    отбрасывал: тесты оставались зелёными, проверяя всё меньше, и никто не
+    видел, что половина стражей выродилась в ``skip`` по несуществующему пути.
+
+    Теперь список выводится: новый модуль в ядре попадает под запрет
+    автоматически, а удалённый не оставляет после себя пустую запись.
+    Tombstone'ы (имя с подчёркиванием) исключены — они не исполняются.
+    """
+    found: list[str] = []
+    for directory in LIB_DIRS:
+        base = REPO_ROOT / directory
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.py"):
+            rel = path.relative_to(REPO_ROOT)
+            if any(part.startswith("_") for part in rel.parts):
+                continue
+            if "__pycache__" in rel.parts:
+                continue
+            found.append(str(rel))
+    return sorted(found)
+
 
 FORBIDDEN_TOKENS = {"audit", "violations", "audits_index", "audit_analyzer"}
 
@@ -68,7 +86,7 @@ class TestCoreNoDomainRouting:
 
     @pytest.mark.parametrize(
         "path",
-        [p for p in CORE_SERVICES if (REPO_ROOT / p).exists()],
+        _core_services(),
     )
     def test_no_routing(self, path: str) -> None:
         source = (REPO_ROOT / path).read_text(encoding="utf-8")
@@ -92,7 +110,7 @@ class TestCoreNoAuditStringsInCode:
 
     @pytest.mark.parametrize(
         "path",
-        [p for p in CORE_SERVICES if (REPO_ROOT / p).exists()],
+        _core_services(),
     )
     def test_no_audit_identifiers(self, path: str) -> None:
         source = (REPO_ROOT / path).read_text(encoding="utf-8")
@@ -117,19 +135,43 @@ class TestCoreNoAuditStringsInCode:
 
 
 class TestDefaultSchemaIsGeneric:
-    """Дефолтная схема в Core-сервисах должна быть 'main', не 'oarb' (TARGET §22.3)."""
+    """Дефолтная схема в ядре — 'main', а не 'oarb' (TARGET §22.3).
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "lib/services/duckdb_cache_store.py",
-            "lib/services/cache_load_service.py",
-        ],
+    Список модулей раньше был зашит и указывал на ``duckdb_cache_store.py`` и
+    ``cache_load_service.py`` — оба уехали на платформу вместе с кластером
+    снимка. Проверка на них стала бессмысленной, но исключение по отсутствию
+    файла скрыло бы это: тест молча превратился бы в «проверять нечего».
+
+    Теперь обход идёт по **всему** ядру, а утверждение сформулировано как
+    запрет, а не как проверка двух мест: запрет переживает и удаление модуля,
+    и появление нового. Схема по умолчанию — свойство домена, которое легко
+    протащить новым сервисом, и раньше оно протаскивалось именно так.
+    """
+
+    #: Подстроки, которыми в ядре может быть выражен дефолт схемы.
+    #:
+    #: Только ``oarb``. ``public`` здесь **не** запрещён и добавлять его
+    #: нельзя: это схема собственных runtime-таблиц агента
+    #: (``agent_gateway_logs``, ``agent_session_meta``), а не домен аудита.
+    #: Первая версия стража запрещала и его — и падала на
+    #: ``db_logging_service.py`` и ``session_cold_sync_service.py``, где
+    #: ``schema="public"`` корректен. Запрет доменной схемы не должен
+    #: запрещать обычную.
+    _OARB_DEFAULTS = (
+        'schema: str = "oarb"',
+        'schema = "oarb"',
+        "schema = 'oarb'",
+        'default_schema: str = "oarb"',
     )
-    def test_no_oarb_default(self, path: str) -> None:
-        source = (REPO_ROOT / path).read_text(encoding="utf-8")
-        # Ищем `schema: str = "oarb"` (default в сигнатуре __init__)
-        assert 'schema: str = "oarb"' not in source, (
-            f"{path} still has 'oarb' as default schema. "
-            "Default must be 'main' (TARGET §22.3)."
+
+    def test_no_oarb_default_anywhere_in_core(self) -> None:
+        offenders: list[tuple[str, str]] = []
+        for rel in _core_services():
+            source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for needle in self._OARB_DEFAULTS:
+                if needle in source:
+                    offenders.append((rel, needle))
+        assert not offenders, (
+            f"дефолтная схема домена в ядре: {offenders}. "
+            "Схема по умолчанию — 'main' (TARGET §22.3)."
         )

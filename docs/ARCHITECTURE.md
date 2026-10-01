@@ -94,7 +94,7 @@ flowchart LR
   `bus`, `agent`, `tool_audit_hook`, `hooks`, `session_manager`,
   `storage_mode`, `db_logging_service`, `sync_service`,
   `cache_store`, `config_service`, `runtime_patcher`,
-  `transcription_service`, `subprocess_manager`, `preload_service`,
+  `transcription_service`, `subprocess_manager`,
   `runtime_health`, `runtime_readiness`, `session_storage_service`,
   `hook_factories`, `project_settings`.
   Метод `start()` использует `ShutdownCoordinator` для регистрации
@@ -133,7 +133,7 @@ flowchart LR
 | `project_tool_loader.py` | Stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(...) -> ProjectToolsLoadResult`. Вызывается из `ApplicationContext.create()` сразу после `apply_all()` как независимый stage composition root'а. **НЕ** компонент (нет lifecycle/state/config — критерии `openspec/specs/architecture/component-model/spec.md`). |
 | `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
-| `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычислялся через единый `resolve_cache_path()` — **после фазы 5 (п. 5.8) функция живёт в `lib/services/cache_provider_impl.py`**, а сам сервис больше не вызывается из runtime: снимком владеет capability `data` платформы. Остался для standalone-утилит сборки индексов. |
+| ~~`preload_service.py`~~ | **Удалён 2026-10-01.** FAISS preload и `compute_index_health` живут в `mcp-platform/libs/vectors/preload.py`. Прежнее описание: Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычислялся через единый `resolve_cache_path()` — **после фазы 5 (п. 5.8) функция живёт в `lib/services/cache_provider_impl.py`**, а сам сервис больше не вызывается из runtime: снимком владеет capability `data` платформы. Остался для standalone-утилит сборки индексов. |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
 | `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает схему из `SKILL.md` (секция «Схема домена», см. `workspace/skills/audit_analyzer/SKILL.md`). |
@@ -333,10 +333,10 @@ dim-«нет данных в кэше», неотличимо от реальн�
 **1.1. Health-summary declared vs runtime (vector index discovery)**.
 До этого — даже при полностью diverged состоянии (объявил
 новый индекс в `gateway.vector.index.indexes.*`, но не собрал blob
-через `tools/build_vectors.py`) gateway **молча** показывал зелёный
+через `tools/build_vectors.py`, удалённой 2026-10-01 вместе с кластером)
 «vector index … loaded» через fallback-цепочку
 (`store → vdb → cache → files`), без какого-либо указания, что на
-самом деле расхождение есть. Теперь `PreloadService.preload_vector_indexes`
+самом деле расхождение есть. Тогда `PreloadService.preload_vector_indexes`
 после прогона считает явное расхождение между **declared** (JSON,
 `project.json::gateway.vector.index.indexes.*`) и **runtime** (DuckDB-снапшот
 таблицы-хранилища `gateway.vector.index.storage_table`,
@@ -354,9 +354,12 @@ dim-«нет данных в кэше», неотличимо от реальн�
 divergence, иначе `INFO`). Ошибки любого этапа (PG недоступна, config
 parse failed) глотаются — summary **никогда** не валит startup gateway.
 
-Чистая логика вычисления — в pure-функции `compute_index_health()`
+Чистая логика вычисления была в pure-функции `compute_index_health()`
 в `preload_service.py`, отделена от I/O и эмита; тестируема без mock'ов
-PG/JOBS.
+PG/JOBS. **Состояние на 2026-10-01:** сам `preload_service.py` и весь
+кластер снимка удалены из агента; функция живёт в
+`mcp-platform/libs/vectors/preload.py`, её страж перенесён на платформу —
+`mcp-platform/tests/test_vectors_index_health.py` (5 тестов, 5/5 мутаций).
 
 **2. PostgresChannel — циклы опроса БД.** Ошибки
 `poll_inbound`/`_poll_once`, `_lease_loop`, `_unstick_loop` раньше шли
@@ -1523,8 +1526,8 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
 nanobot/
 ├── docs/                                  # каталог технической документации (навигация — docs/README.md)
 ├── tools/                                # инфраструктурные CLI-утилиты
-│   ├── build_vectors.py                  #   сборка векторных индексов (вне навыка)
-│   └── check_indexes.py                  #   declared-vs-runtime diff по векторным индексам
+│   ├── ~~build_vectors.py~~              #   снят 2026-10-01 → mcp-platform build_index
+│   └── ~~check_indexes.py~~              #   снят: логика у capability vectors (index_stats)
 ├── sql/                                  # DDL сгруппированы по доменам
 │   ├── README.md                          #   порядок применения, каталог
 │   ├── session/                           #   session_meta + session_messages
@@ -1549,16 +1552,15 @@ nanobot/
 │   │   ├── project_tool_loader.py        #    stateless loader project tools (workspace/tools/*.py)
 │   │   ├── channel_factory.py            #    ChannelManager + Redis/Postgres каналы
 │   │   ├── transcription_service.py      #    openai/groq key/URL/language
-│   │   ├── preload_service.py            #    FAISS preload + audit_cache refresh
 │   │   ├── db_logging_service.py         #    worker, batch INSERT, без JSONL-fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
 │   │   ├── llm_config.py                 #    УДАЛЁН — настройки LLM в mcp-platform/platform.json
-│   │   ├── duckdb_cache_store.py         #     локальный кэш + FAISS-индексы в памяти
-│   │   ├── cache_load_service.py         #     разовая синхронная загрузка кэша из PG
-│   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
-│   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
+│   │   ├── ~~duckdb_cache_store.py~~     #     снят 2026-10-01: снимок у платформы
+│   │   ├── ~~cache_load_service.py~~     #     снят: загрузку делает capability data
+│   │   ├── ~~cache_provider.py~~         #     снят: интерфейс уехал на платформу
+│   │   ├── ~~cache_provider_impl.py~~   #     снят 2026-10-01: снимок и эмбеддинги у capability data / vectors
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
-│   │   ├── vector_index_service.py       #     VectorIndexBuildService — build-слой (провайдер + эмбеддинг)
+│   │   ├── ~~vector_index_service.py~~   #     снят: build-слой у capability vectors
 │   │   ├── table_registry.py             #     pluggable-реестр ресурсов (skill + infra namespaces)
 │   │   ├── context_compaction.py         #     ContextCompactionService — единая точка сжатия контекста
 │   │   ├── consolidator_locale.py        #     monkeypatch Jinja2-шаблонов из workspace/overrides/
@@ -1591,7 +1593,7 @@ nanobot/
 │   └── utils/                            #   утилиты сервисного слоя
 │       ├── outbound_meta.py              #     фильтрация служебных outbound
 │       ├── text_utils.py, project_version.py,
-│       │   duckdb_query.py, retry.py, node_access.py, logging_utils.py
+│       │   retry.py, node_access.py, logging_utils.py
 │
 ├── workspace/                            # runtime-данные и плагины-хуки
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))

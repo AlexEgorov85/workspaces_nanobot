@@ -1,4 +1,15 @@
-"""Тесты ApplicationContext — с обильным мокингом nanobot/psycopg2/PGSessionManager."""
+"""Тесты ApplicationContext — с обильным мокингом nanobot/psycopg2/PGSessionManager.
+
+**Что ушло из этого файла 2026-10-01 (фаза 5).** Классы ``TestResolvePublishPath``
+(6 тестов) и ``TestSingleMechanism`` удалены вместе с ``cache_provider_impl``:
+функция ``resolve_cache_path()`` уехала на платформу, а путь снимка теперь
+объявляет ``mcp-platform/platform.json → data.snapshot_path``. Смысл второго
+класса стоит запомнить и не потерять: он требовал, чтобы путь к снимку
+вычислялся **одним** резолвером, потому что расхождение между «куда пишет» и
+«откуда читает» и было исходным багом v2.5.1. Теперь единственный
+канонический источник пути — объявление платформы, и следить за его
+единственностью должен её собственный реестр, а не агент.
+"""
 
 from __future__ import annotations
 
@@ -308,7 +319,7 @@ class TestCreate:
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
-        ctx = ApplicationContext.create(role='gateway', 
+        ApplicationContext.create(role='gateway',
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -419,158 +430,5 @@ class TestTableRegistryReset:
         assert "leftover_skill" not in table_registry.names(), (
             "ApplicationContext.create(role='gateway', ) должен сбрасывать TableRegistry "
             "в начале; остались ресурсы от предыдущего context"
-        )
-
-
-class TestResolvePublishPath:
-    """``resolve_cache_path`` — **единый механизм** вычисления пути к
-    ``cache.duckdb`` (используется gateway И CLI/skill).
-
-    Главная инвариантa: даже **без** настройки ``project.json`` снимок
-    ``cache.duckdb`` уходит на ЛОКАЛЬНУЮ ФС (``~/.cache/nanobot/duckdb``),
-    а не на legacy-путь ``<workspace>/data_store/duckdb/`` — потому что
-    последний на NFS приводит к падению ATTACH с ``"PID 0"``.
-
-    Нет escape-hatch'ей, нет backwards-compat shim'ов: один механизм,
-    одно поведение.
-    """
-
-    def test_default_uses_local_cache_under_home(self, tmp_path):
-        """Без ``gateway.cache.*`` путь уходит на ``~/.cache/nanobot/duckdb``.
-
-        Подменяем ``Path.home()`` через ``tmp_path``, чтобы тест был
-        детерминирован и не зависел от реальной ``$HOME`` на CI.
-        """
-        from lib.services.cache_provider_impl import resolve_cache_path
-
-        with patch("pathlib.Path.home", return_value=tmp_path):
-            result = resolve_cache_path(str(tmp_path / "workspace"), None)
-
-        assert result == str(
-            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
-        ), result
-        assert Path(result).parent.exists()
-
-    def test_default_uses_local_cache_under_home_with_empty_cfg(self, tmp_path):
-        """Пустой cache_cfg → то же поведение, что и None."""
-        from lib.services.cache_provider_impl import resolve_cache_path
-
-        with patch("pathlib.Path.home", return_value=tmp_path):
-            result = resolve_cache_path(str(tmp_path / "workspace"), {})
-
-        assert result == str(
-            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
-        ), result
-
-    def test_local_path_absolute(self, tmp_path):
-        from lib.services.cache_provider_impl import resolve_cache_path
-
-        custom = tmp_path / "my-cache"
-        result = resolve_cache_path(
-            str(tmp_path / "ws"), {"local_path": str(custom)}
-        )
-        assert result == str(custom / "cache.duckdb"), result
-        assert Path(result).parent.exists()
-
-    def test_local_path_relative_resolved_from_workspace(self, tmp_path):
-        from lib.services.cache_provider_impl import resolve_cache_path
-
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        result = resolve_cache_path(
-            str(ws), {"local_path": "subdir/duckdb"}
-        )
-        assert result == str(ws / "subdir" / "duckdb" / "cache.duckdb"), result
-
-    def test_local_path_unwritable_raises(self, tmp_path):
-        """Если ``local_path`` нельзя создать — громкая OSError, не silent fallback."""
-        from lib.services.cache_provider_impl import resolve_cache_path
-
-        # ``local_path`` указывает на невозможный путь (файл как родитель).
-        impossible = tmp_path / "a_file_not_dir"
-        impossible.write_text("x")
-        with pytest.raises(OSError):
-            resolve_cache_path(
-                str(tmp_path / "ws"),
-                {"local_path": str(impossible / "x")},
-            )
-
-    def test_unknown_keys_are_silently_ignored(self, tmp_path):
-        """Любой неизвестный ключ в cache_cfg (типа ``use_workspace_path`` из старой версии) — игнорируется."""
-        from lib.services.cache_provider_impl import resolve_cache_path
-
-        # Старые user-конфиги могут содержать use_workspace_path / publish_to_workspace
-        # — больше нет shim'ов, эти ключи молча игнорируются.
-        with patch("pathlib.Path.home", return_value=tmp_path):
-            result = resolve_cache_path(
-                str(tmp_path / "ws"),
-                {
-                    "use_workspace_path": True,  # legacy, должно быть проигнорировано
-                    "publish_to_workspace": True,  # задел, не реализован
-                    "embiggen": True,  # откровенный мусор
-                },
-            )
-        assert result == str(
-            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
-        ), result
-
-
-class TestSingleMechanism:
-    """В проекте существует ровно ОДИН резолвер пути к снимку.
-
-    Исторически тут проверялось, что gateway и ``build_cache_provider``
-    возвращают один и тот же путь. После фазы 5 такой тест стал бы
-    тавтологией — обе точки вызывали бы одну и ту же функцию, то есть
-    сравнивать было бы нечего. Исходный баг был не в том, что пути
-    разошлись, а в том, что резолвер **размножился**: skill-слой держал
-    собственную копию и gateway писал в один файл, а читался другой.
-
-    Поэтому страж смотрит на корень проблемы: определить второй резолвер
-    негде. Проверяется статически по всему дереву агента, потому что
-    копия может появиться в любом новом модуле.
-    """
-
-    #: Единственное допустимое место определения. Функция переехала сюда из
-    #: ``application_context`` в фазе 5, потому что composition root больше
-    #: не открывает снимок, а резолвер нужен фабрике провайдера и
-    #: standalone-утилитам сборки индексов.
-    HOME = "lib/services/cache_provider_impl.py"
-
-    #: Имена, которые ищет страж. ``resolve_publish_path`` — историческое
-    #: имя, ``resolve_snapshot_path`` — платформенное (``snapshot/store.py``).
-    #: Все три в списке: вернуться может любое, и любое молча размножит
-    #: резолвер, пока кто-то не посмотрит на импорт.
-    KNOWN = ("resolve_cache_path", "resolve_publish_path", "resolve_snapshot_path")
-
-    def test_only_one_cache_path_resolver_exists(self) -> None:
-        import ast
-
-        root = Path(__file__).resolve().parent.parent
-        # ``.worktrees`` — параллельные чекауты того же репозитория, не
-        # часть этого дерева (их код меняется в других ветках работы, и
-        # считать его за «второй резолвер» нельзя).
-        skip = {".git", ".worktrees", "__pycache__", "mcp-platform",
-                "data_store", "node_modules"}
-        found: list[str] = []
-        for path in root.rglob("*.py"):
-            rel = path.relative_to(root)
-            if any(part in skip for part in rel.parts):
-                continue
-            # tombstone'ы (имя с подчёркиванием) не считаются реализацией
-            if any(part.startswith("_") for part in rel.parts):
-                continue
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError, OSError):
-                continue
-            for node in tree.body:
-                if isinstance(node, ast.FunctionDef) and node.name in self.KNOWN:
-                    found.append(f"{rel.as_posix()}:{node.name}")
-
-        assert len(found) == 1 and found[0] == f"{self.HOME}:resolve_cache_path", (
-            "резолвер пути к снимку должен быть ровно один, с именем "
-            f"resolve_cache_path, в {self.HOME}; найдено: {found} — вторая "
-            "копия или переименование означает, что писать будут в один файл, "
-            "а читать из другого"
         )
 

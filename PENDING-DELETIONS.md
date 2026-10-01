@@ -33,11 +33,99 @@
 `tools/build_vectors.py` и `tools/check_indexes.py`. `llm_client.py` production-
 импортёров не имеет вовсе, поэтому `retry.py` уходит вместе с ним же.
 
-**Сначала — пункт 3.6.** Спека требует *перенести* обе утилиты на платформу; их
-блокером был агентский `cache_provider`/`vector_index_service` в рантайме, и он
-только что снят. Пока перенос не сделан, удаление кластера поймает утилиты.
+**Пункт 3.6. Перенос сделан и проверен на живой базе.**
+
+| Утилита агента | Куда уехала | Состояние |
+|---|---|---|
+| `tools/build_vectors.py` | `mcp-platform/libs/vectors/builder.py` (конвейер) + `mcp-platform/servers/enterprise/build_index.py` (операторский вход) | 23 теста на подставных БД и эмбеддере **плюс живой прогон 2026-10-01** |
+| `tools/check_indexes.py` | логика целиком: `preload.py::compute_index_health` (missing/orphan/stale/divergence) + `signature.py::verify_index_signature` + `runtime.py::list_runtime_vector_indexes` | покрыто платформой. **Не переносилось:** CLI-обёртка с exit-кодами 0/1/2 для CI/pre-deploy. Это новая потребность, а не порт — если она нужна, это отдельная маленькая точка входа поверх `compute_index_health` |
+
+**Живая проверка 2026-10-01** — PostgreSQL, Ollama `mxbai-embed-large`
+(1024 измерения), снимок `C:\Users\Алексей\.cache\nanobot\duckdb\cache.duckdb`:
+
+* `--dry-run` по всем индексам: 120 строк, **120 хешей совпали** с посчитанными
+  агентским кодом 13 сентября. Совпали формат `search_text`, `content_hash` и
+  `norm_pk` — то есть порт считает то же, чем наполнены production-данные, а
+  не просто проходит собственные тесты.
+* `--full-rebuild --index audit_reports_index`: 10 чанков переэмбеддены
+  настоящим провайдером, 10 вставок, 0 ошибок; хеши до и после идентичны.
+* Настоящий сервер как подпроцесс + клиент агента + `vector_search` по трём
+  индексам: точные попадания первыми результатами, `_meta` с `request_id`
+  доехал по проводу.
+
+Операторский вход — не capability: операций у него нет, в реестр он не
+попадает, модель его не видит. Сборка — писатель **PostgreSQL**, снимок она
+не открывает, поэтому после сборки требуется перезагрузка снимка.
+
+Блокер снят: 3.6 выполнен и подтверждён на данных, поэтому кластер снимка
+больше никем в агенте не держится и удаляется одним проходом.
+
+**УДАЛЕНО 2026-10-01.** Код вырезан, файлы переименованы в `_`-имена
+(4892 строки в 9 файлах), как и принято в этом реестре. Перед сносом
+проверено разбором AST по 509 файлам агента: `duckdb`, `faiss`, `numpy`,
+`pyarrow` не импортирует ни один исполняемый модуль, поэтому пакеты убраны из
+`requirements.txt` агента (п. 10.3 закрыт).
+
+| Файл | Строк | Куда уехал |
+|---|---|---|
+| `lib/services/_duckdb_cache_store.py` | 1455 | `mcp-platform/libs/enterprise_data/snapshot/store.py` |
+| `lib/services/_cache_provider.py` | 442 | `snapshot/reader.py` + `store.py` |
+| `lib/services/_cache_provider_impl.py` | 488 | `snapshot/store.py` (вместе с `resolve_cache_path`) |
+| `lib/services/_cache_load_service.py` | 472 | `mcp-platform/libs/enterprise_data/loader.py` |
+| `lib/services/_preload_service.py` | 318 | `mcp-platform/libs/vectors/preload.py` |
+| `lib/services/_vector_index_service.py` | 71 | `mcp-platform/libs/vectors/builder.py`, `indexing.py` |
+| `lib/utils/_duckdb_query.py` | 338 | `mcp-platform/libs/enterprise_data/snapshot/query.py` |
+| `tools/_build_vectors.py` | 1023 | `mcp-platform/servers/enterprise/build_index.py` |
+| `tools/_check_indexes.py` | 285 | операция `index_stats` capability `vectors` |
+
+Тесты агента на снятый код — 16 файлов, 4423 строки. Перед удалением инварианты
+разложены по адресатам, а не выброшены:
+
+* `TestComputeIndexHealthNewSources` → **портирован** в
+  `mcp-platform/tests/test_vectors_index_health.py` (5 тестов, 5/5 мутаций);
+* `TestBuildFaissIndexMinimalMeta` → **портирован** в
+  `mcp-platform/tests/test_vectors_index_metadata.py` (3 теста): «meta
+  содержит только metric» охранял память процесса, и на платформе его не
+  охранял никто;
+* `test_vector_search_silent_failure.py` (14) → перекрыт
+  `mcp-platform/tests/test_vectors_indexing.py` (`TestAsVector`,
+  `TestBuildFaissIndex`, `TestBuildRawItems`); структурная проверка «не читать
+  `conn` после блока чтения» на платформе невозможна по построению — владельцу
+  индекса передаётся только `fetch_fn`;
+* `TestNoHardcodedTableNames` → перекрыт `tests/test_no_hardcoded_table_names.py`;
+* `TestRemovedMethodsNoCallers`, `TestLoadIndexOnlyUsesCachePath`,
+  `TestPreloadIndexesUsesOnlyConfig` → **вакуумны**, охраняли удалённый модуль.
 
 ```bash
+# кластер снимка:
+git rm lib/services/_duckdb_cache_store.py \
+      lib/services/_cache_provider.py \
+      lib/services/_cache_provider_impl.py \
+      lib/services/_cache_load_service.py \
+      lib/services/_preload_service.py \
+      lib/services/_vector_index_service.py \
+      lib/utils/_duckdb_query.py \
+      tools/_build_vectors.py \
+      tools/_check_indexes.py
+
+# тесты кластера:
+git rm tests/_test_duckdb_cache_store.py \
+      tests/_test_cache_provider_mode.py \
+      tests/_test_cache_provider_open_failure.py \
+      tests/_test_cache_no_file_hold.py \
+      tests/_test_cache_load_service.py \
+      tests/_test_preload_service.py \
+      tests/_test_cache_provider_meta.py \
+      tests/_test_get_embedding_auth.py \
+      tests/_test_build_vectors_cli.py \
+      tests/_test_check_indexes.py \
+      tests/_test_shared_cache_path_across_profiles.py \
+      tests/_test_cache_readiness_and_skill_role.py \
+      tests/_test_single_cache_interface.py \
+      tests/_test_remove_vector_index_store_guards.py \
+      tests/_test_vector_search_silent_failure.py
+git rm -r tests/integration/_test_vector_build_e2e.py
+
 # после переноса 3.6:
 git rm lib/services/duckdb_cache_store.py \
       lib/services/cache_load_service.py \
@@ -91,8 +179,14 @@ git rm tests/test_duckdb_cache_store.py \
 | `tests/test_shared_cache_path_across_profiles.py:80,93` | `resolve_cache_path` | владение `gateway.cache.local_path` профилем |
 | `tests/_test_sql_safety.py:202,212` | `duckdb_query`, `duckdb` | отключён (`_` в имени), гонять нельзя |
 
-Вместе с утилитами уезжают по 3.6 их собственные тесты:
-`tests/test_build_vectors_cli.py`, `tests/test_check_indexes.py`.
+Вместе с утилитами уезжают по 3.6 их собственные тесты и сами утилиты:
+
+```bash
+git rm tools/build_vectors.py \
+      tools/check_indexes.py \
+      tests/test_build_vectors_cli.py \
+      tests/test_check_indexes.py
+```
 
 Приёмка фазы 5 — `grep -R "duckdb" lib/ workspace/` пуст — достижима только
 после этого: сейчас не пуст, потому что файлы стоят в обоих репозиториях.
@@ -213,6 +307,10 @@ git rm -r workspace/skills/audit_analyzer/scripts/_removed_predefined \
 | `mcp-platform/.tmp_container_fix.py` | ассистент (правки контейнера применены и закоммичены, скрипт больше не нужен) |
 | `mcp-platform/.tmp_journal_demo.py` | ассистент (ручной прогон писателя журнала, роль изменилась) |
 | `mcp-platform/.tmp_meta_probe.py` | ассистент (проба доставки `params._meta` по проводу, проверка стала тестом) |
+| `mcp-platform/.tmp_probe_live.py` | ассистент (разведка живой инфраструктуры перед переносом 3.6) |
+| `mcp-platform/.tmp_probe_rebuild.py` | ассистент (живая сверка хешей при пересборке индекса) |
+| `.tmp_live_mcp_probe.py` | ассистент (сквозной прогон настоящего MCP: сервер, клиент, `vector_search`) |
+| `.tmp_probe_out.txt` | ассистент (сохранённый вывод сквозного прогона) |
 | `tests/test_user_stop_signal.dump`, `tests/test_user_stop_signal_priority.dump` | ассистент |
 
 ## Чего делать не надо

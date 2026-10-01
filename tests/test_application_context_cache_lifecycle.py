@@ -65,36 +65,5 @@ class TestApplicationContextFields:
         assert "print_llm_calls" in dir(ApplicationContext)
 
 
-class TestCacheLoadServiceHasNoBackgroundMachinery:
-    """Загрузчик — разовая синхронная операция."""
-
-    def test_no_write_callbacks(self) -> None:
-        """Колбэков записи больше нет: загрузчик
-        держит роль ``CacheStore`` напрямую."""
-        from lib.services.cache_load_service import CacheLoadService
-
-        for gone in (
-            "set_on_new_records_callback",
-            "set_on_replace_records_callback",
-            "set_on_schema_callback",
-            "set_on_sync_callback",
-        ):
-            assert not hasattr(CacheLoadService, gone), gone
-
-    def test_no_thread_lifecycle(self) -> None:
-        """У загрузчика нет потока жизни и обрабатки."""
-        from lib.services.cache_load_service import CacheLoadService
-
-        assert not hasattr(CacheLoadService, "start")
-        assert not hasattr(CacheLoadService, "stop")
-        assert not hasattr(CacheLoadService, "_poll_changes")
-        assert not hasattr(CacheLoadService, "_drain_queue")
-
-    def test_has_single_synchronous_entry_point(self) -> None:
-        from lib.services.cache_load_service import CacheLoadService
-
-        assert callable(CacheLoadService.load)
-
-
 # ---------------------------------------------------------------------------
 # Stage E — fencing integration в PgDuckDbSyncService

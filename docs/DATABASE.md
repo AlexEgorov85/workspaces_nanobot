@@ -204,7 +204,17 @@ DSN подключается только через `channels.postgres.dsn` в 
 
 ## 🔄 Жизненный цикл кеша
 
-> **Раздел описывает платформенную сторону (фаза 5, п. 5.8).** В агенте этой
+> **Раздел целиком платформенный (фаза 5, пп. 5.8 и удаление кластера).**
+> 2026-10-01 из агента снесены сами модули кластера: `duckdb_cache_store.py`,
+> `cache_provider.py`, `cache_provider_impl.py`, `cache_load_service.py`,
+> `preload_service.py`, `vector_index_service.py`, `lib/utils/duckdb_query.py`,
+> а также `tools/build_vectors.py` и `tools/check_indexes.py` (заменены на
+> `mcp-platform/servers/enterprise/build_index.py` и операцию `index_stats`).
+> Из `requirements.txt` агента убраны `duckdb`, `faiss-cpu`, `numpy`, `pyarrow`.
+> `TableRegistry`, `skill_registration.py` и `infra_registration.py` остались:
+> они описывают состав снимка, а не способ доступа к нему.
+>
+> Прежняя пометка (5.8): В агенте этой
 > подсистемы больше нет: `ApplicationContext` не загружает снимок, не держит
 > провайдер и не прогревает индексы; полей `cache_provider` / `cache_store` /
 > `cache_loader` / `preload_service` на контексте не осталось, а

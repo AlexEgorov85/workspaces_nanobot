@@ -264,7 +264,16 @@ class TestContextCompactionNotifyBehavior:
 
 class TestDbLoggingServiceUnavailableBehavior:
     """При недоступности ``DbLoggingService`` — no-op for business +
-    WARNING (единый уровень)."""
+    WARNING (единый уровень).
+
+    **Урезан 2026-10-01 (фаза 5).** Проверки ``CacheLoadService._log_sync_event``
+    и ``PreloadService._emit_health_event`` удалены вместе с кластером снимка.
+    Инвариант, который они охраняли, переехал на платформу вместе с
+    производителями: ``libs/enterprise_data/loader.py::_emit`` глушит исключение
+    и пишет ``logger.warning("SnapshotLoadService: событие %s не записано")``,
+    а не роняет загрузку. Здесь остаётся тот же инвариант на выжившем
+    производителе — ``ContextCompactionService``.
+    """
 
     @pytest.mark.asyncio
     async def test_record_event_log_noop_with_warning_when_service_none(self, caplog):
@@ -294,43 +303,17 @@ class TestDbLoggingServiceUnavailableBehavior:
         warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
         assert any("ContextCompactionService" in r.getMessage() for r in warnings)
 
-    def test_log_sync_event_noop_with_warning(self, caplog):
-        """``CacheLoadService._log_sync_event`` при ``None`` — WARNING."""
-        from unittest.mock import MagicMock
-
-        from lib.services.cache_load_service import CacheLoadService
-
-        loader = CacheLoadService(
-            dsn="x", store=MagicMock(), schema="main", tables=["t"]
-        )
-
-        with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            loader._log_sync_event("cache_load_test", "x", payload={"a": 1})
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("CacheLoadService" in r.getMessage() for r in warnings)
-
-    def test_emit_health_event_noop_with_warning(self, caplog):
-        """``PreloadService._emit_health_event`` при ``None`` — WARNING."""
-        from lib.services.preload_service import _emit_health_event
-
-        with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            _emit_health_event(summary="x", payload={}, level="INFO", service=None)
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("PreloadService" in r.getMessage() for r in warnings)
-
 
 # ============================================================================
 # Producer reads no config (tasks 7.3)
 # ============================================================================
 
 
+#: Производители, которые обязаны брать журнал переданным сервисом, а не
+#: читать ``logging.db.*`` сами. Три из четырёх уехали на платформу вместе с
+#: кластером снимка; ``context_compaction`` остался в агенте.
 PRODUCER_MODULES = (
     "lib/services/context_compaction.py",
-    "lib/services/cache_load_service.py",
-    "lib/services/duckdb_cache_store.py",
-    "lib/services/preload_service.py",
 )
 
 

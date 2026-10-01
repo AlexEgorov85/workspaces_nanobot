@@ -36,11 +36,24 @@ psql -d nanobot -f sql/channels/create_public_agent_conversation_messages.sql
 python gateway.py --profile=prod                              # долгоживущий сервер
 python cli_agent.py                                           # REPL vanilla (JSONL), профиль test
 python cli_agent.py -P -s my-session                          # REPL patched (PGSessionManager + хуки)
-python tools/build_vectors.py --full-rebuild                  # перестроение векторов в storage_table
-python tools/build_vectors.py --status                        # текущее состояние
-python tools/check_indexes.py                                 # declared vs runtime индексов
 python tools/migrate.py --apply                               # миграции схемы
 ```
+
+> **Индексы и снимок обслуживает платформа, не агент.** Сборка векторов
+> (`tools/build_vectors.py`) и диагностика (`tools/check_indexes.py`) удалены
+> из агента 2026-10-01 вместе с кластером снимка. Операторские команды —
+> из каталога `mcp-platform/`:
+>
+> ```bash
+> cd mcp-platform
+> python -m servers.enterprise.build_index --dry-run           # что и сколько пересчитать
+> python -m servers.enterprise.build_index --index audits_index --full-rebuild
+> python -m servers.enterprise.server --health                 # состояние capability
+> ```
+>
+> Сборка — **писатель PostgreSQL**, снимок она не открывает: после сборки
+> снимок надо перезагрузить, иначе поиск продолжит читать прежние вектора.
+> Состояние индексов видно операцией `index_stats` capability `vectors`.
 
 > **Навык `audit_analyzer`** не имеет собственного CLI и не ходит в данные
 > напрямую: агент вызывает инструмент `workspace/tools/audit_analyzer_query.py`,
