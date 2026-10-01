@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 _project_root = Path(__file__).resolve().parent.parent
 _workspace_path = str(_project_root / "workspace")
@@ -59,7 +60,7 @@ def _make_channel(pg_mod):
     config = {
         "dsn": "postgresql://u@h/db",
         "schema": "public",
-        "table_name": "agent_conversation_messages",
+        "table_name": runtime_table("conversation_messages"),
         "max_concurrent": 1,
     }
     return pg_mod.PostgresChannel(config, MagicMock())

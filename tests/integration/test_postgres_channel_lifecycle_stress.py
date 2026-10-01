@@ -31,6 +31,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 pytestmark = pytest.mark.integration
 
@@ -78,8 +79,12 @@ def _exec(dsn: str, sql: str, params: list | None = None, fetch: bool = False):
         conn.close()
 
 
+#: Имя таблицы сообщений — из настроек: тест поднимает одноимённую таблицу
+#: в своей одноразовой схеме, и литерал здесь разошёлся бы с каналом.
+_MSG_TABLE = runtime_table("conversation_messages")
+
 _MSG_DDL = """
-CREATE TABLE IF NOT EXISTS "{schema}".agent_conversation_messages (
+CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (
     id UUID NOT NULL DEFAULT gen_random_uuid(),
     chat_id TEXT,
     user_id TEXT,
@@ -104,7 +109,7 @@ def test_schema():
         pytest.skip("DATABASE_URL не задан; integration-тест пропущен")
     schema = f"test_pg_lifecycle_{uuid.uuid4().hex[:8]}"
     _exec(dsn, f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
-    _exec(dsn, _MSG_DDL.format(schema=schema))
+    _exec(dsn, _MSG_DDL.format(schema=schema, table=_MSG_TABLE))
     yield dsn, schema
     _exec(dsn, f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
@@ -114,7 +119,7 @@ def _insert_user(dsn, schema, chat_id, content, status="pending"):
     rows = _exec(
         dsn,
         f"""
-        INSERT INTO "{schema}".agent_conversation_messages
+        INSERT INTO "{schema}".{_MSG_TABLE}
         (chat_id, user_id, role, content, status)
         VALUES (%s, %s, 'user', %s, %s)
         RETURNING id
@@ -129,7 +134,7 @@ def _insert_assistant(dsn, schema, chat_id, reply_to, content="", status="proces
     rows = _exec(
         dsn,
         f"""
-        INSERT INTO "{schema}".agent_conversation_messages
+        INSERT INTO "{schema}".{_MSG_TABLE}
         (chat_id, user_id, role, content, reply_to, status)
         VALUES (%s, %s, 'assistant', %s, %s, %s)
         RETURNING id
@@ -159,7 +164,7 @@ def _make_channel(test_schema, max_concurrent=1):
         {
             "dsn": dsn,
             "schema": schema,
-            "table_name": "agent_conversation_messages",
+            "table_name": runtime_table("conversation_messages"),
             "poll_interval": 0.1,
             "flush_interval": 60.0,
             "max_concurrent": max_concurrent,
@@ -209,8 +214,8 @@ async def _run_turn(ch, ds, schema, user_msg_id, chat_id, assistant_msg_id, fina
     assert chat_id not in ch._chat_inflight
 
     # в БД user → completed, assistant → completed с контентом
-    u = _row(ds, schema, "agent_conversation_messages", user_msg_id)
-    a = _row(ds, schema, "agent_conversation_messages", assistant_msg_id)
+    u = _row(ds, schema, runtime_table("conversation_messages"), user_msg_id)
+    a = _row(ds, schema, runtime_table("conversation_messages"), assistant_msg_id)
     assert u["status"] == "completed", u
     assert a["status"] == "completed", a
 
@@ -233,7 +238,7 @@ async def test_s1_regular_final(test_schema):
         ))
 
     await _run_turn(ch, ds, schema, user_id, "chat-s1", assistant_id, fin)
-    assert _row(ds, schema, "agent_conversation_messages", assistant_id)["content"] == "Answer S1"
+    assert _row(ds, schema, runtime_table("conversation_messages"), assistant_id)["content"] == "Answer S1"
 
 
 async def test_s2_streaming_final_with_buffer(test_schema):
@@ -259,7 +264,7 @@ async def test_s2_streaming_final_with_buffer(test_schema):
         })
 
     await _run_turn(ch, ds, schema, user_id, "chat-s2", assistant_id, fin)
-    a = _row(ds, schema, "agent_conversation_messages", assistant_id)
+    a = _row(ds, schema, runtime_table("conversation_messages"), assistant_id)
     assert a["content"] == "Hello world"
 
 
@@ -446,7 +451,7 @@ async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema):
         done = sum(
             1
             for uid in user_ids
-            if _row(ds, schema, "agent_conversation_messages", uid)["status"]
+            if _row(ds, schema, runtime_table("conversation_messages"), uid)["status"]
             == "completed"
         )
         if done == n_questions:
@@ -454,7 +459,7 @@ async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema):
         await asyncio.sleep(0.1)
     else:
         statuses = [
-            _row(ds, schema, "agent_conversation_messages", uid)["status"]
+            _row(ds, schema, runtime_table("conversation_messages"), uid)["status"]
             for uid in user_ids
         ]
         raise AssertionError(
@@ -482,13 +487,13 @@ async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema):
     await ch.start()  # второй start для следующего цикла
     while asyncio.get_event_loop().time() < deadline:
         row = _row(
-            ds, schema, "agent_conversation_messages", new_user,
+            ds, schema, runtime_table("conversation_messages"), new_user,
         )
         if row["status"] != "pending":
             break
         await asyncio.sleep(0.1)
     await ch.stop()
-    final = _row(ds, schema, "agent_conversation_messages", new_user)
+    final = _row(ds, schema, runtime_table("conversation_messages"), new_user)
     assert final["status"] == "completed", (
         f"новая задача не была поднята поллом, status={final['status']}"
     )

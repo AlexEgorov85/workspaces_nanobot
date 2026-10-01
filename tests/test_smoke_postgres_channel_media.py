@@ -17,6 +17,7 @@ import tempfile
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from config import runtime_table  # noqa: F401
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _WORKSPACE = _PROJECT_ROOT / "workspace"
@@ -189,7 +190,7 @@ async def test_media_with_real_files_reaches_db(mock_db, tmp_path):
 
     ch_config = {
         "dsn": "postgresql://localhost:5432/test",
-        "table_name": "agent_conversation_messages",
+        "table_name": runtime_table("conversation_messages"),
         "poll_interval": 0.1,
         "flush_interval": 0.1,
         "max_concurrent": 1,
@@ -245,7 +246,7 @@ async def test_media_round_trip_through_channel(mock_db, tmp_path):
 
     ch_config = {
         "dsn": "postgresql://localhost:5432/test",
-        "table_name": "agent_conversation_messages",
+        "table_name": runtime_table("conversation_messages"),
         "poll_interval": 0.1,
         "flush_interval": 0.1,
         "max_concurrent": 1,
@@ -302,7 +303,7 @@ async def test_patcher_auto_attach_end_to_end(mock_db, tmp_path):
 
     ch = PostgresChannel({
         "dsn": "postgresql://localhost:5432/test",
-        "table_name": "agent_conversation_messages",
+        "table_name": runtime_table("conversation_messages"),
         "poll_interval": 0.1,
         "flush_interval": 0.1,
         "max_concurrent": 1,

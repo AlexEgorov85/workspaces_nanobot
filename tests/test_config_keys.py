@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 PROJECT_JSON = Path(__file__).resolve().parent.parent / "project.json"
 
@@ -42,9 +43,9 @@ def _required_keys():
         ("channels.postgres.unstick_interval", 120.0),
         ("channels.postgres.max_concurrent", 2),
         ("channels.postgres.allow_from", ["*"]),
-        ("channels.postgres.messages_table", "agent_session_messages"),
-        ("channels.postgres.meta_table", "agent_session_meta"),
-        ("channels.postgres.table_name", "agent_conversation_messages"),
+        ("channels.postgres.messages_table", runtime_table("session_messages")),
+        ("channels.postgres.meta_table", runtime_table("session_meta")),
+        ("channels.postgres.table_name", runtime_table("conversation_messages")),
         ("channels.postgres.schema", "public"),
         ("channels.postgres.max_stuck_retries", 3),
         ("channels.postgres.msg_ctx_max_size", 100),
@@ -149,7 +150,7 @@ def _required_keys():
         ("gateway.vector.index.indexes.audit_reports_index.metric", "cosine"),
         # logging.db
         ("logging.db.enabled", True),
-        ("logging.db.table_name", "agent_gateway_logs"),
+        ("logging.db.table_name", runtime_table("gateway_logs")),
         ("logging.db.schema", "public"),
         ("logging.db.flush_interval_sec", 5.0),
         ("logging.db.batch_size", 100),

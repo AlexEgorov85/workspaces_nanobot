@@ -14,6 +14,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 
 def _settings(**overrides):
@@ -107,8 +108,8 @@ class TestShutdownMidFlight:
         )
 
         svc = DbLoggingService(
-            table_name="agent_gateway_logs",
-            question_runs_table="agent_question_runs",
+            table_name=runtime_table("gateway_logs"),
+            question_runs_table=runtime_table("question_runs"),
         )
         svc.start()
         # Имитация shutdown — worker останавливается, ``is_running`` False.

@@ -15,6 +15,7 @@ from config import (
     _strip_jsonc_comments,
     load_config_json,
     load_env,
+    runtime_table,
 )
 
 
@@ -343,8 +344,7 @@ class TestSettingsModule:
         from config import SETTINGS
 
         pg = SETTINGS.get("channels", {}).get("postgres", {})
-        assert pg.get("messages_table") == "agent_session_messages_test"
-        # ${DATABASE_URL} уже подставлен
+        assert pg.get("messages_table") == runtime_table("session_messages", "test")        # ${DATABASE_URL} уже подставлен
         assert pg.get("dsn") == "postgresql://postgres:1@localhost:5432/postgres"
 
     def test_secrets_exported_to_env(self):

@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 
 class _FakeConfigService:
@@ -121,19 +122,22 @@ class TestMakeSessionColdSyncService:
             if "schema" in keys:
                 return "public"
             if "meta_table" in keys:
-                return "agent_session_meta"
+                return runtime_table("session_meta")
             if "messages_table" in keys:
-                return "agent_session_messages"
+                return runtime_table("session_messages")
             return default
 
-        with patch("config.get_setting", side_effect=_fake_get_setting):
+        with (
+            patch("config.get_setting", side_effect=_fake_get_setting),
+            patch("config.require_setting", side_effect=_fake_get_setting),
+        ):
             svc = _make_session_cold_sync_service(ctx)
 
         assert svc is not None
         assert svc.enabled is True
         assert svc._session_manager is sm
-        assert svc._meta_table == "agent_session_meta"
-        assert svc._messages_table == "agent_session_messages"
+        assert svc._meta_table == runtime_table("session_meta")
+        assert svc._messages_table == runtime_table("session_messages")
 
     def test_respects_enabled_false(self) -> None:
         from lib.core.application_context import _make_session_cold_sync_service
@@ -153,12 +157,15 @@ class TestMakeSessionColdSyncService:
             if "schema" in keys:
                 return "public"
             if "meta_table" in keys:
-                return "agent_session_meta"
+                return runtime_table("session_meta")
             if "messages_table" in keys:
-                return "agent_session_messages"
+                return runtime_table("session_messages")
             return default
 
-        with patch("config.get_setting", side_effect=_fake_get_setting):
+        with (
+            patch("config.get_setting", side_effect=_fake_get_setting),
+            patch("config.require_setting", side_effect=_fake_get_setting),
+        ):
             svc = _make_session_cold_sync_service(ctx)
 
         assert svc is not None

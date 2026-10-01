@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 
 # Add workspace to sys.path so utils.db / config can be imported.
@@ -71,6 +72,8 @@ class TestSessionColdSyncLifecycleMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             sync_interval_sec=0.05,
             enabled=True,
         )
@@ -86,6 +89,8 @@ class TestSessionColdSyncLifecycleMock:
         svc = SessionColdSyncService(
             session_manager=_FakeSessionManager(),
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             enabled=False,
         )
         svc.start()
@@ -97,6 +102,8 @@ class TestSessionColdSyncLifecycleMock:
         svc = SessionColdSyncService(
             session_manager=_FakeSessionManager(),
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
         )
         # Двойной stop не падает.
         svc.stop(timeout_sec=1.0)

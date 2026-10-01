@@ -61,6 +61,7 @@ import pytest
 
 import config
 from config import ConfigurationError
+from config import runtime_table  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +163,7 @@ def test_env_vars_do_not_influence_profile_resolution() -> None:
         },
     )
     assert result.returncode == 0, result.stderr
-    assert "agent_gateway_logs" in result.stdout
+    assert runtime_table("gateway_logs") in result.stdout
     assert "_test" not in result.stdout
 
 
@@ -235,9 +236,9 @@ def test_gateway_prod_smoke_selects_prod_tables() -> None:
     assert result.returncode == 0, result.stderr
     assert "OK_SMOKE_COMPLETE" in result.stdout
     assert "profile=prod" in result.stdout
-    assert "logging.db.table_name=agent_gateway_logs" in result.stdout
+    assert f"logging.db.table_name={runtime_table('gateway_logs')}" in result.stdout
     # И никаких test-таблиц в prod
-    assert "agent_gateway_logs_test" not in result.stdout
+    assert runtime_table("gateway_logs", "test") not in result.stdout
 
 
 @pytest.mark.skip(
@@ -252,7 +253,7 @@ def test_gateway_test_smoke_selects_test_tables() -> None:
     assert result.returncode == 0, result.stderr
     assert "OK_SMOKE_COMPLETE" in result.stdout
     assert "profile=test" in result.stdout
-    assert "logging.db.table_name=agent_gateway_logs_test" in result.stdout
+    assert f"logging.db.table_name={runtime_table('gateway_logs', 'test')}" in result.stdout
 
 
 @pytest.mark.skip(
@@ -276,8 +277,8 @@ def test_gateway_profile_comes_only_from_cli() -> None:
         },
     )
     assert result.returncode == 0, result.stderr
-    assert "agent_gateway_logs_test" not in result.stdout
-    assert "logging.db.table_name=agent_gateway_logs" in result.stdout
+    assert runtime_table("gateway_logs", "test") not in result.stdout
+    assert f"logging.db.table_name={runtime_table('gateway_logs')}" in result.stdout
 
 
 def test_cli_agent_starts_without_profile_flag() -> None:
@@ -329,7 +330,7 @@ def test_cli_agent_test_smoke_selects_test_tables() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "OK_SMOKE_COMPLETE" in result.stdout
-    assert "logging.db.table_name=agent_gateway_logs_test" in result.stdout
+    assert f"logging.db.table_name={runtime_table('gateway_logs', 'test')}" in result.stdout
 
 
 # ---------------------------------------------------------------------------

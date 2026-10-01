@@ -10,7 +10,37 @@
     python tools/generate_comments_sql.py
 """
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from config import runtime_table  # noqa: E402
+
+
+def _rt(role: str) -> str:
+    """``schema.имя`` из настроек: имя таблицы — значение конфигурации."""
+    return f"public.{runtime_table(role)}"
+
+
+def _scripts_registry_table() -> str:
+    """Реестр скриптов навыка — из ``project.json`` (label ``scripts_registry``).
+
+    Инструмент запускается сам по себе и не инициализирует SETTINGS, поэтому
+    читаем файл напрямую (он JSONC — только через ``load_config_json``), а не
+    через ``get_setting``: тот без инициализации вернул бы пустой default.
+    Таблица объявлена там же, где и остальные таблицы навыка, — генератор
+    держит её копию ровно в одном месте, в самом project.json.
+    """
+    project = load_config_json(ROOT / "project.json")
+    tables = project.get("skills", {}).get("audit_analyzer", {}).get("tables") or []
+    for entry in tables:
+        if isinstance(entry, dict) and entry.get("label") == "scripts_registry":
+            return str(entry["name"])
+    raise KeyError(
+        "project.json → skills.audit_analyzer.tables: нет записи с "
+        "label='scripts_registry'"
+    )
 
 
 def _sql_escape(s: str) -> str:
@@ -40,7 +70,7 @@ for tbl_name, tbl in data["tables"].items():
 
 # 2. predefined_scripts
 predefined_scripts = {
-    "public.agent_predefined_scripts": (
+    _scripts_registry_table(): (
         "Реестр предопределённых SQL-скриптов навыка audit_analyzer. "
         "Источник истины для режима --mode predefined. "
         "JSONB-колонка parameters повторяет структуру dataclass ParamDefinition: "
@@ -115,7 +145,7 @@ vector_index_config = {
 
 # 5. session_*
 session = {
-    "public.agent_session_meta": (
+    _rt("session_meta"): (
         "Метаданные сессий nanobot. Cold-storage mirror upstream JSONL-стора "
         "SessionManager (storage-hybridization). Управляется "
         "SessionColdSyncService (lib/services/session_cold_sync_service.py). "
@@ -128,7 +158,7 @@ session = {
             "metadata": "Произвольные метаданные сессии (user_id, channel, ...).",
         },
     ),
-    "public.agent_session_messages": (
+    _rt("session_messages"): (
         "Сообщения чата в рамках сессии (append-only по session_key+seq). "
         "Таблица агента (префикс agent_).",
         {
@@ -152,7 +182,7 @@ session = {
             "created_at": "Время записи в БД.",
         },
     ),
-    "public.agent_conversation_messages": (
+    _rt("conversation_messages"): (
         "Таблица обмена сообщениями канала PostgresChannel и web-чата. "
         "Агент опрашивает входящие (status=pending), отвечает и пишет ответ обратно "
         "в эту же таблицу. Единотабличная схема (роль в role, рассуждения в metadata.reasoning). "
@@ -176,7 +206,7 @@ session = {
 
 # 7. logs
 logs = {
-    "public.agent_question_runs": (
+    _rt("question_runs"): (
         "Контекст вопроса/прогона: пользователь, агент, статус, вопрос/ответ, summary. "
         "Одна строка на request_id. Не дублируется на каждое событие лога. "
         "Полный текст вопроса/ответа в question/response, media — вложения. "
@@ -200,7 +230,7 @@ logs = {
             "media": "JSON-список вложений (media): пути/URL файлов, приложенных пользователем или агентом.",
         },
     ),
-    "public.agent_gateway_logs": (
+    _rt("gateway_logs"): (
         "Структурированный журнал событий агента. "
         "Стройный: контекст вопроса в agent_question_runs (по request_id), "
         "здесь — только то, что относится к конкретному событию. "

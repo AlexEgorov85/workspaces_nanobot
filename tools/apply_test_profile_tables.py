@@ -1,13 +1,11 @@
 """apply_test_profile_tables.py — создать 5 runtime-таблиц профиля test.
 
-Эти таблицы перечислены в profiles/test.jsonc:
-    channels.postgres.table_name     = public.agent_conversation_messages_test
-    channels.postgres.messages_table = public.agent_session_messages_test
-    channels.postgres.meta_table     = public.agent_session_meta_test
-    logging.db.table_name            = public.agent_gateway_logs_test
-    logging.db.question_runs_table   = public.agent_question_runs_test
+Имена таблиц берутся из настроек (``config.runtime_table(role, "test")``),
+поэтому переименование таблицы в ``profiles/test.jsonc`` не оставляет
+инструмент применяющим DDL от старого имени: отсутствующий файл — ошибка
+с именем роли и путём.
 
-Применяет 5 create-скриптов из sql/<domain>/create_public_agent_*_test.sql
+Применяет create-скрипты из ``sql/<domain>/create_public_<table>_test.sql``
 через psycopg2 (DDL разбивается на отдельные statement'ы по ';').
 
 Запуск::
@@ -16,7 +14,7 @@
     python tools/apply_test_profile_tables.py
 
 Идемпотентно: CREATE TABLE / CREATE INDEX используют IF NOT EXISTS;
-ALTER в create_public_agent_gateway_logs_test идемпотентен.
+ALTER в DDL журнала идемпотентен.
 """
 from __future__ import annotations
 
@@ -30,14 +28,40 @@ import psycopg2
 DSN_ENV = "DATABASE_URL"
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-FILES = [
-    ROOT / "sql/channels/create_public_agent_conversation_messages_test.sql",
-    ROOT / "sql/session/create_public_agent_session_meta_test.sql",
-    ROOT / "sql/session/create_public_agent_session_messages_test.sql",
-    ROOT / "sql/logs/create_public_agent_question_runs_test.sql",
-    ROOT / "sql/logs/create_public_agent_gateway_logs_test.sql",
-]
+from config import runtime_table  # noqa: E402
+
+#: DDL лежит в ``sql/<domain>/create_<schema>_<table>.sql``, то есть имя файла
+#: выводится из имени таблицы. Переименование таблицы в профиле без
+#: переименования DDL должно падать здесь и называть файл, а не молча
+#: применять старую схему. Список, а не словарь: каталог ``sql/session``
+#: отдаёт две разные таблицы.
+_DDL: tuple[tuple[str, str], ...] = (
+    ("sql/channels", "conversation_messages"),
+    ("sql/session", "session_meta"),
+    ("sql/session", "session_messages"),
+    ("sql/logs", "question_runs"),
+    ("sql/logs", "gateway_logs"),
+)
+
+
+def ddl_files() -> list[Path]:
+    out: list[Path] = []
+    for directory, role in _DDL:
+        table = runtime_table(role, "test")
+        path = ROOT / directory / f"create_public_{table}.sql"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"DDL для роли {role!r} не найден: {path}\n"
+                f"Имя таблицы взято из профиля test ({table!r}); "
+                f"переименуйте файл DDL вместе с таблицей."
+            )
+        out.append(path)
+    return out
+
+
+FILES = ddl_files()
 
 
 def split_statements(sql: str) -> list[str]:

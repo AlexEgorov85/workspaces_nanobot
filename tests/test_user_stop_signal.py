@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 _project_root = Path(__file__).resolve().parent.parent
 _workspace_path = str(_project_root / "workspace")
@@ -99,7 +100,7 @@ def _make_channel(mock_db, **overrides):
     PostgresChannel, _, _ = mock_db
     config = {
         "dsn": "postgresql://localhost:5432/test",
-        "table_name": "agent_conversation_messages",
+        "table_name": runtime_table("conversation_messages"),
         "poll_interval": 0.1,
         "flush_interval": 0.1,
         "max_concurrent": 1,

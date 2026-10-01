@@ -35,6 +35,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 
 @pytest.fixture
@@ -160,8 +161,8 @@ def minimal_fake_modules(tmp_path):
         settings["logging"] = {
             "db": {
                 "enabled": True,
-                "table_name": "agent_gateway_logs",
-                "question_runs_table": "agent_question_runs",
+                "table_name": runtime_table("gateway_logs"),
+                "question_runs_table": runtime_table("question_runs"),
                 "schema": "public",
                 "flush_interval_sec": 5.0,
             },

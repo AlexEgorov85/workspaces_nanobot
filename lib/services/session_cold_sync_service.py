@@ -67,17 +67,20 @@ class SessionColdSyncService:
     ``SessionColdSyncService`` использует ``utils.db.transaction()``
     и ``utils.db.run(...)`` — никаких собственных psycopg2-пулов.
 
-    Аргументы конструктора — все опциональные с дефолтами; PG DSN берётся
-    из ``config`` через ``ApplicationContext`` (см. ``_make_*``).
+    Аргументы конструктора — все опциональные с дефолтами, кроме
+    ``meta_table``/``messages_table``: имена таблиц читаются из конфигурации
+    (``ApplicationContext`` → ``require_setting``) и в коде не зашиты.
+    PG DSN берётся из ``config`` через ``ApplicationContext`` (см. ``_make_*``).
     """
 
     def __init__(
         self,
         session_manager: "SessionManager",
         pg_dsn: str,
+        *,
+        meta_table: str,
+        messages_table: str,
         schema: str = "public",
-        meta_table: str = "agent_session_meta",
-        messages_table: str = "agent_session_messages",
         sync_interval_sec: float = 30.0,
         batch_size: int = 50,
         enabled: bool = True,

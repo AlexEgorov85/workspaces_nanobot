@@ -25,6 +25,7 @@ from lib.services.schema_validation import (
     MissingTable,
     SchemaValidationError,
 )
+from config import runtime_table  # noqa: F401
 
 
 def _build_settings_with_missing() -> dict[str, Any]:
@@ -33,15 +34,15 @@ def _build_settings_with_missing() -> dict[str, Any]:
         "profile": "prod",
         "channels": {
             "postgres": {
-                "table_name": "agent_conversation_messages",
-                "messages_table": "agent_session_messages",
-                "meta_table": "agent_session_meta",
+                "table_name": runtime_table("conversation_messages"),
+                "messages_table": runtime_table("session_messages"),
+                "meta_table": runtime_table("session_meta"),
             },
         },
         "logging": {
             "db": {
-                "table_name": "agent_gateway_logs",
-                "question_runs_table": "agent_question_runs",
+                "table_name": runtime_table("gateway_logs"),
+                "question_runs_table": runtime_table("question_runs"),
             },
         },
     }
@@ -63,9 +64,9 @@ class TestGatewayMainBoundary:
                 [
                     MissingTable(
                         schema="public",
-                        name="agent_conversation_messages",
+                        name=runtime_table("conversation_messages"),
                     ),
-                    MissingTable(schema="public", name="agent_gateway_logs"),
+                    MissingTable(schema="public", name=runtime_table("gateway_logs")),
                 ],
                 profile="prod",
             )
@@ -78,6 +79,6 @@ class TestGatewayMainBoundary:
         assert rc == 2
         err = fake_stderr.getvalue()
         assert "FATAL" in err
-        assert "agent_conversation_messages" in err
-        assert "agent_gateway_logs" in err
+        assert runtime_table("conversation_messages") in err
+        assert runtime_table("gateway_logs") in err
         assert "python tools/migrate.py --apply" in err

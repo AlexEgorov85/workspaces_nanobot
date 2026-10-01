@@ -132,6 +132,7 @@ class _SqlRecorder:
 
 # Стаб для Any в аннотации _wrap_transaction
 from typing import Any  # noqa: E402
+from config import runtime_table  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +151,7 @@ def recorder():
     config = {
         "dsn": "postgresql://u@h/db",
         "schema": "public",
-        "table_name": "agent_conversation_messages",
+        "table_name": runtime_table("conversation_messages"),
         "max_concurrent": 1,
     }
     ch = pg_mod.PostgresChannel(config, MagicMock())

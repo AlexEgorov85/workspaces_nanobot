@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 _project_root = Path(__file__).resolve().parent.parent
 _workspace_path = str(_project_root / "workspace")
@@ -47,7 +48,7 @@ class TestPGSessionManagerInit:
             PGSessionManager(
                 workspace=tmp_path,
                 messages_table="",
-                meta_table="agent_session_meta",
+                meta_table=runtime_table("session_meta"),
             )
 
     def test_init_accepts_constructor_params(self, tmp_path: Path) -> None:
@@ -357,8 +358,8 @@ class TestSaveCleansContent:
 
         return PGSessionManager(
             workspace=tmp_path,
-            messages_table="agent_session_messages",
-            meta_table="agent_session_meta",
+            messages_table=runtime_table("session_messages"),
+            meta_table=runtime_table("session_meta"),
         )
 
     @staticmethod

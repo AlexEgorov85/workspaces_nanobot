@@ -26,6 +26,7 @@ from lib.services.schema_validation import (
     _MissingConfigKeys,
     _hint_for_profile,
 )
+from config import runtime_table  # noqa: F401
 
 
 def _full_settings(profile: str = "prod") -> dict[str, Any]:
@@ -34,15 +35,15 @@ def _full_settings(profile: str = "prod") -> dict[str, Any]:
         "profile": profile,
         "channels": {
             "postgres": {
-                "table_name": "agent_conversation_messages",
-                "messages_table": "agent_session_messages",
-                "meta_table": "agent_session_meta",
+                "table_name": runtime_table("conversation_messages"),
+                "messages_table": runtime_table("session_messages"),
+                "meta_table": runtime_table("session_meta"),
             },
         },
         "logging": {
             "db": {
-                "table_name": "agent_gateway_logs",
-                "question_runs_table": "agent_question_runs",
+                "table_name": runtime_table("gateway_logs"),
+                "question_runs_table": runtime_table("question_runs"),
             },
         },
     }
@@ -78,15 +79,17 @@ class TestSchemaValidationError:
     def test_message_contains_missing_and_profile(self) -> None:
         err = SchemaValidationError(
             [
-                MissingTable(schema="public", name="agent_conversation_messages"),
-                MissingTable(schema="public", name="agent_gateway_logs"),
+                MissingTable(schema="public", name=runtime_table("conversation_messages")),
+                MissingTable(schema="public", name=runtime_table("gateway_logs")),
             ],
             profile="test",
         )
         text = str(err)
         assert "profile='test'" in text
-        assert "public.agent_conversation_messages" in text
-        assert "public.agent_gateway_logs" in text
+        # Сообщение перечисляет ровно те таблицы, которые ему передали, —
+        # профиль в подписи не переписывает имена.
+        assert f"public.{runtime_table('conversation_messages')}" in text
+        assert f"public.{runtime_table('gateway_logs')}" in text
         assert "python tools/apply_test_profile_tables.py" in text
 
     def test_empty_missing_message_still_safe(self) -> None:
@@ -96,7 +99,7 @@ class TestSchemaValidationError:
 
     def test_message_in_russian(self) -> None:
         err = SchemaValidationError(
-            [MissingTable(schema="public", name="agent_gateway_logs")],
+            [MissingTable(schema="public", name=runtime_table("gateway_logs"))],
             profile="prod",
         )
         text = str(err)
@@ -150,11 +153,11 @@ class TestExpectedTableNames:
         settings = _full_settings()
         names = SchemaValidationService.expected_table_names(settings)
         assert names == [
-            ("public", "agent_conversation_messages"),
-            ("public", "agent_session_messages"),
-            ("public", "agent_session_meta"),
-            ("public", "agent_gateway_logs"),
-            ("public", "agent_question_runs"),
+            ("public", runtime_table("conversation_messages")),
+            ("public", runtime_table("session_messages")),
+            ("public", runtime_table("session_meta")),
+            ("public", runtime_table("gateway_logs")),
+            ("public", runtime_table("question_runs")),
         ]
 
     def test_passes_through_test_suffix_names_verbatim(self) -> None:
@@ -162,21 +165,21 @@ class TestExpectedTableNames:
             "profile": "test",
             "channels": {
                 "postgres": {
-                    "table_name": "agent_conversation_messages_test",
-                    "messages_table": "agent_session_messages_test",
-                    "meta_table": "agent_session_meta_test",
+                    "table_name": runtime_table("conversation_messages", "test"),
+                    "messages_table": runtime_table("session_messages", "test"),
+                    "meta_table": runtime_table("session_meta", "test"),
                 },
             },
             "logging": {
                 "db": {
-                    "table_name": "agent_gateway_logs_test",
-                    "question_runs_table": "agent_question_runs_test",
+                    "table_name": runtime_table("gateway_logs", "test"),
+                    "question_runs_table": runtime_table("question_runs", "test"),
                 },
             },
         }
         names = SchemaValidationService.expected_table_names(settings)
         assert all(n.endswith("_test") for _, n in names)
-        assert names[0] == ("public", "agent_conversation_messages_test")
+        assert names[0] == ("public", runtime_table("conversation_messages", "test"))
 
     def test_custom_names_not_hardcoded(self) -> None:
         settings = {
@@ -242,11 +245,11 @@ class TestExpectedTableNames:
         proxy._inner_dict = raw
         names = SchemaValidationService.expected_table_names(proxy)
         assert names == [
-            ("public", "agent_conversation_messages"),
-            ("public", "agent_session_messages"),
-            ("public", "agent_session_meta"),
-            ("public", "agent_gateway_logs"),
-            ("public", "agent_question_runs"),
+            ("public", runtime_table("conversation_messages")),
+            ("public", runtime_table("session_messages")),
+            ("public", runtime_table("session_meta")),
+            ("public", runtime_table("gateway_logs")),
+            ("public", runtime_table("question_runs")),
         ]
 
     def test_lazy_settings_missing_keys_reports_correctly(self) -> None:
@@ -277,12 +280,12 @@ class TestCheckTables:
 
     def test_one_missing_returned(self) -> None:
         names = SchemaValidationService.expected_table_names(_full_settings())
-        existing = {n for _, n in names if n != "agent_gateway_logs"}
+        existing = {n for _, n in names if n != runtime_table("gateway_logs")}
         fetch = _make_fetch(existing)
         missing = SchemaValidationService.check_tables(fetch, names)
         assert len(missing) == 1
         assert missing[0].schema == "public"
-        assert missing[0].name == "agent_gateway_logs"
+        assert missing[0].name == runtime_table("gateway_logs")
 
     def test_all_missing_returns_all(self) -> None:
         names = SchemaValidationService.expected_table_names(_full_settings())
@@ -321,13 +324,13 @@ class TestValidate:
     def test_raises_schema_validation_error_on_missing(self) -> None:
         settings = _full_settings()
         names = SchemaValidationService.expected_table_names(settings)
-        existing = {n for _, n in names if n != "agent_session_meta"}
+        existing = {n for _, n in names if n != runtime_table("session_meta")}
         fetch = _make_fetch(existing)
         with pytest.raises(SchemaValidationError) as exc_info:
             SchemaValidationService.validate(settings, fetch=fetch)
         assert exc_info.value.profile == "prod"
         assert any(
-            m.name == "agent_session_meta" for m in exc_info.value.missing
+            m.name == runtime_table("session_meta") for m in exc_info.value.missing
         )
 
     def test_missing_keys_raises_configuration_error(self) -> None:

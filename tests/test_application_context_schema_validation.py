@@ -28,6 +28,7 @@ from lib.services.schema_validation import (
     SchemaValidationError,
     SchemaValidationService,
 )
+from config import runtime_table  # noqa: F401
 
 
 class _CtxStub:
@@ -52,13 +53,13 @@ def _settings(
 ) -> dict[str, Any]:
     """Шаблон SETTINGS с возможностью «удалить» одну таблицу."""
     pg = {
-        "table_name": "agent_conversation_messages",
-        "messages_table": "agent_session_messages",
-        "meta_table": "agent_session_meta",
+        "table_name": runtime_table("conversation_messages"),
+        "messages_table": runtime_table("session_messages"),
+        "meta_table": runtime_table("session_meta"),
     }
     db = {
-        "table_name": "agent_gateway_logs",
-        "question_runs_table": "agent_question_runs",
+        "table_name": runtime_table("gateway_logs"),
+        "question_runs_table": runtime_table("question_runs"),
     }
     if missing_one is not None:
         if missing_one in pg:
@@ -118,7 +119,7 @@ class TestValidateRuntimeSchema:
         settings = _settings()
         # Подменяем настройку fetch, чтобы вернуть только 4 из 5.
         names = SchemaValidationService.expected_table_names(settings)
-        existing = {n for _, n in names if n != "agent_gateway_logs"}
+        existing = {n for _, n in names if n != runtime_table("gateway_logs")}
 
         def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
             return [
@@ -132,7 +133,7 @@ class TestValidateRuntimeSchema:
             with pytest.raises(SchemaValidationError) as exc_info:
                 ctx._validate_runtime_schema()
         assert exc_info.value.profile == "prod"
-        assert any(m.name == "agent_gateway_logs" for m in exc_info.value.missing)
+        assert any(m.name == runtime_table("gateway_logs") for m in exc_info.value.missing)
 
     def test_enabled_false_skips_check_with_warning(self) -> None:
         settings = _settings(enabled=False)

@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from config import runtime_table
+
 _project_root = __import__("pathlib").Path(__file__).resolve().parent.parent
 _workspace_path = str(_project_root / "workspace")
 if _workspace_path not in sys.path:
@@ -365,7 +367,7 @@ class TestRunVanillaForwardsStorageAndSession:
             captured["kwargs"] = kwargs
             # Возвращаем мок-инстанс, чтобы _run_vanilla мог позвать .stop()
             mock = MagicMock()
-            mock.settings = {"logging": {"db": {"table_name": "agent_gateway_logs_test"}}}
+            mock.settings = {"logging": {"db": {"table_name": runtime_table("gateway_logs", "test")}}}
             mock.config = MagicMock()
             mock.config_service = MagicMock()
             mock.config_service.settings_section.return_value = {}

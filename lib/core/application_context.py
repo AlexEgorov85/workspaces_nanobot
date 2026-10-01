@@ -1771,85 +1771,15 @@ def _make_enterprise_mcp(settings: Any, ctx: Any = None) -> Any:
     ошибка: без него агент работает, но потребители, которым нужен
     сервер, отвечают структурной ошибкой вместо падения на старте.
 
-    Путь к снимку вычисляется здесь, через ``resolve_cache_path()``, и
-    передаётся клиенту: он уходит в процесс сервера переменной окружения, а
-    вычислять его на стороне платформы нельзя — там нет ни ``project.json``,
-    ни второго экземпляра этого механизма.
+    Ничего сверх ``project.json → enterprise_mcp`` здесь не передаётся.
+    Путь к снимку и объявления индексов раньше уходили в процесс сервера
+    переменными окружения; они живут в ``mcp-platform/platform.json``, и
+    экспорт не просто дублировал их, а молча затирал файловое значение —
+    окружение приоритетнее.
     """
     from lib.services.enterprise_mcp_client import client_from_settings
 
-    snapshot_path = _resolve_snapshot_file(ctx) if ctx is not None else None
-    return client_from_settings(
-        settings, snapshot_path=snapshot_path, expected_tables=_expected_tables(ctx)
-    )
-
-
-def _expected_tables(ctx: Any) -> tuple[str, ...]:
-    """Полные имена обязательных runtime-таблиц для операции ``schema_check``.
-
-    Единственный источник — ``SchemaValidationService.expected_table_names``,
-    тот же, что блокирует старт агента при отсутствии таблиц. Список
-    копируется сюда не для того, чтобы продублировать: если бы операция
-    проверяла другой набор, она проверяла бы не то же, что проверяет старт,
-    и расхождение выглядело бы как «платформа не видит таблицу, которую
-    агент только что создал».
-    """
-    if ctx is None or getattr(ctx, "settings", None) is None:
-        return ()
-    try:
-        from lib.services.schema_validation import SchemaValidationService
-
-        pairs = SchemaValidationService.expected_table_names(ctx.settings)
-    except Exception as exc:  # noqa: BLE001 - проверка не должна ронять старт
-        logger.warning(
-            "enterprise-mcp: список runtime-таблиц не разрешился, "
-            "schema_check будет отвечать «не задано ни одной таблицы»: %s",
-            exc,
-        )
-        return ()
-    return tuple(_qualify(schema, table) for schema, table in pairs)
-
-
-def _qualify(schema: str, table: str) -> str:
-    """Собрать полное имя таблицы ``schema.table``.
-
-    ``SchemaValidationService`` возвращает пару ``(schema, table_name)``, но
-    вторая часть уже бывает квалифицированной — ``("public",
-    "public.agent_gateway_logs")``. Схема дописывается только если её там
-    ещё нет: иначе на выходе ``public.public.agent_gateway_logs``, и
-    ``schema_check`` рапортовал бы «таблицы нет» при таблице на месте.
-    """
-    name = str(table).strip()
-    schema = str(schema).strip()
-    if not schema or "." in name:
-        return name
-    return f"{schema}.{name}"
-
-
-def _resolve_snapshot_file(ctx: ApplicationContext) -> str | None:
-    """Путь к файлу снимка по единственному механизму агента.
-
-    ``None`` — путь не вычислился. Это не повод поднимать исключение:
-    capability ``vectors`` останется ненастроенной и отдаст внятную ошибку
-    на своей операции, тогда как ``history_search`` продолжит работать.
-    """
-    if ctx is None:
-        return None
-    try:
-        gateway_cfg = ctx.config_service.settings_section("gateway") or {}
-        if not isinstance(gateway_cfg, dict):
-            gateway_cfg = {}
-        cache_cfg = gateway_cfg.get("cache")
-        if not isinstance(cache_cfg, dict):
-            cache_cfg = {}
-        return resolve_cache_path(ctx.config.workspace_path, cache_cfg)
-    except Exception:  # noqa: BLE001 - путь снимка не должен ронять запуск агента
-        logger.warning(
-            "enterprise-mcp: путь снимка не вычислился, capability vectors "
-            "останется ненастроенной",
-            exc_info=True,
-        )
-        return None
+    return client_from_settings(settings)
 
 
 def _make_cron_service(config: Any) -> Any:

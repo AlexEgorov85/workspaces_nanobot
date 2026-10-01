@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lib.services.session_storage import SessionStorageError, SessionStorageService
+from config import runtime_table  # noqa: F401
 
 
 @pytest.fixture
@@ -48,7 +49,7 @@ def _config(workspace="C:/ws"):
 
 
 def _pg(*, dsn="postgresql://u@h/db", **extra):
-    cfg = {"dsn": dsn, "messages_table": "agent_session_messages", "meta_table": "agent_session_meta"}
+    cfg = {"dsn": dsn, "messages_table": runtime_table("session_messages"), "meta_table": runtime_table("session_meta")}
     cfg.update(extra)
     return cfg
 

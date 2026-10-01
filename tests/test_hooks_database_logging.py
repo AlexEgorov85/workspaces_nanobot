@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import sys
@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from config import runtime_table
 
 # db_logging_bus импортирует utils.media (workspace на sys.path).
 _workspace_path = str(Path(__file__).resolve().parent.parent / "workspace")
@@ -603,8 +605,8 @@ class TestRunFinishedEventShape:
 
         svc = DbLoggingService(
             dsn="postgresql://x",
-            table_name="agent_gateway_logs",
-            question_runs_table="agent_question_runs",
+            table_name=runtime_table("gateway_logs"),
+            question_runs_table=runtime_table("question_runs"),
         )
         svc.register_request("cli:1", "r1", user_id="alice", chat_id="c1")
 

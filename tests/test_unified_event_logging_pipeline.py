@@ -31,10 +31,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LOGGING_TABLES = {"agent_gateway_logs", "agent_question_runs"}
+LOGGING_TABLES = {
+    runtime_table("gateway_logs"),
+    runtime_table("question_runs"),
+}
 LOGGING_OWNERS = {Path("lib/services/db_logging_service.py")}
 
 PRODUCTION_ROOTS: tuple[Path, ...] = (
@@ -322,22 +326,16 @@ class TestRepositoryGrepBaseline:
             result.append(line)
         return result
 
-    def test_insert_into_agent_gateway_logs_only_in_owner(self) -> None:
-        hits = self._git_grep(r"INSERT INTO .* agent_gateway_logs")
-        offenders = [
-            line for line in hits
-            if not any(
-                line.startswith(f"lib/services/db_logging_service.py:")
-                for _ in [None]
-            )
-        ]
+    def test_insert_into_gateway_logs_only_in_owner(self) -> None:
+        logs = runtime_table("gateway_logs")
+        hits = self._git_grep(rf"INSERT INTO .* {logs}")
         # ``db_logging_service.py`` — единственное исключение (owner).
         offenders = [
             line for line in hits
             if not line.startswith("lib/services/db_logging_service.py:")
         ]
         assert not offenders, (
-            "INSERT INTO agent_gateway_logs вне owner'а:\n  "
+            f"INSERT INTO {logs} вне owner'а:\n  "
             + "\n  ".join(offenders)
         )
 

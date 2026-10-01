@@ -10,13 +10,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lib.services.db_logging_service import DbLoggingService, LogEvent
+from config import runtime_table  # noqa: F401
 
 
 def _svc(**kw):
     kwargs = dict(
         dsn="postgresql://x",
-        table_name="agent_gateway_logs",
-        question_runs_table="agent_question_runs",
+        table_name=runtime_table("gateway_logs"),
+        question_runs_table=runtime_table("question_runs"),
     )
     kwargs.update(kw)
     return DbLoggingService(**kwargs)

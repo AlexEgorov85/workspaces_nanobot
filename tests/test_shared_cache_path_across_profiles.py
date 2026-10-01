@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 _project_root = Path(__file__).resolve().parent.parent
 _workspace_path = str(_project_root / "workspace")
@@ -49,15 +50,15 @@ class TestValidateProfileOverlayRejectsLocalPath:
         overlay = {
             "channels": {
                 "postgres": {
-                    "table_name": "agent_conversation_messages",
-                    "messages_table": "agent_session_messages",
-                    "meta_table": "agent_session_meta",
+                    "table_name": runtime_table("conversation_messages"),
+                    "messages_table": runtime_table("session_messages"),
+                    "meta_table": runtime_table("session_meta"),
                 },
             },
             "logging": {
                 "db": {
-                    "table_name": "agent_gateway_logs",
-                    "question_runs_table": "agent_question_runs",
+                    "table_name": runtime_table("gateway_logs"),
+                    "question_runs_table": runtime_table("question_runs"),
                 },
             },
             "gateway": {"cache": {"local_path": "/srv/cache/other"}},

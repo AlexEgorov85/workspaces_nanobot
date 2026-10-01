@@ -23,6 +23,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from config import runtime_table  # noqa: F401
 
 
 class _FakeSession:
@@ -93,7 +94,7 @@ class _FakeCursor:
             self._results.append([("orphan",)])
         elif sql_str.startswith("UPDATE") and "RETURNING" in sql_str:
             self._results.append([None])
-        elif sql_str.startswith("INSERT INTO") and "agent_session_meta" in sql_str:
+        elif sql_str.startswith("INSERT INTO") and runtime_table("session_meta") in sql_str:
             self._results.append([])
         elif sql_str.startswith("DELETE FROM"):
             self._results.append([])
@@ -164,6 +165,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             enabled=False,
         )
         svc.start()
@@ -181,6 +184,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             sync_interval_sec=1.0,
         )
         with patch.object(svc, "_try_advisory_xact_lock", return_value=False), \
@@ -202,6 +207,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             sync_interval_sec=1.0,
         )
         with patch("utils.db.transaction", _fake_transaction):
@@ -225,6 +232,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             sync_interval_sec=1.0,
         )
 
@@ -243,6 +252,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=_FakeSessionManager({}),
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
         )
         stats = svc.get_stats()
         # D-Pool.6: pool metrics обязательны
@@ -266,6 +277,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             sync_interval_sec=0.05,
         )
         with patch("utils.db.transaction", _fake_transaction):
@@ -284,6 +297,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             sync_interval_sec=1.0,
         )
 
@@ -323,6 +338,8 @@ class TestSessionColdSyncServiceMock:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://x",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             sync_interval_sec=1.0,
         )
         with patch("utils.db.transaction", _fake_transaction):
@@ -381,6 +398,8 @@ class TestStage0Regression:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
         )
         with patch.object(svc, "_read_pg_updated_at",
@@ -405,6 +424,8 @@ class TestStage0Regression:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
         )
         with patch.object(svc, "_read_pg_updated_at",
@@ -429,6 +450,8 @@ class TestStage0Regression:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
             sync_lag_threshold_seconds=3600,
         )
@@ -460,6 +483,8 @@ class TestStaleAndLagDetection:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
             sync_lag_threshold_seconds=3600,
         )
@@ -485,6 +510,8 @@ class TestStaleAndLagDetection:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
         )
         with patch.object(svc, "_read_pg_updated_at",
@@ -507,6 +534,8 @@ class TestStaleAndLagDetection:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
             sync_lag_threshold_seconds=3600,
         )
@@ -532,6 +561,8 @@ class TestStaleAndLagDetection:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
             sync_lag_threshold_seconds=3600,
         )
@@ -556,6 +587,8 @@ class TestStaleAndLagDetection:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
             stale_tolerance_seconds=120,
         )
         with patch.object(svc, "_read_pg_updated_at",
@@ -577,6 +610,8 @@ class TestStaleAndLagDetection:
             SessionColdSyncService(
                 session_manager=_FakeSessionManager({}),
                 pg_dsn="postgresql://test",
+                meta_table=runtime_table("session_meta"),
+                messages_table=runtime_table("session_messages"),
                 stale_tolerance_seconds=300,
                 sync_lag_threshold_seconds=120,
             )
@@ -599,6 +634,8 @@ class TestGracefulShutdown:
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
         )
         seen_keys: list[str] = []
 
@@ -624,6 +661,8 @@ class TestGracefulShutdown:
         svc = SessionColdSyncService(
             session_manager=_FakeSessionManager({}),
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
         )
         with patch("utils.db.transaction", _fake_transaction):
             svc.start()
@@ -639,6 +678,8 @@ class TestGracefulShutdown:
         svc = SessionColdSyncService(
             session_manager=_FakeSessionManager({}),
             pg_dsn="postgresql://test",
+            meta_table=runtime_table("session_meta"),
+            messages_table=runtime_table("session_messages"),
         )
         svc.stop(timeout_sec=1.0)
         assert svc._running is True  # _running не трогается без start

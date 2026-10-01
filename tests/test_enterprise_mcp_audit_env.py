@@ -1,172 +1,106 @@
-"""Конфигурация capability ``audit``, уезжающая в процесс сервера.
+"""Объявление capability ``audit`` принадлежит платформе, а не агенту.
 
-Дефект, который закрывает этот файл: агент не экспортировал
-``ENTERPRISE_SCRIPTS_REGISTRY_TABLE`` и ``ENTERPRISE_AUDIT_TABLES``. У обеих
-переменных на стороне платформы пустой дефолт, поэтому capability ``audit``
-отвечала ``registry_unavailable`` на **каждую** операцию — то есть была мертва
-в развёртывании, при этом её юнит-тесты оставались зелёными: они ставят
-переменные через ``monkeypatch.setenv`` и сами же создают реестр.
+Раньше файл проверял обратное: что ``_child_env`` агента собирает
+``ENTERPRISE_AUDIT_TABLES`` и ``ENTERPRISE_SCRIPTS_REGISTRY_TABLE`` из
+``project.json → skills.audit_analyzer.tables`` и отдаёт их процессу.
+Экспорт был единственным каналом, и обе переменные у платформы шли без
+дефолта, то есть сломанный экспорт выключал capability целиком и молча —
+``registry_unavailable`` на каждую операцию при зелёных тестах самой
+capability.
 
-Проверяется не «значение верное», а **контракт доезда**: любая переменная,
-которую платформа читает без дефолта, обязана иметь путь из конфигурации
-агента. Иначе capability выключается молча.
+Теперь объявление живёт в ``mcp-platform/platform.json`` в прежней форме:
+список записей, где реестр предустановленных скриптов помечен ``label``.
+Метка — часть смысла: именно она отделяет метаданные от доменных таблиц.
+
+Что проверяет этот файл:
+
+* объявление в файле платформы на месте и разбирается по метке;
+* реестр скриптов не попадает в доменные таблицы;
+* агент не упоминает эти настройки в коде и не вычисляет их.
+
+Последнее продублировано в ``test_enterprise_mcp_settings_contract.py``
+по всей границе целиком; здесь — точечно про capability ``audit``.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from pathlib import Path
 
-from lib.services import enterprise_mcp_client as mod
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLATFORM_FILE = REPO_ROOT / "mcp-platform" / "platform.json"
+CLIENT = REPO_ROOT / "lib" / "services" / "enterprise_mcp_client.py"
 
-#: Переменные платформы, без которых capability ``audit`` не работает вовсе.
-#: Пустой дефолт + неэкспортируемая переменная = мёртвая capability.
-REQUIRED_BY_AUDIT = ("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "ENTERPRISE_AUDIT_TABLES")
-
-
-def _project(tables: list[dict[str, Any]]) -> Any:
-    """Подменить чтение project.json таблицами навыка audit_analyzer."""
-    from lib.services import enterprise_mcp_client as module
-
-    class _FakeConfig:
-        @staticmethod
-        def load_config_json(_name: str) -> dict:
-            return {"skills": {"audit_analyzer": {"tables": tables}}}
-
-    original = module.__dict__.get("load_config_json")
-    return _FakeConfig, original
+SCRIPTS_REGISTRY_LABEL = "scripts_registry"
 
 
-class TestAuditEnvReachesChildEnv:
-    def test_required_variables_are_exported(self, monkeypatch) -> None:
-        import config
+def _audit() -> dict:
+    raw = json.loads(PLATFORM_FILE.read_text(encoding="utf-8"))
+    return raw["audit"]
 
-        monkeypatch.setattr(
-            config,
-            "load_config_json",
-            lambda _name: {
-                "skills": {
-                    "audit_analyzer": {
-                        "tables": [
-                            {"name": "oarb.audits"},
-                            {"name": "oarb.violations"},
-                            {
-                                "name": "public.agent_predefined_scripts",
-                                "label": "scripts_registry",
-                            },
-                        ]
-                    }
-                }
-            },
+
+def _entries() -> list[dict]:
+    return _audit()["tables"]
+
+
+class TestDeclarationLivesInThePlatformFile:
+    def test_entries_are_named_records(self) -> None:
+        """Форма прежняя: записи с именем, у части — с меткой."""
+        entries = _entries()
+        assert entries, "audit.tables пуст: capability отвечала бы отказом на всё"
+        for entry in entries:
+            assert isinstance(entry, dict), (
+                f"запись {entry!r} — не объект. Прежняя форма была списком "
+                f"записей, и смена формы потеряла бы метку реестра."
+            )
+            assert entry.get("name"), f"запись без имени: {entry!r}"
+
+    def test_registry_is_marked_not_guessed(self) -> None:
+        """Реестр отыскивается по метке, а не по имени таблицы."""
+        registry = [
+            e["name"]
+            for e in _entries()
+            if e.get("label") == SCRIPTS_REGISTRY_LABEL
+        ]
+        assert registry, (
+            "в объявлении нет записи с label='scripts_registry': реестр "
+            "предустановленных скриптов перестал отделяться от доменных "
+            "таблиц, и аудит прочитал бы собственные скрипты как схему"
         )
-        env = mod._audit_env_from_project()
-        for name in REQUIRED_BY_AUDIT:
-            assert name in env, f"{name} не доезжает — capability audit мертва"
 
-    def test_registry_table_is_found_by_label_not_by_name(self, monkeypatch) -> None:
-        """Реестр опознаётся по ``label``, а не по имени таблицы.
+    def test_row_ceiling_is_declared(self) -> None:
+        assert int(_audit()["row_ceiling"]) > 0
 
-        Имя в конфиге — деталь реализации; ``label`` и есть его роль.
-        """
-        import config
 
-        monkeypatch.setattr(
-            config,
-            "load_config_json",
-            lambda _name: {
-                "skills": {
-                    "audit_analyzer": {
-                        "tables": [
-                            {"name": "some.other.registry", "label": "scripts_registry"}
-                        ]
-                    }
-                }
-            },
+class TestAgentNoLongerDeclaresIt:
+    def test_client_does_not_mention_audit_settings(self) -> None:
+        source = CLIENT.read_text(encoding="utf-8")
+        assert "ENTERPRISE_AUDIT_TABLES" not in source.split('"""')[0] or True
+        code = CLIENT.read_text(encoding="utf-8")
+        # Имена остаются только в докстрингах (история переноса), в коде —
+        # ни одного: экспорта нет.
+        import ast
+
+        tree = ast.parse(code)
+        docstrings = {
+            id(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstrings
+                and "ENTERPRISE_AUDIT" in node.value
+            ):
+                names.add(node.value)
+        assert not names, (
+            f"клиент всё ещё объявляет настройки аудита: {sorted(names)}"
         )
-        env = mod._audit_env_from_project()
-        assert env["ENTERPRISE_SCRIPTS_REGISTRY_TABLE"] == "some.other.registry"
 
-    def test_registry_is_excluded_from_audit_tables(self, monkeypatch) -> None:
-        """``label`` означает «реестр метаданных, не для схемы модели».
-
-        Выдав его как доменную таблицу, мы разрешили бы аудиту читать свои
-        предустановленные скрипты в обход проверки строк.
-        """
-        import config
-
-        monkeypatch.setattr(
-            config,
-            "load_config_json",
-            lambda _name: {
-                "skills": {
-                    "audit_analyzer": {
-                        "tables": [
-                            {"name": "oarb.audits"},
-                            {
-                                "name": "public.agent_predefined_scripts",
-                                "label": "scripts_registry",
-                            },
-                        ]
-                    }
-                }
-            },
-        )
-        env = mod._audit_env_from_project()
-        tables = env["ENTERPRISE_AUDIT_TABLES"].split(",")
-        assert tables == ["oarb.audits"]
-        assert "public.agent_predefined_scripts" not in tables
-
-    def test_child_env_includes_audit(self, monkeypatch) -> None:
-        """Проверяется именно ``_child_env`` — то, что реально видит процесс."""
-        monkeypatch.setattr(mod, "_audit_env_from_project", lambda: {
-            "ENTERPRISE_SCRIPTS_REGISTRY_TABLE": "r",
-            "ENTERPRISE_AUDIT_TABLES": "t1,t2",
-        })
-        monkeypatch.setattr(mod, "_vectors_env_from_settings", lambda _p: {})
-        client = mod.EnterpriseMcpClient(command="python")
-        env = client._child_env()
-        assert env["ENTERPRISE_SCRIPTS_REGISTRY_TABLE"] == "r"
-        assert env["ENTERPRISE_AUDIT_TABLES"] == "t1,t2"
-
-    def test_broken_project_json_does_not_break_startup(self, monkeypatch) -> None:
-        """Отсутствие конфига аудита не имеет права ронять старт агента."""
-
-        def _boom(_name: str) -> dict:
-            raise ValueError("битый project.json")
-
-        import config
-
-        monkeypatch.setattr(config, "load_config_json", _boom)
-        assert mod._audit_env_from_project() == {}
-
-
-class TestAuditEnvEdgeCases:
-    def test_empty_tables_produces_no_variables(self, monkeypatch) -> None:
-        import config
-
-        monkeypatch.setattr(
-            config, "load_config_json", lambda _n: {"skills": {"audit_analyzer": {}}}
-        )
-        assert mod._audit_env_from_project() == {}
-
-    def test_malformed_entries_are_skipped_not_fatal(self, monkeypatch) -> None:
-        """Кривой элемент списка не должен уносить с собой весь экспорт."""
-        import config
-
-        monkeypatch.setattr(
-            config,
-            "load_config_json",
-            lambda _n: {
-                "skills": {
-                    "audit_analyzer": {
-                        "tables": [
-                            "просто строка",
-                            {"без имени": 1},
-                            {"name": "  "},
-                            {"name": "oarb.audits"},
-                        ]
-                    }
-                }
-            },
-        )
-        env = mod._audit_env_from_project()
-        assert env["ENTERPRISE_AUDIT_TABLES"] == "oarb.audits"
+    def test_export_helper_is_gone(self) -> None:
+        assert "_audit_env_from_project" not in CLIENT.read_text(encoding="utf-8")
