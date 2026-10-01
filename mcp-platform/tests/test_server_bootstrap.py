@@ -162,22 +162,24 @@ class TestContainerWiring:
         assert "audits_index" in (index.get("indexes") or {}), config
         assert (vector.get("embedding") or {}).get("model") == "mxbai-embed-large:latest"
 
-    def test_audit_config_reaches_the_service(self, monkeypatch) -> None:
-        monkeypatch.setenv(
-            "ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "public.agent_predefined_scripts"
-        )
-        monkeypatch.setenv(
-            "ENTERPRISE_AUDIT_TABLES", "oarb.audits, oarb.violations\noarb.audit_reports"
-        )
-        monkeypatch.setenv("ENTERPRISE_AUDIT_ROW_CEILING", "500")
+    def test_audit_config_reaches_the_service(self) -> None:
+        """Объявление доезжает до capability из файла, а не из окружения.
+
+        Раньше проверка ставила переменные окружения и ждала их в контейнере.
+        Теперь источник — ``platform.json``: переменная окружения тут не
+        может нести метку, а значит не может сказать «это реестр».
+        """
         container = enterprise_server._build_container(_settings())
         config = container.config
-        assert config["scripts_registry"]["table"] == "public.agent_predefined_scripts"
-        # Разделители: запятая с пробелом и перевод строки. Список пишут руками.
+        registry = config["scripts_registry"]["table"]
+        assert registry == "public.agent_predefined_scripts", config
+        # Реестр помечен и в доменные таблицы не попадает.
+        assert registry not in config["audit"]["tables"], config
         assert config["audit"]["tables"] == [
             "oarb.audits",
             "oarb.violations",
             "oarb.audit_reports",
+            "oarb.report_items",
         ]
         # Число, а не строка: потолок строк — счётчик, и раньше он доезжал
         # строкой, которую сервис аудита приводил сам. Приводит теперь реестр,

@@ -297,13 +297,16 @@ class TestListSettingsKeepBothSeparators:
         вполне корректной конфигурации.
         """
         settings = _settings(env={"ENTERPRISE_AUDIT_TABLES": "oarb.audits\noarb.violations"})
-        assert settings.get("ENTERPRISE_AUDIT_TABLES") == ["oarb.audits", "oarb.violations"]
+        assert [name for name, _ in settings.get("ENTERPRISE_AUDIT_TABLES")] == [
+            "oarb.audits",
+            "oarb.violations",
+        ]
 
     def test_mixed_separators_are_split(self) -> None:
         settings = _settings(
             env={"ENTERPRISE_AUDIT_TABLES": "oarb.audits, oarb.violations\noarb.reports"}
         )
-        assert settings.get("ENTERPRISE_AUDIT_TABLES") == [
+        assert [name for name, _ in settings.get("ENTERPRISE_AUDIT_TABLES")] == [
             "oarb.audits",
             "oarb.violations",
             "oarb.reports",

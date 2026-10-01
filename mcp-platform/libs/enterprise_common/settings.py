@@ -270,15 +270,17 @@ class Setting:
     def is_secret(self) -> bool:
         return self.kind == "secret"
 
-    def coerce(self, raw: str) -> Any:
-        """Привести строку из окружения или файла к типу настройки.
+    def coerce(self, raw: Any) -> Any:
+        """Привести значение из окружения или файла к типу настройки.
 
         Raises:
             InfrastructureError: значение не приводится к объявленному
                 типу. Молчаливый откат к дефолту выглядел бы как «настройка
                 не применилась», и оператор искал бы не там.
         """
-        text = raw.strip()
+        if self.kind == "table_list":
+            return _table_pairs(raw, self.name)
+        text = str(raw).strip()
         if self.kind in ("int", "float", "bool", "list"):
             if not text:
                 return self.default
@@ -306,6 +308,44 @@ class Setting:
             raise InfrastructureError(
                 f"{self.name}: {raw!r} не приводится к типу {self.kind!r}"
             ) from exc
+
+
+#: Метка, которой в объявлении помечена таблица реестра предустановленных
+#: скриптов. По ней capability ``audit`` отделяет реестр от доменных
+#: таблиц: реестр — метаданные, и читать его как схему модели нельзя.
+SCRIPTS_REGISTRY_LABEL = "scripts_registry"
+
+
+def _table_pairs(raw: Any, setting_name: str) -> tuple[tuple[str, str], ...]:
+    """Привести объявление таблиц к паре ``(имя, метка)``.
+
+    Формат тот же, что в ``project.json`` агента: список записей, у которых
+    метка есть не у всех. Из окружения приходит строка — по таблице на
+    строке или через запятую; метки в ней нет, и это не ошибка разбора, а
+    недостаток самого канала: строка не умеет сказать «это реестр».
+    """
+    if isinstance(raw, (list, tuple)):
+        pairs: list[tuple[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                label = str(item.get("label") or "").strip()
+            else:
+                name, label = str(item).strip(), ""
+            if not name:
+                raise InfrastructureError(
+                    f"{setting_name}: запись без имени — {item!r}"
+                )
+            pairs.append((name, label))
+        return tuple(pairs)
+    text = str(raw).strip()
+    if not text:
+        return ()
+    return tuple(
+        (item.strip(), "")
+        for item in text.replace("\n", ",").split(",")
+        if item.strip()
+    )
 
 
 def _s(
@@ -354,20 +394,18 @@ SETTINGS: tuple[Setting, ...] = (
        "DSN рабочей базы; пусто — воркер падает внятно, а не подключается не туда",
        aliases=("PG_DSN",), required=True, file_key="db.dsn", file_first=True),
     # -- capability audit ----------------------------------------------------
-    # Список таблиц аудита и реестр скриптов переехали из окружения агента в
-    # platform.json: это знание о проекте, которым владеет MCP, и держать
-    # его в чужом окружении означало, что у одного факта два владельца.
-    # ``required`` здесь не нужен и противоречил бы FROM_FILE: отсутствие
-    # ключа в файле останавливает сервер на старте с именем ключа, то есть
-    # настройка не может разрешиться в «нет значения». Маркер required
-    # означает «может быть пустым, но тогда назови меня в баннере».
-    _s("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
+    # Объявление переехало из окружения агента в platform.json, но form не
+    # менялся: это тот же список записей, что в project.json, где реестр
+    # предустановленных скриптов помечен label. Метку нельзя заменить
+    # отдельным ключом — она и объясняет, почему реестр не доменная
+    # таблица, и потерялась бы вместе с формой.
+    # ``required`` не нужен и противоречил бы FROM_FILE: отсутствие ключа в
+    # файле останавливает сервер на старте с именем ключа, то есть настройка
+    # не может разрешиться в «нет значения».
+    _s("ENTERPRISE_AUDIT_TABLES", "table_list", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_audit_config",
-       "таблица реестра предустановленных скриптов; в tables не входит",
-       file_key="audit.scripts_registry_table"),
-    _s("ENTERPRISE_AUDIT_TABLES", "list", FROM_FILE, OWNER_PLATFORM,
-       "servers/enterprise/server.py:_audit_config",
-       "белый список таблиц для аудита; реестр скриптов сюда не входит",
+       "объявление таблиц аудита; запись с label='scripts_registry' — реестр "
+       "предустановленных скриптов, в доменные таблицы не входит",
        file_key="audit.tables"),
     _s("ENTERPRISE_AUDIT_ROW_CEILING", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_audit_config",
@@ -605,7 +643,6 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
         service="servers/enterprise/capabilities/audit/service/main.py",
         tools=("generate_sql", "list_scripts", "run_script"),
         settings=(
-            "ENTERPRISE_SCRIPTS_REGISTRY_TABLE",
             "ENTERPRISE_AUDIT_TABLES",
             "ENTERPRISE_AUDIT_ROW_CEILING",
         ),
@@ -788,7 +825,7 @@ def _flatten(raw: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
-def read_platform_file(path: Path | None = None) -> dict[str, str]:
+def read_platform_file(path: Path | None = None) -> dict[str, Any]:
     """Прочитать ``platform.json`` в вид ``имя переменной -> значение``.
 
     Только ``owner="platform"``. Значение настройки агента в этом файле —
@@ -811,7 +848,7 @@ def read_platform_file(path: Path | None = None) -> dict[str, str]:
         raise InfrastructureError(f"{target.name}: ожидался объект")
 
     allowed = {s.key for s in settings_owned_by(OWNER_PLATFORM)}
-    flat: dict[str, str] = {}
+    flat: dict[str, Any] = {}
     for key, value in _flatten(raw).items():
         if key not in allowed:
             raise InfrastructureError(
@@ -822,6 +859,12 @@ def read_platform_file(path: Path | None = None) -> dict[str, str]:
             flat[key] = "1" if value else "0"
         elif isinstance(value, (int, float)):
             flat[key] = str(value)
+        elif isinstance(value, (list, tuple)) and BY_FILE_KEY[key].kind == "table_list":
+            # Список таблиц с метками остаётся структурой. Склеивать его в
+            # строку нельзя: метка (scripts_registry) и есть смысл
+            # объявления, и потерять её — значит объявить реестр скриптов
+            # обычной доменной таблицей.
+            flat[key] = list(value)
         elif isinstance(value, (list, tuple)):
             flat[key] = ",".join(str(v) for v in value)
         else:
@@ -856,7 +899,7 @@ class Settings:
         self._secrets: dict[str, str] = (
             dict(secrets) if secrets is not None else read_secrets(secrets_path)
         )
-        self._file: dict[str, str] = read_platform_file(file_path)
+        self._file: dict[str, Any] = read_platform_file(file_path)
         self._values: dict[str, Any] = {}
         self._sources: dict[str, str] = {}
         for setting in SETTINGS:
@@ -870,11 +913,9 @@ class Settings:
         разворачивать его повторно опасно, потому что пароль, содержащий
         ``${`` (вполне обычная последовательность), был бы съеден.
         """
-        from_file: tuple[str, str] | None = None
+        from_file: tuple[Any, str] | None = None
         if setting.file_first:
-            raw_file = self._file.get(setting.name)
-            if raw_file is not None and str(raw_file).strip():
-                from_file = (self._expand(str(raw_file), setting), "file:platform.json")
+            from_file = self._from_file(setting)
         if from_file is None:
             for name in setting.names:
                 raw = self._env.get(name)
@@ -882,9 +923,7 @@ class Settings:
                     self._values[setting.name] = setting.coerce(raw)
                     self._sources[setting.name] = f"env:{name}"
                     return
-            raw_file = self._file.get(setting.name)
-            if raw_file is not None and str(raw_file).strip():
-                from_file = (self._expand(str(raw_file), setting), "file:platform.json")
+            from_file = self._from_file(setting)
         if from_file is not None:
             self._values[setting.name] = setting.coerce(from_file[0])
             self._sources[setting.name] = from_file[1]
@@ -908,6 +947,31 @@ class Settings:
             else setting.default
         )
         self._sources[setting.name] = "default"
+
+    def _from_file(self, setting: Setting) -> tuple[Any, str] | None:
+        """Значение из файла или ``None``, если ключа нет либо он пуст.
+
+        Подстановки ``${...}`` разворачиваются и в списках — поимённо: имя
+        таблицы из переменной окружения не собирается, но и лишней двери
+        «забыли подставить» у файла быть не должно.
+        """
+        raw = self._file.get(setting.name)
+        if isinstance(raw, (list, tuple)):
+            if not raw:
+                return None
+            # Подстановка — только в именах. Запись с меткой приходит
+            # словарём, и str() на ней склеил бы объявление в текст,
+            # который потом не разобрать.
+            return [
+                self._expand(item, setting) if isinstance(item, str) else item
+                for item in raw
+            ], "file:platform.json"
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        return self._expand(text, setting), "file:platform.json"
 
     def _secret(self, name: str) -> tuple[str, str] | None:
         """Секрет по имени: сначала ``.secrets.env``, потом окружение процесса.
@@ -1024,6 +1088,11 @@ class Settings:
                 continue
             if isinstance(value, bool):
                 out[setting.name] = "1" if value else "0"
+            elif setting.kind == "table_list":
+                # Метка в окружение не передаётся: строка не умеет сказать
+                # «это реестр». Передаём имена — потребитель, которому нужен
+                # реестр, берёт его из файла, а не из процесса.
+                out[setting.name] = ",".join(name for name, _ in value)
             elif isinstance(value, (list, tuple)):
                 out[setting.name] = ",".join(str(item) for item in value)
             else:

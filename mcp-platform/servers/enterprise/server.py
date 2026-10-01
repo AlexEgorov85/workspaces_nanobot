@@ -45,7 +45,11 @@ from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.errors import InfrastructureError
 from libs.enterprise_common.loader import build_server, load_registry
 from libs.enterprise_common.registry import ToolRegistry
-from libs.enterprise_common.settings import Settings, pool_config
+from libs.enterprise_common.settings import (
+    SCRIPTS_REGISTRY_LABEL,
+    Settings,
+    pool_config,
+)
 
 #: Корень платформы: ``mcp-platform/``. Нужен и загрузчику (для модульных имён),
 #: и проверке зависимостей.
@@ -138,26 +142,29 @@ def _apply_pool_settings(settings: Settings) -> None:
 def _audit_config(settings: Settings) -> dict[str, Any]:
     """Собрать конфигурацию capability ``audit`` из разрешённых настроек.
 
-    Имя таблицы реестра и список разрешённых таблиц — платформенные значения
-    из ``platform.json`` (``audit.scripts_registry_table``, ``audit.tables``).
-    Раньше они приходили переменными от агента, то есть MCP читал знание о
-    проекте из чужого окружения; теперь объявление здесь, и ``source()`` в
-    баннере показывает, откуда взято значение на самом деле.
+    Объявление таблиц приходит одним списком записей из ``platform.json``
+    (``audit.tables``) — той же формой, что в ``project.json`` агента.
+    Запись с меткой ``scripts_registry`` — реестр предустановленных
+    скриптов: возвращается отдельно и в доменные таблицы не попадает,
+    потому что аудит не должен читать собственные скрипты в обход проверки
+    строк. Раньше это разделение делал агент перед экспортом в окружение;
+    теперь оно живёт здесь, рядом с объявлением, а не в коде потребителя.
 
-    Оба значения приходят аргументом операции, а не знанием о проекте.
-
-    Список приходит из файла JSON-массивом и разбирается реестром
-    (``Setting.coerce``); из окружения он приходит строкой — по таблице на
-    строке или через запятую, оба разделителя понимаются. Ошибка разбора
-    не молчит: значение приводится к типу настройки, и неприводимое
-    останавливает сервер на старте с именем ключа.
+    Реестр без метки (значение из окружения — строка) остаётся пустым, и
+    capability отвечает ``registry_unavailable``: строка не умеет сказать
+    «это реестр», а выдать его за доменную таблицу хуже, чем не выдать.
     """
+    registry = ""
+    tables: list[str] = []
+    for name, label in settings.get("ENTERPRISE_AUDIT_TABLES"):
+        if label == SCRIPTS_REGISTRY_LABEL:
+            registry = name
+        else:
+            tables.append(name)
     return {
-        "scripts_registry": {
-            "table": str(settings.get("ENTERPRISE_SCRIPTS_REGISTRY_TABLE")).strip(),
-        },
+        "scripts_registry": {"table": registry},
         "audit": {
-            "tables": list(settings.get("ENTERPRISE_AUDIT_TABLES")),
+            "tables": tables,
             "row_ceiling": settings.get("ENTERPRISE_AUDIT_ROW_CEILING"),
         },
     }
