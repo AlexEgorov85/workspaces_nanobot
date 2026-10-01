@@ -161,11 +161,47 @@ def _audit_config(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _build_container(settings: Settings) -> ToolContainer:
-    """Собрать контейнер: сервисы capability и конфигурация из настроек."""
+def _build_container(
+    settings: Settings, capabilities: frozenset[str] | None = None
+) -> ToolContainer:
+    """Собрать контейнер: сервисы capability и конфигурация из настроек.
+
+    Args:
+        capabilities: какие capability поднимать. ``None`` — все.
+
+    Сборка не тяжелеет сама себя: сервисы и настройки читаются только для
+    отобранных capability. Это не оптимизация, а условие корректности —
+    см. ``_needs_data()``.
+    """
+    from libs.llm import gateway as llm_gateway
+    from libs.llm.gateway import LlmGateway, set_gateway
+    from servers.enterprise.capabilities.llm.service.main import LlmService
+
+    wanted = _selected(capabilities)
+
+    # Сервис общения с LLM — один на процесс, и он получает тот самый
+    # реестр, что и всё остальное. Передача ``Settings``, а не
+    # ``settings.as_env()``, преследует одну цель: у настройки должен быть
+    # ровно один источник. Второй разбор того же файла рядом с реестром
+    # означал бы, что «откуда взялось значение» у настройки два ответа, и
+    # одна из копий рано или поздно разошлась бы с другой.
+    #
+    # Конфигурация LLM используется лениво, внутри сервиса. Сборка сервера
+    # обязана пережить её отсутствие: процесс обслуживает несколько
+    # capability, и забытый провайдер не должен снимать из работы ``data``.
+    # Незаданный провайдер отдаёт ``infrastructure_error`` на своей операции
+    # и виден как ``configured: false`` в баннере ниже.
+    set_gateway(LlmGateway(settings=settings))
+    services: dict[str, Any] = {"llm": LlmService()}
+    config: dict[str, Any] = {}
+
+    if not _needs_data(wanted):
+        # Единственная capability, которой не нужен доступ к данным.
+        # Ни пула, ни снимка, ни настроек журнала: см. ``_needs_data``.
+        return ToolContainer(services=services, config=config)
+
     from servers.enterprise.capabilities.audit.service.main import AuditService
     from servers.enterprise.capabilities.data.service.main import DataService
-    from servers.enterprise.capabilities.llm.service.main import LlmService
     from servers.enterprise.capabilities.vectors.service.main import VectorsService
 
     statement_timeout_ms = int(settings.get("ENTERPRISE_STATEMENT_TIMEOUT_MS"))
@@ -179,23 +215,14 @@ def _build_container(settings: Settings) -> ToolContainer:
         buffer_flush_interval=float(settings.get("ENTERPRISE_LOG_FLUSH_INTERVAL")),
         snapshot=_snapshot(settings),
     )
-    # Конфигурация LLM разбирается реестром и передаётся сервису, но
-    # используется лениво, внутри него. Сборка сервера обязана пережить её
-    # отсутствие: процесс обслуживает несколько capability, и забытая
-    # переменная провайдера не должна снимать из работы ``data``.
-    # Незаданный провайдер отдаёт ``infrastructure_error`` на своей операции
-    # и виден как ``configured: false`` в health-отчёте.
-    #
-    # ``as_env()`` — а не ``os.environ``: иначе сервис разрешал бы значения
-    # сам, и файл с настройками влиял бы на один сервис, а не на все.
-    llm = LlmService(env=settings.as_env())
+    services["data"] = data
     config = {
         "statement_timeout_ms": statement_timeout_ms,
         "max_rows": max_rows,
         **_vectors_config(settings),
         **_audit_config(settings),
     }
-    container = ToolContainer(services={"data": data, "llm": llm}, config=config)
+    container = ToolContainer(services=services, config=config)
     # Регистрация ПОСЛЕ сборки контейнера: конструктор VectorsService берёт
     # сервисы ``data`` и ``llm`` из контейнера сразу, а не на первом запросе.
     # Причина — диагностика: отсутствие эмбеддера должно падать на сборке,
@@ -211,17 +238,57 @@ def _build_container(settings: Settings) -> ToolContainer:
     return container
 
 
+#: Capability, которой не нужен доступ к данным. Полный набор — всё, что
+#: описано в ``servers/enterprise/capabilities``.
+_ALL_CAPABILITIES = frozenset({"audit", "data", "llm", "vectors"})
+#: Capability, читающие снимок или очередь. Их нельзя поднимать без ``data``.
+_DATA_CAPABILITIES = frozenset({"audit", "data", "vectors"})
+
+
+def _selected(capabilities: frozenset[str] | None) -> frozenset[str]:
+    """Нормализовать отбор capability и отсеять опечатки."""
+    if capabilities is None:
+        return _ALL_CAPABILITIES
+    unknown = set(capabilities) - _ALL_CAPABILITIES
+    if unknown:
+        raise InfrastructureError(
+            f"неизвестные capability: {', '.join(sorted(unknown))}. "
+            f"Доступны: {', '.join(sorted(_ALL_CAPABILITIES))}"
+        )
+    return frozenset(capabilities)
+
+
+def _needs_data(wanted: frozenset[str]) -> bool:
+    """Нужен ли в этом процессе доступ к данным.
+
+    Считается по запрошенному набору, а не по факту регистрации: пока
+    ``data`` не в списке, процесс не трогает ни DSN, ни пул, ни файл
+    снимка. Это ровно то, что делает второй экземпляр сервера
+    безопасным — он не становится вторым владельцем PostgreSQL и вторым
+    держателем блокировки на файле DuckDB.
+    """
+    return bool(wanted & _DATA_CAPABILITIES)
+
+
 def _snapshot(settings: Settings) -> Any:
     """Открыть снимок DuckDB, если оператор его задал. Иначе — ``None``.
 
-    Снимок **не обязателен**. ``open_snapshot_store`` падает громко и
-    правильно (занятый файл, неподдерживаемая ФС), и требование снимка при
-    старте означало бы, что сервер перестаёт подниматься там, где capability
-    ``vectors`` не развёрнут, — вместе с работающим ``history_search``.
+    Снимок **не обязателен**. Требование снимка при старте означало бы, что
+    сервер перестаёт подниматься там, где capability ``vectors`` не
+    развёрнут, — вместе с работающим ``history_search``. Поэтому ошибка
+    открытия (занятый файл, битый файл, неподдерживаемая ФС) не
+    поднимается наружу: она логируется, снимок остаётся неподключённым.
 
-    Без переменной снимок остаётся неподключённым, и чтение даёт
-    ``InfrastructureError`` («снимок недоступен»), а не «индексов нет»:
-    разница между «нечего искать» и «нечем искать» обязана быть видна.
+    Занятый файл — не экзотика: ``READ_WRITE``-сессия загрузчика исключает
+    читателей во всех процессах, а agent и ``enterprise-mcp`` — два разных
+    процесса. Без перехвата падал бы весь сервер из-за снимка, к которому
+    половина его операций отношения не имеет.
+
+    Без переменной, как и при ошибке открытия, снимок отдаётся не как
+    ``None``, а как :class:`UnavailableSnapshot` — с той же причиной и её
+    кодом на каждой операции. «Снимок недоступен» без причины не диагноз:
+    читателю нужен конкретный ответ — не задан путь, файл держит другой
+    процесс или файл не открывается, — а не «индексов нет».
 
     Принимается именно **путь к файлу**, а не каталог: у агента путь
     считается единственным механизмом ``resolve_cache_path()``, и требовать
@@ -231,15 +298,30 @@ def _snapshot(settings: Settings) -> Any:
     вторая переменная окружения.
     """
     path = str(settings.get("ENTERPRISE_SNAPSHOT_PATH")).strip()
-    if not path:
-        return None
     from libs.enterprise_data.snapshot import CacheAccessMode, open_snapshot_store
+    from libs.enterprise_data.snapshot.unavailable import UnavailableSnapshot
 
-    return open_snapshot_store(
-        path,
-        CacheAccessMode.READ_ONLY,
-        vector_db_table=str(settings.get("ENTERPRISE_VECTOR_DB_TABLE")),
-    )
+    if not path:
+        return UnavailableSnapshot(
+            "снимок не настроен: ENTERPRISE_SNAPSHOT_PATH пуст — путь к файлу "
+            "кэша не задан оператором"
+        )
+
+    try:
+        return open_snapshot_store(
+            path,
+            CacheAccessMode.READ_ONLY,
+            vector_db_table=str(settings.get("ENTERPRISE_VECTOR_DB_TABLE")),
+        )
+    except InfrastructureError as exc:
+        # Причина и её код (``cache_busy``, ``cache_open_error``) доезжают до
+        # клиента без искажений — см. ``UnavailableSnapshot``. Процесс при
+        # этом поднимается: ``vectors`` и ``audit`` от снимка не зависят.
+        logger.warning("снимок недоступен, сервер поднимается без него: %s", exc)
+        return UnavailableSnapshot(
+            str(exc),
+            code=getattr(exc, "code", "infrastructure_error"),
+        )
 
 
 def _vectors_config(settings: Settings) -> dict[str, Any]:
@@ -289,23 +371,48 @@ def _vectors_config(settings: Settings) -> dict[str, Any]:
 
 
 def _log_table(settings: Settings) -> tuple[str, str]:
-    raw = str(settings.get("ENTERPRISE_LOG_TABLE"))
+    """Разобрать ``ENTERPRISE_LOG_TABLE`` на ``(schema, table)``.
+
+    Без fallback-литерала: настройка обязательна (``FROM_FILE``), пустое или
+    неоднозначное значение — ошибка конфигурации, а не молчаливое имя.
+    """
+    raw = str(settings.get("ENTERPRISE_LOG_TABLE")).strip()
     schema, _, table = raw.partition(".")
-    return schema or "public", table or "agent_gateway_logs"
+    if not schema or not table:
+        raise InfrastructureError(
+            "ENTERPRISE_LOG_TABLE должен быть в виде '<schema>.<table>', "
+            f"получено {raw!r}"
+        )
+    return schema, table
 
 
-def build() -> tuple[Any, ToolRegistry, ToolContainer]:
+def build(
+    capabilities: frozenset[str] | None = None,
+) -> tuple[Any, ToolRegistry, ToolContainer]:
     """Собрать сервер: настройки, пул, сервисы, реестр, транспорт.
+
+    Args:
+        capabilities: поднять только эти capability. ``None`` — все.
 
     Возвращает ``(server, registry, container)`` — чтобы тест мог проверить
     реестр, не поднимая транспорт.
+
+    Зачем отбор: потребителю LLM вне агента (skill-конвейер в отдельном
+    процессе) нужен только сервис общения с моделью. Второй экземпляр со
+    всеми capability стал бы вторым владельцем пула PostgreSQL и вторым
+    держателем блокировки на файле снимка DuckDB, поэтому он поднимает
+    ``llm`` и ничего больше — см. :func:`_needs_data`.
     """
+    wanted = _selected(capabilities)
     settings = Settings()
-    _check_dependencies(settings)
-    _configure_dsn(settings)
-    _apply_pool_settings(settings)
-    container = _build_container(settings)
-    registry = load_registry(CAPABILITIES_DIR, container, root=PLATFORM_ROOT)
+    if _needs_data(wanted):
+        _check_dependencies(settings)
+        _configure_dsn(settings)
+        _apply_pool_settings(settings)
+    container = _build_container(settings, wanted)
+    registry = load_registry(
+        CAPABILITIES_DIR, container, root=PLATFORM_ROOT, capabilities=wanted
+    )
     transport = build_server(
         registry,
         name="enterprise-mcp",
@@ -317,21 +424,74 @@ def build() -> tuple[Any, ToolRegistry, ToolContainer]:
     from_file = settings.file_backed()
     if from_file:
         logger.info("настройки из platform.json: %s", ", ".join(from_file))
+    if wanted != _ALL_CAPABILITIES:
+        logger.info("подняты только capability: %s", ", ".join(sorted(wanted)))
+    _log_llm_settings(container.get("llm"))
     logger.info("операций загружено: %d", len(registry))
     for name in registry.names():
         logger.info("  операция: %s", name)
     return transport, registry, container
 
 
-def main() -> None:
-    """Поднять сервер по stdio. Точка входа для MCP-клиента агента."""
+def _log_llm_settings(llm: Any) -> None:
+    """Показать, чем сервис общения с моделью настроен. Без ключа.
+
+    Молчание здесь стоило бы дороже строки лога: «модель не задана» и
+    «модель задана, но перекрыта переменной окружения» выглядят снаружи
+    одинаково — процесс поднялся, ``data`` работает, а ``generate_sql``
+    отвечает ``infrastructure_error``. Строка баннера отвечает на вопрос
+    «настроен ли сервис» до первого вызова, а не после.
+    """
+    if llm is None:
+        logger.info("LLM: сервис не зарегистрирован — capability llm недоступна")
+        return
+    info = llm.describe()
+    if not info.get("configured"):
+        logger.warning(
+            "LLM: не настроен (в platform.json нет llm.model / llm.api_base) — "
+            "операции complete/embed отдадут infrastructure_error",
+        )
+        return
+    logger.info(
+        "LLM: провайдер=%s модель=%s адрес=%s ключ=%s max_tokens=%s temperature=%s",
+        info.get("provider"),
+        info.get("model"),
+        info.get("api_base"),
+        "задан" if info.get("key_configured") else "НЕ ЗАДАН",
+        info.get("max_tokens"),
+        info.get("temperature"),
+    )
+    embed = info.get("embed") or {}
+    logger.info(
+        "LLM: эмбеддер — модель=%s адрес=%s ключ=%s",
+        embed.get("model"),
+        embed.get("api_base"),
+        "задан" if embed.get("key_configured") else "не задан",
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Поднять сервер по stdio. Точка входа для MCP-клиента агента.
+
+    Args:
+        argv: аргументы командной строки; ``None`` — ``sys.argv[1:]``.
+
+    ``--capabilities llm`` поднимает только сервис общения с моделью — для
+    потребителей вне агента (skill-конвейер в отдельном процессе). Такой
+    процесс не трогает ни PostgreSQL, ни файл снимка, поэтому он не может
+    стать их вторым владельцем.
+    """
     import anyio
     from mcp.server.stdio import stdio_server
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-    transport, _, container = build()
-    data = container.get("data")
-    data.start()
+    transport, _, container = build(_capabilities_from_argv(argv))
+    # ``services``, а не ``get``: у процесса без ``data`` такого сервиса
+    # нет, и строгий ``get`` уронил бы старт с «сервис не зарегистрирован»
+    # вместо того, чтобы он просто обслуживал capability ``llm``.
+    data = container.services.get("data")
+    if data is not None:
+        data.start()
     try:
         async def _serve() -> None:
             async with stdio_server() as (read_stream, write_stream):
@@ -343,7 +503,27 @@ def main() -> None:
 
         anyio.run(_serve)
     finally:
-        data.stop()
+        if data is not None:
+            data.stop()
+
+
+def _capabilities_from_argv(argv: list[str] | None) -> frozenset[str] | None:
+    """Разобрать ``--capabilities a,b``; без флага — все capability.
+
+    Ручной разбор вместо ``argparse``: входная точка одна и живёт в
+    потоке, где ``sys.argv`` принадлежит не серверу, и лишняя зависимость
+    ради трёх строк разбора тут не окупается.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    wanted: list[str] = []
+    for index, arg in enumerate(args):
+        if arg == "--capabilities" and index + 1 < len(args):
+            wanted.extend(part.strip() for part in args[index + 1].split(",") if part.strip())
+        elif arg.startswith("--capabilities="):
+            wanted.extend(
+                part.strip() for part in arg.split("=", 1)[1].split(",") if part.strip()
+            )
+    return frozenset(wanted) if wanted else None
 
 
 if __name__ == "__main__":  # pragma: no cover - ручной запуск

@@ -260,6 +260,34 @@
       **Осталось:** `db_logging_service.py` и `schema_validation.py` — там
       агент выступает клиентом, а не модель, поэтому это отдельный механизм
 - [x] 2.17 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
+- [ ] 2.19 **Контракт идентичности на сервере.** Валидатор загрузки требует,
+      чтобы `handler` каждой операции объявлял `session_id` и `user_id`: без
+      любого из них сервер не поднимается. В опубликованной `inputSchema` оба
+      параметра **необязательные** — иначе модель их заполняет. Вызов без
+      идентичности → `identity_missing`, работа не выполняется. Тесты: операция
+      без `session_id` роняет старт с именем файла; `session_id` отсутствует в
+      `required` схемы; пустой вызов даёт `identity_missing`, а не результат
+- [ ] 2.20 **Подстановка идентичности на стороне агента.** Патч
+      `MCPToolWrapper.execute` вставляет `session_id`/`user_id` из
+      `RequestContext` в аргументы **с перезаписью** значения, присланного
+      моделью. Причина: `execute` отправляет в `tools/call` ровно `kwargs`
+      модели (`arguments=kwargs`), поэтому объявить идентичность аргументом
+      без этого патча — значит отдать её модели. Исключение из «патчи → хуки»:
+      точки расширения для аргументов вызова в наноботе нет. Внести патч в
+      `docs/architecture/runtime-patcher-inventory.md`. Тест: модель, приславшая
+      чужой `session_id`, не влияет на изоляцию; буфер журнала снимает
+      идентичность при записи, а не при flush'е (иначе батч переживёт
+      `RequestContext` и начнёт молча ронять события)
+- [ ] 2.21 **Подстановка `request_id`.** Тем же патчом агент подставляет
+      `request_id` из `DbLoggingService.get_request_id(session_key)` — по
+      умолчанию `null`, отсутствие не является ошибкой. Значение обязано
+      совпадать с PK оборота в `agent_question_runs`, отдельный `question_id` не
+      заводим. **Ограничение:** `user_id` берётся только из
+      `RequestContext.sender_id` — lookup'ом `user_id` по индексу `session_key`
+      пользоваться нельзя, доступ закрыт намеренно
+      (`db_logging_service.py:253-256`). Тесты: вызов вне оборота проходит без
+      `identity_missing`; `request_id` не меняет видимые данные; отмена
+      `clear_request` не ломает вызовы
 
 **Приёмка:** `cd mcp-platform && pytest` — зелёные. Сервер поднимается в
 подпроцессе с заблокированным `import nanobot`. `capabilities/data/` не
@@ -336,11 +364,21 @@
       capability, и забытая переменная провайдера не должна снимать из работы
       `history_search`. Незаданный провайдер отдаёт `infrastructure_error` на
       своей операции и виден как `configured: false` в health-отчёте
-- [ ] 3.13 Удалить `llm_client.py` и `llm_config.py` из агента. **Заблокировано
-      до фазы 9:** потребители — `lib/core/skill_config.py::get_llm_config`,
-      `audit_analyzer/scripts/llm.py`, `legal_summarizer/scripts/llm/client.py`,
-      `audit_analyzer/scripts/skill_config.py`, `legal_summarizer/scripts/llm/config.py`.
-      Пока они в агенте, удаление оставит вторую рабочую реализацию
+- [~] 3.13 Удалить `llm_client.py` и `llm_config.py` из агента. **Сделано,
+      кроме самих файлов:** удаление восстановимое, а лаунчер на этой машине
+      недоступен, поэтому два файла ждут ручного удаления — на них стоит
+      `xfail` в `tests/test_llm_goes_through_mcp.py`, который сам станет
+      зелёным после удаления. Потребители переведены:
+      `lib/core/skill_config.py::get_llm_config` удалён (функции про LLM в
+      runtime API больше нет), оба `scripts/skill_config.py` очищены,
+      `_llm_env_from_settings` из `enterprise_mcp_client` удалён (агент больше
+      не экспортирует `ENTERPRISE_LLM_*` и не знает адреса, модели и ключа),
+      а `audit_analyzer/scripts/llm.py` и
+      `legal_summarizer/scripts/llm/client.py` ходят в модель через
+      `libs/enterprise_client/llm.py`. Настройки провайдера переехали в
+      `platform.json` (секция `llm`), поэтому правка модели больше не
+      трогает две копии. Ключ из `agents.defaults`/`providers.*` агента в
+      окружение сервера больше не попадает.
 - [ ] 3.14 Удалить `lib/utils/retry.py` из агента. **Заблокировано до фазы 5:**
       единственный оставшийся импортёр — `lib/services/cache_provider_impl.py:300`
       (ленивый импорт), а он уезжает вместе с кластером снимка. Платформа уже
@@ -495,8 +533,23 @@
 - [x] 5.4 Перенести исполнитель запросов из `lib/utils/duckdb_query.py`:
 
       `run_query`, `explain_query`, `build_schema`, `rewrite_duck_sql`
-- [ ] 5.5 Перенести `_capture_schema_meta` из `cache_provider_impl.py`; остальное
-      ушло в фазу 3
+- [x] 5.5 ~~Перенести~~ **Удалить** `_capture_schema_meta` из
+      `cache_provider_impl.py`; остальное ушло в фазу 3.
+      **Формулировка плана была неверна — переносить нечего.** У функции 0
+      production-вызовов, она дублирует `DuckDbCacheStore._save_schema_meta`
+      (константы `_META_SCHEMA`/`_META_TABLE` были объявлены в обоих файлах), и
+      вердикт аудита — «Удалить» (`docs/audit/reports/02-services-cache.md`).
+      **Сделано:** удалены функция, дубль констант и неиспользуемый импорт
+      `CacheProvider, SearchResult` (из модуля их никто не импортировал);
+      из `tests/test_cache_provider_meta.py` убраны 4 теста, 9 тестов
+      `TestIndexSignature` остались — они живые. Инвариант повторной записи
+      метаданных, который покрывал удалённый `test_capture_schema_meta_drops_previous`,
+      перенесён на живой путь: `test_ensure_schema_replaces_previous_meta` в
+      `tests/test_duckdb_cache_store.py`.
+      **`sys.path`-хак (строки 247-250) оставлен:** около тридцати файлов в
+      `lib/`, `tools/` и `workspace/` делают `from utils.db import ...`, а
+      `gateway.py` добавляет пути уже внутри `main()`, то есть после импорта
+      модулей. Удаление хака — отдельное решение на границе импортов.
 - [ ] 5.6 Убрать cache-API из `lib/core/skill_config.py`. `TableRegistry` и
       `skill_registration.py` **остаются** — они описывают состав снимка
 - [ ] 5.7 Секция `CacheSettings` переезжает из `project_settings.py` в конфиг
@@ -513,12 +566,49 @@
       `test_cache_provider_mode.py`, `test_cache_load_service.py`,
       `test_table_registry.py`, `test_skill_cache_boundary.py`,
       `test_shared_cache_path_across_profiles.py`
-- [ ] 5.11 Добавить страж: вне `libs/enterprise_data` запрещены `duckdb.connect`,
-      `ATTACH` и импорт `duckdb`
+- [x] 5.11 Добавить страж: вне `libs/enterprise_data` запрещены `duckdb.connect`,
+      `ATTACH` и импорт `duckdb`.
+      **Сделано — пункт был выполнен, но не отмечен** (проверено чтением кода):
+      `mcp-platform/tests/test_architecture_boundaries.py:77-83` — список
+      запрещённых конструкций, строки 313-347 — сценарии, которые сначала
+      провоцируют страж, а потом проверяют, что молчание провоцирующего кода
+      ловится, и что слово «duckdb» в тексте ошибки нарушением не считается.
+      Маркер `httpx` расширен на эмбеддер: строковое правило по
+      `chat/completions` пропускало копию HTTP-клиента в `libs/vectors`.
 - [ ] 5.12 Переписать `tests/test_application_context*` (5 файлов)
 - [ ] 5.13 **Пересобрать baseline** и зафиксировать новую строку падений
 - [ ] 5.14 Проверить, что `duckdb` и `pyarrow` в зависимостях сервера, а в
       зависимостях агента — нет
+- [x] 5.15 **Снимок не обязателен для старта, а его причина доезжает до
+      клиента.** Найдено при сверке 5.11. `_snapshot()` вызывался из
+      `_build_container()` без перехвата, поэтому `CacheBusyError` поднимался
+      из `build()` и **весь процесс MCP падал на старте** — вместе с
+      `history_search`, `log_event`, `llm` и `audit`, которые от снимка не
+      зависят. Это не экзотика: агент и `enterprise-mcp` — два разных
+      процесса, а `READ_WRITE`-сессия загрузчика исключает читателей во всех
+      процессах (проверено эмпирически на duckdb 1.5.4: два `READ_ONLY`
+      читателя работают одновременно, `READ_WRITE` + `READ_ONLY` — «File is
+      already open in … (PID …)»). Докстринг `_snapshot()` при этом снимок уже
+      объявлял необязательным: намерение было записано, а реализация покрывала
+      только незаданный путь.
+      **Сделано:** `libs/enterprise_data/snapshot/unavailable.py` —
+      `UnavailableSnapshot(CacheStore)`: DuckDB не открывает, на каждой
+      операции поднимает `InfrastructureError` с кодом и текстом исходной
+      ошибки. `_snapshot()` отдаёт его и для незаданного пути, и для ошибки
+      открытия. Конверт собирается из `exc.code`
+      (`libs/enterprise_common/loader.py:209`), поэтому клиент различает
+      `cache_busy` («файл держит процесс X», X назван в тексте) и
+      `cache_open_error`, а не получает общий `infrastructure_error` с чужой
+      подсказкой «проверьте регистрацию в server.py».
+      Векторные чтения закрыты отдельно: их нет в ABC, `capability vectors`
+      зовёт их напрямую, и без заглушки она получила бы `AttributeError`
+      вместо причины. `is_ready()` возвращает `False`, а не падает, чтобы
+      health видел состояние; причина доступна через `get_stats()`.
+      Тесты — `mcp-platform/tests/test_snapshot_optional_startup.py` (10 шт.).
+      Регрессия проверена на коде до правки: тело функции из HEAD отдавало
+      `CacheBusyError` наружу.
+      **Решение владельца:** ретрая на занятый файл нет — окно занятости равно
+      длительности загрузки снимка, ретрай только упрётся в него.
 
 **Приёмка:** `grep -R "duckdb" lib/ workspace/` пуст — в агенте снимка нет. В
 `mcp-platform` движок есть: снимок открывается, `run_script` работает, векторный
@@ -688,6 +778,15 @@
 - [ ] 11.3 `workspace/tools/legal_summarizer_query.py` → MCP-вызов, ~30 строк
 - [ ] 11.4 Разложить legal по capability
       `capabilities/legal_summarizer/{skill/SKILL.md, tools/*.py, service/}`
+- [ ] 11.5 **Привязать кэш документа к `session_id` контракта, а не к
+      окружению.** Сегодня ключ сессии резолвится как `SESSION_KEY` в env →
+      fallback на имя файла → `__nosession__`, причём `SESSION_KEY` **не
+      выставляется нигде в репозитории**, поэтому кэш оказывается в папке,
+      названной по документу, а не по сессии. Источник ключа — `session_id` из
+      2.19/2.20. Дополнительно: корень кэша перестаёт выводиться из
+      `Path(__file__).parents[N]` (после переезда это каталог платформы, а не
+      репозиторий агента) и задаётся конфигурацией; `document_id` — по
+      контент-хешу, а не по `resolved_path+size+mtime`
 
 **Приёмка:** legal работает; в репозитории агента нет ни одного импорта legal.
 Парсер офисных файлов существует в проекте агента в единственном экземпляре.
