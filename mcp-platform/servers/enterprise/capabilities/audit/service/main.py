@@ -92,7 +92,16 @@ class AuditService:
         return self._container.get(DATA_SERVICE).snapshot_query
 
     def _schema(self):
-        return self._container.get(DATA_SERVICE).snapshot_schema
+        """Описание схемы снимка — **результат** вызова, а не сам метод.
+
+        Соседние ``_reader()``/``_chat()`` тоже отдают bound-методы, и там
+        это правильно: ``run_generated_sql`` ждёт вызываемый объект. Здесь
+        ждется словарь, и возвращать ``snapshot_schema`` (метод) значило
+        отдать callable вместо значения. Ошибка выглядела как
+        «Описание схемы вернуло method, ожидался словарь» — то есть как
+        отказ генератора, хотя сломан был шов, а не генерация.
+        """
+        return self._container.get(DATA_SERVICE).snapshot_schema()
 
     def _explainer(self):
         from libs.enterprise_data.snapshot.query import explain_query
