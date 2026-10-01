@@ -3,9 +3,8 @@
 Три входа — один путь записи (заметка в ``agent_conversation_messages``,
 loguru INFO, опциональный Rich-вывод в терминал gateway):
 
-  1. **Ручной запуск**: slash-команда ``/compact``
-     (``lib/commands/compact_command.py`` + регистрация
-     ``RuntimePatcher.patch_compact_command``), CLI-команда ``/compact``
+  1. **Ручной запуск**: slash-команда ``/compact`` (upstream
+     ``nanobot/command/builtin.py::cmd_compact``), CLI-команда ``/compact``
      (``lib/cli/console_loop.py::_run_cli_compact``) или tool агента
      ``compact_context`` (``workspace/tools/compact_context.py``).
      Метод :py:meth:`compact` сам зовёт штатный ``Consolidator`` из
@@ -340,8 +339,8 @@ class ContextCompactionService:
         observability-trail НЕ должен зависеть от ``notify_in_history``:
         даже если UI-уведомления выключены, ``history_search(event_type=
         "context_compacted")`` должен находить событие (это закрывает
-        design D8 — ``patch_compaction_tracking`` остаётся активным при
-        ``notify_in_history=false``).
+        design D8 — факт сжатия пишется в журнал независимо от
+        ``notify_in_history``, а не «если повезло»).
 
         ``user_id`` берётся из identity-store текущего request (для
         ``history_search(session_scope="all")`` как security boundary).
@@ -400,9 +399,8 @@ class ContextCompactionService:
     ) -> None:
         """Записать факт сжатия, выполненного штатным кодом nanobot.
 
-        Используется из обёрток ``runtime_patcher.patch_compaction_tracking``
-        вокруг ``AutoCompact._archive`` и
-        ``Consolidator.maybe_consolidate_by_tokens``: после того как
+        Вызывается из ``CompactionEventSubscriber.feed()`` по событию
+        ``ContextCompactionEvent`` на ``OutboundMessage``: после того как
         нативный код сделал архивацию и сдвинул ``last_consolidated``,
         обёртка собирает замеры и зовёт этот метод — он пишет заметку
         в ``agent_conversation_messages`` ровно тем же кодом, что и

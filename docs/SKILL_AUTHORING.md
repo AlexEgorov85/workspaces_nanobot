@@ -500,7 +500,7 @@ Tool **не импортирует** Skill (TARGET §22.1,
 | Поверхность | Кто использует | Когда |
 |---|---|---|
 | **`CacheProvider` напрямую** | Standalone CLI skill'ов (`audit_analyzer/scripts/cli.py`), утилиты (`tools/build_vectors.py`), тесты | Детерминированные сценарии: retry-цикл LLM, predefined-скрипты, map-reduce, ручной smoke |
-| **Skill CLI** (`scripts/cli.py`) | Agent runtime (CLI/gateway/streamlit) при NL-вопросе | Агент вызывает CLI через `exec` по инструкциям `SKILL.md` |
+| **Skill CLI** (`scripts/cli.py`) | Agent runtime (CLI/gateway) при NL-вопросе | Агент вызывает CLI через `exec` по инструкциям `SKILL.md` |
 
 Обе поверхности **сводятся к одному runtime-синглтону** — данные в кэше и индексах
 общие. Это **не дублирование**, а намеренное разделение:

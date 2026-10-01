@@ -9,7 +9,7 @@
 ### Жизненный цикл сообщения
 
 ```
-Пользователь (Streamlit)     PostgresChannel          Agent
+Пользователь (CLI / Gateway)     PostgresChannel          Agent
         │                         │                     │
         │ INSERT (status=pending)  │                     │
         │────────────────────────>│                     │
@@ -36,7 +36,7 @@
 | **Эксклюзивность захвата** | Гарантирует внешний `AND status = 'pending'` в `_claim_one`: если задачу уже взял другой захват, повторный UPDATE не срабатывает, двойная обработка невозможна. `FOR UPDATE SKIP LOCKED` не используется — недоступно на Greenplum 6.5 (ядро PG 9.4), а Greenplum при `FOR UPDATE` берёт блокировку уровня таблицы |
 | **Возврат в пул** | `_unstick_loop` с интервалом `unstick_interval` (по умолчанию 120 сек) возвращает `processing`-строки с `updated_at` старше `processing_timeout` в `pending` (или `failed` при исчерпании `max_stuck_retries`). Это единственный механизм возврата — таблицы аренды и lease/heartbeat больше нет. При `stop()` незавершённые задачи возвращает `_return_claimed_to_pool` |
 | **Ошибки** | Разведены статусы: `error` — повторяемая ошибка, `failed` — терминальный (не повторяется). Известный дефект: ветка повтора `error` в `_claim_one` сейчас недостижима — внешний `AND status = 'pending'` её отсекает, поэтому задача после повторяемой ошибки остаётся в `error` навсегда. Настройка `error_retry_delay` сохранена как контракт `_mark_failed`; см. CHANGELOG |
-| **Placeholder** | При захвате сообщения сразу создаётся assistant-запись (`status=processing`), чтобы Streamlit мог начать опрос до завершения генерации |
+| **Placeholder** | При захвате сообщения сразу создаётся assistant-запись (`status=processing`), чтобы UI мог начать опрос до завершения генерации |
 
 ### Конфигурация
 
@@ -169,7 +169,7 @@
 ## MessageExchange — общий движок (v2.3.0)
 
 `lib/channels/message_exchange.py` — общий `MessageExchange` для всех каналов
-(Postgres / Redis / Streamlit) и для чтения истории. Инкапсулирует:
+(Postgres / Redis) и для чтения истории. Инкапсулирует:
 
 - кодирование/декодирование `InboundMessage` / `OutboundMessage`;
 - JSONB-кодек медиа (`workspace/utils/media.py`);
@@ -177,8 +177,10 @@
 - фильтрацию служебных outbound (`lib/utils/outbound_meta.py`).
 
 `PostgresChannel` и `RedisChannel` — тонкие обёртки над `MessageExchange`;
-публичный API не изменился. `streamlit_app.py` использует тот же движок для
-чтения истории, поэтому поведение в Streamlit и в каналах синхронизировано.
+публичный API не изменился. Любая другая поверхность (например, web-UI) может
+читать историю через тот же движок — тогда поведение UI и каналов
+синхронизировано по построению. Отдельного потребителя-приложения больше нет:
+`streamlit_app.py` удалён в фазе 1 миграции `enterprise-mcp-platform`.
 
 ## Как добавить новый канал
 
@@ -187,4 +189,5 @@
    `MessageExchange` — иначе поведение канала разъедется с Postgres/Redis.
 3. Подключить в `gateway.py` через `ChannelFactory.create_all()` (по аналогии
    с PostgresChannel/RedisChannel). Если новый канал — только читатель истории
-   (как Streamlit), достаточно обёртки над `MessageExchange.poll_once(...)`.
+   (как была web-поверхность), достаточно обёртки над
+   `MessageExchange.poll_once(...)`.

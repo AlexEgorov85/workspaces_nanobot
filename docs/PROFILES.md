@@ -71,7 +71,7 @@ entrypoint.
 ```text
 process start
   ↓
-application entrypoint (gateway.py / cli_agent.py / streamlit_app.py)
+application entrypoint (gateway.py / cli_agent.py)
   ↓
 определение профиля по startup-контракту entrypoint:
   gateway.py      → argparse --profile (whitelist {"prod","test"}, обязателен)
@@ -121,18 +121,10 @@ CLI — локальный test/dev entrypoint, а не production-deploy interf
 search, Memory, Logging, Prompts, Runtime patches, что и в gateway.
 Различие — только в profile и transport (CLI == in-memory bus).
 
-**Streamlit:**
-
-```bash
-streamlit run streamlit_app.py -- --profile=prod
-streamlit run streamlit_app.py -- --profile=test
-```
-
-`streamlit_app.py` парсит `--profile` из `sys.argv` (всё после `--`
-streamlit-run пробрасывает как позиционные элементы). При первом запуске
-вызывается `_initialize_settings(profile)`; `st.rerun()` повторно
-вызывает module-level statements, но guard через `globals()`
-предотвращает второй вызов lifecycle-gate.
+**Streamlit удалён в фазе 1** миграции `enterprise-mcp-platform`: `streamlit_app.py`,
+`lib/services/subprocess_manager.py` и секция `streamlit.*` из `project.json`
+не существуют, как и `test_streamlit_app.py`. Живы два entrypoint — `gateway.py`
+и `cli_agent.py`; оба получают профиль через `argv`.
 
 ### Без `--profile`
 
@@ -168,13 +160,22 @@ streamlit-run пробрасывает как позиционные элеме�
 Деплои должны передавать `--profile` через `command:` в
 `docker-compose.yml` / k8s manifest / systemd unit / GitHub Actions.
 
-## Application subprocess получает `--profile` через argv
+## Профиль всегда приходит через argv
 
-Когда `gateway.py` spawn'ит `streamlit_app.py`, профиль передаётся в
-argv child (НЕ в env). Это контракт — никаких env vars:
+`--profile` передаётся **только** через argv, никогда через env vars: иначе
+переменная окружения пережила бы перезапуск и «протекла» бы в чужой процесс.
+Оба живых entrypoint держатся этого правила:
 
 ```python
-# lib/services/subprocess_manager.py:spawn_streamlit
+# gateway.py — argparse --profile (whitelist {"prod","test"}, обязателен)
+# cli_agent.py — фиксированный "test", флаг не принимается
+```
+
+**Историческая справка.** Правило было сформулировано, когда третий entrypoint
+существовал: `gateway.py` spawn'ил `streamlit_app.py` через
+`lib/services/subprocess_manager.py::spawn_streamlit` и передавал профиль так:
+
+```python
 proc = subprocess.Popen(
     [sys.executable, "-m", "streamlit", "run", str(script),
      "--server.headless", "true",
@@ -184,8 +185,8 @@ proc = subprocess.Popen(
 )
 ```
 
-`streamlit_app.py` получает свой `--profile` из argv и инициализирует
-SETTINGS через тот же lifecycle-gate.
+И `streamlit_app.py`, и `SubprocessManager` удалены в фазе 1 — код выше приведён,
+чтобы было видно, откуда взялось требование «argv, а не env».
 
 ## Порядок merge (ConfigurationResolver)
 
@@ -359,7 +360,7 @@ process start
 argv
    │
    ▼
- application entrypoint (gateway.py / cli_agent.py / streamlit_app.py)
+ application entrypoint (gateway.py / cli_agent.py)
    определяет профиль по своему startup-контракту
    (gateway: --profile, whitelist {"prod","test"}, обязателен;
     cli_agent: фиксированный "test", флаг не принимается)

@@ -208,6 +208,19 @@ tool'ов, и при переносе тяжёлых запросов в MCP о�
 `ApplicationContext`, и в CLI пользователь видел upstream-литерал
 «Sorry, I encountered an error.».
 
+### `save_turn`, `async_save`, `session_content_cleanup`, `session_dir_watch`, `document_text_threshold`
+
+Удалены в change `enterprise-mcp-platform`, фаза 6 (пункты 6.2–6.5, 6.7) — патчи,
+которые заменены штатными точками расширения, а не переписаны:
+
+| Патч | Куда ушёл | Пункт плана |
+|---|---|---|
+| `save_turn` | Хук `after_execute_tool` — архивирование результата происходит раньше, чем upstream усечёт его в `_save_turn` | 6.2 |
+| `async_save` | `lib/services/session_storage.py::install_async_save` — обёртка ставится при создании менеджера сессий | 6.3 |
+| `session_content_cleanup` | `PGSessionManager.save` через `workspace/utils/clean_text.py`: чистка NUL — забота PostgreSQL, а не фреймворка | 6.4 |
+| `session_dir_watch` | Удалён целиком: гейт выключен по умолчанию, тестов не было | 6.5 |
+| `document_text_threshold` | Нативный document-tool агента — это наш код, патчить фреймворк не нужно | 6.7 |
+
 ### `context_bridge_seed`
 
 Удалён ранее (см. change `post-0.3.5-patches-cleanup`). Seed лимита
@@ -217,6 +230,14 @@ tool'ов, и при переносе тяжёлых запросов в MCP о�
 ---
 
 ## Детальный каталог
+
+Каталог содержит **только живые патчи** — те, что есть в `apply_all()`,
+`_PATCH_SPECS` и `canonical_runtime_patches()`. Удалённые патчи перечислены в
+«Удалённые патчи (REMOVED)» выше; исключение — последняя запись, оставленная
+указателем на то, что патч делал.
+
+**Условие удаления здесь не дублируется:** оно живёт в сводной таблице выше, и
+второе место для него — это расхождение, которое читатель примет за факт.
 
 ### 1. `patch_context_governor(config, settings, workspace_dir)`
 
@@ -235,24 +256,7 @@ risk: MEDIUM (статический метод, не приватный instanc
 tests: tests/test_runtime_patcher_e2e.py, tests/test_gateway.py
 ```
 
-### 2. `patch_save_turn(settings, workspace_dir, agent)`
-
-```yaml
-PATCH: save_turn
-target: AgentLoop._save_turn (private)
-nanobot_version: 0.3.5
-required: true
-purpose: >
-  Архивация больших tool-результатов в data_store/ ДО усечения истории
-  оборота _save_turn (нативный nanobot 0.3.5 режет строку до max_tool_result_chars);
-  сериализация сообщений с защитой от потери медиа-ссылок.
-public_alternative: нет.
-risk: HIGH (сигнатура обновилась: kwargs turn_latency_ms, summary_checkpoint,
-  input_persisted_early добавлены).
-tests: tests/test_runtime_patcher.py::test_save_turn*
-```
-
-### 3. `patch_exec_limits(settings)`
+### 2. `patch_exec_limits(settings)`
 
 ```yaml
 PATCH: exec_limits
@@ -270,7 +274,7 @@ tests: tests/test_runtime_patcher.py::test_exec_limits*,
   tests/test_runtime_patcher_e2e.py::TestExecToolE2E
 ```
 
-### 4. `patch_exec_timeout_cap(settings)`
+### 3. `patch_exec_timeout_cap(settings)`
 
 ```yaml
 PATCH: exec_timeout_cap
@@ -283,7 +287,7 @@ risk: MEDIUM.
 tests: tests/test_runtime_patcher.py
 ```
 
-### 5. `patch_tool_limits(settings)`
+### 4. `patch_tool_limits(settings)`
 
 ```yaml
 PATCH: tool_limits
@@ -296,7 +300,7 @@ risk: MEDIUM (модульные константы — не приватные 
 tests: tests/test_runtime_patcher.py::test_tool_limits*
 ```
 
-### 6. `patch_assemble_outbound(agent, tool_audit_hook, recent_files_hook=...)`
+### 5. `patch_assemble_outbound(agent, tool_audit_hook, recent_files_hook=...)`
 
 ```yaml
 PATCH: assemble_outbound
@@ -320,34 +324,7 @@ tests: tests/test_runtime_patcher.py (TestPatchAssembleOutbound),
   tests/contract/test_agent_loop_api.py::test_assemble_outbound_signature
 ```
 
-### 7. `patch_async_session_saves(agent)`
-
-```yaml
-PATCH: async_save
-target: agent.sessions.save (наш PGSessionManager)
-nanobot_version: 0.3.5
-purpose: >
-  Обёртка save() через ThreadPoolExecutor(max_workers=1): синхронный
-  psycopg2-вызов не блокирует event loop и не взаимно-блокируется
-  с postgres channel.
-risk: MEDIUM.
-tests: tests/test_runtime_patcher.py::test_async_session_saves*
-```
-
-### 8. `patch_session_dir_watch(agent, workspace_dir)`
-
-```yaml
-PATCH: session_dir_watch
-target: agent.sessions.save
-nanobot_version: 0.3.5
-purpose: >
-  Диагностическое логирование FileNotFoundError вокруг save
-  (см. session_dir_watch). Гейт: gateway.runtime_diagnostics.session_dir_watch=true.
-risk: LOW.
-tests: tests (нет — гейт выключен по умолчанию, проверяется вручную).
-```
-
-### 9. `patch_subagent_logging(db_logging_service, session_manager=...)`
+### 6. `patch_subagent_logging(db_logging_service, session_manager=...)`
 
 ```yaml
 PATCH: subagent_logging
@@ -364,7 +341,7 @@ risk: HIGH (CRITICAL пересмотрен до HIGH — публичные а�
 tests: tests/test_runtime_patcher.py::test_subagent_logging*
 ```
 
-### 10. ~~`patch_turn_delivery_fail`~~ — УДАЛЁН (фаза 6, п. 6.1)
+### 7. ~~`patch_turn_delivery_fail`~~ — УДАЛЁН (фаза 6, п. 6.1)
 
 > Запись сохранена как указатель на то, что патч делал, — по контракту и
 > содержимому журнала. Реализации в `runtime_patcher.py` больше нет; см.
@@ -402,43 +379,6 @@ tests: tests/test_runtime_patcher.py::TestPatchTurnDeliveryFail
 spec: openspec/specs/runtime/error-fallback/spec.md
 ```
 
-### 11. `patch_session_content_cleanup()`
-
-```yaml
-PATCH: session_content_cleanup
-target: Session.add_message (nanobot.session.manager)
-nanobot_version: 0.3.5
-purpose: >
-  Санитизация content/kwargs от NUL-символов на источнике — иначе
-  psycopg2 падает "A string literal cannot contain NUL".
-public_alternative: перенос в PGSessionManager.save (обсуждается).
-risk: LOW (только защитная логика, не меняет upstream-контракт).
-tests: tests/test_runtime_patcher.py::test_session_content_cleanup*
-```
-
-### 12. `patch_document_text_threshold(settings)`
-
-```yaml
-PATCH: document_text_threshold
-target: nanobot.utils.document.reference_non_image_attachments
-nanobot_version: 0.3.5
-purpose: >
-  Единый механизм встраивания документов в user-промпт (все каналы/навыки).
-  В 0.3.5 upstream `extract_documents` удалён — патч оборачивает
-  `reference_non_image_attachments`:
-    маленький (≤ channels.document_text_threshold):
-      [File: <basename> (saved at <path>)]
-      <text>
-    большой (> порога):
-      [File: <basename> (saved at <path>)]
-      [text omitted (len=… > threshold=…)]
-  Изображения НЕ формируют текстовых блоков (путь идёт в image_paths).
-  Нечитаемые файлы — fallback на upstream [Attachment: <path>].
-public_alternative: ПРОВЕРИТЬ при апгрейде.
-risk: MEDIUM (оборачиваем публичную функцию, fallback на upstream при сбое).
-tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
-```
-
 ---
 
 ## Политика ведения
@@ -447,8 +387,10 @@ tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
 2. **При апгрейде nanobot:** пройти таблицу сверху вниз, для каждого патча сверить
    целевой API по changelog upstream; контракт каждого целевого API фиксируется
    в `tests/contract/`.
-3. **Кандидаты на удаление:** #3, #4, #5 (если upstream даст конфигурацию лимитов).
-   Отслеживать в [Unreleased] CHANGELOG.
+3. **Кандидаты на удаление:** `exec_timeout_cap`, `tool_limits`, `assemble_outbound`
+   (если upstream даст конфигурацию лимитов). Перечислены именами, а не номерами:
+   нумерация каталога меняется при каждом удалении, и ссылка на номер переживает
+   изменение молча. Отслеживать в [Unreleased] CHANGELOG.
 4. **Запрещено** добавлять патчи вне этого класса (единственные исторические
    исключения: `BusFactory._wrap` для MessageBus и Jinja2-loader в
    `consolidator_locale` — оба задокументированы в nanobot-inventory.md §3.2).

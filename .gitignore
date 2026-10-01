@@ -1,4 +1,3 @@
-```
 # Logs and temp files
 *.log
 *.tmp
@@ -72,6 +71,17 @@ AGENTS.md.local
 *.secret
 *.key
 *.pem
+!**/.env.example
+
+# Scratch artifacts of one-off analysis runs
+# (.tmp_*.md / .tmp_*.py appear when a spec is read by script;
+# they are throwaway by construction and must never be committed)
+.tmp_*
+*.dump
+.mavis-fork-ownership.json
+
+# Assistant fork/worktree scratch space (runtime-owned, not source)
+.worktrees/
 
 # nanobot-specific runtime caches and per-session state
 # (NOT part of the codebase; regenerated on each run)
@@ -124,4 +134,8 @@ venv/
 .benchmarks/
 .coverage
 htmlcov/
-```
+
+# mcp-platform local scratch (demo sessions and one-off PG probes)
+mcp-platform/.sessions_demo/
+mcp-platform/.tmp_*
+mcp-platform/_live_*.py
