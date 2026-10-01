@@ -226,14 +226,17 @@ class TestCallLlm:
         )
         assert provider.calls[0].url == f"{API_BASE}/{CHAT_PATH}"
 
-    def test_config_is_resolved_from_environment(self, provider: _Provider, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Без переданного конфига клиент резолвит его сам — из окружения."""
-        monkeypatch.setenv("ENTERPRISE_LLM_MODEL", "env-model")
-        monkeypatch.setenv("ENTERPRISE_LLM_API_BASE", "https://env.invalid/v1")
-        provider.outcomes = [_FakeResponse(_answer("ok"))]
-        call_llm([{"role": "user", "content": "q"}])
-        assert provider.calls[0].url == f"https://env.invalid/v1/{CHAT_PATH}"
-        assert provider.calls[0].payload["model"] == "env-model"
+    def test_config_cannot_be_omitted(self, provider: _Provider) -> None:
+        """Конфиг обязателен: клиент не решает, где настройки.
+
+        Раньше вызов без ``cfg`` молча резолвился из ``os.environ``. Это был
+        второй разбор настроек рядом с реестром: переменные процесса влияли
+        на LLM, а ``platform.json`` — на всё остальное, и при расхождении
+        двух источников всё выглядело рабочим. Теперь единственный путь —
+        ``Settings.as_env()`` на стороне сервера.
+        """
+        with pytest.raises(TypeError, match="cfg"):
+            call_llm([{"role": "user", "content": "q"}])  # type: ignore[call-arg]
 
 
 class TestRetryPolicy:

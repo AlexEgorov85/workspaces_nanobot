@@ -219,6 +219,115 @@ class TestListSettingsKeepBothSeparators:
         ]
 
 
+class TestDsnIsConfigurableInTheFile:
+    """DSN настраивается в MCP-конфигурации — с паролем, не уезжающим в git.
+
+    Требование владельца: DSN должен быть виден в ``platform.json``. Отсюда
+    риск, который закрывается конструкцией, а не запретом: в файле остаются
+    хост, порт и имя базы, а логин с паролем — подстановками ``${...}``,
+    которые разворачиваются из окружения процесса. Так ``platform.json``
+    говорит «к какой базе подключается процесс» и не становится файлом с
+    паролем от рабочей базы под git.
+    """
+
+    TEMPLATE = "postgresql://${DB_USER}:${DB_PASSWORD}@db-host:5432/oarb"
+
+    def _file(self, tmp_path: Path, dsn: str) -> Path:
+        target = tmp_path / "platform.json"
+        target.write_text(json.dumps({"db": {"dsn": dsn}}), encoding="utf-8")
+        return target
+
+    def test_file_dsn_reaches_the_pool(self, tmp_path: Path) -> None:
+        from servers.enterprise import server as enterprise_server
+
+        file_path = self._file(tmp_path, self.TEMPLATE)
+        settings = Settings(
+            env={"DB_USER": "svc", "DB_PASSWORD": "p@ss:word"},
+            file_path=file_path,
+        )
+        assert settings.get("DATABASE_URL") == "postgresql://svc:p@ss:word@db-host:5432/oarb"
+        assert settings.source("DATABASE_URL") == "file:platform.json"
+
+        enterprise_server._configure_dsn(settings)
+        from libs.enterprise_data import db as data_db
+
+        assert data_db.resolve_dsn() == "postgresql://svc:p@ss:word@db-host:5432/oarb"
+        data_db._dsn = ""
+
+    def test_file_beats_inherited_environment(self, tmp_path: Path) -> None:
+        """Файл важнее унаследованного ``DATABASE_URL`` агента.
+
+        Процесс ``enterprise-mcp`` наследует ``dict(os.environ)`` целиком, и
+        ``DATABASE_URL`` в нём — секрет агента, а не решение платформы о
+        своей базе. С общим приоритетом «окружение > файл» значение из файла
+        было бы декоративным: сервер показывал бы DSN в конфигурации, а
+        подключался бы к чужой базе.
+        """
+        file_path = self._file(tmp_path, self.TEMPLATE)
+        settings = Settings(
+            env={
+                "DATABASE_URL": "postgresql://agent@agent-host/agent-db",
+                "DB_USER": "svc",
+                "DB_PASSWORD": "secret",
+            },
+            file_path=file_path,
+        )
+        assert settings.get("DATABASE_URL") == "postgresql://svc:secret@db-host:5432/oarb"
+        assert settings.source("DATABASE_URL") == "file:platform.json"
+
+    def test_environment_still_works_without_a_file_dsn(self, tmp_path: Path) -> None:
+        """Пустой ``db.dsn`` — не поломка, а «бери из окружения».
+
+        Файл есть всегда (он под git), и пустое значение в нём не должно
+        ломать развёртывание, где DSN приходит из окружения.
+        """
+        file_path = self._file(tmp_path, "")
+        settings = Settings(
+            env={"DATABASE_URL": "postgresql://from-env@host/db"}, file_path=file_path
+        )
+        assert settings.get("DATABASE_URL") == "postgresql://from-env@host/db"
+        assert settings.source("DATABASE_URL") == "env:DATABASE_URL"
+
+    def test_pg_dsn_is_still_the_fallback(self, tmp_path: Path) -> None:
+        file_path = self._file(tmp_path, "")
+        settings = Settings(env={"PG_DSN": "postgresql://from-pg@host/db"}, file_path=file_path)
+        assert settings.get("DATABASE_URL") == "postgresql://from-pg@host/db"
+        assert settings.source("DATABASE_URL") == "env:PG_DSN"
+
+    def test_missing_substitution_is_an_error(self, tmp_path: Path) -> None:
+        """Незаданная переменная подстановки — отказ, а не пустая учётная часть.
+
+        ``postgresql://:@host`` дал бы отказ соединения там, где виновата
+        опечатка в имени переменной: диагностика указывала бы не туда.
+        """
+        file_path = self._file(tmp_path, self.TEMPLATE)
+        with pytest.raises(InfrastructureError, match="DB_PASSWORD"):
+            Settings(env={"DB_USER": "svc"}, file_path=file_path)
+
+    def test_substitution_does_not_touch_environment_values(self) -> None:
+        """Значение из окружения не разворачивается.
+
+        Разворачивать его повторно опасно: пароль, содержащий ``${`` (обычная
+        последовательность), был бы съеден, и платформа подключилась бы с
+        изменённым паролем.
+        """
+        settings = Settings(env={"DATABASE_URL": "postgresql://u:pa${ss}@h/db"})
+        assert settings.get("DATABASE_URL") == "postgresql://u:pa${ss}@h/db"
+
+    def test_dsn_is_never_logged(self, tmp_path: Path) -> None:
+        """Баннер показывает источник, но не значение.
+
+        Маскирование уже сделано типом ``secret``; здесь проверяется, что
+        список «пришло из файла» тоже не разворачивается в текст.
+        """
+        file_path = self._file(tmp_path, self.TEMPLATE)
+        settings = Settings(
+            env={"DB_USER": "svc", "DB_PASSWORD": "s3cret"}, file_path=file_path
+        )
+        assert settings.as_dict()["DATABASE_URL"] == "***"
+        assert "DATABASE_URL" in settings.file_backed()
+
+
 class TestSingleReadPath:
     def test_server_reads_no_environment_directly(self) -> None:
         """``server.py`` не читает ``os.environ`` ни разу.

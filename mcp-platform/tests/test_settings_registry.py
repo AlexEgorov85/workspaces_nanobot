@@ -313,13 +313,46 @@ class TestPlatformFile:
                 f"{key!r} в platform.json не является настройкой платформы"
             )
 
-    def test_file_never_contains_secrets(self) -> None:
-        """Секрет в файле — он уедет в git вместе с ключом."""
+    def test_file_never_contains_api_keys(self) -> None:
+        """Ключ внешнего провайдера в файле уехал бы в git.
+
+        DSN — другой случай и он разрешён: в нём может быть пароль, но
+        записывается он подстановкой ``${ПЕРЕМЕННАЯ}`` (отдельная проверка
+        ниже). Ключ LLM-провайдера подстановкой не пишется, и незачем.
+        """
         import json
 
         raw = json.dumps(json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8")))
-        for forbidden in ("sk-", "password", "api_key", "apikey", "://"):
+        for forbidden in ("sk-", "api_key", "apikey"):
             assert forbidden not in raw, f"platform.json содержит {forbidden!r}"
+
+    def test_file_dsn_carries_no_literal_credentials(self) -> None:
+        """Логин и пароль в файле — только подстановками.
+
+        DSN в ``platform.json`` нужен, чтобы было видно, к какой базе
+        подключается процесс. Пароль от рабочей базы в коммитируемом файле —
+        утечка, поэтому ``platform.json`` под git, а файл читают и другие.
+        Хост, порт и имя базы — не секрет, и они остаются литералом.
+        """
+        import json
+        import re as _re
+
+        dsn = (
+            json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+            .get("db", {})
+            .get("dsn", "")
+        )
+        if not dsn:
+            return
+        match = _re.search(r"://(?P<userinfo>[^/@]*)@", dsn)
+        if match is None:
+            assert "//" not in dsn, f"DSN без @: {dsn!r}"
+            return
+        userinfo = match.group("userinfo")
+        assert _re.fullmatch(r"(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}:?)+", userinfo), (
+            f"platform.json: в DSN литеральный логин или пароль ({userinfo!r}). "
+            "Ожидается postgresql://${DB_USER}:${DB_PASSWORD}@хост:5432/база"
+        )
 
 
 class TestCapabilityTree:
@@ -438,6 +471,78 @@ class TestCapabilityTree:
         sections = {key.split(".", 1)[0] for key in _flatten(raw)}
         unused = sorted(set(SHARED_SECTIONS) - sections)
         assert not unused, f"SHARED_SECTIONS объявляет неиспользуемые секции: {unused}"
+
+
+class TestOnlyTheRegistryReadsTheEnvironment:
+    """Единственный, кто читает ``os.environ``, — сам реестр.
+
+    Пока читателей было четверо (``server.py``, ``db.resolve_dsn``,
+    ``resolve_llm_config``, ``ensure_llm_env``), у каждой настройки было
+    два-четыре независимых ответа на вопрос «какое значение применяется».
+    Для DSN это особенно дорого: расхождение двух ответов выглядит как
+    «настроено», пока процесс не подключится не туда.
+
+    Проверка по модулям, а не по вызовам: чтение может выглядеть как
+    ``os.environ``, ``os.environ.get(...)``, ``os.getenv(...)`` или как
+    присваивание ``env = os.environ if env is None else env``, и все четыре
+    формы — одно и то же чтение.
+    """
+
+    ALLOWED = "libs/enterprise_common/settings.py"
+
+    def _touches_environment(self, path: Path) -> list[str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        hits: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv"):
+                hits.append(f"{node.attr} (строка {node.lineno})")
+            if isinstance(node, ast.Name) and node.id == "getenv":
+                hits.append(f"getenv (строка {node.lineno})")
+        return hits
+
+    def test_no_module_besides_the_registry_reads_the_environment(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        for path in _python_files():
+            relative = path.relative_to(PLATFORM_ROOT).as_posix()
+            if relative == self.ALLOWED:
+                continue
+            hits = self._touches_environment(path)
+            if hits:
+                offenders[relative] = hits
+        assert not offenders, (
+            "окружение читает не только реестр: "
+            + "; ".join(f"{k}: {', '.join(v)}" for k, v in offenders.items())
+            + ". Значение приходит из Settings, а не из процесса."
+        )
+
+    def test_the_registry_really_reads_the_environment(self) -> None:
+        """Страж не должен деградировать в «никто не читает».
+
+        Если реестр перестанет брать ``os.environ``, настройки перестанут
+        приезжать из процесса, и все проверки выше станут зелёными на
+        полностью сломанной конфигурации.
+        """
+        path = PLATFORM_ROOT / self.ALLOWED
+        assert self._touches_environment(path), (
+            "реестр перестал читать окружение: значения из процесса не придут"
+        )
+
+    def test_guard_sees_the_fallback_form(self) -> None:
+        """Форма ``env = os.environ if env is None else env`` тоже чтение.
+
+        Самая незаметная: страж, ищущий ``os.environ.get(...)``, её не видит
+        — а это и был исходный вид всех четырёх мест.
+        """
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write("def f(env=None):\n    return os.environ if env is None else env\n")
+            temp = Path(fh.name)
+        try:
+            assert self._touches_environment(temp)
+        finally:
+            temp.unlink()
 
 
 class TestGuardIgnoresProse:

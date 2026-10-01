@@ -44,7 +44,7 @@ DSN — через ``resolve_dsn()``. Перечислить настройки,
 Приоритет значений
 ------------------
 
-``окружение > файл > дефолт``
+``окружение > файл > дефолт``, с одним исключением — ``db.dsn`` (см. ниже)
 --------------------------------
 
 Окружение остаётся старшим намеренно. Пока агент экспортирует значения в
@@ -54,6 +54,23 @@ DSN — через ``resolve_dsn()``. Перечислить настройки,
 одному, с проверкой на каждом шаге. Обратный порядок (сначала убрать
 экспорт, потом добавить файл) оставил бы развёртывание без значения
 после неудачного деплоя.
+
+Исключение: DSN
+---------------
+
+``db.dsn`` — единственная настройка с ``file_first=True``, и это не каприз,
+а разница между объявлением и наследованием. Процесс ``enterprise-mcp``
+получает ``dict(os.environ)`` агента целиком, поэтому ``DATABASE_URL`` в его
+окружении — это секрет агента, а не решение платформы о своей базе. С
+общим приоритетом значение из файла оказалось бы декоративным: сервер
+показывал бы в конфигурации одну базу, а подключался бы к другой.
+
+В файле лежит **шаблон**: хост, порт и имя базы литералом, логин и пароль
+подстановками ``${ПЕРЕМЕННАЯ}``, которые разворачиваются из окружения
+процесса. Так DSN виден в конфигурации (это и было требованием), а пароль
+от рабочей базы не попадает в файл под git. Подстановка разворачивается
+**только** для значений из файла: значение из окружения уже готово, и
+повторный разворот съел бы пароль, содержащий ``${``.
 
 Владелец настройки
 ------------------
@@ -86,6 +103,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -106,6 +124,11 @@ PLATFORM_CONFIG_PATH = PLATFORM_ROOT / "platform.json"
 OWNER_PLATFORM = "platform"
 OWNER_AGENT = "agent"
 
+#: Подстановка ``${ПЕРЕМЕННАЯ}`` в значении из ``platform.json``. Имена —
+#: как в окружении, без префиксов: файл читает человек, и ``${DB_USER}``
+#    понятнее, чем ``${ENTERPRISE_DB_USER}``, которого не существует.
+_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
 
 @dataclass(frozen=True)
 class Setting:
@@ -124,6 +147,12 @@ class Setting:
         purpose: зачем настройка существует, в одну строку.
         required: без значения и без дефолта — операция обязана падать с
             внятной ошибкой, а не работать вслепую.
+        file_first: файл важнее окружения. Нужно там, где окружение —
+            не объявление, а побочный эффект наследования: дочерний процесс
+            ``enterprise-mcp`` получает ``dict(os.environ)`` агента целиком,
+            и ``DATABASE_URL`` в нём — это секрет агента, а не решение
+            платформы о своей базе. Своя конфигурация владельца бьёт
+            унаследованный глобал.
     """
 
     name: str
@@ -135,6 +164,7 @@ class Setting:
     aliases: tuple[str, ...] = ()
     required: bool = False
     file_key: str = ""
+    file_first: bool = False
     """Ключ вложенной секции ``platform.json`` (например ``data.log_table``).
 
     Человек пишет ``{"data": {"log_table": ...}}``, а окружение получает
@@ -142,7 +172,6 @@ class Setting:
     и не в файле: иначе пришлось бы угадывать имя переменной по имени
     секции, и опечатка стала бы молчаливой потерей настройки.
     """
-
     @property
     def names(self) -> tuple[str, ...]:
         return (self.name, *self.aliases)
@@ -204,6 +233,7 @@ def _s(
     aliases: tuple[str, ...] = (),
     required: bool = False,
     file_key: str = "",
+    file_first: bool = False,
 ) -> Setting:
     return Setting(
         name=name,
@@ -215,6 +245,7 @@ def _s(
         aliases=aliases,
         required=required,
         file_key=file_key,
+        file_first=file_first,
     )
 
 
@@ -222,10 +253,15 @@ def _s(
 #: и страж сверяются с ним, а не с копией в тесте.
 SETTINGS: tuple[Setting, ...] = (
     # -- подключение к базе -------------------------------------------------
-    _s("DATABASE_URL", "secret", None, OWNER_AGENT,
-       "libs/enterprise_data/db.py:resolve_dsn",
+    # DSN живёт в файле, но учётная часть — подстановками. Пароль от рабочей
+    # базы в коммитируемом файле недопустим, а хост, порт и имя базы — это и
+    # есть то, ради чего DSN вообще хочется видеть в конфигурации: по умолчанию
+    # процесс молча унаследует чужой DSN из окружения агента, и непонятно, к
+    # какой базе он подключится. Поэтому: ``postgresql://${DB_USER}:${DB_PASSWORD}@хост:5432/база``.
+    _s("DATABASE_URL", "secret", None, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_configure_dsn",
        "DSN рабочей базы; пусто — воркер падает внятно, а не подключается не туда",
-       aliases=("PG_DSN",), required=True),
+       aliases=("PG_DSN",), required=True, file_key="db.dsn", file_first=True),
     # -- capability audit ----------------------------------------------------
     _s("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "str", "", OWNER_AGENT,
        "servers/enterprise/server.py:_audit_config",
@@ -490,7 +526,7 @@ SHARED_SETTINGS: tuple[str, ...] = (
 #: Секции ``platform.json`` для настроек вне capability. Список объявлен
 #: явно, потому что страж сверяет с ним файл: секция, не принадлежащая ни
 #: capability, ни этому списку, выглядела бы как «настройка прочитана».
-SHARED_SECTIONS: tuple[str, ...] = ("pool",)
+SHARED_SECTIONS: tuple[str, ...] = ("pool", "db")
 
 #: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуются
 #: и :func:`pool_defaults`, и :func:`pool_config`: иначе второй список
@@ -626,19 +662,65 @@ class Settings:
             self._resolve(setting)
 
     def _resolve(self, setting: Setting) -> None:
-        for name in setting.names:
-            raw = self._env.get(name)
-            if raw is not None and raw.strip():
-                self._values[setting.name] = setting.coerce(raw)
-                self._sources[setting.name] = f"env:{name}"
-                return
-        raw = self._file.get(setting.name)
-        if raw is not None and str(raw).strip():
-            self._values[setting.name] = setting.coerce(str(raw))
-            self._sources[setting.name] = "file:platform.json"
+        """Разрешить одну настройку: окружение > файл > дефолт.
+
+        Подстановка ``${ПЕРЕМЕННАЯ}`` разворачивается **только** для значений
+        из файла. Окружение — уже готовое значение: его развернул агент, и
+        разворачивать его повторно опасно, потому что пароль, содержащий
+        ``${`` (вполне обычная последовательность), был бы съеден.
+        """
+        from_file: tuple[str, str] | None = None
+        if setting.file_first:
+            raw_file = self._file.get(setting.name)
+            if raw_file is not None and str(raw_file).strip():
+                from_file = (self._expand(str(raw_file), setting), "file:platform.json")
+        if from_file is None:
+            for name in setting.names:
+                raw = self._env.get(name)
+                if raw is not None and raw.strip():
+                    self._values[setting.name] = setting.coerce(raw)
+                    self._sources[setting.name] = f"env:{name}"
+                    return
+            raw_file = self._file.get(setting.name)
+            if raw_file is not None and str(raw_file).strip():
+                from_file = (self._expand(str(raw_file), setting), "file:platform.json")
+        if from_file is not None:
+            self._values[setting.name] = setting.coerce(from_file[0])
+            self._sources[setting.name] = from_file[1]
             return
         self._values[setting.name] = setting.default
         self._sources[setting.name] = "default"
+
+    def _expand(self, text: str, setting: Setting) -> str:
+        """Развернуть ``${ПЕРЕМЕННАЯ}`` из окружения в значении из файла.
+
+        Нужно для DSN: хост, порт и имя базы — это то, что хочется видеть в
+        конфигурации, а логин и пароль в коммитируемый файл класть нельзя.
+        Поэтому в файле лежит ``postgresql://${DB_USER}:${DB_PASSWORD}@хост``.
+
+        Отсутствующая переменная — ошибка, а не пустая строка: подставленная
+        пустота дала бы ``postgresql://:@хост`` и отказ соединения там, где
+        виновата опечатка в имени переменной.
+        """
+        missing: list[str] = []
+
+        def _substitute(match: re.Match[str]) -> str:
+            name = match.group(1)
+            value = self._env.get(name)
+            if value is None or not value.strip():
+                missing.append(name)
+                return ""
+            return value
+
+        expanded = _PLACEHOLDER.sub(_substitute, text)
+        if missing:
+            raise InfrastructureError(
+                f"platform.json, {setting.key}: не задана переменная окружения "
+                + ", ".join(sorted(set(missing)))
+                + ". Подстановка ${имя} в файле читается из окружения "
+                "процесса; задайте переменную или уберите подстановку."
+            )
+        return expanded
 
     def get(self, name: str) -> Any:
         """Значение настройки. Неизвестное имя — исключение, не ``None``."""

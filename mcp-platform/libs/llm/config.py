@@ -2,10 +2,13 @@
 
 Портировано из агента ``lib/services/llm_config.py``. Изменён ровно один
 компонент — **источник конфигурации**: агент читал ``config.json``
-(``agents.defaults.*`` и ``providers.<provider>.*``), платформа читает
-переданный ``Mapping``/``os.environ``. Конфига агента в этом процессе не
-существует, а импорт ``config`` запрещён архитектурным стражем, поэтому
-источник сделан явной зависимостью, а не спрятанным чтением глобала.
+(``agents.defaults.*`` и ``providers.<provider>.*``), плаформа принимает
+переданный ``Mapping`` — ровно то, что разрешил реестр. Конфига агента в
+этом процессе не существует, а импорт ``config`` запрещён архитектурным
+стражем, поэтому источник сделан явной зависимостью, а не спрятанным
+чтением глобала. Окружение читает только ``libs.enterprise_common.settings``:
+параметр ``env`` обязателен именно поэтому — подставив сюда ``os.environ``,
+модуль стал бы вторым разбором настроек, а файл влиял бы не на всё сразу.
 
 **Что сохранено без изменений**
 
@@ -43,7 +46,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import Any
@@ -189,16 +191,19 @@ def _number(env: Mapping[str, str], overrides: Mapping[str, Any], key: str, defa
 def resolve_llm_config(
     overrides: Mapping[str, Any] | None = None,
     *,
-    env: Mapping[str, str] | None = None,
+    env: Mapping[str, str],
 ) -> LlmConfig:
     """Собрать конфигурацию провайдера.
 
     Args:
         overrides: специфичные переопределения (секция skill'а с ключами
             ``llm_*``). Перекрывают окружение.
-        env: источник окружения; по умолчанию ``os.environ``. Параметр
-            существует, чтобы резолв был проверяемым тестом без правки
-            глобального окружения процесса.
+        env: разрешённые значения — обязательный параметр. Раньше он был
+            необязательным и подставлял ``os.environ``, но читать окружение
+            здесь — значит завести второй разбор настроек рядом с реестром:
+            файл влиял бы на ``data``, а на LLM действовало бы окружение.
+            Единственный читатель — ``Settings``, он же и передаёт сюда
+            ``settings.as_env()``.
 
     Returns:
         :class:`LlmConfig` с полями provider, model, api_base, api_key,
@@ -209,7 +214,7 @@ def resolve_llm_config(
             ``max_tokens``/``temperature`` нечисловые. Подстановки дефолта
             нет: запрос к несуществующей модели неотличим от «модель молчит».
     """
-    source: Mapping[str, str] = os.environ if env is None else env
+    source: Mapping[str, str] = env
     cfg: Mapping[str, Any] = overrides or {}
 
     provider = (
@@ -250,18 +255,20 @@ def resolve_llm_config(
     )
 
 
-def ensure_llm_env(env: MutableMapping[str, str] | None = None) -> None:
+def ensure_llm_env(env: MutableMapping[str, str]) -> None:
     """Гарантировать ``LLM_API_KEY`` в окружении для резолва ``${...}``.
 
     Нужен потребителям, которые читают ключ через подстановку
     ``${LLM_API_KEY}`` (запуск дочернего процесса, конфиг SDK), а не самому
-    резолву платформы: тот читает ``os.environ`` напрямую. Существующее
-    значение не перетирается — иначе вызов, пришедший с правильным ключом
-    окружения, был бы молча заменён на другой.
+    резолву платформы. Существующее значение не перетирается — иначе вызов,
+    пришедший с правильным ключом окружения, был бы молча заменён на другой.
+
+    Цель обязательна: писать в ``os.environ`` отсюда нельзя, иначе модуль
+    снова стал бы читателем окружения — уже не только для чтения, но и для
+    записи, что необратимо меняет конфигурацию процесса.
     """
-    target: MutableMapping[str, str] = os.environ if env is None else env
-    if "LLM_API_KEY" in target:
+    if "LLM_API_KEY" in env:
         return
-    key = resolve_llm_config(env=target).api_key
+    key = resolve_llm_config(env=env).api_key
     if key:
-        target["LLM_API_KEY"] = key
+        env["LLM_API_KEY"] = key

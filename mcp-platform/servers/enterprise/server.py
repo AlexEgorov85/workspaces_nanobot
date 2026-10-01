@@ -26,10 +26,11 @@
 5. **Старт фоновых писателей** — после того как всё загрузилось, иначе буфер
    начнёт принимать события от операций, которых ещё нет.
 
-DSN — единственное исключение: его читает ``resolve_dsn()`` в
-``libs/enterprise_data/db.py``, а не этот файл. Секрет агента не должен
-проходить через платформенный реестр, у которого есть только один слой —
-``platform.json``, а ключ туда не пишется.
+Ни одного чтения окружения в платформе, кроме реестра: ``os.environ`` в
+этом файле не встречается ни разу, а DSN приходит из ``Settings`` и
+передаётся пулу через ``configure()``. Значение, к которому процесс
+подключается, имеет одного хозяина — иначе у секрета два независимых
+ответа, и расхождение между ними выглядит как «настроено».
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 REQUIRED_PACKAGES = ("sqlglot",)
 
 
-def _check_dependencies() -> None:
+def _check_dependencies(settings: Settings) -> None:
     """Проверить, что сервер может работать, **до** того как он начал.
 
     Два условия, оба fail-fast по одной причине: сервер, который поднялся и
@@ -70,6 +71,11 @@ def _check_dependencies() -> None:
     * DSN — без него пул не инициализируется, и буфер журнала честно, но
       незаметно теряет каждое событие. Поднявшийся сервер без DSN выглядит
       рабочим, пока журнал пуст.
+
+    DSN берётся из реестра, а не из процесса: читателей окружения должен
+    быть ровно один. Сам секрет в реестр не попадает (владелец — агент, в
+    ``platform.json`` ключи нет), но **решение о нём** принимает тот же
+    код, что и обо всём остальном.
     """
     missing: list[str] = []
     for name in REQUIRED_PACKAGES:
@@ -85,14 +91,26 @@ def _check_dependencies() -> None:
             "pg_sleep, information_schema и UPDATE/DELETE после -- комментария"
         )
 
-    from libs.enterprise_data.db import resolve_dsn
-
-    if not resolve_dsn():
+    if not settings.get("DATABASE_URL"):
         raise InfrastructureError(
-            "не задан DSN. Задайте переменную окружения DATABASE_URL (или PG_DSN) "
-            "для процесса enterprise-mcp. Без неё пул не поднимется, а буфер "
-            "журнала будет терять каждое событие"
+            "не задан DSN. Задайте его в mcp-platform/platform.json "
+            "(секция db, ключ dsn — логин и пароль подстановками "
+            "${DB_USER}:${DB_PASSWORD}) или переменной окружения DATABASE_URL "
+            "(затем PG_DSN) для процесса enterprise-mcp. Без неё пул не "
+            "поднимется, а буфер журнала будет терять каждое событие"
         )
+
+
+def _configure_dsn(settings: Settings) -> None:
+    """Передать DSN, разрешённый реестром, владельцу пула.
+
+    Пул не читает окружение: ``resolve_dsn()`` возвращает только то, что
+    задано ``configure()``. Ответственность за «к какой базе подключается
+    процесс» таким образом одна, а не две — у реестра и у пула.
+    """
+    from libs.enterprise_data.db import configure
+
+    configure(str(settings.get("DATABASE_URL")))
 
 
 def _apply_pool_settings(settings: Settings) -> None:
@@ -283,7 +301,8 @@ def build() -> tuple[Any, ToolRegistry, ToolContainer]:
     реестр, не поднимая транспорт.
     """
     settings = Settings()
-    _check_dependencies()
+    _check_dependencies(settings)
+    _configure_dsn(settings)
     _apply_pool_settings(settings)
     container = _build_container(settings)
     registry = load_registry(CAPABILITIES_DIR, container, root=PLATFORM_ROOT)

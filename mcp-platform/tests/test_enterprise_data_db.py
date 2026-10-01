@@ -125,10 +125,13 @@ class TestConfigure:
 
 
 class TestResolveDsn:
-    """resolve_dsn: явный DSN, иначе окружение платформы.
+    """resolve_dsn: только то, что задал ``configure()``.
 
-    Конфиг агента платформе недоступен — это и было целью переноса.
-    DSN приходит либо из ``configure()``, либо из окружения процесса.
+    Раньше функция сама читала ``DATABASE_URL``, затем ``PG_DSN`` из
+    окружения. Теперь этого нет: читателей окружения в платформе ровно один
+    — реестр ``libs.enterprise_common.settings``, и он передаёт значение
+    сюда явно. У секрета, к которому подключается процесс, не должно быть
+    двух независимых ответов.
     """
 
     @staticmethod
@@ -146,27 +149,43 @@ class TestResolveDsn:
         mock_psycopg2["configure"]("postgresql://explicit@configured/db")
         assert mock_psycopg2["resolve_dsn"]() == "postgresql://explicit@configured/db"
 
-    def test_database_url_from_env(self, mock_psycopg2, monkeypatch):
+    def test_database_url_env_is_not_read_here(self, mock_psycopg2, monkeypatch):
+        """Переменная процесса не подставляется сама.
+
+        Регрессия второго разбора: значение пришло бы из окружения, пока
+        реестр сообщает оператору, что применяется ``file:platform.json`` или
+        дефолт. Расхождение двух ответов — это «подключилось не туда».
+        """
         self._clean_env(monkeypatch)
         monkeypatch.setenv("DATABASE_URL", "postgresql://from-env@x/y")
-        assert mock_psycopg2["resolve_dsn"]() == "postgresql://from-env@x/y"
+        assert mock_psycopg2["resolve_dsn"]() == ""
 
-    def test_pg_dsn_from_env(self, mock_psycopg2, monkeypatch):
+    def test_pg_dsn_env_is_not_read_here(self, mock_psycopg2, monkeypatch):
         self._clean_env(monkeypatch)
         monkeypatch.setenv("PG_DSN", "postgresql://from-pg-dsn@x/y")
-        assert mock_psycopg2["resolve_dsn"]() == "postgresql://from-pg-dsn@x/y"
+        assert mock_psycopg2["resolve_dsn"]() == ""
 
-    def test_database_url_wins_over_pg_dsn(self, mock_psycopg2, monkeypatch):
+    def test_registry_resolved_dsn_is_what_the_pool_uses(
+        self, mock_psycopg2, monkeypatch
+    ):
+        """Конец цепочки: то, что решил реестр, — то, с чем работает пул."""
+        from libs.enterprise_common.settings import Settings
+        from libs.enterprise_data import db as data_db
+        from servers.enterprise import server as enterprise_server
+
         self._clean_env(monkeypatch)
-        monkeypatch.setenv("DATABASE_URL", "postgresql://primary@x/y")
-        monkeypatch.setenv("PG_DSN", "postgresql://fallback@x/y")
-        assert mock_psycopg2["resolve_dsn"]() == "postgresql://primary@x/y"
+        settings = Settings(
+            env={"DATABASE_URL": "postgresql://resolved@x/y"},
+        )
+        enterprise_server._configure_dsn(settings)
+        assert data_db.resolve_dsn() == "postgresql://resolved@x/y"
+        assert mock_psycopg2["resolve_dsn"]() == "postgresql://resolved@x/y"
 
-    def test_empty_env_value_falls_through_to_pg_dsn(self, mock_psycopg2, monkeypatch):
+    def test_empty_env_value_changes_nothing(self, mock_psycopg2, monkeypatch):
         self._clean_env(monkeypatch)
         monkeypatch.setenv("DATABASE_URL", "")
         monkeypatch.setenv("PG_DSN", "postgresql://from-pg-dsn@x/y")
-        assert mock_psycopg2["resolve_dsn"]() == "postgresql://from-pg-dsn@x/y"
+        assert mock_psycopg2["resolve_dsn"]() == ""
 
     def test_empty_when_no_source(self, mock_psycopg2, monkeypatch):
         self._clean_env(monkeypatch)

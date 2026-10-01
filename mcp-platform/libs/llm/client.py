@@ -29,7 +29,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from libs.enterprise_common.retry import retry_on_exception
-from libs.llm.config import LlmConfig, resolve_llm_config
+from libs.llm.config import LlmConfig
 
 #: Путь эндпойнта чата. Живёт только здесь: вне ``libs/llm`` строка
 #: запрещена стражем (правило 8 README) — иначе вторая копия клиента
@@ -37,22 +37,28 @@ from libs.llm.config import LlmConfig, resolve_llm_config
 CHAT_PATH = "chat/completions"
 
 
-def _resolve_cfg(cfg: LlmConfig | Mapping[str, Any] | None) -> LlmConfig:
-    """Вернуть переданный конфиг или резолвнуть его из окружения.
+def _resolve_cfg(cfg: LlmConfig | Mapping[str, Any]) -> LlmConfig:
+    """Принять конфиг в виде объекта или словаря.
+
+    Резолвить конфиг здесь было нельзя: это читало бы процесс изнутри
+    библиотеки, и тогда значение приходило бы из двух мест — из реестра и
+    из окружения мимо него. Конфиг обязан прийти от вызывающей стороны:
+    сервер достаёт его из ``Settings``, и всё, что ниже, работает с уже
+    разрешённым значением.
 
     Принимается и словарь: потребители, пришедшие из агента, отдают конфиг
     словарём, и перевод каждого из них на новый тип не должен быть условием
     переезда.
     """
-    if cfg is None:
-        return resolve_llm_config()
+    if isinstance(cfg, LlmConfig):
+        return cfg
     return LlmConfig.from_mapping(cfg)
 
 
 def call_llm(
     messages: list[dict[str, Any]],
     *,
-    cfg: LlmConfig | Mapping[str, Any] | None = None,
+    cfg: LlmConfig | Mapping[str, Any],
     context: list[dict[str, Any]] | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
@@ -64,8 +70,9 @@ def call_llm(
 
     Args:
         messages: Сообщения (system / user / assistant).
-        cfg: Резолвнутый LLM-конфиг от :func:`resolve_llm_config` (если не
-            передан — резолвится здесь из окружения).
+        cfg: конфиг от :func:`resolve_llm_config` (то есть от реестра).
+            Обязателен: клиент не знает, где настройки, и не должен решать
+            это за вызывающую сторону.
         context: История чата — добавляется в начало перед ``messages``.
         model/max_tokens/temperature: переопределение параметров запроса.
         max_retries: максимум повторов при 429/timeout/connect.
@@ -106,7 +113,7 @@ def call_llm(
 def call_llm_json(
     messages: list[dict[str, Any]],
     *,
-    cfg: LlmConfig | Mapping[str, Any] | None = None,
+    cfg: LlmConfig | Mapping[str, Any],
     context: list[dict[str, Any]] | None = None,
     model: str | None = None,
     max_tokens: int | None = None,

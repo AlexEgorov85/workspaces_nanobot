@@ -116,6 +116,13 @@ class TestExportMatchesRegistry:
         def flatten(node: dict, prefix: str = "") -> set[str]:
             out: set[str] = set()
             for key, value in node.items():
+                # ``_about`` — комментарий в данных, и реестр пропускает такие
+                # ключи на любом уровне. Раньше проверка отсекала их только
+                # в корне, и первая же вложенная секция (``db``) с пояснением
+                # внутри объявила страж сломанным: он ругался на ``db._about``,
+                # которого в файле настроек нет вообще.
+                if str(key).startswith("_"):
+                    continue
                 dotted = f"{prefix}{key}"
                 if isinstance(value, dict):
                     out |= flatten(value, f"{dotted}.")
@@ -123,8 +130,13 @@ class TestExportMatchesRegistry:
                     out.add(dotted)
             return out
 
-        file_keys = {k for k in flatten(raw) if not k.startswith("_")}
+        file_keys = flatten(raw)
         assert file_keys, "platform.json пуст — настройки платформы исчезли"
+        assert "db.dsn" in file_keys, (
+            "db.dsn пропал из platform.json — DSN вернулся к одному "
+            "источнику, и настройка агента снова решает, к какой базе "
+            "подключается процесс"
+        )
         for key in file_keys:
             assert key in registry.BY_FILE_KEY, (
                 f"{key!r} не зарегистрирован как настройка платформы"

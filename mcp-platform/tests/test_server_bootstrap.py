@@ -322,7 +322,7 @@ class TestSqlglotIsMandatory:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         with pytest.raises(InfrastructureError, match="sqlglot"):
-            enterprise_server._check_dependencies()
+            enterprise_server._check_dependencies(Settings())
 
     def test_dependency_list_names_sqlglot(self) -> None:
         assert "sqlglot" in enterprise_server.REQUIRED_PACKAGES
@@ -339,7 +339,7 @@ class TestSqlglotIsMandatory:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.delenv("PG_DSN", raising=False)
         with pytest.raises(InfrastructureError, match="не задан DSN"):
-            enterprise_server._check_dependencies()
+            enterprise_server._check_dependencies(Settings())
 
 
 class TestNoManualToolRegistration:
