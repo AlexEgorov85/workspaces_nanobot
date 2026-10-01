@@ -49,7 +49,14 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
+    # Импорт не на верхнем уровне намеренно: клиент поднимает сервер как
+    # подпроцесс и рассчитан на то, чтобы импортироваться раньше, чем
+    # платформа окажется в ``sys.path``. Импортировать контракт нужно в тот
+    # момент, когда корень платформы точно доступен, — при создании клиента.
+    from libs.enterprise_common.execution.context import McpCallContext
 
 logger = logging.getLogger(__name__)
 
@@ -118,14 +125,46 @@ class LlmClient:
         *,
         root: Path | None = None,
         call_timeout_sec: float = DEFAULT_CALL_TIMEOUT_SEC,
+        identity: McpCallContext | None = None,
     ) -> None:
+        """Инициализировать клиент.
+
+        Args:
+            root: Корень платформы. По умолчанию — от расположения этого файла.
+            call_timeout_sec: Сколько ждать ответа операции.
+            identity: Идентичность оборота, которая уедет в ``params._meta``.
+
+        Идентичность — аргумент конструктора, а не чтение окружения, и это
+        принципиально. Окружение читает только реестр: клиент, начавший
+        разбирать ``ENTERPRISE_*`` сам, стал бы вторым читателем настройки, и
+        проверка «значение приходит из Settings» перестала бы что-либо
+        значить. Здесь она приходит от вызывающего явно.
+
+        Один клиент — один оборот. Подпроцесс скилла живёт внутри оборота и
+        обслуживает сотни вызовов из пула чанков, поэтому идентичность
+        постоянна для его жизни и меняться не может: смена означала бы, что
+        вызовы одного оборота начали бы подписываться чужим.
+        """
         self._root = root if root is not None else platform_root()
         self._call_timeout = float(call_timeout_sec)
+        self._meta: dict[str, str] | None = (
+            dict(identity.as_meta()) if identity is not None else None
+        )
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._session: Any = None
         self._stack: Any = None
+
+    @property
+    def meta(self) -> dict[str, str] | None:
+        """Идентичность, которая уедет в ``params._meta``. ``None`` — её нет.
+
+        Открыта наружу, чтобы «кто я в этом обороте» можно было проверить, не
+        открывая транспорт. Копия, а не сам словарь: подменить идентичность
+        на лету нельзя.
+        """
+        return dict(self._meta) if self._meta is not None else None
 
     # -- вызов -------------------------------------------------------------
 
@@ -275,7 +314,15 @@ class LlmClient:
     async def _call_async(self, operation: str, arguments: dict[str, Any]) -> str:
         session = await self._ensure_session()
         try:
-            result = await session.call_tool(operation, arguments)
+            if self._meta is None:
+                # Без идентичности ``meta`` не отправляется вовсе, а не
+                # отправляется пустым: пустой ``_meta`` выглядел бы на
+                # сервере как «идентичность была и оказалась пустой».
+                result = await session.call_tool(operation, arguments)
+            else:
+                result = await session.call_tool(
+                    operation, arguments, meta=self._meta
+                )
         except Exception as exc:  # noqa: BLE001 - транспорт любой формы
             # Оборванный процесс не восстанавливается сам: следующий вызов
             # получил бы ту же ошибку, поэтому сессия сбрасывается.
@@ -415,12 +462,24 @@ _default: LlmClient | None = None
 _default_lock = threading.Lock()
 
 
-def default_client() -> LlmClient:
-    """Клиент процесса. Тот же, что и в прошлый раз."""
+def default_client(identity: McpCallContext | None = None) -> LlmClient:
+    """Клиент процесса. Тот же, что и в прошлый раз.
+
+    Идентичность запоминается вместе с клиентом. Повтор с **другой**
+    идентичностью — отказ, а не пересоздание: молча выпустить вызовы нового
+    оборота под старым ``request_id`` значило бы испортить журнал именно там,
+    где он нужен для разбора.
+    """
     global _default
     with _default_lock:
         if _default is None:
-            _default = LlmClient()
+            _default = LlmClient(identity=identity)
+        elif identity is not None and _default.meta != identity.as_meta():
+            raise LlmUnavailable(
+                "клиент процесса уже создан под другой оборот: "
+                f"{sorted(_default.meta or {})} против {sorted(identity.as_meta())}. "
+                "Один процесс — один оборот; для другого нужен свой клиент."
+            )
         return _default
 
 
