@@ -187,6 +187,37 @@ def _project_version() -> str:
     return project_version()
 
 
+async def _connect_enterprise_mcp(ctx) -> None:
+    """Поднять сессию ``enterprise-mcp`` и убедиться, что сервер отвечает.
+
+    Инвариант: сервер поднимается **до** агента. Он всегда нужен — три входа
+    к данным и пул соединений живут в нём, — поэтому «платформа не
+    отвечает» обязано обнаруживаться на старте, а не посреди оборота.
+
+    Проверка — это ``list_operations()``: он поднимает сессию и делает
+    discovery. Второго механизма рукопожатия здесь нет намеренно: если
+    сервер поднялся, но не отдал операции, подниматься он нечего.
+
+    Отказ не проглатывается. ``EnterpriseMcpUnavailable`` уходит наверх, в
+    ``GatewayRunner``, который перезапускает gateway с backoff и пишет
+    причину в лог на каждой попытке. Тихая деградация была бы здесь
+    единственным неправильным вариантом: каналы поднялись бы, задачи
+    начали бы забираться, а tool'ы отвечали бы ошибкой.
+
+    ``None`` — раздел ``enterprise_mcp`` выключен: тогда сервера нет по
+    решению оператора, и это не повод падать. Потребители об этом сообщают
+    структурной ошибкой (см. ``history_search_tool``).
+    """
+    client = getattr(ctx, "enterprise_mcp", None)
+    if client is None:
+        return
+    operations = await client.list_operations()
+    console.print(
+        f"[green]✓[/green] enterprise-mcp: {len(operations)} операций, "
+        "процесс поднят"
+    )
+
+
 async def _run(ctx) -> None:
     """Основной рабочий цикл gateway: каналы + агент."""
     from lib.services.channel_factory import ChannelFactory
@@ -251,9 +282,15 @@ async def _run(ctx) -> None:
 
         asyncio.create_task(_preload_and_report())
 
-    channels_task = asyncio.create_task(channels.start_all())
+    # enterprise-mcp поднимается ДО каналов и ДО работы агента: его процесс —
+    # единственный владелец пула PostgreSQL и единственный, кто даёт модели
+    # три входа к данным. Проверка не декоративная — подъём ленивый, а
+    # отказ тогда обнаруживался бы посреди оборота, и «платформа лежит»
+    # выглядел бы как «агент работает».
+    await _connect_enterprise_mcp(ctx)
 
     try:
+        channels_task = asyncio.create_task(channels.start_all())
         await ctx.agent.run()
     except (asyncio.CancelledError, KeyboardInterrupt):
         console.print("\nShutting down...")
