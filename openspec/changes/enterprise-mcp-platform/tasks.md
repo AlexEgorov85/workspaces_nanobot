@@ -603,20 +603,65 @@
       модулей. Удаление хака — отдельное решение на границе импортов.
 - [ ] 5.6 Убрать cache-API из `lib/core/skill_config.py`. `TableRegistry` и
       `skill_registration.py` **остаются** — они описывают состав снимка
+      **Заблокировано фазой 9.** `workspace/skills/audit_analyzer` ходит в
+      данные через `build_cache_provider()` → `CacheProvider.query_sql` /
+      `search_vector` / `get_schema`, и это его основной путь доступа, а не
+      вспомогательный. Агент по условию границы не может импортировать
+      `libs/enterprise_data`, поэтому единственный выход — перевести навык на
+      операции capability `audit` (фаза 9), и только потом убирать cache-API
 - [ ] 5.7 Секция `CacheSettings` переезжает из `project_settings.py` в конфиг
       сервера как путь снимка
+      **Сторона платформы сделана (пункт 2.19a, коммит `507d895`):** путь
+      объявляется в `platform.json → data.snapshot_path`, и `_about` этой
+      секции прямо говорит, что снимком владеет capability `data` и объявлять
+      его должна она, а не получать окружением агента — два владельца одного
+      файла означали бы, что снимок читают не оттуда, откуда пишут.
+      **Осталось:** убрать `CacheSettings` из агента — заблокировано вместе с
+      5.6 и 5.8
 - [ ] 5.8 Убрать 88 строк кэш-обвязки из `application_context.py`:
       `resolve_cache_path`, `_warn_if_cache_path_on_nfs`, `_init_cache_runtime`,
       `check_duckdb_cache`, `check_vector_search`
-- [ ] 5.9 Удалить `sql/vectors/create_vector_index_config.sql` и
+      **Заблокировано фазой 9** — по той же причине, что и 5.6: снять обвязку
+      нельзя, пока `audit_analyzer` читает снимок напрямую. Обвязка больше не
+      висячая и её размер измерен точно: `_init_cache_runtime` — 190 строк,
+      `_warn_if_cache_path_on_nfs` — 60, `resolve_cache_path` — 73,
+      `_default_local_cache_dir` — 17, `_make_preload` импортирует
+      `PreloadService`, `check_duckdb_cache`/`check_vector_search` регистрируются
+      в readiness как обязательные компоненты
+- [x] 5.9 Удалить `sql/vectors/create_vector_index_config.sql` и
       `create_vector_index_store.sql` — это legacy прошлого шага, а не снимок
-- [ ] 5.10 Перенести 10 тестовых модулей кэша в `mcp-platform` как стражи
-      capability `data`: `test_duckdb_cache_store.py`,
-      `test_cache_provider_meta.py`, `test_single_cache_interface.py`,
-      `test_cache_no_file_hold.py`, `test_cache_provider_open_failure.py`,
-      `test_cache_provider_mode.py`, `test_cache_load_service.py`,
-      `test_table_registry.py`, `test_skill_cache_boundary.py`,
-      `test_shared_cache_path_across_profiles.py`
+      **Мёртвость проверена, а не предположена:** `tools/migrate.py` обходит
+      только `sql/migrations/V*.sql` по маске `V*__*.sql`, а оба файла лежат в
+      `sql/vectors/` и ни одним runner'ом не подхватываются. Ссылка на первый
+      из них осталась только в комментарии `project_settings.py:441`, второй
+      DDL уже помечен DEPRECATED в собственном заголовке.
+      **Сделано:** оба файла вырезаны до tombstone-заглушек и внесены в
+      `PENDING-DELETIONS.md` — физически удалить их нельзя, политика не даёт
+      удалять файлы без служебного лаунчера `mavis-trash`
+- [x] 5.10 Перенести 10 тестовых модулей кэша в `mcp-platform` как стражи
+      capability `data` — **перекрыто портом фазы 3, 6 из 10:**
+      `test_duckdb_cache_store` → `test_snapshot_store` (41) +
+      `test_snapshot_writer_records` (32) + `test_snapshot_writer_garbage` (20);
+      `test_cache_provider_mode` → `test_snapshot_sql_guard` (23) +
+      `test_snapshot_contracts` (24); `test_cache_no_file_hold` →
+      `test_snapshot_no_file_hold` (27); `test_cache_provider_open_failure` →
+      `test_snapshot_optional_startup` (10); `test_cache_load_service` →
+      `test_snapshot_load_service` (25) + `..._bounds` (8);
+      `test_cache_provider_meta` → `test_vectors_signature` (подпись индекса
+      переехала в `libs/vectors/signature.py`).
+      **Четыре остаются в агенте, и это решение, а не недосмотр.**
+      `test_table_registry` и `test_skill_cache_boundary` — про то, что исчезает
+      вместе с кэшем, страж нужен на стороне агента; `test_shared_cache_path_
+      across_profiles` — про `gateway.cache.local_path`, который уехал в
+      `platform.json` и больше не является per-profile настройкой агента.
+      `test_single_cache_interface` (22) переписывается вместе с удалением:
+      сейчас он называет конкретные классы агента (`DuckDbCacheStore`,
+      `cache_provider.open_cache_provider`) и проверяет AST по всему репозиторию.
+      После удаления смысл инварианта меняется на обратный — агент не должен
+      завести **вторую** реализацию снимка, — и проверять это надо в
+      `tests/test_application_context*`, а не переносить в платформу: платформа
+      импортировать агентские модули не вправе, и сканер чужого дерева в её
+      тестах стал бы обходом границы
 - [x] 5.11 Добавить страж: вне `libs/enterprise_data` запрещены `duckdb.connect`,
       `ATTACH` и импорт `duckdb`.
       **Сделано — пункт был выполнен, но не отмечен** (проверено чтением кода):
