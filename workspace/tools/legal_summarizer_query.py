@@ -165,8 +165,17 @@ class LegalSummarizerQueryTool(Tool):
 
     config_key: ClassVar[str] = "legal_summarizer_query"
 
-    def __init__(self, *, config: LegalSummarizerQueryToolConfig) -> None:
+    def __init__(
+        self,
+        *,
+        config: LegalSummarizerQueryToolConfig,
+        request_id_source: Any = None,
+    ) -> None:
         self.config = config
+        # Источник PK оборота (``DbLoggingService``). Нужен, чтобы подпроцесс
+        # знал не только «кто», но и «какой оборот» — иначе журнал платформы
+        # не связал бы его вызов с вопросом.
+        self._request_id_source = request_id_source
 
     @classmethod
     def config_cls(cls):
@@ -215,7 +224,57 @@ class LegalSummarizerQueryTool(Tool):
             config = cls.config_cls()(**section)
         except Exception:
             config = cls.config_cls()
-        return cls(config=config)
+        return cls(
+            config=config,
+            request_id_source=getattr(ctx, "db_logging_service", None),
+        )
+
+    def _identity_env(self) -> dict[str, str]:
+        """Идентичность оборота для окружения подпроцесса.
+
+        Из ``RequestContext`` и журнала, никогда из аргументов модели: значение,
+        присланное моделью, границей изоляции не является.
+
+        Пусто вне оборота. Тогда подпроцесс не пошлёт ``_meta`` вовсе, и сервер
+        ответит ``identity_missing`` — что и правильно. Выдумывать значения здесь
+        нельзя: подставленный ``session_id`` выглядел бы в журнале как настоящая
+        сессия, а подставленный ``request_id`` — как существующий оборот.
+
+        ``request_id`` необязателен: платформенный клиент досоставит
+        самостоятельный, если оборота нет. Подменять его нечем — либо он найден,
+        либо его нет.
+        """
+        try:
+            from nanobot.agent.tools.context import (
+                current_request_context,
+                current_request_session_key,
+            )
+        except Exception:
+            return {}
+        try:
+            ctx = current_request_context()
+            session_id = current_request_session_key()
+        except Exception:
+            return {}
+        if ctx is None or not session_id:
+            return {}
+
+        sender_id = getattr(ctx, "sender_id", None)
+        if not isinstance(sender_id, str) or not sender_id:
+            return {}
+
+        env = {
+            "ENTERPRISE_SESSION_ID": str(session_id),
+            "ENTERPRISE_USER_ID": sender_id,
+        }
+        if self._request_id_source is not None:
+            try:
+                request_id = self._request_id_source.get_request_id(str(session_id))
+            except Exception:
+                request_id = None
+            if request_id:
+                env["ENTERPRISE_REQUEST_ID"] = str(request_id)
+        return env
 
     @property
     def name(self) -> str:
@@ -267,6 +326,13 @@ class LegalSummarizerQueryTool(Tool):
         ]
         # env наследуется; PYTHONUTF8/PYTHONIOENCODING выставлены на entry-points.
         env = os.environ.copy()
+        # Идентичность оборота — в окружение подпроцесса, а не в аргументы
+        # командной строки. Аргументы пишет модель, и значение, пришедшее от
+        # модели, границей изоляции не является: модель назвала бы себя любой
+        # сессией. Окружение собирается здесь, на конкретный вызов, — и не
+        # остаётся в процессе после возврата, поэтому следующий вызов не
+        # унаследует чужие значения.
+        env.update(self._identity_env())
 
         try:
             completed = subprocess.run(

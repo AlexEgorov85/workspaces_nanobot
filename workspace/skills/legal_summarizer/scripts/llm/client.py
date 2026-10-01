@@ -42,6 +42,9 @@ from libs.enterprise_client import (  # noqa: E402
     LlmUnavailable,
     complete,
 )
+from libs.enterprise_common.execution.context import (  # noqa: E402
+    McpCallContext as _McpCallContext,
+)
 
 
 __all__ = ["chat", "LlmOperationError", "LlmUnavailable"]
@@ -50,6 +53,33 @@ _LLM_TRACE_ENABLED = (
     "--llm-trace" in sys.argv
     or os.environ.get("LEGAL_SUMMARIZER_LLM_TRACE") == "1"
 )
+
+
+def _identity() -> _McpCallContext | None:
+    """Идентичность оборота, переданная tool'ом в окружение подпроцесса.
+
+    Tool ``legal_summarizer_query`` кладёт её в ``env`` конкретного запуска, а не
+    в аргументы командной строки: аргументы пишет модель, и названное ею имя
+    сессии границей изоляции не является.
+
+    Читает окружение навык, а не платформенный клиент: у того свой запрет — он
+    вообще не разбирает окружение, потому что читает его только реестр, и
+    настройки, которые реестр не объявил, не должны выглядеть как настройки.
+
+    Пусто — когда навык запустили вне оборота (например, из shell вручную). Тогда
+    ``_meta`` не уйдёт вовсе, и сервер ответит ``identity_missing``: это точнее,
+    чем выдуманная сессия, которая потом попадёт в журнал как настоящая.
+    ``request_id`` необязателен — клиент платформы досоставит самостоятельный.
+    """
+    session_id = os.environ.get("ENTERPRISE_SESSION_ID")
+    user_id = os.environ.get("ENTERPRISE_USER_ID")
+    if not session_id or not user_id:
+        return None
+    return _McpCallContext(
+        session_id=session_id,
+        user_id=user_id,
+        request_id=os.environ.get("ENTERPRISE_REQUEST_ID") or None,
+    )
 
 
 def _trace(stage: str, **fields) -> None:
@@ -109,6 +139,7 @@ def chat(
         response = complete(
             messages,
             context=context,
+            identity=_identity(),
             model=kwargs.get("model"),
             max_tokens=kwargs.get("max_tokens"),
             temperature=kwargs.get("temperature"),
