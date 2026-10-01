@@ -22,18 +22,30 @@
 * **Файл не удерживается между операциями** в ``READ_ONLY``: соединение
   открывается на время вызова и закрывается сразу после. Неудачное открытие —
   всегда исключение, «полуготовый» провайдер наружу не отдаётся.
-* **Запись не портирована** (фаза 5, пункты 5.1/5.2): методы ``CacheIngestion``
-  поднимают ``NotImplementedError`` с явной ссылкой на фазу. Загрузчик снимка в
-  платформе ещё не написан, а заглушка, которая «успешно» ничего не пишет,
-  вреднее отсутствия метода: об этом сообщает раздел 4 отчёта миграции.
+* **Запись — стадия загрузки.** ``READ_WRITE`` открывается только загрузчиком
+  (:mod:`libs.enterprise_data.loader`), который держит и роль ``CacheStore``, и
+  единственное право писать. Из runtime-пути вызывается одна операция полной
+  замены содержимого таблицы (:meth:`DuckDbSnapshotStore.replace_records`);
+  частичная запись (:meth:`~DuckDbSnapshotStore.upsert_records`) остаётся
+  примитивом хранилища. Писать в снимок, открытый на чтение, нельзя: режим
+  проверяется дважды — соединением ``read_only=True`` и явной проверкой в
+  :meth:`DuckDbSnapshotStore._assert_writable`.
+* **Проверка индекса и подпись индекса** (агентские ``_check_index_integrity`` /
+  ``compute_index_signature``) писателю снимка не принадлежат: FAISS и его
+  целостность живут в ``libs/vectors`` (``signature.py``), а в снимок писатель
+  не ходит. Векторные индексы пересобираются лениво, при первом поиске после
+  загрузки, поэтому помечать «грязные» источники в хранилище не нужно: к этому
+  моменту ни одного построенного индекса ещё не существует.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import platform
 import re
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -45,10 +57,25 @@ from libs.enterprise_data.snapshot.contracts import (
     CacheBusyError,
     CacheOpenError,
     CacheStore,
+    ReadOnlyAssertionError,
     SearchResult,
 )
 from libs.enterprise_data.snapshot.query import build_schema, explain_query, run_query
 from libs.enterprise_data.snapshot.sql_guard import assert_query_allowed
+from libs.enterprise_data.snapshot.writer import (
+    TABLE_COMMENT_KEY,
+    bindable_values,
+    infer_duckdb_type,
+    map_pg_type,
+    meta_column_name,
+    nested_columns,
+    record_columns,
+    records_to_arrow,
+    resolve_column_specs,
+    validate_records,
+)
+
+logger = logging.getLogger(__name__)
 
 # Внутренняя таблица метаданных схемы (комментарии таблиц/колонок).
 META_TABLE = "__schema_meta"
@@ -252,6 +279,12 @@ class DuckDbSnapshotStore(CacheStore):
         self._duckdb_read_only: bool = bool(mode == CacheAccessMode.READ_ONLY)
         self._is_ready = False
         self._last_error: str | None = None
+        # Диагностика писателя: сколько батчей принято, сколько упало, когда
+        # последний раз. В агентской копии эти счётчики жили в том же классе.
+        self._schema_defs: dict[str, list[dict[str, Any]]] = {}
+        self._upserts = 0
+        self._upsert_errors = 0
+        self._last_upsert_at: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -624,6 +657,9 @@ class DuckDbSnapshotStore(CacheStore):
                 "mode": self._mode.value,
                 "tables": tables,
                 "vector_sources": vector_sources,
+                "upserts": self._upserts,
+                "upsert_errors": self._upsert_errors,
+                "last_upsert_at": self._last_upsert_at,
                 "last_error": self._last_error,
             }
 
@@ -671,7 +707,7 @@ class DuckDbSnapshotStore(CacheStore):
         return self._index_accessor.preload()
 
     # ------------------------------------------------------------------
-    # Запись — фаза 5 (пункты 5.1/5.2)
+    # Запись снимка (единственный писатель — loader.py)
     # ------------------------------------------------------------------
 
     def upsert_records(
@@ -681,16 +717,66 @@ class DuckDbSnapshotStore(CacheStore):
         *,
         key_column: str | None = None,
     ) -> bool:
-        raise NotImplementedError(
-            "запись снимка не портирована в платформу: миграция "
-            "enterprise-mcp-platform, фаза 5 пункт 5.1 (upsert_records)"
-        )
+        """Добавить/обновить строки таблицы в снимке.
+
+        Батч заменяет существующие записи с тем же ключом (upsert), новые —
+        добавляются. Ключ: явный ``key_column`` (PK источника), иначе колонка
+        ``id``, иначе — если в записях нет колонки ``id``, таблица целиком
+        пересоздаётся из батча (с предупреждением).
+
+        ВАЖНО про пересоздание: оно деструктивно для частичного батча. Без
+        ключа несвязанные строки были бы потеряны, поэтому таблицам без PK
+        нужен ``key_column`` от загрузчика, а не дефолт ``id``.
+
+        Из runtime-пути этот метод **не вызывается**: полная перезагрузка
+        таблицы делается через :meth:`replace_records`. Частичная запись
+        остаётся примитивом хранилища (и тестом фикстур).
+
+        Args:
+            table: ``schema.table`` (или ``table`` в схеме хранилища).
+            records: батч строк (dict).
+            key_column: PK-колонка источника; ``None`` → ``id`` → recreate.
+
+        Returns:
+            True при успешном сохранении, False при ошибке.
+        """
+        with self._lock:
+            try:
+                validate_records(records, table=table)
+                if not records:
+                    return True
+                self._assert_writable("upsert", table)
+                self._open_locked()
+                self._upsert_locked(table, records, key_column)
+                self._count_write()
+                return True
+            except Exception as e:  # noqa: BLE001 - контракт возвращает bool
+                self._record_write_error("upsert", table, e)
+                return False
 
     def replace_records(self, table: str, records: list[dict[str, Any]]) -> bool:
-        raise NotImplementedError(
-            "запись снимка не портирована в платформу: миграция "
-            "enterprise-mcp-platform, фаза 5 пункт 5.2 (replace_records)"
-        )
+        """Полностью пересоздать содержимое таблицы из полного батча.
+
+        Единственная операция записи, которую вызывает загрузчик снимка: снимок
+        — производный ресурс, поэтому в нём не бывает «дельт», а бывает
+        содержимое таблицы на момент загрузки. Структура таблицы сохраняется
+        (из ``ensure_schema`` либо существующей), строки, отсутствующие в
+        батче, удаляются.
+
+        Returns:
+            True при успехе, False при ошибке.
+        """
+        with self._lock:
+            try:
+                validate_records(records, table=table)
+                self._assert_writable("replace", table)
+                self._open_locked()
+                self._replace_locked(table, records)
+                self._count_write()
+                return True
+            except Exception as e:  # noqa: BLE001 - контракт возвращает bool
+                self._record_write_error("replace", table, e)
+                return False
 
     def ensure_schema(
         self,
@@ -698,10 +784,424 @@ class DuckDbSnapshotStore(CacheStore):
         records: list[dict[str, Any]],
         schema_meta: dict[tuple[str, str], tuple[str, str]] | None = None,
     ) -> bool:
-        raise NotImplementedError(
-            "запись снимка не портирована в платформу: миграция "
-            "enterprise-mcp-platform, фаза 5 пункт 5.2 (ensure_schema)"
+        """Создать таблицу по описанию колонок из источника (типы, комментарии).
+
+        Используется вместо вывода структуры из значений: так в снимок попадают
+        честные PG-типы (``map_pg_type``) и пустые таблицы тоже создаются.
+        Комментарии сохраняются в ``__schema_meta`` и возвращаются через
+        :meth:`get_schema`.
+
+        Args:
+            table: полное имя таблицы (``oarb.audits``).
+            records: описание колонок ``[{"name", "type", "not_null",
+                "comment"}, ...]`` либо батч строк — структура выводится по
+                значениям (оба прочтения контракта поддержаны, см.
+                ``writer.resolve_column_specs``).
+            schema_meta: дополнительные метаданные колонок
+                ``{(table, column): (comment, pg_type)}``; колонка, которой нет
+                среди ``records``, будет создана.
+
+        Returns:
+            True при успехе, False при ошибке.
+        """
+        if not records and not schema_meta:
+            return True
+        with self._lock:
+            try:
+                columns = resolve_column_specs(records, table=table)
+                columns = self._with_schema_meta(table, columns, schema_meta)
+                if not columns:
+                    return True
+                self._assert_writable("ensure_schema", table)
+                self._open_locked()
+                self._ensure_schema_locked(table, columns)
+                return True
+            except Exception as e:  # noqa: BLE001 - контракт возвращает bool
+                self._record_write_error("ensure_schema", table, e)
+                return False
+
+    # -- внутреннее: счётчики и охрана ---------------------------------
+
+    def _assert_writable(self, op: str, table: str) -> None:
+        """Отказать в записи, если снимок не проверен или открыт на чтение.
+
+        Первый уровень защиты — соединение DuckDB с ``read_only=True`` — не
+        сработает, если файл открыт повторно в RW. Этот уровень говорит прямо:
+        запись в снимок существует только на стадии загрузки, и только в
+        хранилище, которое уже открылось и проверилось (``_is_ready``) — тем
+        же правилом, что и чтение.
+        """
+        if not self._is_ready:
+            raise CacheOpenError(
+                self._path or "<in-memory>",
+                cause=RuntimeError(
+                    f"{op} {table}: хранилище не проверено открытием "
+                    "(open_snapshot_store(..., verify=True))"
+                ),
+            )
+        if self._duckdb_read_only or self._mode == CacheAccessMode.READ_ONLY:
+            raise ReadOnlyAssertionError(f"{op} {table}")
+
+    def _count_write(self) -> None:
+        self._upserts += 1
+        self._last_upsert_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _record_write_error(self, op: str, table: str, exc: Exception) -> None:
+        self._upsert_errors += 1
+        self._last_error = f"{op} {table}: {exc}"
+        logger.warning("[snapshot_writer] Ошибка %s %s: %s", op, table, exc)
+
+    def _with_schema_meta(
+        self,
+        table: str,
+        columns: list[dict[str, Any]],
+        schema_meta: dict[tuple[str, str], tuple[str, str]] | None,
+    ) -> list[dict[str, Any]]:
+        """Дописать в описание колонок метаданные из ``schema_meta``."""
+        if not schema_meta:
+            return columns
+        merged = list(columns)
+        by_name = {c["name"]: c for c in merged}
+        for key, value in schema_meta.items():
+            name = meta_column_name(key)
+            if not name:
+                continue
+            comment = value[0] if len(value) > 0 else None
+            pg_type = value[1] if len(value) > 1 else None
+            spec = by_name.get(name)
+            if spec is None:
+                spec = {
+                    "name": name,
+                    "type": pg_type or "",
+                    "not_null": False,
+                    "comment": comment,
+                }
+                merged.append(spec)
+                by_name[name] = spec
+                continue
+            if comment is not None:
+                spec["comment"] = comment
+            if pg_type:
+                spec["type"] = pg_type
+        return merged
+
+    # -- внутреннее: DDL и приём данных --------------------------------
+
+    def _qualified(self, table: str) -> tuple[str, str, str]:
+        """``(schema, table, "schema"."table")``; пустое имя — ошибка вызывающего."""
+        schema, name = split_table(table)
+        schema = schema or self._schema
+        if not name:
+            raise ValueError(f"Некорректное имя таблицы: {table!r}")
+        return schema, name, f'"{schema}"."{name}"'
+
+    def _table_exists(self, schema: str, name: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = ? AND table_name = ?",
+            [schema, name],
+        ).fetchone() is not None
+
+    def _column_names(self, schema: str, name: str) -> list[str]:
+        return [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = ? AND table_name = ?",
+                [schema, name],
+            ).fetchall()
+        ]
+
+    def _ensure_schema_locked(self, table: str, columns: list[dict[str, Any]]) -> None:
+        schema, name, full = self._qualified(table)
+        conn = self._conn
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        self._schema_defs[f"{schema}.{name}"] = list(columns)
+        # "__table__" — не настоящая колонка, а комментарий таблицы
+        real_cols = [c for c in columns if c.get("name") != TABLE_COMMENT_KEY]
+
+        if not self._table_exists(schema, name):
+            if not real_cols:
+                # описание есть, но состоит только из комментария таблицы:
+                # таблицы без колонок не бывает, а «снимок пустой таблицы»
+                # создаётся вызовом с пустым батчем.
+                self._save_schema_meta(schema, name, columns)
+                return
+            cols_sql = ", ".join(
+                f'"{c["name"]}" {map_pg_type(c.get("type", ""))}' for c in real_cols
+            )
+            conn.execute(f"CREATE TABLE {full} ({cols_sql})")
+        else:
+            existing = self._column_names(schema, name)
+            for c in real_cols:
+                if c["name"] not in existing:
+                    conn.execute(
+                        f'ALTER TABLE {full} ADD COLUMN "{c["name"]}" '
+                        f'{map_pg_type(c.get("type", ""))}'
+                    )
+
+        self._save_schema_meta(schema, name, columns)
+
+    def _upsert_locked(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        key_column: str | None = None,
+    ) -> None:
+        schema, name, full = self._qualified(table)
+        if not records:
+            return
+
+        # Колонки — из объединения ключей records (порядок появления)
+        df_cols = record_columns(records)
+        if not df_cols:
+            return
+
+        conn = self._conn
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+
+        if not self._table_exists(schema, name):
+            defs = self._schema_defs.get(f"{schema}.{name}")
+            if defs:
+                # описание таблицы уже было — создаём по нему, а не по значениям
+                self._ensure_schema_locked(table, defs)
+            else:
+                # первый батч: структуры ещё нет, создаём её из батча. Это не
+                # «потеря ключа», поэтому предупреждение здесь лишнее.
+                self._ingest_batch_locked(table, records, df_cols, create_table=True)
+                return
+
+        # DDL (ALTER/DROP) вне транзакции — DuckDB не откатывает DDL.
+        # новые колонки (появившиеся в источнике) — добавляем с выводом типа
+        existing_cols = self._column_names(schema, name)
+        for c in df_cols:
+            if c not in existing_cols:
+                col_values = [r.get(c) for r in records]
+                conn.execute(
+                    f'ALTER TABLE {full} ADD COLUMN "{c}" '
+                    f"{infer_duckdb_type(col_values)}"
+                )
+        existing_cols = self._column_names(schema, name)
+
+        key_col = key_column or ("id" if "id" in df_cols else None)
+        insert_cols = [c for c in df_cols if c in existing_cols]
+
+        # Ключ не найден — пересоздание из батча (CREATE OR REPLACE). Деструктивно
+        # для дельты, поэтому предупреждение должно быть громким.
+        if not (key_col and key_col in existing_cols):
+            logger.warning(
+                "[snapshot_writer] ВНИМАНИЕ: %s: нет ключа upsert "
+                "(key_column='%s', нет 'id') — таблица ПЕРЕСОЗДАЁТСЯ из батча. "
+                "Для дельты это удаляет несвязанные строки; укажите PK через key_column.",
+                full,
+                key_column,
+            )
+            self._ingest_batch_locked(
+                table, records, insert_cols or df_cols, create_table=True
+            )
+            return
+
+        # Транзакция: DELETE + INSERT. Если INSERT упадёт — данные останутся.
+        ids = [r[key_col] for r in records if r.get(key_col) is not None]
+        conn.execute("BEGIN")
+        try:
+            if ids:
+                conn.execute(
+                    f'DELETE FROM {full} WHERE "{key_col}" IN (SELECT unnest(?))',
+                    [ids],
+                )
+            self._ingest_batch_locked(table, records, insert_cols, create_table=False)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001 - откат уже не спасает, пусть увидит вызывающий
+                pass
+            raise
+
+    def _replace_locked(self, table: str, records: list[dict[str, Any]]) -> None:
+        schema, name, full = self._qualified(table)
+        conn = self._conn
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+
+        if not self._table_exists(schema, name):
+            # пустой источник без сохранённого описания — создаём из батча
+            if records:
+                self._upsert_locked(table, records)
+            return
+
+        # Транзакция: DELETE + INSERT. Если INSERT упадёт — таблица останется
+        # в исходном состоянии, без потери данных.
+        conn.execute("BEGIN")
+        try:
+            conn.execute(f"DELETE FROM {full}")
+            if not records:
+                conn.execute("COMMIT")
+                return
+
+            known = set(self._column_names(schema, name))
+            cols = [c for c in record_columns(records) if c in known]
+            if not cols:
+                conn.execute("COMMIT")
+                return
+            self._ingest_batch_locked(table, records, cols, create_table=False)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001 - откат уже не спасает, пусть увидит вызывающий
+                pass
+            raise
+
+    def _ingest_batch_locked(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        cols: list[str],
+        create_table: bool,
+    ) -> None:
+        """Залить батч в таблицу, сохранив вложенные типы, где это возможно.
+
+        ``create_table=True``  → ``CREATE OR REPLACE TABLE`` (агентское поведение);
+        ``create_table=False`` → ``INSERT INTO``.
+        """
+        schema, name, full = self._qualified(table)
+        if not cols:
+            return
+
+        try:
+            arrow_tbl = records_to_arrow(records)
+        except ImportError:
+            # pyarrow не объявлен в манифете платформы (задача 5.14) — запись
+            # обязана работать и без него, иначе снимок просто остался бы пустым.
+            arrow_tbl = None
+
+        if arrow_tbl is None:
+            nested = nested_columns(records, cols)
+            if nested:
+                # Проверка до DDL: иначе после неудачной записи осталась бы
+                # пустая таблица, созданная пересозданием.
+                raise ValueError(
+                    f"запись без pyarrow не переносит вложенные значения: {nested}. "
+                    "Либо поставьте pyarrow (манифест сервера, задача 5.14), либо "
+                    "приведите колонку к строке до загрузки."
+                )
+            if create_table and not self._table_exists(schema, name):
+                self._create_table_from_records(full, cols, records)
+            self._insert_records_locked(full, cols, records, replace=create_table)
+            return
+
+        projected = [c for c in cols if c in arrow_tbl.column_names]
+        if not projected:
+            return
+        cols_csv = ",".join(f'"{c}"' for c in projected)
+        self._conn.register("_snapshot_batch", arrow_tbl.select(projected))
+        try:
+            if create_table:
+                self._conn.execute(
+                    f"CREATE OR REPLACE TABLE {full} AS "
+                    f"SELECT {cols_csv} FROM _snapshot_batch"
+                )
+            else:
+                # Проверим, что таблица ещё существует (могла быть пересоздана)
+                if not self._table_exists(schema, name):
+                    self._conn.execute(
+                        f"CREATE TABLE {full} AS "
+                        f"SELECT {cols_csv} FROM _snapshot_batch"
+                    )
+                else:
+                    self._conn.execute(
+                        f"INSERT INTO {full} ({cols_csv}) "
+                        f"SELECT {cols_csv} FROM _snapshot_batch"
+                    )
+        finally:
+            self._conn.unregister("_snapshot_batch")
+
+    def _create_table_from_records(
+        self,
+        full: str,
+        cols: list[str],
+        records: list[dict[str, Any]],
+    ) -> None:
+        """Создать таблицу по батчу — только для пути без ``pyarrow``.
+
+        Типы выводятся из значений, поэтому честные PG-типы даёт только
+        ``ensure_schema``; этот путь существует, чтобы снимок не остался пустым
+        на установке без ``pyarrow``.
+        """
+        defs = ", ".join(
+            f'"{col}" {infer_duckdb_type(r.get(col) for r in records)}' for col in cols
         )
+        self._conn.execute(f"CREATE OR REPLACE TABLE {full} ({defs})")
+
+    def _insert_records_locked(
+        self,
+        full: str,
+        cols: list[str],
+        records: list[dict[str, Any]],
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Построчный ``INSERT`` — путь без ``pyarrow``.
+
+        Вложенные значения (``list``/``dict``, эмбеддинги) отсекаются
+        проверкой в :meth:`_ingest_batch_locked` до вызова сюда: DuckDB принял
+        бы их в ``VARCHAR``-колонку и тихо изменил данные.
+        """
+        if not cols:
+            return
+        cols_csv = ",".join(f'"{c}"' for c in cols)
+        placeholders = ",".join("?" for _ in cols)
+        if replace:
+            self._conn.execute(f"DELETE FROM {full}")
+        self._conn.executemany(
+            f"INSERT INTO {full} ({cols_csv}) VALUES ({placeholders})",
+            bindable_values(records, cols),
+        )
+
+    # -- метаданные схемы (комментарии + исходные PG-типы) ---------------
+
+    def _ensure_meta_table(self) -> None:
+        conn = self._conn
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{META_SCHEMA}"')
+        conn.execute(
+            f'CREATE TABLE IF NOT EXISTS "{META_SCHEMA}"."{META_TABLE}" ('
+            "schema_name TEXT, table_name TEXT, column_name TEXT, "
+            "comment TEXT, pg_type TEXT)"
+        )
+
+    def _save_schema_meta(
+        self,
+        schema: str,
+        table: str,
+        columns: list[dict[str, Any]],
+    ) -> None:
+        conn = self._conn
+        self._ensure_meta_table()
+        table_comment = next(
+            (c.get("comment") for c in columns if c.get("name") == TABLE_COMMENT_KEY),
+            None,
+        )
+        conn.execute(
+            f'DELETE FROM "{META_SCHEMA}"."{META_TABLE}" '
+            "WHERE schema_name = ? AND table_name = ?",
+            [schema, table],
+        )
+        rows: list[tuple[Any, ...]] = []
+        if table_comment:
+            rows.append((schema, table, None, table_comment, None))
+        for c in columns:
+            if c.get("name") == TABLE_COMMENT_KEY:
+                continue
+            rows.append((schema, table, c["name"], c.get("comment"), c.get("type")))
+        if rows:
+            conn.executemany(
+                f'INSERT INTO "{META_SCHEMA}"."{META_TABLE}" '
+                "(schema_name, table_name, column_name, comment, pg_type) "
+                "VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+
 
 
 def _is_missing_relation(exc: Exception) -> bool:

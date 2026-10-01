@@ -1,0 +1,404 @@
+"""Конвейер ``generated_sql``: модель пишет SELECT, мы его проверяем и выполняем.
+
+Портировано из агента (``workspace/skills/audit_analyzer/scripts/
+generated_sql_mode.py``). Порядок шагов и текст промпта сохранены; изменения
+те, что требует план:
+
+* **4.6** — описание схемы, few-shot из реестра, промпт с ``<NO_MATCH>``,
+  цикл попыток, ``validate_sql``, ``EXPLAIN``. Модель зовётся только через
+  переданный колбэк: ``libs/llm`` владеет HTTP, библиотека аудита — нет.
+* **4.7** — после ``validate_sql`` запрос проверяется **по составу таблиц**
+  и отклоняется, если ссылается на что-то вне разрешённого списка. Раньше
+  белый список был строкой в промпте, а ``SELECT * FROM
+  public.agent_gateway_logs`` проходил без возражений.
+* **4.8** — к сгенерированному запросу применяется потолок строк, и
+  применение проверяется повторным разбором. Раньше ``LIMIT`` дописывал
+  только сборщик predefined, а сгенерированный запрос уходил в снимок как
+  есть.
+* **4.9** — аргумента ``context`` больше нет: в агенте он позволял
+  подклеить текст вызывающей стороны в начало сообщений генератору.
+  Личность подставляет вызывающий, закрывая колбэк.
+* **4.13** — нечитаемый реестр больше не превращается в пустой few-shot:
+  это ``registry_unavailable``. Пустой реестр (ноль строк) — не ошибка.
+* **4.14** — успех это :class:`~libs.audit.models.AuditResult`, неудача —
+  исключение с ``code``. ``<NO_MATCH>`` остаётся честным успехом с флагом
+  ``no_match`` (как и был), чтобы адаптер отдал агенту код ``no_match``,
+  а не пустую выдачу.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+
+from libs.audit.contracts import (
+    ChatCallable,
+    SnapshotExplain,
+    SnapshotQuery,
+    SnapshotSchema,
+)
+from libs.audit.errors import (
+    AuditError,
+    AuditValidationError,
+    ForbiddenTableError,
+    GenerationFailedError,
+    QueryFailedError,
+    RowLimitNotAppliedError,
+)
+from libs.audit.guard import (
+    DEFAULT_ROW_CEILING,
+    DEFAULT_SCHEMA,
+    assert_tables_allowed,
+    enforce_row_limit,
+    normalize_table_name,
+)
+from libs.audit.models import AuditResult, ScriptDefinition
+from libs.audit.registry_loader import load_all
+from libs.enterprise_data.sql_safety import format_schema, validate_sql
+
+__all__ = [
+    "MAX_ATTEMPTS",
+    "NO_MATCH_MARKER",
+    "is_no_match",
+    "run_generated_sql",
+    "sanitize_sql_response",
+    "select_few_shot",
+]
+
+#: Сколько раз пробуем сгенерировать запрос. Столько же, сколько было
+#: в агенте (там это называлось ``MAX_RETRIES=3`` + одна начальная попытка;
+#: имя приведено к честному).
+MAX_ATTEMPTS = 4
+
+#: Маркер явного отказа модели: «на этих таблицах ответить нельзя».
+NO_MATCH_MARKER = "<NO_MATCH>"
+
+#: Признак того, что снимок занят другой операцией. В агенте это был
+#: особый случай «прервать цикл, а не повторять»: повтор не поможет, пока
+#: файл кэша занят. Сохранено дословно, потому что это формулировка
+#: DuckDB, а не наша.
+_BUSY_MARKER = "временно занята"
+
+#: Ошибки, которые имеет смысл показать модели и попросить исправить.
+_RETRYABLE = (AuditValidationError, ForbiddenTableError, RowLimitNotAppliedError)
+
+
+def _normalize(text: str) -> set[str]:
+    """Токены для keyword-overlap: нижний регистр, длина ≥ 3.
+
+    Длина отсекает служебные слова («и», «по», «в», «the»).
+    """
+    return {
+        token
+        for token in re.split(r"[^a-zа-яё0-9]+", (text or "").lower())
+        if len(token) >= 3
+    }
+
+
+def select_few_shot(
+    query: str, scripts: dict[str, ScriptDefinition], limit: int = 2
+) -> str:
+    """Выбрать top-N скриптов реестра по пересечению слов с запросом.
+
+    Возвращает блок примеров для системного промпта либо пустую строку, если
+    реестр пуст или релевантных скриптов нет. Данные — только из реестра
+    (``load_all``), своей копии SQL здесь нет.
+    """
+    if not scripts:
+        return ""
+    query_tokens = _normalize(query)
+    if not query_tokens:
+        return ""
+
+    scored: list[tuple[int, ScriptDefinition]] = []
+    for script in scripts.values():
+        tokens = _normalize(f"{script.name} {script.description}")
+        score = len(query_tokens & tokens)
+        if score > 0:
+            scored.append((score, script))
+    if not scored:
+        return ""
+
+    scored.sort(key=lambda item: (-item[0], item[1].name))
+    lines = [
+        "Examples from the predefined registry "
+        "(use as templates, adapt to the user's request):"
+    ]
+    for _, script in scored[:limit]:
+        lines.append(f"  -- «{script.description}» →")
+        lines.append(f"  {script.sql_template.strip()}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def is_no_match(text: str) -> bool:
+    """Распознать явный отказ модели от генерации SQL.
+
+    Сравнение — точное, по маркеру, с запасом по регистру и окружающим
+    знакам. Сюда попадает только ответ, который не прошёл
+    :func:`validate_sql`, то есть «SQL» тут означает ровно ``<NO_MATCH>``.
+    """
+    if not text:
+        return False
+    cleaned = text.strip().rstrip(".;,").strip()
+    return cleaned.upper() == NO_MATCH_MARKER
+
+
+def sanitize_sql_response(text: str) -> str:
+    """Достать SQL из ответа модели (мысли + markdown-обёртки).
+
+    Для reasoning-моделей ответ выглядит как ``<think>...</think>`` и
+    блок ```` ```sql ... ``` ``. Берём последний блок с SQL — модель могла
+    сначала показать неудачный вариант в разборе.
+    """
+    cleaned = (text or "").strip()
+
+    if "```" in cleaned:
+        blocks = re.findall(r"```(?:sql)?\s*\n(.*?)```", cleaned, re.DOTALL)
+        if blocks:
+            return blocks[-1].strip().rstrip(";")
+
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"```xml-think\s*\n.*?```", "", cleaned, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^[^\S\n]*think:[^\n]*\n", "", cleaned, flags=re.MULTILINE).strip()
+    return cleaned.strip().rstrip(";")
+
+
+def _schema_for_prompt(
+    read_schema: SnapshotSchema,
+    allowed: Sequence[str],
+    default_schema: str,
+) -> str:
+    """Описание схемы, **ограниченное белым списком**.
+
+    Ограничение здесь, а не только в проверке запроса, намеренно: модели
+    не нужно видеть то, что ей нельзя использовать, — иначе она тратит
+    попытки на таблицы, которых в списке нет.
+    """
+    try:
+        schema = read_schema()
+    except Exception as exc:  # noqa: BLE001 - текст ошибки уходит вызывающему
+        raise QueryFailedError(
+            f"Не удалось прочитать описание схемы снимка: {exc}"
+        ) from exc
+    if not isinstance(schema, dict):
+        raise QueryFailedError(
+            f"Описание схемы вернуло {type(schema).__name__}, ожидался словарь."
+        )
+
+    wanted = {name.split(".", 1)[1] for name in allowed}
+    tables = {
+        name: meta
+        for name, meta in (schema.get("tables") or {}).items()
+        if name in wanted
+    }
+    return format_schema({"schema": default_schema, "tables": tables})
+
+
+def _build_prompt(
+    query: str,
+    schema_text: str,
+    allowed: Sequence[str],
+    few_shot: str,
+    row_ceiling: int,
+) -> str:
+    """Системный промпт модели.
+
+    Отличие от агентского текста — одна строка про потолок строк: раньше
+    модель была вправе вернуть ``LIMIT 1000000``, и это уходило в снимок.
+    """
+    few_shot_section = f"\n\n{few_shot}" if few_shot else ""
+    return (
+        "You are a PostgreSQL expert. Return ONLY a safe SELECT query — no "
+        "explanations, no markdown, no SQL wrapping.\n\n"
+        "STRICT RULES:\n"
+        "  1. Use ONLY these tables (whitelist, fully qualified):\n"
+        f"     {', '.join(allowed) if allowed else '(none)'}\n"
+        "  2. If the user's question CANNOT be answered from these tables "
+        "(the required data is not in the whitelist), return EXACTLY "
+        f"``{NO_MATCH_MARKER}`` and nothing else — no SQL, no markdown, no "
+        "explanation. NEVER invent tables, substitute a different table, or "
+        "change the schema-qualified names. Honesty over coverage: an "
+        f"explicit ``{NO_MATCH_MARKER}`` is the correct response when the data "
+        "is unavailable.\n"
+        "  3. Always schema-qualify table names.\n"
+        f"  4. Always end the query with LIMIT no greater than {row_ceiling}."
+        f"{few_shot_section}"
+    )
+
+
+def run_generated_sql(
+    query: str,
+    reader: SnapshotQuery,
+    *,
+    llm: ChatCallable,
+    explain: SnapshotExplain,
+    read_schema: SnapshotSchema,
+    allowed_tables: Sequence[str],
+    scripts_registry_table: str,
+    row_ceiling: int = DEFAULT_ROW_CEILING,
+    max_attempts: int = MAX_ATTEMPTS,
+    few_shot_limit: int = 2,
+    default_schema: str = DEFAULT_SCHEMA,
+) -> AuditResult:
+    """Сгенерировать SQL по описанию, проверить и выполнить.
+
+    Args:
+        query: Запрос на естественном языке.
+        reader: Чтение снимка (``DataService.snapshot_query``).
+        llm: Вызов модели (``libs.llm.client.call_llm`` с подставленной
+            личностью). Аргумента ``context`` нет намеренно (пункт 4.9).
+        explain: Проверка синтаксиса без выполнения
+            (``explain_query`` в терминах платформы). Обязателен: без него
+            запрос ушёл бы в снимок непроверенным.
+        read_schema: Описание схемы снимка.
+        allowed_tables: Белый список таблиц, полностью квалифицированных.
+        scripts_registry_table: ``schema.table`` реестра для few-shot
+            (пункт 4.1).
+        row_ceiling: Потолок строк сгенерированного запроса (пункт 4.8).
+        max_attempts: Сколько раз пробуем сгенерировать запрос.
+        few_shot_limit: Сколько примеров из реестра подкладывать.
+        default_schema: Схема снимка (пункт 4.4).
+
+    Returns:
+        :class:`AuditResult` с ``mode="generated_sql"``. Флаг ``no_match``
+        означает честный отказ модели, а не ошибку.
+
+    Raises:
+        AuditValidationError: Пустой или некорректный запрос, нечитаемая
+            схема, не переживший проверки текст.
+        ForbiddenTableError: Ссылка на таблицу вне списка (пункт 4.7).
+        RowLimitNotAppliedError: Потолок строк не применён (пункт 4.8).
+        RegistryUnavailableError / RegistryCorruptError: Реестр few-shot не
+            прочитан (пункт 4.13).
+        QueryFailedError: Снимок отклонил запрос.
+        GenerationFailedError: Попытки исчерпаны.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise AuditValidationError(
+            f"Ожидался непустой текст запроса, получено: {type(query).__name__}"
+        )
+    if not isinstance(row_ceiling, int) or isinstance(row_ceiling, bool) or row_ceiling <= 0:
+        raise AuditValidationError(
+            f"Потолок строк должен быть положительным целым, получено: {row_ceiling!r}"
+        )
+    if max_attempts < 1:
+        raise AuditValidationError(
+            f"Число попыток должно быть не меньше 1, получено: {max_attempts!r}"
+        )
+
+    allowed = tuple(
+        normalize_table_name(name, default_schema) for name in allowed_tables
+    )
+    registry = load_all(
+        reader, scripts_registry_table, default_schema=default_schema
+    )
+    few_shot = select_few_shot(query, registry, limit=few_shot_limit)
+    schema_text = _schema_for_prompt(read_schema, allowed, default_schema)
+
+    system_prompt = _build_prompt(query, schema_text, allowed, few_shot, row_ceiling)
+    base_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Schema:\n{schema_text}\n\nRequest: {query}"},
+    ]
+
+    last_error: AuditError | None = None
+    last_query = ""
+
+    for attempt in range(max_attempts):
+        messages = list(base_messages)
+        if attempt > 0 and last_error is not None:
+            messages.append({"role": "assistant", "content": last_query})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Предыдущий SQL-запрос вызвал ошибку: {last_error.message}\n"
+                        "Исправь запрос и верни только корректный SQL.\n"
+                        f"НАПОМИНАНИЕ: используй только таблицы из whitelist выше; "
+                        f"не придумывай новых таблиц; все имена таблиц — "
+                        f"полностью квалифицированные (schema.table); "
+                        f"потолок строк — не более {row_ceiling}."
+                    ),
+                }
+            )
+
+        try:
+            raw_answer = llm(messages)
+        except Exception as exc:  # noqa: BLE001 - причина уходит в отчёт
+            last_error = QueryFailedError(f"Вызов модели не удался: {exc}")
+            last_query = ""
+            continue
+
+        query_text = sanitize_sql_response(raw_answer)
+
+        if is_no_match(query_text):
+            # Честный отказ модели — это не сбой пайплайна. Возвращаем
+            # успех с флагом: подменять «нет данных» похожей таблицей
+            # было бы выдумыванием ответа.
+            return AuditResult(
+                mode="generated_sql",
+                rows=[],
+                columns=[],
+                row_count=0,
+                sql="",
+                no_match=True,
+                row_ceiling=row_ceiling,
+            )
+
+        try:
+            # Порядок проверок: вид операции → состав таблиц → потолок строк.
+            # Состав таблиц проверяется до EXPLAIN: нечего объяснять план
+            # запроса к таблице, которой быть не должно.
+            safety_error = validate_sql(query_text)
+            if safety_error:
+                raise AuditValidationError(safety_error)
+            assert_tables_allowed(
+                query_text, allowed, default_schema=default_schema
+            )
+            verified_text = enforce_row_limit(query_text, row_ceiling)
+        except _RETRYABLE as exc:
+            last_error = exc
+            last_query = query_text
+            continue
+
+        explain_result = explain(verified_text) or {}
+        if not explain_result.get("valid"):
+            detail = explain_result.get("error") or "EXPLAIN не подтвердил запрос"
+            if _BUSY_MARKER in str(detail):
+                break
+            last_error = AuditValidationError(f"EXPLAIN: {detail}")
+            last_query = query_text
+            continue
+
+        result = reader(verified_text, None)
+        if not isinstance(result, dict):
+            raise QueryFailedError(
+                f"Выполнение вернуло {type(result).__name__}, ожидался словарь."
+            )
+        if result.get("status") != "success":
+            detail = str(result.get("error") or "снимок не ответил успехом")
+            if _BUSY_MARKER in detail:
+                break
+            raise QueryFailedError(f"Ошибка выполнения запроса: {detail}")
+
+        rows = list(result.get("rows") or [])
+        return AuditResult(
+            mode="generated_sql",
+            rows=rows,
+            columns=list(result.get("columns") or []),
+            row_count=int(result.get("row_count") or len(rows)),
+            sql=verified_text,
+            no_match=False,
+            row_ceiling=row_ceiling,
+        )
+
+    detail = last_error.message if last_error is not None else "неизвестная ошибка"
+    raise GenerationFailedError(
+        f"Не удалось сгенерировать корректный SQL после {max_attempts} попыток. "
+        f"Последняя ошибка: {detail}",
+        attempts=max_attempts,
+        last_code=last_error.code if last_error is not None else "",
+        last_error=detail,
+        last_query=last_query,
+    )

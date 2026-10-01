@@ -1,7 +1,7 @@
 """Снимок (файл кэша) во владельце ``data``.
 
-Портировано из агента: ``lib/services/duckdb_cache_store.py`` (читающая
-половина), ``lib/services/cache_provider.py`` (контракты),
+Портировано из агента: ``lib/services/duckdb_cache_store.py`` (чтение — фаза 3,
+запись — фаза 5), ``lib/services/cache_provider.py`` (контракты),
 ``lib/utils/duckdb_query.py`` (исполнитель запросов). Удаление агентских копий
 — фазы 4/5/9; до тех пор обе копии живут намеренно, платформенная — рабочая.
 
@@ -20,14 +20,18 @@
 * :mod:`store` — :class:`~libs.enterprise_data.snapshot.store.DuckDbSnapshotStore`
   и фабрика :func:`~libs.enterprise_data.snapshot.store.open_snapshot_store`.
   Единственное место платформы, где допустим ``import duckdb``.
+* :mod:`writer` — маппинг типов PostgreSQL → DuckDB и маршалинг строк для
+  писателя (чистые функции, по той же причине, что и ``query.py``).
 
 Правила слоя:
 
 * FAISS-индексы здесь **не** живут — их владелец ``libs/vectors``. Хранилище
   отдаёт строки векторного хранилища и получает построенный индекс
   сверху (``index_accessor``), поэтому не знает, кто строит индексы.
-* Роль записи не портирована (фаза 5): методы ``CacheIngestion`` поднимают
-  ``NotImplementedError`` с явной ссылкой на фазу.
+* Запись есть (фаза 5, пункты 5.1/5.2) и принадлежит **загрузчику**
+  :mod:`libs.enterprise_data.loader`: тот открывает хранилище в ``READ_WRITE``
+  на время загрузки и закрывает сразу после. Из runtime-пути вызывается только
+  ``replace_records``.
 * Путь к файлу — параметр. Каталог (``gateway.cache.local_path`` у агента)
   разворачивается в файл через ``resolve_snapshot_path``.
 """
@@ -62,6 +66,13 @@ from libs.enterprise_data.snapshot.store import (
     resolve_snapshot_path,
     split_table,
 )
+from libs.enterprise_data.snapshot.writer import (
+    infer_duckdb_type,
+    map_pg_type,
+    record_columns,
+    resolve_column_specs,
+    validate_records,
+)
 
 __all__ = [
     "SNAPSHOT_FILENAME",
@@ -82,10 +93,15 @@ __all__ = [
     "classify_sql",
     "explain_query",
     "extract_lock_holder",
+    "infer_duckdb_type",
+    "map_pg_type",
     "open_snapshot_store",
+    "record_columns",
     "reject_unsupported_filesystem",
+    "resolve_column_specs",
     "resolve_snapshot_path",
     "rewrite_duck_sql",
     "run_query",
     "split_table",
+    "validate_records",
 ]

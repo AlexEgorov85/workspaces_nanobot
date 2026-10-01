@@ -317,30 +317,6 @@ class TestSearchVectorWithoutAccessor:
         assert store.preload_indexes() == []
 
 
-class TestIngestionIsPhaseFive:
-    def test_upsert_records_raises(self, store: DuckDbSnapshotStore) -> None:
-        with pytest.raises(NotImplementedError, match="5.1"):
-            store.upsert_records("oarb.t", [{"a": 1}])
-
-    def test_replace_records_raises(self, store: DuckDbSnapshotStore) -> None:
-        with pytest.raises(NotImplementedError, match="5.2"):
-            store.replace_records("oarb.t", [{"a": 1}])
-
-    def test_ensure_schema_raises(self, store: DuckDbSnapshotStore) -> None:
-        with pytest.raises(NotImplementedError, match="5.2"):
-            store.ensure_schema("oarb.t", [{"a": 1}])
-
-    def test_error_names_the_migration_phase(self) -> None:
-        """Сообщение обязано называть фазу: иначе «не реализовано» читается как баг."""
-        import inspect
-
-        from libs.enterprise_data.snapshot import store as store_module
-
-        source = inspect.getsource(store_module.DuckDbSnapshotStore.replace_records)
-        assert "enterprise-mcp-platform" in source
-        assert "фаза 5" in source
-
-
 class TestGetStats:
     def test_reports_tables_and_mode(self, store: DuckDbSnapshotStore) -> None:
         stats = store.get_stats()
