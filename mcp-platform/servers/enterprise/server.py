@@ -145,6 +145,7 @@ def _build_container() -> ToolContainer:
     config = {
         "statement_timeout_ms": statement_timeout_ms,
         "max_rows": max_rows,
+        **_vectors_config_from_env(),
         **_audit_config_from_env(),
     }
     container = ToolContainer(services={"data": data, "llm": llm}, config=config)

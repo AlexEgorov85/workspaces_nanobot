@@ -111,6 +111,70 @@ class TestBootstrap:
                     "но не объявляет ни одного permission"
                 )
 
+
+class TestContainerWiring:
+    """Конфигурация обязана доезжать до сервисов при сборке контейнера.
+
+    Регрессия, которую этот тест закрывает: при добавлении capability ``audit``
+    вызов ``_vectors_config_from_env()`` в ``_build_container`` вытеснили общей
+    сборкой ``config``, и секция ``gateway.vector`` пропала. Сервер поднимался,
+    операции отвечали, ``list_indexes`` отдавал **пустой** каталог — то есть
+    capability работала, не объявляя ни одного индекса. Объявления доходили до
+    окружения процесса, терялись в одном месте, и ни один тест этого не видел:
+    все проверки строили сервис напрямую, минуя bootstrap.
+    """
+
+    def test_vector_config_reaches_the_service(self, monkeypatch) -> None:
+        monkeypatch.setenv(
+            "ENTERPRISE_VECTOR_STORAGE_TABLE", "oarb.audit_vectors"
+        )
+        monkeypatch.setenv(
+            "ENTERPRISE_VECTOR_INDEXES",
+            '{"audits_index": {"table": "oarb.audits", "pk": "id"}}',
+        )
+        monkeypatch.setenv("ENTERPRISE_EMBED_MODEL", "mxbai-embed-large:latest")
+        container = enterprise_server._build_container()
+        config = container.config
+        vector = ((config.get("gateway") or {}).get("vector") or {})
+        index = vector.get("index") or {}
+        assert index.get("storage_table") == "oarb.audit_vectors", config
+        assert "audits_index" in (index.get("indexes") or {}), config
+        assert (vector.get("embedding") or {}).get("model") == "mxbai-embed-large:latest"
+
+    def test_audit_config_reaches_the_service(self, monkeypatch) -> None:
+        monkeypatch.setenv(
+            "ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "public.agent_predefined_scripts"
+        )
+        monkeypatch.setenv(
+            "ENTERPRISE_AUDIT_TABLES", "oarb.audits, oarb.violations\noarb.audit_reports"
+        )
+        monkeypatch.setenv("ENTERPRISE_AUDIT_ROW_CEILING", "500")
+        container = enterprise_server._build_container()
+        config = container.config
+        assert config["scripts_registry"]["table"] == "public.agent_predefined_scripts"
+        # Разделители: запятая с пробелом и перевод строки. Список пишут руками.
+        assert config["audit"]["tables"] == [
+            "oarb.audits",
+            "oarb.violations",
+            "oarb.audit_reports",
+        ]
+        assert config["audit"]["row_ceiling"] == "500"
+
+    def test_both_sections_coexist(self, monkeypatch) -> None:
+        """Секции не должны затирать друг друга.
+
+        Отдельный тест, а не часть предыдущих: слияние словарей на месте
+        затирания — ровно тот способ, которым одна пропавшая секция убила
+        другую.
+        """
+        monkeypatch.setenv("ENTERPRISE_VECTOR_STORAGE_TABLE", "oarb.audit_vectors")
+        monkeypatch.setenv("ENTERPRISE_SCRIPTS_REGISTRY_TABLE", "public.agent_predefined_scripts")
+        config = enterprise_server._build_container().config
+        assert config.get("gateway"), "секция gateway потеряна"
+        assert config.get("scripts_registry"), "секция scripts_registry потеряна"
+        assert config.get("audit"), "секция audit потеряна"
+        assert config.get("statement_timeout_ms") is not None
+
     def test_no_sql_surface_on_operations(self) -> None:
         """Произвольного SQL на поверхности агента не существует."""
         _, registry, _ = enterprise_server.build()
