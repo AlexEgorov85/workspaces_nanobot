@@ -9,6 +9,111 @@
 
 Поэтому удаление сводится к списку ниже. **После удаления строку убрать отсюда.**
 
+## Кластер снимка в агенте (фаза 5, п. 5.1–5.4, 5.10, 3.14)
+
+Снятие с агента сделано соседним воркером (`c660b6f`): `build_cache_provider`,
+`_init_cache_runtime`, `CacheSettings`, `check_duckdb_cache` и `_make_preload` из
+кода убраны, навык `audit_analyzer` ходит в capability `audit` платформы. Остался
+сам кластер — в рантайме он уже никем не вызывается.
+
+**Проверено по `import` (после `c660b6f`), production-код агента:**
+
+| Модуль | Кто импортирует помимо самого кластера |
+|---|---|
+| `preload_service.py` | **никто** — сосед снял последнего вызывающего |
+| `cache_load_service.py` | **никто** |
+| `duckdb_cache_store.py` | только `cache_provider.py:399` (взаимная связка) |
+| `duckdb_query.py` | только `duckdb_cache_store.py:1077–1374` |
+| `cache_provider.py` | `tools/build_vectors.py:437`, `tools/check_indexes.py:182` |
+| `cache_provider_impl.py` | `tools/build_vectors.py:73`, `tools/check_indexes.py:47,121` |
+| `vector_index_service.py` | `tools/build_vectors.py:78` |
+| `retry.py` | `cache_provider_impl.py:297` и `llm_client.py:28` (мёртвый файл) |
+
+Вывод: единственное, что держит кластер снаружи, — две утилиты
+`tools/build_vectors.py` и `tools/check_indexes.py`. `llm_client.py` production-
+импортёров не имеет вовсе, поэтому `retry.py` уходит вместе с ним же.
+
+**Сначала — пункт 3.6.** Спека требует *перенести* обе утилиты на платформу; их
+блокером был агентский `cache_provider`/`vector_index_service` в рантайме, и он
+только что снят. Пока перенос не сделан, удаление кластера поймает утилиты.
+
+```bash
+# после переноса 3.6:
+git rm lib/services/duckdb_cache_store.py \
+      lib/services/cache_load_service.py \
+      lib/services/cache_provider.py \
+      lib/services/cache_provider_impl.py \
+      lib/services/vector_index_service.py \
+      lib/services/preload_service.py \
+      lib/utils/duckdb_query.py \
+      lib/utils/retry.py
+```
+
+`llm_client.py` и `llm_config.py` в этот список не попали: они удаляются
+отдельно и уже перечислены ниже, в «Обязательно удалить». В проход кластера они
+попадают только как держатели `retry.py` и `httpx`.
+
+**Тесты делятся на три группы — одна команда `git rm` здесь не годится.**
+
+Удаляются вместе с кластером, потому что их предмет и есть кластер:
+
+```bash
+git rm tests/test_duckdb_cache_store.py \
+      tests/test_cache_provider_mode.py \
+      tests/test_cache_load_service.py \
+      tests/test_cache_no_file_hold.py \
+      tests/test_cache_provider_open_failure.py \
+      tests/test_cache_provider_meta.py \
+      tests/test_single_cache_interface.py \
+      tests/test_preload_service.py \
+      tests/test_get_embedding_auth.py \
+      tests/test_vector_search_silent_failure.py \
+      tests/integration/test_vector_build_e2e.py
+```
+
+Требуют **правки**, а не удаления: импорт инцидентный, а тест проверяет другое.
+Их нельзя убирать молча — прогон упадёт на `ImportError`.
+
+| Файл | Что в нём импортировано |
+|---|---|
+| `tests/test_application_context.py:444–500` | `resolve_cache_path` (6 мест) |
+| `tests/test_auto_register_skills.py:272–287` | `read_embedding_config` (3 места) |
+| `tests/test_skill_config_api.py:140,152` | `read_vector_index_config` |
+| `tests/test_unified_event_logging_contract.py:301,315` | `CacheLoadService`, `_emit_health_event` |
+| `tests/test_application_context_cache_lifecycle.py:74,86,94` | `CacheLoadService` — сосед уже вырезал отсюда большую часть |
+
+Решение при выполнении, предмет смешанный (проверены только импорты):
+
+| Файл | Импорт | Чем занят |
+|---|---|---|
+| `tests/test_cache_readiness_and_skill_role.py:136,155` | `DuckDbCacheStore`, `CacheProvider`, `CacheStore` | 4.2 readiness + 3.6 роль навыка |
+| `tests/test_remove_vector_index_store_guards.py:243–278` | `build_faiss_index`, `compute_index_health` | guard'ы вокруг удалённого store |
+| `tests/test_shared_cache_path_across_profiles.py:80,93` | `resolve_cache_path` | владение `gateway.cache.local_path` профилем |
+| `tests/_test_sql_safety.py:202,212` | `duckdb_query`, `duckdb` | отключён (`_` в имени), гонять нельзя |
+
+Вместе с утилитами уезжают по 3.6 их собственные тесты:
+`tests/test_build_vectors_cli.py`, `tests/test_check_indexes.py`.
+
+Приёмка фазы 5 — `grep -R "duckdb" lib/ workspace/` пуст — достижима только
+после этого: сейчас не пуст, потому что файлы стоят в обоих репозиториях.
+
+### Зависимости, которые уходят вместе с кластером (п. 10.3)
+
+Пять пакетов нельзя вычистить раньше: каждый импортируется удаляемым кодом.
+Проверено по `import`, в пределах агента:
+
+| Пакет | Импортируется из |
+|---|---|
+| `httpx` | `cache_provider_impl.py:282`, `llm_client.py:156` |
+| `pyarrow` | `duckdb_cache_store.py:96` |
+| `numpy` | `duckdb_cache_store.py:1360`, `duckdb_query.py:278,318`, `build_vectors.py:856` |
+| `faiss-cpu` | `duckdb_cache_store.py:1366`, `duckdb_query.py:278`, `build_vectors.py:855` |
+| `duckdb` | `duckdb_cache_store.py:491`, `tests/_test_sql_safety.py:202` |
+
+`httpx` можно снять раньше остальных: оба его импортёра уже стоят в списке
+удаления, а `llm_client.py` мёртв. Остальные ждут 3.6. `sqlglot` из требований
+уже убран (осталась строка-комментарий).
+
 ## Обязательно удалить
 
 | Файл | Почему | Команда |
@@ -16,8 +121,16 @@
 | `mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py` | Заглушка на месте удалённой операции `claim_task` (коммит `944535e`). Код операции вырезан, файл оставлен пустым намеренно: загрузчик по соглашению пропускает модули с именем, начинающимся с `_`, поэтому операция не публикуется. Сам файл не нужен | `git rm mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py` |
 | `mcp-platform/servers/enterprise/capabilities/data/tools/_update_task_status.py` | То же для `update_task_status`: обе операции над очередью задач удалены решением владельца, в capability `data` очередь не осталась | `git rm mcp-platform/servers/enterprise/capabilities/data/tools/_update_task_status.py` |
 | `mcp-platform/_live_audit_tables.py` | Черновой прогон по таблицам аудита, в git не отслеживается, к миграции не относится | удалить вручную (файл не отслеживается, `git rm` не подходит) |
-| `lib/services/llm_client.py` | Мёртвый код: общение с моделью принадлежит платформе, навыки ходят в `mcp-platform/libs/llm` через `libs/enterprise_client/llm.py`. Импортирует его только текст в `project_settings.py:496` | `git rm lib/services/llm_client.py` |
-| `lib/services/llm_config.py` | То же. Второй «импортёр» `retry.py` (пункт 3.14), из-за которого удаление `retry.py` считалось заблокированным | `git rm lib/services/llm_config.py` |
+| `lib/services/llm_client.py` | Мёртвый код: общение с моделью принадлежит платформе, навыки ходят в `mcp-platform/libs/llm` через `libs/enterprise_client/llm.py`. Production-импортёров не осталось: сосед снял последнего вызывающего из `project_settings.py`. Держат его только `tests/test_dependency_direction.py:143` (упоминание в комментарии) и страж `tests/test_llm_goes_through_mcp.py::test_agent_has_no_llm_client_module`, помеченный `xfail` до ручного удаления | `git rm lib/services/llm_client.py` |
+| `lib/services/llm_config.py` | То же. Импортируется из `llm_client.py:39` и из `tests/test_llm_config.py` (6 мест) — то есть пока жив первый, второй нельзя выкинуть молча. Пока жив и `llm_client.py`, `lib/utils/retry.py` (пункт 3.14) считался заблокированным вторым держателем | `git rm lib/services/llm_config.py` |
+
+Порядок важен: `llm_client.py` удаляется раньше `llm_config.py`, иначе падает
+`tests/test_llm_config.py`. Вместе с ними уходит и сам тест мёртвого модуля —
+предмет у него ровно один:
+
+```bash
+git rm tests/test_llm_config.py
+```
 | `mcp-platform/.sessions_demo/` | Демонстрационный каталог файлов сессии, оставшийся после прогона `SessionWorkspace` вручную. Содержит только синтетические артефакты `sess-DEMO-1`, к проекту не относится | удалить вручную (каталог не отслеживается) |
 | `sql/vectors/create_vector_index_config.sql` | Мёртвый DDL: самая конфигурация индексов живёт в `project.json`. `migrate.py` обходит только `sql/migrations/`, файл не исполняется. Код вырезан, осталась заглушка (фаза 5, п. 5.9) | `git rm sql/vectors/create_vector_index_config.sql` |
 | `sql/vectors/create_vector_index_store.sql` | Мёртвый DDL: persisted FAISS-кеш удалён ещё change `remove-vector-index-store`, таблица снесена миграцией `V003`. Не исполняется. То же, что и предыдущий (фаза 5, п. 5.9) | `git rm sql/vectors/create_vector_index_store.sql` |
