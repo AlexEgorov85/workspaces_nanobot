@@ -437,12 +437,63 @@ class DuckDbSnapshotStore(CacheStore):
         schema_name: str | None = None,
         table_names: list[str] | None = None,
     ) -> dict[str, Any]:
-        schema = schema_name or self._schema
-        tables = table_names if table_names is not None else self._tables
+        """Описание схемы снимка.
+
+        Явно запрошенные схема и таблицы обрабатываются как раньше. Когда не
+        задано **ни того, ни другого**, схема не угадывается, а читается из
+        файла.
+
+        Раньше здесь стояло ``schema_name or self._schema``, то есть ``main`` по
+        умолчанию. Это молча ломало описание снимка: загрузчик кладёт таблицы в
+        их PG-схему (``oarb.audits``), а читатель искал ``main`` и находил
+        пустоту. Потребитель получал «в базе нет колонок» и строил по этому
+        выводу — а модель, получив от capability ``audit`` пустую схему,
+        выдумывала имена колонок и значения.
+
+        Схема снимка — факт файла, а не настройка: спрашивать файл дешевле,
+        чем гадать, и он не расходится с тем, что туда записали.
+        """
         with self._read_conn() as conn:
             if conn is None:
                 raise RuntimeError("DuckDbSnapshotStore is not ready")
-            return build_schema(conn, schema, tables, self._load_schema_meta)
+            if schema_name is not None or table_names is not None:
+                schema = schema_name or self._schema
+                tables = (
+                    table_names if table_names is not None else self._tables
+                )
+                return build_schema(
+                    conn, schema, tables, self._load_schema_meta
+                )
+            return self._schema_in_file(conn)
+
+    def _schema_in_file(self, conn: Any) -> dict[str, Any]:
+        """Описание всех схем файла, кроме служебной мета-таблицы.
+
+        Таблицы объединены по простому имени, а схема в ответе остаётся
+        заданной по умолчанию: ключ ``schema`` отвечает на вопрос «в какой
+        схеме смотреть по умолчанию», а не «какие схемы нашлись».
+        """
+        schemas = self._user_schemas(conn)
+        merged: dict[str, Any] = {}
+        for schema in schemas:
+            part = build_schema(conn, schema, None, self._load_schema_meta)
+            merged.update(part.get("tables") or {})
+        return {"schema": self._schema, "tables": merged}
+
+    def _user_schemas(self, conn: Any) -> list[str]:
+        """Схемы файла с таблицами, служебная ``__nanobot_meta`` исключена."""
+        rows = conn.execute(
+            "SELECT DISTINCT table_schema FROM information_schema.tables "
+            "WHERE table_schema <> ? ORDER BY table_schema",
+            [META_SCHEMA],
+        ).fetchall()
+        found = [str(row[0]) for row in rows]
+        # Схема по умолчанию идёт первой, если она есть: порядок описания
+        # остаётся предсказуемым, как его и описывает build_schema.
+        if self._schema in found:
+            found.remove(self._schema)
+            found.insert(0, self._schema)
+        return found
 
     def query_sql(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
         # Проверка режима не требует соединения: она смотрит только на текст
