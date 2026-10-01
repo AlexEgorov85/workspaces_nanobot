@@ -22,6 +22,7 @@ from libs.enterprise_common.eventing.models import (
     LEVELS,
     SOURCE_ENTERPRISE_MCP,
     AgentEvent,
+    normalize_level,
     with_identity,
 )
 from libs.enterprise_common.eventing.types import (
@@ -137,9 +138,64 @@ def test_payload_and_metadata_are_json_objects() -> None:
 
 
 def test_unknown_level_is_refused() -> None:
-    assert LEVELS == ("debug", "info", "warn", "error")
+    assert LEVELS == ("DEBUG", "INFO", "WARN", "ERROR")
     with pytest.raises(ValueError):
         AgentEvent(event_type=TOOL_STARTED, level="trace")
+
+
+def test_level_is_uppercased_before_it_reaches_the_database() -> None:
+    """Уровень нормализуется в модели, а не у писателя.
+
+    Проверяет ``to_row()``, то есть именно то значение, которое уедет в
+    ``agent_gateway_logs``. ``CHECK valid_level`` принимает только верхний
+    регистр, и сброс буфера падал целиком на строке с ``'info'`` — не на
+    одном событии, а на всём батче сразу (живой прогон 2026-10-01:
+    «сброс буфера не удался, событий потеряно: 29»).
+
+    Нормализация в модели, а не в ``writer.py``: ``to_row()`` и файловая
+    копия видят один снимок, поэтому строка на диске и строка в базе не
+    могут разойтись регистром.
+    """
+    row = AgentEvent(event_type=TOOL_STARTED, level="info").to_row()
+    assert row["level"] == "INFO"
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("info", "INFO"),
+        ("INFO", "INFO"),
+        ("  warn  ", "WARN"),
+        ("WARNING", "WARN"),
+        ("Error", "ERROR"),
+        ("debug", "DEBUG"),
+        ("", "INFO"),
+        (None, "INFO"),
+    ],
+)
+def test_normalize_level_accepts_ordinary_spellings(
+    given: str | None, expected: str
+) -> None:
+    """Регистр и синоним ``WARNING`` — не повод терять событие.
+
+    Вызывающий — ``execution/logger.py``, ``enterprise_data/loader.py`` и
+    внешние потребители; молча отвергать ``"warning"`` там, где человек
+    написал это в конфиге, значит ронять запись в журнале из-за регистра.
+    """
+    assert normalize_level(given) == expected
+    assert AgentEvent(event_type=TOOL_STARTED, level=given).to_row()["level"] == expected
+
+
+def test_normalize_level_refuses_unknown_even_if_longer() -> None:
+    """Отказ строгий: неизвестный уровень не подменяется на ``INFO``.
+
+    Тихая подмена опаснее отказа — в журнале событие ошибки выглядело бы
+    как обычное, и читатель, фильтрующий по уровню, его не нашёл бы.
+    """
+    with pytest.raises(ValueError):
+        normalize_level("CRITICAL")
+    with pytest.raises(ValueError):
+        AgentEvent(event_type=TOOL_STARTED, level="CRITICAL")
 
 
 def test_with_identity_does_not_mutate_the_original() -> None:

@@ -47,29 +47,30 @@ logger = logging.getLogger(__name__)
 AUDIENCE_MODEL = "model"
 AUDIENCE_RUNTIME = "runtime"
 
-#: Уровни, которые принимает ``valid_level`` (CHECK в DDL журнала).
-#: Журнал хранит верхний регистр, и всё, что с ним сравнивается, приводится
-#: к нему же через :func:`normalize_level`.
-_LOG_LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
+#: Набор уровней и правило приведения живут в модели события
+#: (``libs.enterprise_common.eventing.models``) — там же, где ``valid_level``
+#: сверяется с ним в тестах. Дублировать список уровней здесь было ровно
+#: причиной дефекта 2026-10-01: локальная копия была верхнего регистра, модель
+#: события — нижнего, и внутренние события платформы писались в базу тем
+#: регистром, который ``CHECK`` отвергает. Определение должно быть одно.
+
+from libs.enterprise_common.eventing.models import (  # noqa: E402
+    normalize_level as _normalize_level,
+)
 
 
 def normalize_level(value: str | None) -> str:
     """Привести уровень к тому, что принимает CHECK-ограничение журнала.
 
-    Пустое значение — ``INFO``. Неизвестное — отказ, а не тихая замена:
-    опечатка в уровне, съеденная молча, выглядит в журнале как будто
-    событие было важнее или менее важным, чем на самом деле.
+    Обёртка над общим правилом: модель события отказывает ``ValueError``,
+    транспорт операции — ``InvalidRequestError``. Значение не подменяется,
+    ошибка не глотается, но тип ошибки остаётся тем, на который рассчитан
+    слой операций.
     """
-    candidate = (value or "").strip().upper()
-    if not candidate:
-        return "INFO"
-    if candidate == "WARNING":
-        candidate = "WARN"
-    if candidate not in _LOG_LEVELS:
-        raise InvalidRequestError(
-            f"уровень {value!r} недопустим: журнал принимает {', '.join(_LOG_LEVELS)}"
-        )
-    return candidate
+    try:
+        return _normalize_level(value)
+    except ValueError as exc:
+        raise InvalidRequestError(str(exc)) from exc
 
 
 @dataclass(frozen=True)

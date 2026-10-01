@@ -161,7 +161,7 @@ class ExecutionLogger:
         return self._emit(
             AgentEvent(
                 event_type=TOOL_STARTED,
-                level="info",
+                level="INFO",
                 name=ctx.tool_name,
                 summary=f"{ctx.tool_name}: начало",
                 session_id=ctx.session_id,
@@ -203,7 +203,7 @@ class ExecutionLogger:
         return self._emit(
             AgentEvent(
                 event_type=TOOL_COMPLETED,
-                level="info",
+                level="INFO",
                 name=ctx.tool_name,
                 summary=f"{ctx.tool_name}: успех за {duration_ms} мс",
                 session_id=ctx.session_id,
@@ -230,7 +230,7 @@ class ExecutionLogger:
         return self._emit(
             AgentEvent(
                 event_type=TOOL_TIMEOUT if timed_out else TOOL_FAILED,
-                level="warn" if timed_out else "error",
+                level="WARN" if timed_out else "ERROR",
                 name=ctx.tool_name,
                 summary=f"{ctx.tool_name}: отказ {error_code} за {duration_ms} мс",
                 session_id=ctx.session_id,
@@ -259,7 +259,7 @@ class ExecutionLogger:
         return self._emit(
             AgentEvent(
                 event_type=ARTIFACT_CREATED,
-                level="info",
+                level="INFO",
                 name=ctx.tool_name,
                 summary=f"результат сохранён артефактом ({artifact.size} байт)",
                 session_id=ctx.session_id,
@@ -287,7 +287,7 @@ class ExecutionLogger:
         return self._emit(
             AgentEvent(
                 event_type=QUALITY_CHECK,
-                level="info" if report.ok else "warn",
+                level="INFO" if report.ok else "warn",
                 name=ctx.tool_name,
                 summary=f"качество: {report.policy} ({', '.join(report.flags) or 'без замечаний'})",
                 session_id=ctx.session_id,

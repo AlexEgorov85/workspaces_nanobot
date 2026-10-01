@@ -142,3 +142,90 @@ def test_both_writers_agree() -> None:
         f"множества колонок разошлись; только агент: {sorted(agent - platform)}; "
         f"только платформа: {sorted(platform - agent)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Уровни журнала: значения, а не колонки
+# ---------------------------------------------------------------------------
+
+JOURNAL_DDL = REPO_ROOT / "sql" / "logs" / "create_public_agent_gateway_logs.sql"
+PLATFORM_DATA_SERVICE = PLATFORM_WRITER  # data/service/main.py
+
+VALID_LEVEL_CHECK = re.compile(
+    r"CONSTRAINT\s+valid_level\s+CHECK\s*\(\s*level\s+IN\s*\(([^)]*)\)",
+    re.IGNORECASE,
+)
+
+
+def _ddl_levels() -> set[str]:
+    """Уровни, которые реально принимает ``agent_gateway_logs``."""
+    text = JOURNAL_DDL.read_text(encoding="utf-8")
+    match = VALID_LEVEL_CHECK.search(text)
+    assert match, (
+        f"в {JOURNAL_DDL.name} не найдено CHECK valid_level — если ограничение "
+        "снято, этот страж молча перестаёт что-либо проверять"
+    )
+    return {value.strip().strip("'\"") for value in match.group(1).split(",")}
+
+
+def _platform_levels() -> set[str]:
+    """``LEVELS`` модели события — второй источник правды о допустимых уровнях."""
+    tree = ast.parse(PLATFORM_FIELDS.read_text(encoding="utf-8"), filename=str(PLATFORM_FIELDS.name))
+    for node in tree.body:
+        targets = (
+            [node.target] if isinstance(node, ast.AnnAssign) else getattr(node, "targets", [])
+        )
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id == "LEVELS":
+                return {ast.literal_eval(item) for item in node.value.elts}
+    raise AssertionError("в models.py нет LEVELS")
+
+
+def test_platform_levels_match_the_database_check() -> None:
+    """Регистр уровней в модели обязан совпадать с ``CHECK valid_level``.
+
+    Обнаружено живым прогоном 2026-10-01, а не тестом: ``LEVELS`` в
+    ``eventing/models.py`` был в нижнем регистре, ``loader.py`` писал в
+    верхнем, и ``CHECK`` отвергал внутренние события платформы
+    (``tool.started``, ``quality.check``). Сброс буфера падал целиком —
+    «сброс буфера не удался, событий потеряно: 29» — то есть журнал молча
+    не писался целиком, а страница истории выглядела как «просто пусто».
+
+    Ровно тот класс расхождения, ради которого существуют проверки выше,
+    только по значениям, а не по колонкам.
+    """
+    ddl = _ddl_levels()
+    platform = _platform_levels()
+    assert platform == ddl, (
+        f"наборы уровней разошлись: DDL {sorted(ddl)}, платформа "
+        f"{sorted(platform)}. Любое событие с уровнем вне DDL будет "
+        "отвергнуто базой, а отказ приходится на весь батч сброса"
+    )
+
+
+def test_data_service_does_not_define_its_own_levels() -> None:
+    """Набор уровней определён один раз — в модели события.
+
+    Локальная копия в ``data/service/main.py`` была верхнего регистра, модель
+    — нижнего, и обе были по отдельности «правильными». Дубликат молча
+    разъезжается: правка одной стороны не трогает другую, и расхождение
+    обнаруживается только на живом прогоне.
+    """
+    tree = ast.parse(
+        PLATFORM_DATA_SERVICE.read_text(encoding="utf-8"),
+        filename=str(PLATFORM_DATA_SERVICE.name),
+    )
+    for node in ast.walk(tree):
+        targets = (
+            [node.target] if isinstance(node, ast.AnnAssign) else getattr(node, "targets", [])
+        )
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in {"_LOG_LEVELS", "LEVELS"}:
+                # Импорт с псевдонимом допустим — он и есть ссылка на канон.
+                value = getattr(node, "value", None)
+                if isinstance(value, (ast.Tuple, ast.List)):
+                    raise AssertionError(
+                        f"{PLATFORM_DATA_SERVICE.name}: кортеж уровней "
+                        f"{target.id} объявлен вторым — он обязан импортироваться "
+                        "из eventing.models, а не объявляться здесь"
+                    )

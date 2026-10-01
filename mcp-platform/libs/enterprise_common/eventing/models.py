@@ -30,7 +30,42 @@ SOURCE_ENTERPRISE_MCP = "enterprise_mcp"
 #: Компонент — подсистема внутри источника (``data``, ``tool_execution``, ``llm``).
 COMPONENT_TOOL_EXECUTION = "tool_execution"
 
-LEVELS: tuple[str, ...] = ("debug", "info", "warn", "error")
+#: Уровни журнала. **Регистр совпадает с CHECK-ограничением** ``valid_level``
+#: в ``sql/logs/create_public_agent_gateway_logs.sql``
+#: (``level IN ('DEBUG','INFO','WARN','ERROR')``).
+#:
+#: Раньше здесь стоял нижний регистр, а у ``loader.py`` — верхний. Оба списка
+#: были верными по отдельности и неверными вместе: внутренние события
+#: платформы (``tool.started``, ``quality.check``) проверялись по нижнему
+#: списку, писались в базу нижним регистром и отвергались её ``CHECK`` —
+#: сброс буфера падал целиком, а вместе с ним терялся весь батч. Живой прогон
+#: 2026-10-01 показал это как «сброс буфера не удался, событий потеряно: 29».
+#:
+#: Теперь набор один, и он верхний; ``AgentEvent`` нормализует вход, поэтому
+#: вызывающий может писать ``"info"`` — в базу уйдёт ``"INFO"``.
+LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARN", "ERROR")
+
+#: ``WARNING`` — синоним, который встречается в конфигурации и в привычном
+#: ``logging``. В базу он не пишется: ``CHECK`` его не принимает.
+_LEVEL_ALIASES: dict[str, str] = {"WARNING": "WARN"}
+
+
+def normalize_level(value: str | None) -> str:
+    """Привести уровень к тому, что принимает ``valid_level`` в базе.
+
+    Пустое значение — ``INFO``. Неизвестное — отказ, а не тихая замена:
+    опечатка в уровне, съеденная молча, выглядит в журнале как событие иной
+    важности, а читатель журнала фильтрует по важности.
+    """
+    candidate = (value or "").strip().upper()
+    candidate = _LEVEL_ALIASES.get(candidate, candidate)
+    if not candidate:
+        return "INFO"
+    if candidate not in LEVELS:
+        raise ValueError(
+            f"неизвестный уровень журнала: {value!r}; допустимы {', '.join(LEVELS)}"
+        )
+    return candidate
 
 #: Поля события, которые попадают в колонки журнала. Порядок совпадает с
 #: ``agent_gateway_logs`` — так проверка писателя становится сравнением множеств.
@@ -70,8 +105,10 @@ class AgentEvent:
 
     def __post_init__(self) -> None:
         event_types.require_known(self.event_type)
-        if self.level not in LEVELS:
-            raise ValueError(f"неизвестный уровень журнала: {self.level!r}")
+        # Нормализация здесь, а не у писателя: ``to_row()`` и файловая копия
+        # видят один и тот же снимок, поэтому строка, ушедшая в базу, и
+        # строка на диске не могут разойтись регистром уровня.
+        object.__setattr__(self, "level", normalize_level(self.level))
         if not self.event_id:
             object.__setattr__(self, "event_id", str(uuid.uuid4()))
         if self.timestamp is None:
