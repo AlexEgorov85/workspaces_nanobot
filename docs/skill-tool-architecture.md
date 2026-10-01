@@ -203,9 +203,10 @@ Step 7: do not use vector/search для COUNT/GROUP BY.
   который агент запускает через `tools.exec`; тот же интерфейс используют
   бенчмарки и CI.
 - Tool'ы `run_predefined_script` и `nl_sql_generate` отсутствуют: их логика
-  живёт в Skill (`predefined.run`, `generated_sql_mode.run`) и skill-side
-  helper `scripts/skill_config.py` / `scripts/llm.py` (прямой вызов
-  `lib.services.llm_client.call_llm` для LLM-генерации SQL).
+  живёт в Skill (`predefined.run`, `generated_sql_mode.run`), а обращение к
+  модели skill-side helper делает через клиент платформы
+  (`libs/enterprise_client/llm.py` → операция `complete`). Собственного
+  вызова провайдера у навыка нет, и настроек модели он не знает.
 
 CLI — **операционный** интерфейс доставки capability, а не архитектурное
 требование Skill'а. Норма не предписывает его наличие; она запрещает

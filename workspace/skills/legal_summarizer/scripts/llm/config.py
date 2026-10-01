@@ -2,7 +2,12 @@
 
 Все функции параметризованы в ``lib.core.skill_config`` по ``skill_name``.
 Здесь — тонкие обёртки, чтобы внутренний код skill'а мог продолжать
-вызывать ``from skill_config import get_llm_config`` и т.д.
+вызывать ``from skill_config import get_cli_config`` и т.д.
+
+Функции про LLM здесь нет и не будет: настройки провайдера живут в
+платформе (``mcp-platform/platform.json``), навык ходит к модели через её
+операцию ``complete`` и знает только бюджет прогона (``cli.*``). Ключ от
+провайдера в процесс навыка не попадает вовсе.
 
 Имя skill'а фиксировано в ``_SKILL_NAME``. При добавлении нового skill'а
 он получает свою копию этого файла с другим ``_SKILL_NAME`` (либо
@@ -25,10 +30,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 from lib.core import skill_config as _lib  # noqa: E402
 
 _SKILL_NAME = "legal_summarizer"
-
-
-def get_llm_config() -> dict[str, Any]:
-    return _lib.get_llm_config(_SKILL_NAME)
 
 
 def get_cli_config() -> dict[str, Any]:

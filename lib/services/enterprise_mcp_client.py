@@ -13,6 +13,15 @@
 
 Жизненный цикл ленивый: сервер не стартует, пока не понадобился, и не
 мешает старту агента, если платформа выключена или не собрана.
+
+Про LLM
+-------
+
+Этот клиент не передаёт платформе ничего о провайдере модели. Настройки
+живут в ``mcp-platform/platform.json`` и принадлежат платформе: она и
+делает вызов. Агенту они не нужны, и из этого следует практическое
+следствие — ключ провайдера не попадает в окружение процессов скиллов,
+которые этот клиент не поднимает.
 """
 
 from __future__ import annotations
@@ -268,19 +277,22 @@ class EnterpriseMcpClient:
         и на Windows с cp1251 кодировка консоли убила бы процесс на
         первом же сообщении.
 
-        Сверх наследования добавляется конфигурация capability ``llm``,
-        ``vectors`` и ``audit``. Причина: агент держит провайдера в ``SETTINGS``
-        (``agents.defaults.model``, ``providers.<p>.apiBase``), а в
-        ``os.environ`` экспортирует только ``LLM_API_KEY`` — этого не хватит
-        ни модели, ни адреса. Платформа не читает конфиг агента (такой импорт
-        запрещён архитектурным стражем), поэтому единственный источник —
-        окружение процесса, и заполняет его агент. Дублировать значения в
-        ``project.json`` нельзя: там уже не будет ни одного пути и ни одной
-        машины, и две копии провайдера разъедутся.
+        Сверх наследования добавляется конфигурация capability ``vectors``
+        и ``audit``. Платформа не читает конфиг агента (такой импорт
+        запрещён архитектурным стражем), поэтому объявления индексов и путь
+        снимка переезжают в окружение процесса, и заполняет его агент.
+
+        Конфигурации провайдера LLM среди них **нет**: она живёт в
+        ``mcp-platform/platform.json`` и принадлежит платформе, которая и
+        делает вызов. Агент не знает ни адреса, ни модели, ни ключа — и
+        потому не может ни разъехаться с платформенной копией, ни утянуть
+        секрет в процессы скиллов. Раньше здесь был экспорт всех шести
+        ``ENTERPRISE_LLM_*``; вторая копия выбора модели разъезжалась с
+        первой при первой же смене модели, и это стоило отдельного файла
+        ``lib/services/llm_config.py``.
         """
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
-        env.update(_llm_env_from_settings())
         env.update(_vectors_env_from_settings(self._snapshot_path))
         env.update(_audit_env_from_project())
         if self._expected_tables:
@@ -442,36 +454,6 @@ def _agent_embedding_config() -> dict[str, Any]:
         logger.debug("enterprise-mcp: конфигурация эмбеддера не прочитана", exc_info=True)
         return {}
     return cfg if isinstance(cfg, dict) else {}
-
-
-def _llm_env_from_settings() -> dict[str, str]:
-    """Передать провайдера в процесс ``enterprise-mcp`` через окружение.
-
-    Fail-soft и без логирования ключа: если конфигурация не резолвится,
-    capability ``llm`` остаётся ненастроенной и честно отвечает
-    ``infrastructure_error`` на своей операции. Это не хуже молчаливого
-    подключения к не тому провайдеру, а диагностика указывает на конкретную
-    capability, а не на весь сервер.
-    """
-    try:
-        from lib.services.llm_config import resolve_llm_config
-
-        cfg = resolve_llm_config()
-    except Exception:  # noqa: BLE001 - конфиг LLM не должен ронять запуск
-        logger.debug(
-            "enterprise-mcp: LLM-конфигурация не разрешилась, capability llm "
-            "останется ненастроенной",
-            exc_info=True,
-        )
-        return {}
-    return {
-        "ENTERPRISE_LLM_PROVIDER": str(cfg.get("provider") or ""),
-        "ENTERPRISE_LLM_MODEL": str(cfg.get("model") or ""),
-        "ENTERPRISE_LLM_API_BASE": str(cfg.get("api_base") or ""),
-        "ENTERPRISE_LLM_API_KEY": str(cfg.get("api_key") or ""),
-        "ENTERPRISE_LLM_MAX_TOKENS": str(cfg.get("max_tokens") or ""),
-        "ENTERPRISE_LLM_TEMPERATURE": str(cfg.get("temperature") or ""),
-    }
 
 
 def client_from_settings(

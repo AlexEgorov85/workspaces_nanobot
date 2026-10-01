@@ -74,11 +74,32 @@ def _load_registry() -> object:
 
 
 def _exported_names() -> set[str]:
-    """Имена, которые агент пишет в окружение дочернего процесса."""
+    """Имена, которые агент пишет в окружение дочернего процесса.
+
+    Докстринги пропускаются: они описывают историю, а не то, что пишется в
+    окружение. Без этого ``ENTERPRISE_LLM_*`` в тексте про «экспорта больше
+    нет» превращался бы в имя ``ENTERPRISE_LLM_``, которого в реестре
+    нет, и тест падал бы на собственном же комментарии.
+    """
     tree = ast.parse(CLIENT.read_text(encoding="utf-8"), filename=str(CLIENT))
+    # Докстринг — это узел ``Expr``, оборачивающий строковый литерал, но
+    # ``ast.walk`` отдаёт их по отдельности. Поэтому исключаем литералы по
+    # идентификатору, а не сам узел ``Expr``: иначе текст «экспорта больше
+    # нет» снова попал бы в список экспорта.
+    docstrings = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
     names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        ):
             names |= set(EXPORTED_PATTERN.findall(node.value))
     return names
 

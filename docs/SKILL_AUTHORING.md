@@ -353,8 +353,7 @@ Pydantic-валидация в `ApplicationContext.create()`
 | `get_db_tables(skill_name)` | Доменные таблицы без label (для LLM-схемы) |
 | `get_db_schema(skill_name)` | Имя схемы по первой таблице |
 | `get_predefined_scripts_table(skill_name)` | Имя реестра SQL-шаблонов через `resources_by_label("scripts_registry")` |
-| `get_llm_config(skill_name)` | LLM execution policy для skill'а |
-| `get_cli_config(skill_name)` | `default_mode`, `timeout_sec`, `max_retries` |
+| `get_cli_config(skill_name)` | `default_mode`, `timeout_sec`, `max_retries` — бюджет прогона. Настроек модели здесь нет: они в `mcp-platform/platform.json`, а skill ходит в LLM через операцию `complete` |
 | `get_chunking_config(skill_name)` | Map-reduce параметры |
 | `get_in_memory_cache_path(skill_root)` | Путь к общему DuckDB snapshot |
 | `get_vector_index_path(skill_name, skill_root)` | Путь к FAISS-индексу |

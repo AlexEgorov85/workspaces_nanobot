@@ -105,12 +105,6 @@ def load_db_config(skill_name: str) -> dict[str, Any]:
     return {"schema": get_db_schema(skill_name), "tables": get_db_tables(skill_name)}
 
 
-def get_llm_config(skill_name: str) -> dict[str, Any]:
-    from lib.services.llm_config import resolve_llm_config
-
-    return resolve_llm_config(overrides=_skill_cfg(skill_name))
-
-
 def get_tool_config(skill_name: str) -> dict[str, Any]:
     return dict(_skill_cfg(skill_name))
 

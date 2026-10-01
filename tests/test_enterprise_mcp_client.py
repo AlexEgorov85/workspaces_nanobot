@@ -166,75 +166,38 @@ class TestChildEnv:
             del os.environ["PYTHONIOENCODING"]
 
 
-class TestLlmEnv:
-    """Capability ``llm`` получает провайдера из окружения, а не из config.json.
+class TestNoLlmEnv:
+    """Агент НЕ передаёт платформе ничего о провайдере модели.
 
-    Платформе запрещён импорт конфига агента, поэтому единственный канал —
-    окружение процесса. Агент экспортирует туда только ``LLM_API_KEY``, а
-    модели и адреса у него в ``SETTINGS``: без явной передачи capability
-    осталась бы ненастроенной, и это выглядело бы как «сервер поднялся и не
-    работает».
+    Контракт сменился на противоположный прежнему. Раньше здесь стоял
+    экспорт шести ``ENTERPRISE_LLM_*``, и у него была одна причина:
+    платформе нужен был провайдер, а своего конфига у неё не было. Теперь
+    настройки живут в ``mcp-platform/platform.json`` (секция ``llm``), и
+    вызов делает платформа.
+
+    Отсутствие экспорта — не «недоделанный перенос», а граница: у агента
+    больше нет ни файла ``llm_client.py``, ни ``llm_config.py``, и
+    появившийся снова резолв провайдера означал бы третью копию выбора
+    модели в проекте, где их теперь одна.
     """
 
-    def test_provider_reaches_child_env(self, monkeypatch) -> None:
+    def test_no_provider_variables_are_exported(self, monkeypatch) -> None:
         from lib.services import enterprise_mcp_client as mod
 
-        monkeypatch.setattr(
-            mod,
-            "_llm_env_from_settings",
-            lambda: {
-                "ENTERPRISE_LLM_MODEL": "model-x",
-                "ENTERPRISE_LLM_API_BASE": "https://prov.invalid/v1",
-                "ENTERPRISE_LLM_API_KEY": "sk-x",
-            },
+        monkeypatch.setattr(mod, "_vectors_env_from_settings", lambda _p: {})
+        monkeypatch.setattr(mod, "_audit_env_from_project", dict)
+        env = mod.EnterpriseMcpClient(command="python")._child_env()
+        exported = [key for key in env if key.startswith("ENTERPRISE_LLM_")]
+        assert not exported, (
+            f"агент экспортирует провайдера модели: {exported}. Настройки "
+            "принадлежат платформе, и вторая копия разъедется с ней при "
+            "смене модели."
         )
-        client = EnterpriseMcpClient(command="python")
-        env = client._child_env()
-        assert env["ENTERPRISE_LLM_MODEL"] == "model-x"
-        assert env["ENTERPRISE_LLM_API_BASE"] == "https://prov.invalid/v1"
 
-    def test_all_platform_fields_are_exported(self, monkeypatch) -> None:
-        """Все шесть полей, а не только модель: адрес и ключ тоже обязательны."""
+    def test_the_helper_that_exported_them_is_gone(self) -> None:
         from lib.services import enterprise_mcp_client as mod
 
-        cfg = {
-            "provider": "openai-compatible",
-            "model": "m",
-            "api_base": "https://p.invalid/v1",
-            "api_key": "k",
-            "max_tokens": 4096,
-            "temperature": 0.2,
-        }
-        monkeypatch.setattr(
-            "lib.services.llm_config.resolve_llm_config", lambda: cfg
-        )
-        assert mod._llm_env_from_settings() == {
-            "ENTERPRISE_LLM_PROVIDER": "openai-compatible",
-            "ENTERPRISE_LLM_MODEL": "m",
-            "ENTERPRISE_LLM_API_BASE": "https://p.invalid/v1",
-            "ENTERPRISE_LLM_API_KEY": "k",
-            "ENTERPRISE_LLM_MAX_TOKENS": "4096",
-            "ENTERPRISE_LLM_TEMPERATURE": "0.2",
-        }
-
-    def test_unresolvable_config_does_not_break_startup(self, monkeypatch) -> None:
-        """Capability остаётся ненастроенной, но запуск агента не падает.
-
-        Отказ должен быть виден на операции ``llm`` как ``infrastructure_error``,
-        а не обрушивать весь процесс: остальные capability к провайдеру
-        отношения не имеют.
-        """
-        from lib.services import enterprise_mcp_client as mod
-
-        def _boom() -> dict:
-            raise RuntimeError("не задана модель")
-
-        monkeypatch.setattr(
-            "lib.services.llm_config.resolve_llm_config", _boom, raising=True
-        )
-        assert mod._llm_env_from_settings() == {}
-        client = EnterpriseMcpClient(command="python")
-        assert "ENTERPRISE_LLM_MODEL" not in client._child_env()
+        assert not hasattr(mod, "_llm_env_from_settings")
 
 
 class TestVectorsEnv:

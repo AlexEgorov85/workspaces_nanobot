@@ -35,7 +35,6 @@ __all__ = [
     "get_db_tables",
     "get_db_schema",
     "get_predefined_scripts_table",
-    "get_llm_config",
     "get_cli_config",
     "get_max_retries",
     "build_cache_provider",
@@ -52,10 +51,6 @@ def get_db_schema() -> str:
 
 def get_predefined_scripts_table() -> str:
     return _lib.get_predefined_scripts_table(_SKILL_NAME)
-
-
-def get_llm_config() -> dict[str, Any]:
-    return _lib.get_llm_config(_SKILL_NAME)
 
 
 def get_cli_config() -> dict[str, Any]:

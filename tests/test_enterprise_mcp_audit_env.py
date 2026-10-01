@@ -121,7 +121,6 @@ class TestAuditEnvReachesChildEnv:
             "ENTERPRISE_SCRIPTS_REGISTRY_TABLE": "r",
             "ENTERPRISE_AUDIT_TABLES": "t1,t2",
         })
-        monkeypatch.setattr(mod, "_llm_env_from_settings", dict)
         monkeypatch.setattr(mod, "_vectors_env_from_settings", lambda _p: {})
         client = mod.EnterpriseMcpClient(command="python")
         env = client._child_env()

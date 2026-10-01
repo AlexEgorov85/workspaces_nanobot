@@ -163,22 +163,25 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 > из любой непустой секции `providers.*` подставляется как `LLM_API_KEY`.
 > Достаточно переименовать секцию в `# providers: llm` для ясности.
 
-### Единый резолв LLM-конфигурации: `lib/services/llm_config.py`
+### Настройки LLM принадлежат платформе: `mcp-platform/platform.json` (секция `llm`)
 
-Резолв провайдера/модели/ключа вынесен в общий модуль
-`lib/services/llm_config.py::resolve_llm_config()`: дефолт берётся из
-`agents.defaults` (модель/провайдер) и `providers.<provider>`
-(`apiBase`/`apiKey`) уже-резолвнутых `SETTINGS`, переопределения
-(например, `skills.audit_analyzer.llm_*`) передаются через `overrides`.
+Резолв провайдера/модели/ключа больше не в агенте. Единственный источник —
+реестр платформы (`libs/enterprise_common/settings`) и секция `llm` в
+`mcp-platform/platform.json`; ключ провайдера лежит там как подстановка
+`${LLM_API_KEY}` и разворачивается из `mcp-platform/.secrets.env`. Окружение
+процесса остаётся запасным источником и имеет приоритет, поэтому развёртывание
+с `ENTERPRISE_LLM_*` вручную работает как раньше.
 
-Используется единообразно:
-* навыком `audit_analyzer` — `scripts/skill_config.py::get_llm_config()`.
+Почему перенос, а не дублирование: пока резолв жил в агенте, выбор модели был
+в двух местах — `agents.defaults`/`providers.*` и `platform.json` — и они
+разъезжались при первой же смене модели. Теперь выбор один, и агент о нём не
+знает вообще: `EnterpriseMcpClient._child_env()` ничего о провайдере не
+передаёт, поэтому ключ не попадает и в окружение процессов скиллов.
 
-Потребитель в лице бенчмарк-раннера (`benchmarks/runner.py::_run_suite()`)
-удалён вместе с подсистемой бенчмарков.
-
-Так смена модели/провайдера/ключа агента автоматически меняет LLM и в
-навыке, и в бенчмарке — без дублирования секретов в трёх местах.
+Агентский резолв удалён вместе с агентским клиентом, и функции
+`get_llm_config()` в runtime API для skill'ов больше нет. Эмбеддер — исключение
+с обоснованием: `ENTERPRISE_EMBED_*` остались агентскими, потому что модель
+эмбеддера входит в подпись индекса, который строит и проверяет агент.
 
 ### Гонка за загрузкой устранена структурно
 
@@ -1414,13 +1417,34 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
   что `exchange.inflight` пуст и `_claim_one` поднимает
   следующую задачу без перезапуска процесса.
 
-### `lib/services/llm_client.py` — единая точка вызова LLM
+### Провайдер LLM: единственная точка вызова — `mcp-platform/libs/llm`
 
-Единственное место, откуда делаются запросы к LLM-провайдеру: ретраи,
-таймауты, логирование через `loguru`, redaction секретов. Параметры
-(API-ключ, base URL, модель) — через `config.require_setting("providers",
-"llm")`. Используется навыком `audit_analyzer`, утилитой `tools/build_vectors.py`
-и другими потребителями. Прямые `httpx`-вызовы к LLM в новом коде запрещены.
+HTTP-вызовы к провайдеру модели делает только платформа. Слой состоит из
+резолва настроек (`config.py`), вызова (`client.py`, `embeddings.py`) и
+**внутреннего сервиса** (`gateway.py`) — простого метода отправки и получения
+ответа:
+
+```
+llm.ask("вопрос")        → str
+llm.ask_json("вопрос")   → dict | None
+llm.send(messages)       → str        # готовая история диалога
+llm.embed("текст")       → list[float]
+llm.describe()           → dict       # что настроено, без ключа
+```
+
+Сервис один на процесс и получает реестр настроек сборки сервера, поэтому у
+настройки один источник и один ответ на вопрос «какая модель сейчас
+настроена». Ошибки наружу — доменные (`InfrastructureError`,
+`InvalidRequestError`): `httpx` на проводе конверта означал бы
+`internal_error` вместо `upstream_unavailable`. Бизнес-логики в слое нет: сервис
+не строит промпты и не разбирает доменный ответ — это проверяется тестом.
+
+Агентских копий нет: `lib/services/llm_client.py` и `lib/services/llm_config.py`
+удалены. Навыки, работающие отдельными процессами, ходят в модель через
+`mcp-platform/libs/enterprise_client/llm.py` — клиент платформы, который
+поднимает лёгкий экземпляр сервера (`--capabilities llm`, без доступа к
+данным, поэтому не становится вторым владельцем пула PostgreSQL и блокировки
+файла снимка) и держит одну сессию на процесс.
 
 ### `lib/utils/node_access.py` — обход настроек
 
@@ -1518,7 +1542,7 @@ nanobot/
 │   │   ├── preload_service.py            #    FAISS preload + audit_cache refresh
 │   │   ├── db_logging_service.py         #    worker, batch INSERT, без JSONL-fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
-│   │   ├── llm_config.py                 #    resolve_llm_config() — общий резолв LLM для навыка/бенчмарка
+│   │   ├── llm_config.py                 #    УДАЛЁН — настройки LLM в mcp-platform/platform.json
 │   │   ├── duckdb_cache_store.py         #     локальный кэш + FAISS-индексы в памяти
 │   │   ├── cache_load_service.py         #     разовая синхронная загрузка кэша из PG
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult

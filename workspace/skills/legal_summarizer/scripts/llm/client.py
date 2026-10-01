@@ -1,9 +1,21 @@
-"""LLM-клиент (OpenAI-compatible HTTP API) — тонкая обёртка над общим клиентом.
+"""LLM-доступ навыка — через MCP, без собственного HTTP.
 
-Единая реализация — ``lib.services.llm_client.call_llm`` (та же, что
-использует ``audit_analyzer`` и бенчмарк). Этот модуль сохраняет
-прежний публичный API ``chat`` и читает конфигурацию навыка через
-``get_llm_config()`` / ``get_cli_config()``.
+Единая реализация общения с моделью — в платформе
+(``mcp-platform/libs/llm``), а навык вызывает её операцию ``complete``.
+Собственного HTTP-клиента у навыка больше нет, и настройки провайдера
+(адрес, модель, ключ) в его распоряжении не остаётся: они живут в
+``mcp-platform/platform.json``.
+
+Почему это важно именно здесь
+-----------------------------
+
+Конвейер суммаризации шлёт по запросу на каждый чанк — за проход это сотни
+вызовов. Свой клиент означал бы вторую копию retry, разбора ответа и резолва
+настроек, а расхождение с платформенной копией показало бы себя первой же
+сменой модели. Один сервис и один набор настроек вместо этого.
+
+Процесс платформы поднимается один на навык и живёт до конца прогона, хотя
+вызовов много: поднимать его на каждый запрос было бы дороже самой модели.
 
 LLM-trace (``--llm-trace`` или ``LEGAL_SUMMARIZER_LLM_TRACE=1``) —
 диагностическое логирование в stderr для долгих прогонов
@@ -15,11 +27,24 @@ LLM-trace (``--llm-trace`` или ``LEGAL_SUMMARIZER_LLM_TRACE=1``) —
 import os
 import sys
 import time as _time
+from pathlib import Path
 
-from llm.config import get_cli_config, get_llm_config
+from llm.config import get_cli_config
 
-from lib.services.llm_client import call_llm
+#: Корень платформы — от этого файла, а не от ``cwd``:
+#: ``scripts/llm/client.py`` → ``parents[5]`` = корень репозитория.
+_PLATFORM_ROOT = Path(__file__).resolve().parents[5] / "mcp-platform"
+if str(_PLATFORM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM_ROOT))
 
+from libs.enterprise_client import (  # noqa: E402
+    LlmOperationError,
+    LlmUnavailable,
+    complete,
+)
+
+
+__all__ = ["chat", "LlmOperationError", "LlmUnavailable"]
 
 _LLM_TRACE_ENABLED = (
     "--llm-trace" in sys.argv
@@ -45,7 +70,7 @@ def chat(
 ) -> str:
     """Отправить сообщения в LLM и получить текстовый ответ.
 
-    Поддерживает опциональный ``context`` — историю чата, которая
+    Поддерживает опциональный ``context`` — история чата, которая
     добавляется в начало ``messages``.
 
     Args:
@@ -56,31 +81,39 @@ def chat(
 
     Returns:
         Текстовый ответ LLM (stripped).
+
+    Raises:
+        LlmOperationError: Платформа ответила доменной ошибкой — сервис не
+            настроен либо провайдер отказал.
+        LlmUnavailable: Процесс платформы не поднялся, сессия оборвалась
+            или не ответила вовремя.
     """
-    cfg = get_llm_config()
     cli = get_cli_config()
     system_chars = len(messages[0]["content"]) if messages else 0
     user_chars = len(messages[1]["content"]) if len(messages) > 1 else 0
+    timeout = float(cli.get("timeout_sec", 120))
     _trace(
         "begin",
         n_msgs=len(messages) + (len(context) if context else 0),
         system=system_chars,
         user=user_chars,
-        model=kwargs.get("model") or cfg.get("model", "?"),
-        max_tokens=kwargs.get("max_tokens") or cfg.get("max_tokens", "?"),
-        timeout=float(cli.get("timeout_sec", 120)),
+        # Модель и потолок токенов навыку неизвестны: они в настройках
+        # платформы. Раньше тут печаталось значение из собственного конфига,
+        # и именно из-за него навык знал про копию настроек.
+        model=kwargs.get("model") or "из настроек платформы",
+        max_tokens=kwargs.get("max_tokens") or "из настроек платформы",
+        timeout=timeout,
     )
     start = _time.monotonic()
     try:
-        response = call_llm(
+        response = complete(
             messages,
-            cfg=cfg,
             context=context,
             model=kwargs.get("model"),
             max_tokens=kwargs.get("max_tokens"),
             temperature=kwargs.get("temperature"),
             max_retries=int(cli.get("max_retries", 3)),
-            timeout=float(cli.get("timeout_sec", 120)),
+            timeout=timeout,
         )
     except Exception as exc:
         _trace(
@@ -103,4 +136,3 @@ def chat(
         )
         sys.stderr.flush()
     return response
-

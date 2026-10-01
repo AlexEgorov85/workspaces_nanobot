@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from config import runtime_table
 from lib.core import application_context as ac
 from lib.services import enterprise_mcp_client as mod
 
@@ -36,19 +37,24 @@ EXPECTED_KEYS = (
 )
 
 
+def _rt(role: str) -> str:
+    """``schema.имя`` из настроек — литерал таблицы здесь не нужен."""
+    return f"public.{runtime_table(role)}"
+
+
 def _settings(**overrides: Any) -> dict:
     base = {
         "channels": {
             "postgres": {
-                "table_name": "public.agent_conversation_messages",
-                "messages_table": "public.agent_session_messages",
-                "meta_table": "public.agent_session_meta",
+                "table_name": _rt("conversation_messages"),
+                "messages_table": _rt("session_messages"),
+                "meta_table": _rt("session_meta"),
             }
         },
         "logging": {
             "db": {
-                "table_name": "public.agent_gateway_logs",
-                "question_runs_table": "public.agent_question_runs",
+                "table_name": _rt("gateway_logs"),
+                "question_runs_table": _rt("question_runs"),
             }
         },
     }
@@ -66,11 +72,11 @@ class TestExpectedTablesResolve:
     def test_names_are_schema_qualified(self) -> None:
         tables = ac._expected_tables(_Ctx(_settings()))
         assert tables == (
-            "public.agent_conversation_messages",
-            "public.agent_session_messages",
-            "public.agent_session_meta",
-            "public.agent_gateway_logs",
-            "public.agent_question_runs",
+            _rt("conversation_messages"),
+            _rt("session_messages"),
+            _rt("session_meta"),
+            _rt("gateway_logs"),
+            _rt("question_runs"),
         )
 
     def test_every_expected_key_is_covered(self) -> None:
@@ -113,7 +119,6 @@ class TestExpectedTablesResolve:
 
 class TestExpectedTablesReachChildEnv:
     def test_exported_as_comma_separated(self, monkeypatch) -> None:
-        monkeypatch.setattr(mod, "_llm_env_from_settings", dict)
         monkeypatch.setattr(mod, "_vectors_env_from_settings", lambda _p: {})
         monkeypatch.setattr(mod, "_audit_env_from_project", dict)
         client = mod.EnterpriseMcpClient(
@@ -130,7 +135,6 @@ class TestExpectedTablesReachChildEnv:
         объявил», отсутствие переменной — «список не передан вовсе». Разница
         видна только в ответе операции, и она полезна при разборе.
         """
-        monkeypatch.setattr(mod, "_llm_env_from_settings", dict)
         monkeypatch.setattr(mod, "_vectors_env_from_settings", lambda _p: {})
         monkeypatch.setattr(mod, "_audit_env_from_project", dict)
         client = mod.EnterpriseMcpClient(command="python", expected_tables=())
