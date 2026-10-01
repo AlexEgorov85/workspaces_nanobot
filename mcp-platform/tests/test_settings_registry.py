@@ -242,6 +242,29 @@ def _all_referenced_names() -> set[str]:
 
 
 class TestRegistryIsComplete:
+    def test_identity_names_are_not_platform_settings(self) -> None:
+        """Идентичность оборота — не настройка, и объявлять её нельзя.
+
+        Агент передаёт её навыку через окружение подпроцесса, и навык отдаёт её
+        клиенту аргументом. Реестр к этому отношения не имеет: значение меняется
+        каждый оборот, у него нет ни дефолта, ни места в ``platform.json``, и
+        объявление сделало бы его разделяемой настройкой — с правом подмены из
+        файла, то есть с правом выдать себя за чужой оборот.
+
+        Имя проверяется здесь, а не в коде навыка, потому что местом, где такую
+        настройку объявили бы, был бы реестр.
+        """
+        identity = {
+            "ENTERPRISE_SESSION_ID",
+            "ENTERPRISE_USER_ID",
+            "ENTERPRISE_REQUEST_ID",
+        }
+        declared = identity & set(BY_ANY_NAME)
+        assert not declared, (
+            f"имена идентичности объявлены в реестре: {sorted(declared)}. "
+            "Идентичность приходит от вызывающей стороны, а не из platform.json."
+        )
+
     def test_every_read_variable_is_declared(self) -> None:
         """Платформа не читает ничего, чего нет в реестре."""
         undeclared = sorted(_all_referenced_names() - set(BY_ANY_NAME))
