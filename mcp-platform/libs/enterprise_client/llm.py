@@ -492,16 +492,38 @@ def close_default() -> None:
         client.close()
 
 
-def complete(messages: list[dict[str, Any]], **kwargs: Any) -> str:
-    """Отправить сообщения и получить текст ответа. Простой метод."""
-    return default_client().complete(messages, **kwargs)
+def complete(
+    messages: list[dict[str, Any]],
+    *,
+    identity: McpCallContext | None = None,
+    **kwargs: Any,
+) -> str:
+    """Отправить сообщения и получить текст ответа. Простой метод.
+
+    Args:
+        messages: сообщения ``{role, content}``.
+        identity: идентичность оборота. Без неё вызов уходит без ``_meta``,
+            и сервер либо примет его по переходному окну, либо откажет кодом
+            ``identity_missing`` — в зависимости от ``execution.require_call_meta``.
+    """
+    return default_client(identity).complete(messages, **kwargs)
 
 
-def complete_json(messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any] | None:
+def complete_json(
+    messages: list[dict[str, Any]],
+    *,
+    identity: McpCallContext | None = None,
+    **kwargs: Any,
+) -> dict[str, Any] | None:
     """Как :func:`complete`, но ответ разбирается как JSON-объект."""
-    return default_client().complete_json(messages, **kwargs)
+    return default_client(identity).complete_json(messages, **kwargs)
 
 
-def embed(text: str, **kwargs: Any) -> list[float]:
+def embed(
+    text: str,
+    *,
+    identity: McpCallContext | None = None,
+    **kwargs: Any,
+) -> list[float]:
     """Вернуть эмбеддинг текста."""
-    return default_client().embed(text, **kwargs)
+    return default_client(identity).embed(text, **kwargs)

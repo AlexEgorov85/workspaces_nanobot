@@ -255,6 +255,56 @@ class TestDefaultClient:
 
 
 # ---------------------------------------------------------------------------
+# Удобные функции модуля — тоже путь вызывающего
+# ---------------------------------------------------------------------------
+
+
+class TestModuleLevelFunctionsCarryIdentity:
+    """``complete()``/``embed()`` — то, чем навык зовёт платформу на самом деле.
+
+    Пока эти функции не принимали идентичность, перевести навык на ``_meta``
+    было нечем: скилл зовёт именно их, а не класс клиента. Возможность была
+    недостижимой, пока её не открыли здесь.
+    """
+
+    def test_complete_sends_the_identity(self, monkeypatch: Any) -> None:
+        _client, recorded = _client_with(_identity())
+        monkeypatch.setattr(
+            client_module, "default_client", lambda identity=None: _client
+        )
+        result = client_module.complete(
+            [{"role": "user", "content": "вопрос"}], identity=_identity()
+        )
+        assert result == "ответ"
+        assert recorded.had_meta_kwarg is True
+        parsed = McpCallContext.from_meta(recorded.meta)
+        assert (parsed.session_id, parsed.user_id, parsed.request_id) == (
+            "sess-1",
+            "user-1",
+            "req-1",
+        )
+
+    def test_complete_without_identity_sends_no_meta(self, monkeypatch: Any) -> None:
+        _client, recorded = _client_with(None)
+        monkeypatch.setattr(
+            client_module, "default_client", lambda identity=None: _client
+        )
+        client_module.complete([{"role": "user", "content": "вопрос"}])
+        assert recorded.had_meta_kwarg is False, recorded.meta
+
+    def test_identity_is_keyword_only(self) -> None:
+        """Идентичность — именованный аргумент, а не позиционный.
+
+        Иначе ``complete(messages, context=...)`` в чужом коде молча отдал бы
+        второй позиционный аргумент вместо идентичности.
+        """
+        with pytest.raises(TypeError):
+            client_module.complete(  # type: ignore[misc]
+                [{"role": "user", "content": "вопрос"}], _identity()
+            )
+
+
+# ---------------------------------------------------------------------------
 # Клиент не разбирает окружение
 # ---------------------------------------------------------------------------
 
