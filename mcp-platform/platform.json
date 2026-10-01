@@ -1,0 +1,17 @@
+{
+  "_about": "Настройки платформенной части enterprise-mcp. Секция агента сюда НЕ переносится: выбор модели, ключи и адреса остаются в project.json/.secrets.env и приходят через окружение процесса. Приоритет: окружение > этот файл > дефолт в libs/enterprise_common/settings.py. Значение чужой настройки в этом файле — ошибка, сервер не поднимется.",
+  "_owner": "platform",
+
+  "data": {
+    "log_table": "public.agent_gateway_logs",
+    "log_buffer_maxlen": 2048,
+    "log_flush_interval": 5.0,
+    "statement_timeout_ms": 30000,
+    "max_rows": 1000,
+    "expected_tables": []
+  },
+
+  "vectors": {
+    "enable": true
+  }
+}
