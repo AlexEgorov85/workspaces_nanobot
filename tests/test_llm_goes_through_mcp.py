@@ -8,11 +8,18 @@
   больше нет, и ходят в модель через операцию ``complete``;
 * секрет провайдера не попадает в процессы навыков.
 
-Проверки 3 и 4 — по исходникам, а не импортом: оба скилла называют свой
+Проверки 3 и 4 — по исходникам, а не импортом: скиллы называют свой
 модуль LLM одинаково (``audit_analyzer/scripts/llm.py`` и пакет
 ``legal_summarizer/scripts/llm/``), и импорт обоих в одном прогоне
 разрешается по-разному в зависимости от ``sys.path``. Проверять исходник
 устойчивее, и ломается он раньше, чем тест успел бы стать ложно-зелёным.
+
+Список модулей навыков **не зашит** (переписано в фазе 9): он находится по
+имени. Зашитый список молча вырождался — модуль `audit_analyzer` уехал на
+платформу, строка осталась, и тест падал на ``FileNotFoundError``, то есть
+на отсутствии файла, а не на нарушении контракта. Поиск по имени ловит
+обратное: вернуть навыку свой HTTP-клиент значит, что он снова попадёт в
+перебор и будет проверен.
 """
 
 from __future__ import annotations
@@ -27,10 +34,16 @@ LIB_LLM_MODULES = (
     REPO_ROOT / "lib" / "services" / "llm_client.py",
     REPO_ROOT / "lib" / "services" / "llm_config.py",
 )
-SKILL_LLM_MODULES = (
-    REPO_ROOT / "workspace" / "skills" / "audit_analyzer" / "scripts" / "llm.py",
-    REPO_ROOT / "workspace" / "skills" / "legal_summarizer" / "scripts" / "llm" / "client.py",
-)
+#: Модуль навыка, который сам ходит в модель: и файл, и пакет. Каталоги с
+#: именем на подчёркивании — tombstone'ы, они пропускаются.
+SKILL_LLM_MODULES: tuple[Path, ...] = tuple(sorted(
+    path
+    for path in (
+        *(REPO_ROOT / "workspace" / "skills").glob("*/scripts/llm.py"),
+        *(REPO_ROOT / "workspace" / "skills").glob("*/scripts/llm/client.py"),
+    )
+    if not any(part.startswith("_") for part in path.relative_to(REPO_ROOT).parts)
+))
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -81,6 +94,20 @@ def test_runtime_api_does_not_expose_llm_config() -> None:
     assert not hasattr(skill_config, "get_llm_config")
     for name in ("get_db_tables", "get_cli_config", "get_max_retries"):
         assert hasattr(skill_config, name), f"удалён не тот хелпер: {name}"
+
+
+def test_skill_llm_modules_are_actually_discovered() -> None:
+    """Поиск по имени не должен тихо обратиться в ноль.
+
+    Обратная сторона отказа от зашитого списка: сломанный glob даёт пустой
+    перебор, и параметризованные проверки ниже не падают, а просто не
+    выполняются. Пока в проекте есть навык с собственным модулем LLM, пустой
+    список — это поломка обхода, а не «все навыки переведены на платформу».
+    """
+    assert SKILL_LLM_MODULES, (
+        "ни одного scripts/llm.py в навыках не найдено — проверки ниже "
+        "перестали бы что-либо проверять"
+    )
 
 
 @pytest.mark.parametrize(

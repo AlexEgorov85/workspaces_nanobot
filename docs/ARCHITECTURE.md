@@ -264,15 +264,17 @@ Producer'ы (с обязательным keyword-only DI через `db_logging_
 
 | Producer | События | DI |
 |---|---|---|
-| `ContextCompactionService` | `context_compacted` | через `RuntimePatcher.patch_compact_command(partial(...))` или `run_repl(...)` параметр |
+| `ContextCompactionService` | `context_compacted` | параметр конструктора из composition root; событие приводит `lib/services/compaction_event_subscriber.py` |
 | `CacheLoadService` | `cache_load_started`, `cache_load_done` | kwarg `db_logging_service` |
 | `DuckDbCacheStore` | `sync_publish_ok`/`_failed`/`_empty`, `vector_preload_error`, `vector_index_build_failed` | kwarg `db_logging_service` |
 | `PreloadService` | `vector_index_preload_health` | kwarg `db_logging_service` |
 | `ApplicationContext._make_sync_services` | `sync_skipped_*` | inline `try_log_event` |
 | `DatabaseLoggingHook` (AgentLoop) | `tool_call`/`tool_result`/`llm_call`/`run_finished`/`turn_failed` | kwarg `db_logging_service` |
 
-DI поднимается через `functools.partial` (`RuntimePatcher.patch_compact_command`)
-и параметры composition root'ов (`run_repl(...)` в `lib/cli/console_loop.py`).
+DI поднимается через параметры composition root'ов — `run_repl(...)` в
+`lib/cli/console_loop.py` и сборку `ApplicationContext`; для события сжатия путь
+иной: `CompactionEventSubscriber` получает `ContextCompactionEvent` из
+`OutboundMessage` и зовёт `notify_session_compacted()`.
 **Никаких DI-полей на `agent`** (ни `_db_logging_service`, ни
 `db_logging_service`) — это историческая ошибка, исправленная в коммите
 `1893b17`.
@@ -421,7 +423,11 @@ PG/JOBS.
 `metadata` целиком в `_finalize_turn`.
 
 **UI:**
-* **Streamlit** (`streamlit_app.py`): `_render_context_window(block)` —
+* **Streamlit удалён в фазе 1** (`streamlit_app.py` и префикс сессий
+  `streamlit:` больше не существуют). Описанное ниже поведение — историческая
+  справка о том, чем рисовался прогресс контекста; живые поверхности —
+  консольный вывод и каналы.
+  Исторически: `_render_context_window(block)` —
   `st.progress(pct, text="Контекст: used / limit · NN% · model")`.
   Рисуется один раз для финальной строки (после загрузки истории)
   и live для processing-строки (каждый poll). Метка `metadata.kind ==
@@ -476,9 +482,13 @@ flowchart LR
 **Точки входа:**
 
 1. **Настоящая slash-команда ``/compact``** —
-   upstream `nanobot/command/builtin.py::cmd_compact`, расширяется
-   `RuntimePatcher.patch_compact_command` (fail-soft обёртка) в `agent.commands`
-   (`CommandRouter`), где это единственный путь, общий для всех каналов
+   upstream `nanobot/command/builtin.py::cmd_compact`. Патча-обёртки нет и не
+   было: `compact_command` остался DEPRECATED-остатком от `nanobot-035-upgrade`
+   (drift между `_PATCH_SPECS` и `apply_all()` — фактически не вызывался, см.
+   `docs/architecture/runtime-patcher-inventory.md` § «Удалённые патчи»), а
+   наблюдение ведёт `lib/services/compaction_event_subscriber.py` по событию
+   `ContextCompactionEvent` на `OutboundMessage` — публичный путь
+   `notify_session_compacted()`, общий для всех каналов
    (postgres, redis, telegram). В `run()` зарегистрированные команды
    перехватываются **до** LLM (``_dispatch_command_inline`` /
    ``_state_command``), поэтому сжатие срабатывает детерминированно и
@@ -498,8 +508,9 @@ flowchart LR
    уже подразумевает жёсткое idle-сжатие).
 
 3. **Tool ``compact_context``** (`workspace/tools/compact_context.py`),
-   регистрируется `RuntimePatcher.patch_project_tools` в `apply_all`
-   (см. `lib/services/runtime_patcher.py`). Параметры:
+   регистрируется `lib/services/project_tool_loader.py::register_project_tools`
+   (стандартный путь; регистрация project tools в `RuntimePatcher` запрещена —
+   см. `docs/architecture/runtime-patcher-inventory.md` п. 5). Параметры:
    `session_key: str | None` (по умолчанию — текущая из
    `current_request_session_key()`), ``idle: bool=False``, ``force: bool=True``.
    Пустой вызов ``compact_context({})`` (= ручная просьба пользователя)
@@ -507,16 +518,14 @@ flowchart LR
    токенов (JSON-schema-дефолт nanobot не применяется, значение подставляет
    Python-сигнатура). Явный ``force=False`` возвращает в token-budget режим.
 
-4. **Авто-сжатие** — обёртки `patch_compaction_tracking` в
-   `runtime_patcher`:
-   * `_wrap_auto_compact_archive` (`agent.auto_compact._archive`) —
-     перед/после вызова замеряет `last_consolidated` и `tokens`,
-     если курсор сдвинулся и `result` непустой — зовёт
-     `svc.record_external_compaction(...)`.
-   * `_wrap_maybe_consolidate_by_tokens`
-     (`agent.consolidator.maybe_consolidate_by_tokens`) — то же:
-     diff `last_consolidated` до/после; если сдвинулся — пишет
-     заметку через `record_external_compaction`.
+4. **Авто-сжатие** — патча нет: upstream сам пишет событие
+   `ContextCompactionEvent` на `OutboundMessage`, а
+   `lib/services/compaction_event_subscriber.py::CompactionEventSubscriber.feed()`
+   читает его и зовёт `notify_session_compacted()`. Механизм один и для idle,
+   и для token-budget сжатия — различать их не нужно: событие уже пришло.
+   (`compact_tracking` остался DEPRECATED-остатком от `nanobot-035-upgrade` и
+   никогда не применялся; `Consolidator.maybe_consolidate_by_tokens` в 0.3.5
+   отсутствует — отсюда и смысл перехода на событие.)
 
 Ручной вход ``/compact`` имеет два обработчика одного слова: slash-команда
 в ``CommandRouter`` (сетевые каналы) и перехват в REPL. Оба ставят
@@ -624,9 +633,9 @@ async def _notify(self, session_key, report):
 (`nanobot/agent/loop.py:1034`), а тот даже при `idleCompactAfterMinutes=0`
 делает `sessions.list_sessions()` — дорогой N+1 (перечисление всех сессий +
 отдельный запрос превью каждой). При сотне сессий это ~150 запросов/сек
-вхолостую. Патч при `auto_compact._ttl <= 0` заменяет `check_expired` на
-no-op — сбрасывая load практически до нуля (остаётся только легитимный
-поллинг каналов). При `ttl > 0` патч пропускается.
+вхолостую. Патча `idle_guard` нет: его функционал живёт в upstream
+`AutoCompact._is_expired`, который при `_ttl <= 0` не поллит сессии — практически
+до нуля (остаётся только легитимный поллинг каналов).
 
 **UI:**
 
@@ -683,16 +692,17 @@ no-op — сбрасывая load практически до нуля (оста
 * `TestCompactContextTool` — `CompactContextTool.enabled`/`create`/`execute`
   (стандартный nanobot-паттерн, читает `gateway.compact.*` через
   `ctx._settings_ref`).
-* `TestCompactContextToolRegistered` — `patch_project_tools` реально
+* `TestCompactContextToolRegistered` — регистрация через
+  `register_project_tools` реально
   регистрирует `compact_context` в `agent.tools`.
 * `TestRecordExternalCompaction` — единый путь записи:
   `_write_history_notice` зовётся с правильным report,
   skip при `archived=0`, skip при `notify_in_history=false`.
-* `TestPatchCompactionTracking` — `patch_compaction_tracking`:
-  skip при `enabled=false` / `notify_in_history=false`,
-  archive-wrapper зовёт `record_external_compaction`,
-  skip когда авто не архивирует,
-  maybe-consolidate-wrapper зовёт `record_external_compaction`.
+* `TestPatchCompactionTracking` — **плейсхолдер со `@pytest.mark.skip`**
+  (`tests/test_context_compaction.py`): патч `compact_tracking` удалён ещё в
+  `nanobot-035-upgrade` (`Consolidator.maybe_consolidate_by_tokens` в 0.3.5
+  отсутствует), тесты отключены. Проверки, которые он описывал, живут в тестах
+  `CompactionEventSubscriber` — по событию, а не по патчу.
 
 #### Переопределение шаблонов nanobot: `workspace/overrides/`
 
@@ -1353,7 +1363,7 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 Иначе `postgres_channel.send()` трактует ответ как промежуточную публикацию и НЕ
 финализирует оборот → `status='completed'` не ставится, слот не освобождается,
 чат блокируется. Пример корректного паттерна — обработчик compact-команды
-(`RuntimePatcher.patch_compact_command`, ставит `_final_turn` во все свои
+(upstream `cmd_compact`, ставит `_final_turn` во все свои
 `OutboundMessage`).
 
 ### Lifecycle-инвариант оборота (PostgresChannel)
@@ -1579,7 +1589,6 @@ nanobot/
 │   ├── session/                          #   хранилище сессий
 │   │   └── pg_session_manager.py         #     cold-storage mirror поверх upstream JSONL SessionManager
 │   └── utils/                            #   утилиты сервисного слоя
-│       ├── sql_safety.py                 #     SQL Security Guard (read-only AST-политика)
 │       ├── outbound_meta.py              #     фильтрация служебных outbound
 │       ├── text_utils.py, project_version.py,
 │       │   duckdb_query.py, retry.py, node_access.py, logging_utils.py
@@ -1589,7 +1598,7 @@ nanobot/
 │   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/cache/sessions/
 │   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
 │   │   └── debug_stream_diag.py          #     диагностика стриминга
-│   ├── tools/                            # кастомные tool'ы (auto-discover через patch_project_tools)
+│   ├── tools/                            # кастомные tool'ы (auto-discover через project_tool_loader.register_project_tools)
 │   │   ├── compact_context.py, history_search_tool.py,
 │   │   │   legal_summarizer_query.py, example.py
 │   ├── utils/                            # утилиты workspace

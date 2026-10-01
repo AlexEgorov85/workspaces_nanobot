@@ -52,18 +52,54 @@ def test_agents_md_no_forbidden_module_references() -> None:
         )
 
 
-def test_readme_md_describes_audit_analyzer_cli() -> None:
-    """README.md должен описывать CLI audit_analyzer (он активен в коде)."""
+def test_readme_md_describes_the_live_audit_analyzer_entrypoint() -> None:
+    """README должен описывать тот вход в данные аудита, который есть в коде.
+
+    Инвариант прежний, сторона перевёрнута: раньше проверка требовала, чтобы
+    README описывал CLI, который активен в коде. Теперь CLI нет (фаза 9), и
+    настоящая опасность обратная — README продолжает предлагать ``cli.py``,
+    которого в репозитории уже не существует. Модель и человек, читая
+    README, уйдут по несуществующему пути и потратят на это оборот.
+    """
     text = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     cli_path = _PROJECT_ROOT / "workspace/skills/audit_analyzer/scripts/cli.py"
-    assert cli_path.is_file(), "cli.py удалён, а документация его описывает"
+    tool_path = _PROJECT_ROOT / "workspace/tools/audit_analyzer_query.py"
 
-    assert "cli.py" in text, (
-        "README.md не упоминает CLI audit_analyzer, хотя scripts/cli.py существует"
+    assert not cli_path.exists(), (
+        "scripts/cli.py снова появился: если он вернулся как живой код, "
+        "README и SKILL.md надо вернуть к описанию CLI, а не инструмента"
     )
-    assert "tool-only" not in text.lower() or "не имеет собственного CLI" not in text, (
-        "README.md описывает audit_analyzer как tool-only, но CLI активен"
+    assert tool_path.is_file(), (
+        "инструмента audit_analyzer_query нет, а навык лишён CLI — "
+        "доступа к данным аудита не осталось"
     )
+    assert "audit_analyzer_query" in text, (
+        "README не называет инструмент, через который агент ходит в данные "
+        "аудита"
+    )
+
+    # Живой раздел — до первого «Что нового». Ниже начинается changelog, и
+    # его переписывать нельзя: он описывает то, что было в прошлых версиях.
+    live, _, changelog = text.partition("## 🆕")
+    assert "scripts/cli.py" not in live, (
+        "живой раздел README всё ещё предлагает удалённый scripts/cli.py"
+    )
+    for gone in ("--mode generated_sql", "--mode predefined", "sql_safety"):
+        assert gone not in live, (
+            f"живой раздел README упоминает {gone!r} — этого больше нет в коде"
+        )
+
+    # В [Unreleased] упоминание CLI законно — там им фиксируют его удаление.
+    # Законно говорить «удалён», незаконно — давать команду. Поэтому запрет
+    # тут другой: форма команды, а не само имя файла. Без этой проверки
+    # changelog незамеченно превращался бы в живую инструкцию.
+    unreleased = changelog.split("## 🆕", 1)[0]
+    for command in ("--mode predefined", "--mode generated_sql", "--mode vector",
+                    "python scripts/", "audit_analyze "):
+        assert command not in unreleased, (
+            f"[Unreleased] даёт команду {command!r} на удалённый CLI навыка — "
+            "changelog не инструкция"
+        )
 
 
 def test_project_json_no_duplicate_keys() -> None:

@@ -56,6 +56,10 @@ TEST_ALLOWLIST: dict[str, str] = {
     "tests/test_profile_integration.py": "предмет проверки — разбор профиля и его имён",
     "tests/test_config_resolver.py": "предмет проверки — слияние конфигов и имён",
     "tests/test_no_hardcoded_table_names.py": "здесь лежат примеры самого правила",
+    "tests/test_audit_analyzer_skill_doc.py": (
+        "страж SKILL.md; имя таблицы журнала лежит в списке ЗАПРЕЩЁННЫХ "
+        "токенов, то есть используется как запрет, а не как обращение к данным"
+    ),
 }
 
 SKIP_DIR_PARTS = {"data_store", ".git", ".worktrees", "__pycache__", "node_modules"}

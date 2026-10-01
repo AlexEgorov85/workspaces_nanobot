@@ -20,6 +20,63 @@
 | `sql/vectors/create_vector_index_config.sql` | Мёртвый DDL: самая конфигурация индексов живёт в `project.json`. `migrate.py` обходит только `sql/migrations/`, файл не исполняется. Код вырезан, осталась заглушка (фаза 5, п. 5.9) | `git rm sql/vectors/create_vector_index_config.sql` |
 | `sql/vectors/create_vector_index_store.sql` | Мёртвый DDL: persisted FAISS-кеш удалён ещё change `remove-vector-index-store`, таблица снесена миграцией `V003`. Не исполняется. То же, что и предыдущий (фаза 5, п. 5.9) | `git rm sql/vectors/create_vector_index_store.sql` |
 
+## Python-слой навыка `audit_analyzer` (фаза 9)
+
+Навык перестал владеть данными: запросы строит и проверяет capability `audit`
+платформы, агент ходит до неё инструментом `audit_analyzer_query`. Всё
+перечисленное не импортируется ничем, но лежит на диске и убирается вручную.
+Код внутри каждого файла вырезан, осталась заглушка-описание: загрузчик по
+соглашению пропускает модули с именем, начинающимся с `_`.
+
+| Файл | Что было | Строк |
+|---|---|---|
+| `lib/utils/_sql_safety.py` | SQL Security Guard агента; копия живёт в `mcp-platform/libs/enterprise_data/sql_safety.py` | 425 |
+| `workspace/skills/audit_analyzer/scripts/_cli.py` | CLI навыка (`--mode predefined/vector/generated_sql`) | 411 |
+| `workspace/skills/audit_analyzer/scripts/_generated_sql_mode.py` | NL→SQL в агенте; порт в `mcp-platform/libs/audit/` | 424 |
+| `workspace/skills/audit_analyzer/scripts/_llm.py` | HTTP-клиент модели; выбора модели у агента больше нет | — |
+| `workspace/skills/audit_analyzer/scripts/_skill_config.py` | Обёртка над `lib.core.skill_config` для одного навыка | — |
+| `workspace/skills/audit_analyzer/scripts/_output.py` | Сериализация вывода CLI | — |
+| `workspace/skills/audit_analyzer/scripts/_package_init.py` | `__init__.py` пакета `scripts` (Python не даёт файлу с `_` быть пакетом) | — |
+| `workspace/skills/audit_analyzer/scripts/_removed_predefined/` | 6 модулей DB-first реестра скриптов; порт в `mcp-platform/libs/audit/predefined.py` + `registry_loader.py` | 931 |
+| `workspace/skills/audit_analyzer/_removed_tests/` | 4 файла тестов навыка (не в `tests/`, а внутри скилла) | ~1784 |
+
+Тесты агента на снятый код (pytest не собирает `_test_*.py`):
+
+| Файл | Строк |
+|---|---|
+| `tests/_test_audit_analyzer_cli.py` | 411 |
+| `tests/_test_audit_analyzer_mode_selection.py` | 311 |
+| `tests/_test_audit_analyzer_generated_sql.py` | 424 |
+| `tests/_test_skill_cache_boundary.py` | 146 |
+| `tests/_test_skill_tool_integration.py` | 211 |
+| `tests/_test_sql_safety.py` | 250 |
+
+Удалить одним проходом:
+
+```bash
+git rm lib/utils/_sql_safety.py \
+  workspace/skills/audit_analyzer/scripts/_cli.py \
+  workspace/skills/audit_analyzer/scripts/_generated_sql_mode.py \
+  workspace/skills/audit_analyzer/scripts/_llm.py \
+  workspace/skills/audit_analyzer/scripts/_skill_config.py \
+  workspace/skills/audit_analyzer/scripts/_output.py \
+  workspace/skills/audit_analyzer/scripts/_package_init.py \
+  tests/_test_audit_analyzer_cli.py \
+  tests/_test_audit_analyzer_mode_selection.py \
+  tests/_test_audit_analyzer_generated_sql.py \
+  tests/_test_skill_cache_boundary.py \
+  tests/_test_skill_tool_integration.py \
+  tests/_test_sql_safety.py
+git rm -r workspace/skills/audit_analyzer/scripts/_removed_predefined \
+          workspace/skills/audit_analyzer/_removed_tests
+```
+
+Не отслеживается git, `git rm` не подходит:
+
+| Файл | Что это |
+|---|---|
+| `workspace/skills/audit_analyzer/err1.log` | Мусорный лог, оставшийся от ручных прогонов CLI |
+
 ## Черновики в корне
 
 Отладочные пробы и скрипты, оставшиеся от прошлых заходов. Всё это не часть

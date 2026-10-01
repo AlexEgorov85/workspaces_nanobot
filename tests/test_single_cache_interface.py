@@ -448,6 +448,15 @@ class TestDiscoveryRequiresProvider:
 
     _CALLEE = "list_runtime_vector_indexes"
 
+    #: Места вызова, которые должны остаться в дереве. Навык
+    #: ``audit_analyzer`` раньше был третьим и уехал на платформу (фаза 9);
+    #: список назван поимённо, потому что «не меньше N» перестаёт работать
+    #: ровно тогда, когда вызывающий уходит штатно.
+    _EXPECTED_CALL_SITES = frozenset({
+        "lib/services/preload_service.py",
+        "tools/check_indexes.py",
+    })
+
     def test_every_call_site_passes_provider(self) -> None:
         offenders: list[str] = []
         for path in _iter_sources():
@@ -469,8 +478,16 @@ class TestDiscoveryRequiresProvider:
         )
 
     def test_call_sites_exist(self) -> None:
-        """Защита от вакуума: правило выше не должно молча ничего не проверять."""
-        found: list[str] = []
+        """Защита от вакуума: правило выше не должно молча ничего не проверять.
+
+        Порог-«не меньше N» здесь был плохой защитой: он ломался на каждом
+        переезде кода, ничего не говоря о том, что именно должно остаться.
+        Третий вызывающий — навык `audit_analyzer` — уехал на платформу в
+        фазе 9, и число мест вызова уменьшилось с трёх до двух штатно, а не
+        по поломке. Поэтому проверяется не количество, а наличие известных
+        продакшн-мест: если они исчезнут все, правило начнёт проверять пустоту.
+        """
+        found: set[str] = set()
         for path in _iter_sources():
             tree = _parse(path)
             if tree is None:
@@ -479,9 +496,11 @@ class TestDiscoveryRequiresProvider:
                 if isinstance(node, ast.Call):
                     chain = _dotted_chain(node.func)
                     if chain and chain[-1] == self._CALLEE:
-                        found.append(_rel(path))
-        assert len(set(found)) >= 3, (
-            f"Ожидалось минимум 3 места вызова, найдено {sorted(set(found))}"
+                        found.add(_rel(path))
+        assert self._EXPECTED_CALL_SITES <= found, (
+            "ожидались места вызова "
+            f"{sorted(self._EXPECTED_CALL_SITES)}, найдено {sorted(found)} — "
+            "правило выше перестало что-либо проверять"
         )
 
     def test_missing_provider_raises(self) -> None:

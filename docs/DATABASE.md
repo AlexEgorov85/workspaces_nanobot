@@ -135,7 +135,8 @@
 
 **Кто ходит в БД через пул:** `DbLoggingService`, `CacheLoadService` (только на
 время стартовой загрузки), `PGSessionManager`, `PostgresChannel`,
-`session_storage`, `streamlit_app.py` и инструменты. Ни один сервис-поток не
+`session_storage` и инструменты. (`streamlit_app.py` тоже ходил, но удалён в
+фазе 1.) Ни один сервис-поток не
 держит собственного psycopg2-соединения — соединение выдаёт пул на время
 запроса/транзакции. Чтение кэша в рабочем режиме пул **не занимает вовсе**:
 это и есть смысл кэша.
@@ -163,14 +164,23 @@
 | `skills.audit_analyzer.enabled` | Вкл/выкл навыка | `true` |
 | `skills.audit_analyzer.tables[*].name` | Таблицы домена, доступные агенту (`{name, tracking_column?, label?}`) | `oarb.audit_reports`, `oarb.audits`, `oarb.report_items`, `oarb.violations` — **примеры текущей инсталляции; имена настраиваются здесь** |
 | `skills.audit_analyzer.tables[*].label` | Opaque-метка для `resources_by_label` (напр. реестр скриптов) | `public.agent_predefined_scripts` → `label: "scripts_registry"` |
-| `skills.audit_analyzer.vector_indexes[*].name` | Имена FAISS-индексов (`index_name` в `--mode vector`; persisted-файлов нет — индексы живут в памяти процесса) | `audits_index`, `violations_index`, `audit_reports_index` — **примеры текущей инсталляции** |
-| `skills.audit_analyzer.llm.max_tokens` / `temperature` | Параметры генерации SQL | `8192` / `0.1` |
-| `skills.audit_analyzer.cli.default_mode` / `max_retries` / `timeout_sec` | CLI-режим навыка | `predefined` / `3` / `60` |
+| `skills.audit_analyzer.vector_indexes[*].name` | Имена FAISS-индексов (`index_name` в операции `vector_search`; persisted-файлов нет — индексы живут в памяти процесса) | `audits_index`, `violations_index`, `audit_reports_index` — **примеры текущей инсталляции** |
+| ~~`skills.audit_analyzer.llm.*`~~ | — | **удалено (9.6)**: выбор модели принадлежит capability `llm`. `max_tokens` / `temperature` объявляет платформа — `mcp-platform/platform.json` → `llm.max_tokens` / `llm.temperature` |
+| ~~`skills.audit_analyzer.cli.*`~~ | — | **удалено вместе с CLI навыка (фаза 9)**: `default_mode` / `max_retries` / `timeout_sec` больше не существуют, режим выбирает модель, а не флаг командной строки |
 | `gateway.vector.index.storage_table` | Таблица сырых эмбеддингов; регистрируется через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` | `oarb.audit_vectors` |
 | `gateway.vector.index.default_root` | Каталог FAISS-индексов (в runtime не персистится — FAISS в памяти) | `data_store/vectors` |
 | `gateway.vector.index.indexes.<name>` | Декларативный конфиг индексов (`table`, `pk`, `source_table`, `content_columns`, `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`, `enabled`) — единственный источник; PG-реестр не читается | `audits_index`, `violations_index`, `audit_reports_index` |
 | `gateway.sync.*` | **удалена** — поллинга и пересинхронизации больше нет | — |
 | `gateway.cache.local_path` | Каталог файла кэша (имя `cache.duckdb` добавляется внутри `resolve_cache_path()`) | `~/.cache/nanobot/duckdb` |
+
+> **Дубликат объявлений, который пока живёт.** `skills.audit_analyzer.tables[*]`
+> и `skills.audit_analyzer.vector_indexes[*]` нужны агенту для загрузки снимка
+> и сборки индексов — и те же значения объявлены ещё раз в
+> `mcp-platform/platform.json` (секции `audit.tables`, `vectors.indexes`),
+> потому что capability `audit` не должна получать знание о проекте из чужого
+> окружения. Схлопывается вместе с уходом снимка из агента. До тех пор при
+> расхождении доверять платформенному объявлению: запросы к данным идут через
+> него, и только агент читает своё.
 
 Декларация — единый источник истины. `ApplicationContext._auto_register_skills` (см. `lib/core/application_context.py`) читает эту секцию при старте и автоматически создаёт `TableResource`/`VectorResource` в `table_registry`. Никакого `register.py` не требуется. Для добавления нового skill достаточно добавить секцию `skills.<name>` в `project.json`. DoD-проверка — `tests/test_resource_universality.py`.
 
@@ -325,8 +335,13 @@ writer; поскольку writer'ом является только загру�
 #### Практические сценарии
 
 - **Обновить данные в PostgreSQL**: перезапустить процесс. Ничего другого нет.
-- **Добавить таблицу в анализ**: добавить её в `skills.audit_analyzer.tables` и
-  перезапустить процесс.
+- **Добавить таблицу в анализ**: добавить её в **оба** места — `audit.tables`
+  в `mcp-platform/platform.json` (этим пользуется capability `audit` и именно
+  по этому списку проверяется сгенерированный запрос) и
+  `skills.audit_analyzer.tables` в `project.json` (этим наполняется снимок
+  агента), затем перезапустить процесс. Правка только в `project.json` даст
+  таблицу в снимке, но не в ответах, потому что запросы к данным больше не
+  идут через агента.
 - **Сомнение в свежести кэша**: сверить `loaded_at` в `cache_load_done` с
   временем последней правки данных в PostgreSQL.
 
@@ -413,24 +428,32 @@ DISTRIBUTED BY (source);         -- audit_vectors
 Четыре инфраструктурные границы, не зависящие от домена навыков
 (TARGET_ARCHITECTURE §16/§20/§28/§29).
 
-### SQL Security Guard — `lib/utils/sql_safety.py`
+### SQL Security Guard — уехал на платформу (фаза 9)
 
-AST-политика read-only SQL на `sqlglot` (dialect postgres). Контракт
-`validate_sql(sql) -> None|str` сохранён (None = безопасен); внутри:
+В агенте больше нет. Модуль `lib/utils/sql_safety.py` (AST-политика read-only
+SQL на `sqlglot`) удалён: его единственным продакшн-потребителем был
+`generated_sql_mode.py` навыка `audit_analyzer`, который тоже уехал. Проверять
+SQL было нечем.
 
-- разрешены SELECT / WITH...SELECT / UNION (и EXPLAIN от них);
-- запрещены DML/DDL по первому слову (быстрый путь) и структурно:
-  `SELECT INTO`, опасные функции (`pg_read_file`, `pg_sleep`,
-  `dblink`, `nextval/setval`...), системные каталоги
-  (`pg_catalog`/`information_schema`; флаг `SqlPolicy.allow_catalog_access`);
-- multi-statement запрещён; EXPLAIN валидирует внутренний statement рекурсивно;
-- `validate_sql_report()` возвращает `ValidationReport` (allowed/reason/
-  issues + `normalize_sql()`/`query_hash()`) для audit trail вызывающей стороны;
-- при недоступном sqlglot — graceful degradation на regex-проверки.
+Граница не исчезла, а переехала и разделилась на две, потому что исходная
+закрывала две разные задачи одним модулем:
 
-Потребители: skill `audit_analyzer` (`generated_sql_mode`, `predefined`).
-Тесты: `tests/test_sql_safety.py`. (Tool `duckdb_query` отсутствует — доступ
-через CLI skill'а.)
+| Уровень | Где | Что проверяет |
+|---|---|---|
+| Проверка вывода модели | `mcp-platform/libs/audit/guard.py` | Белый список таблиц: из AST собираются **все** ссылки (`FROM`, `JOIN`, подзапросы, `WITH`), ссылка вне списка — отказ **до** выполнения. Плюс потолок строк, применяемый к любому сгенерированному запросу и проверяемый повторным разбором готового текста |
+| Режим доступа к снимку | `mcp-platform/libs/enterprise_data/snapshot/sql_guard.py` | Классификатор DDL / DML / SELECT / OTHER + запрет multi-statement. Второй уровень поверх `read_only=True` у соединения DuckDB |
+| Общая SQL-политика | `mcp-platform/libs/enterprise_data/sql_safety.py` | `validate_sql` / `format_schema` — порт исходного модуля, используется генератором `libs.audit` |
+
+Что изменилось по сути, а не только места хранения: старый `validate_sql` знал
+только вид оператора и **не знал имён таблиц** — запрос к любой таблице домена
+проходил без возражений. Белый список таблиц был строкой в промпте, то есть
+просьбой, а не запретом. Теперь запрет настоящий и проверяется разбором, а
+деградации к регулярным выражениям нет: без `sqlglot` поднимается
+`GuardUnavailableError`, потому что «проверка, которая молча ничего не
+проверяет», хуже её отсутствия.
+
+Тесты: `mcp-platform/tests/test_enterprise_data_sql_safety.py`,
+`mcp-platform/tests/test_audit_lib_table_guard.py`.
 
 ### Contract tests nanobot API — `tests/contract/`
 

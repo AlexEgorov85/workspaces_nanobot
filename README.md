@@ -42,11 +42,13 @@ python tools/check_indexes.py                                 # declared vs runt
 python tools/migrate.py --apply                               # миграции схемы
 ```
 
-> **Навык `audit_analyzer`** предоставляет CLI `scripts/cli.py --mode <predefined | generated_sql | vector>`
-> (вызывается агентом через `exec`; также для бенчмарков/CI). Generic tools
-> `duckdb_query` / `vector_search` отсутствуют — агент работает только через CLI.
-> LLM-генерация SQL — режим `generated_sql` (`scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client`).
-> Внешний контракт — `SKILL.md`.
+> **Навык `audit_analyzer`** не имеет собственного CLI и не ходит в данные
+> напрямую: агент вызывает инструмент `workspace/tools/audit_analyzer_query.py`,
+> который обращается к capability `audit` платформы enterprise-mcp по MCP.
+> Операции: `list_scripts` (каталог готовых скриптов), `run_script`,
+> `generate_sql` (NL→SQL, запрос строит и проверяет платформа), `vector_search`.
+> Модель не пишет SQL: белый список таблиц и потолок строк проверяются до
+> выполнения. Внешний контракт — `SKILL.md`.
 
 Подробности по каждой команде — в [docs/INTERNAL_API.md](docs/INTERNAL_API.md) и
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
@@ -184,8 +186,10 @@ cross-user выдачи; без identity-store возвращается `missing
 
 **Changed.** Единый logging pipeline: `workspace/utils/event_log.py` удалён,
 `DbLoggingService` — единственный writer в `agent_gateway_logs` /
-`agent_question_runs`; `/compact` переведён на upstream-обработчик
-(`ContextCompactionService` + `RuntimePatcher.patch_compact_command`).
+`agent_question_runs`; `/compact` живёт в upstream-обработчике
+`nanobot.command.builtin.cmd_compact`, а факт сжатия пишет
+`ContextCompactionService.notify_session_compacted()` (через
+`CompactionEventSubscriber` по событию `ContextCompactionEvent`).
 
 Полный changelog — в [CHANGELOG.md → Unreleased](CHANGELOG.md#unreleased).
 
