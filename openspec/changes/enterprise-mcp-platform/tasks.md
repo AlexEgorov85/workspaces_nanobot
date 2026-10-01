@@ -643,17 +643,35 @@
 
 ## Фаза 6 — патчи → хуки
 
-- [ ] 6.1 `turn_delivery_fail` → хук на `finalize_content` (замена текста) +
+- [x] 6.1 `turn_delivery_fail` → хук на `finalize_content` (замена текста) +
       `on_error` (логирование `turn_failed`). Проверить: пользователь получает
       **один** fallback-ответ.
       **Формулировка плана нереализуема на nanobot 0.3.5** — исправлено
       решением `docs/architecture/decisions/turn-delivery-public-extension.md`:
       `finalize_content` вызывается только `runner.py` на `response.content`
       и текст ошибки из `turn_delivery.py:341` не видит никогда.
-      Перенос делается **внедрением через публичный параметр**
-      `AgentLoop(turn_delivery_factory=...)`: подкласс `TurnDelivery`
-      переопределяет `fail()`, фабрика-подкласс отдаёт его вместо upstream.
-      Патч удаляется целиком, `_OutboundSilencer` уходит вместе с ним
+      **Сделано:** перенос через публичный параметр
+      `AgentLoop(turn_delivery_factory=...)`, как и предписывал ADR.
+      `lib/services/turn_delivery_factory.py`: `FallbackTurnDelivery.fail()`
+      публикует настроенный fallback **сам** и `super().fail()` не зовёт, поэтому
+      двойная публикация невозможна конструктивно — `_OutboundSilencer` удалён
+      вместе с патчем. `FallbackTurnDeliveryFactory` зовёт `super().create()` и
+      `super().unrouted()` (маршрутизация остаётся upstream) и подменяет класс
+      собранного экземпляра. Фабрику собирает `AgentFactory.create()`, параметр
+      `settings` приходит из `ApplicationContext` (`ctx.settings`).
+      Патч удалён из `_PATCH_SPECS`, из тела `apply_all` и из класса; константы
+      `_DEFAULT_INTERNAL_ERROR_TEXT`/`_DEFAULT_LOG_TO_DB` переехали в новый
+      модуль. Запрет возврата — `REMOVED_PATCHES` в `tests/test_runtime_patcher.py`,
+      канон — `tests/test_patch_spec_consistency.py`.
+      Контракт — `tests/test_turn_delivery_factory.py` (17 тестов) на настоящем
+      nanobot, а не на заглушке. Стражи проверены на заведомо плохих данных:
+      возврат `await super().fail(...)` роняет `test_exactly_one_publication` и
+      `test_both_creation_paths_are_adopted`.
+      **Побочный эффект:** CLI-путь (`cli_agent.py` → `AgentFactory`) тоже
+      получил настраиваемый fallback. Раньше патч применялся только в
+      `ApplicationContext`, и в CLI пользователь видел upstream-литерал.
+      Отдельно: пробельный текст настройки теперь отбрасывается наравне с
+      пустым — иначе пользователь получил бы сообщение из одних пробелов.
 - [x] 6.2 `save_turn` → хук на `after_execute_tool`: архивирование результата
       в момент возврата tool'а. **Сделано:** `lib/hooks/tool_result_archive_hook.py`
       (`ToolResultArchiveHook`), фабрика `_make_tool_result_archive_hook` в
@@ -694,9 +712,15 @@
       **Сделано:** канон строится из `patch_specs()` (12 → 7), тест выражен
       правилом, а не выпиской чисел. Добавлен страж
       «`_PATCH_SPECS` == записываемые в `apply_all` == `patch_*`-методы»
-- [ ] 6.10 Обновить `docs/architecture/runtime-patcher-inventory.md`:
-      категории, тесты, risk пересчитать. **Не начато:** документ описывает
-      состояние до фазы 6
+- [x] 6.10 Обновить `docs/architecture/runtime-patcher-inventory.md`:
+      категории, тесты, risk пересчитать.
+      **Сделано:** сводная таблица переведена с 12 патчей на фактические 6,
+      переписаны категории и условия удаления, `Required = ✓` теперь 3 патча
+      вместо 4. Добавлен раздел REMOVED с `turn_delivery_fail` и его нативной
+      заменой. Исправлена фактическая ошибка: `TurnEndEvent` был указан среди
+      23 событий nanobot, хотя в 0.3.5 его нет — теперь помечен как
+      несуществующий со ссылкой на ADR. Прогноз «12 → 4–5» заменён на
+      «6 → 3–4» с перечнем того, что блокирует каждый оставшийся кандидат
 
 - [x] 6.11 Написать нативный document-tool агента поверх `office_files.py`;
       порог длины текста переносится из патча в его собственный код.
@@ -709,9 +733,26 @@
 - [x] 6.13 `tests/test_office_files.py` остаётся в проекте агента: сам модуль
       `office_files.py` не переезжает. **Сделано:** файл на месте, тест зелёный
 
-**Приёмка:** патчей 12 → **4** на этом шаге: `2` полностью необходимых
-(`exec_limits`, `subagent_logging`) + 2 частичных (`context_governor`,
-`tool_limits`). Каждый оставшийся имеет заполненное «Условие удаления».
+**Приёмка (исправлена 2026-10-01):** патчей **6 → 3–4**, а не «12 → 4».
+После закрытия 6.1 осталось шесть: `context_governor`, `exec_limits`,
+`exec_timeout_cap`, `tool_limits`, `assemble_outbound`, `subagent_logging`.
+
+Число «4» не достижимо и, что важнее, **неверно по существу**: приёмка требовала
+снять `exec_timeout_cap`, но ни один пункт фазы 6 этого не описывает, и снять
+его сейчас нельзя. Патч поднимает потолок `ExecTool._MAX_TIMEOUT` с 600 до
+`gateway.exec_timeout_cap_sec` (по умолчанию 3600) и снимает `maximum=600` в
+схеме параметра. `tools.exec.timeout=0` ослабляет лимит только когда агент **не**
+передаёт явный `timeout`, а `TOOLS.md` учит его передавать, — то есть навыки с
+длительными прогонами (legal 7–10 мин) без патча упрутся в 600 секунд. Правдивая
+категория — **KEEP**, условие удаления — «после переезда `legal_summarizer` в
+платформу (фаза 11)».
+
+**Решение владельца:** принять 5 как целевое число и добавить пункт о снятии
+`exec_timeout_cap` в фазу 11, либо оставить 6 как постоянный состав. Тихо
+снимать патч нельзя — это регресс для `legal_summarizer`.
+
+Каждый оставшийся патч имеет заполненное «Условие удаления» в
+`docs/architecture/runtime-patcher-inventory.md`.
 
 ---
 

@@ -126,7 +126,6 @@ class TestKnownPatchesRemainDeclared:
         "exec_timeout_cap",
         "subagent_logging",
         "tool_limits",
-        "turn_delivery_fail",
     })
 
     REMOVED_IN_PHASE_6 = frozenset({
@@ -135,6 +134,9 @@ class TestKnownPatchesRemainDeclared:
         "save_turn",
         "session_content_cleanup",
         "session_dir_watch",
+        # Переехал на публичный ``AgentLoop(turn_delivery_factory=...)``,
+        # см. ``lib/services/turn_delivery_factory.py``.
+        "turn_delivery_fail",
     })
 
     def test_expected_set_matches(self) -> None:

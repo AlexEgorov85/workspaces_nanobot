@@ -20,9 +20,13 @@
   * ``session_content_cleanup`` → ``PGSessionManager.save``;
   * ``async_save`` → обёртка в ``lib/services/session_storage.py``;
   * ``session_dir_watch`` → удалён целиком (диагностика расследована);
-  * ``assemble_outbound`` и ``turn_delivery_fail`` — оставлены: в nanobot
-    0.3.5 нет публичного extension point, см. ``docs/architecture/
-    runtime-patcher-inventory.md``.
+  * ``turn_delivery_fail`` → ``lib/services/turn_delivery_factory.py``
+    (``FallbackTurnDeliveryFactory`` через публичный параметр
+    ``AgentLoop(turn_delivery_factory=...)``);
+  * ``assemble_outbound`` — оставлен: в nanobot 0.3.5 нет события конца
+    оборота, на которое можно перевести ``_final_turn``/``media``, см.
+    ``docs/architecture/runtime-patcher-inventory.md`` и ADR
+    ``docs/architecture/decisions/turn-delivery-public-extension.md``.
 
 Регистрация кастомных tool'ов из ``workspace/tools/*.py`` — в отдельном
 loader'е: ``lib/services/project_tool_loader.py::register_project_tools``;
@@ -35,7 +39,6 @@ loader'е: ``lib/services/project_tool_loader.py::register_project_tools``;
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys as _sys
 from dataclasses import dataclass
@@ -95,18 +98,11 @@ def _resolve_media_path(media_paths: list[str], basename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Error fallback constants (см. openspec/specs/runtime/error-fallback).
-# Hardcoded default для случаев, когда ``gateway.error_messages.internal_error``
-# в project.json не задан или ``settings`` недоступен (юнит-тесты без
-# ApplicationContext). Изменение этих констант требует согласования со
-# спекой — это пользовательский контракт.
+# Константы fallback'а (openspec/specs/runtime/error-fallback) переехали
+# вместе с патчем в ``lib/services/turn_delivery_factory.py``: настраиваемый
+# ответ на internal-ошибку теперь собирает фабрика, внедряемая публичным
+# параметром ``AgentLoop(turn_delivery_factory=...)``.
 # ---------------------------------------------------------------------------
-_DEFAULT_INTERNAL_ERROR_TEXT: str = (
-    "Я не справился с вашим вопросом. "
-    "Попробуйте, пожалуйста, переформулировать конкретнее — "
-    "например, уточните ключевую часть или приведите пример."
-)
-_DEFAULT_LOG_TO_DB: bool = True
 
 
 class ContextWindowNotSeededError(RuntimeError):
@@ -339,21 +335,6 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         risk="high",
         required=True,
     ),
-    "turn_delivery_fail": PatchSpec(
-        name="turn_delivery_fail",
-        purpose="конфигурируемый fallback-ответ при internal-ошибке в "
-                "AgentLoop._process_message (подмена захардкоженного "
-                "upstream-литерала \"Sorry, I encountered an error.\")",
-        nanobot_target="nanobot.agent.turn_delivery.TurnDelivery.fail",
-        reason="public extension point отсутствует; патч подменяет метод "
-               "класса обёрткой, читает gateway.error_messages.internal_error, "
-               "подавляет двойной outbound через per-instance _OutboundSilencer "
-               "и пишет event_type=\"turn_failed\" в agent_gateway_logs",
-        alternatives_checked="AgentHook.after_run — слишком поздно и не видит "
-                             "OutboundMessage от TurnDelivery.fail; "
-                             "EventSink не публикуется upstream-методом",
-        risk="medium",
-    ),
 }
 
 
@@ -447,33 +428,6 @@ class PatchReport:
         return "\n".join(lines)
 
 
-class _OutboundSilencer:
-    """Прокси для подавления outbound'а при вызове upstream ``TurnDelivery.fail``.
-
-    Используется в ``RuntimePatcher.patch_turn_delivery_fail._wrap_fail``:
-    на время вызова оригинального ``fail()`` ``self.bus`` подменяется на
-    этот объект. ``__getattr__`` пробрасывает все обращения к реальному
-    bus, кроме ``publish_outbound`` — она возвращает ``None`` без публикации.
-    Это позволяет сохранить upstream-логику ``turn_completed`` runtime-event,
-    не отправляя при этом upstream-литерал ``"Sorry, I encountered an error."``
-    пользователю.
-
-    Подмена атрибута экземпляра (per-instance) безопасна для конкурентных
-    оборотов: один ``TurnDelivery`` живёт ровно один оборот.
-    """
-
-    __slots__ = ("_inner",)
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def publish_outbound(self, msg: Any) -> None:
-        return None
-
-
 def _resolve_agent_id(config: Any, agent: Any) -> str | None:
     """Резолв идентификатора активного агента для передачи в патчи.
 
@@ -561,8 +515,6 @@ class RuntimePatcher:
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
-        self._record(report, "turn_delivery_fail", self.patch_turn_delivery_fail(
-            settings, db_logging_service, agent_id=_resolve_agent_id(config, agent)))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager, bus=bus))
         return report
@@ -1041,231 +993,6 @@ class RuntimePatcher:
 
         agent._assemble_outbound = _wrap
         return True, "agent._assemble_outbound patched"
-
-    # ------------------------------------------------------------------
-    # Патч 2b: TurnDelivery.fail → заготовленный fallback вместо
-    # upstream-литерала "Sorry, I encountered an error."
-    # ------------------------------------------------------------------
-
-    def patch_turn_delivery_fail(
-        self,
-        settings: Any,
-        db_logging_service: Any = None,
-        agent_id: str | None = None,
-    ) -> tuple[bool, str]:
-        """Заменить ``TurnDelivery.fail`` обёрткой с заготовленным текстом.
-
-        Upstream-``nanobot.agent.turn_delivery.TurnDelivery.fail``
-        (``site-packages/.../turn_delivery.py:336-353``) при любом
-        ``Exception`` в ``AgentLoop._process_message`` отправляет
-        пользователю хардкод ``"Sorry, I encountered an error."``.
-        Патч подменяет метод класса обёрткой, которая:
-
-        1. читает ``gateway.error_messages.internal_error`` из SETTINGS
-           (default — ``_DEFAULT_INTERNAL_ERROR_TEXT``);
-        2. формирует ``OutboundMessage`` с ``content=internal_error``,
-           ``metadata._error_kind="internal"`` и оригинальным
-           ``channel/chat_id/metadata`` из ``self.lifecycle_message``;
-        3. при ``log_to_db=True`` (default) и доступном
-           ``db_logging_service`` пишет в ``agent_gateway_logs`` через
-           ``try_log_event`` (``event_type="turn_failed"``, payload c типом
-           и текстом исключения) — без утечки деталей пользователю;
-        4. вызывает оригинальный ``TurnDelivery.fail(self, publish_completion=...)``
-           для финализации ``turn_completed`` event (run-time event publisher).
-
-        ``asyncio.CancelledError`` НЕ проходит через ``fail()`` — в
-        upstream он обрабатывается отдельной веткой ``except`` в
-        ``_process_message`` и зовёт ``delivery.abort_stream()``. Патч
-        НЕ вмешивается в эту ветку (перехват именно на ``fail``).
-
-        Args:
-            settings: ``SETTINGS`` (или ``AttrDict``-проекция ``.gateway.*``).
-                ``None`` → default-текст, ``log_to_db=True``.
-            db_logging_service: ``DbLoggingService`` или ``None``. При
-                ``None`` — запись в БД пропускается (fail-open).
-            agent_id: идентификатор агента для колонки ``agent_id`` в
-                ``agent_gateway_logs`` payload (опционально).
-
-        Returns:
-            ``(True, "TurnDelivery.fail patched")`` при успехе;
-            ``(False, <причина>)`` если ``TurnDelivery`` модуль не
-            загружен (битый nanobot / нет в ``sys.modules``).
-        """
-        td_module = _getloaded("nanobot.agent.turn_delivery")
-        if td_module is None:
-            return False, "TurnDelivery module not loaded"
-
-        internal_error = _get(
-            settings, "gateway", "error_messages", "internal_error",
-            default=None,
-        )
-        if not isinstance(internal_error, str) or not internal_error:
-            internal_error = _DEFAULT_INTERNAL_ERROR_TEXT
-
-        log_to_db = _get(
-            settings, "gateway", "error_messages", "log_to_db", default=None,
-        )
-        if not isinstance(log_to_db, bool):
-            log_to_db = _DEFAULT_LOG_TO_DB
-
-        try:
-            TurnDelivery = getattr(td_module, "TurnDelivery")
-        except AttributeError:
-            return False, "TurnDelivery class not found in module"
-        original_fail = getattr(TurnDelivery, "fail", None)
-        if original_fail is None:
-            return False, "TurnDelivery.fail is missing"
-
-        async def _wrap_fail(self, *, publish_completion: bool) -> None:
-            # Импорт внутри обёртки — ``LogEvent``/``try_log_event`` не
-            # нужны, если ``log_to_db=False``.
-            from lib.services.db_logging_service import LogEvent, try_log_event
-
-            # Захват активного исключения. ``TurnDelivery.fail`` вызывается
-            # изнутри ``except Exception``-блока в
-            # ``AgentLoop._process_message`` (``loop.py:1480-1482``), поэтому
-            # ``sys.exception()`` возвращает активное исключение. При прямом
-            # вызове вне ``except``-блока (юнит-тест) вернётся ``None`` →
-            # ``exception_available=False`` в payload.
-            exc = _sys.exception()
-
-            lifecycle = getattr(self, "lifecycle_message", None)
-            channel = getattr(lifecycle, "channel", None) if lifecycle else None
-            chat_id = getattr(lifecycle, "chat_id", None) if lifecycle else None
-            base_metadata = (
-                dict(getattr(lifecycle, "metadata", None) or {})
-                if lifecycle is not None
-                else {}
-            )
-
-            # Авторитетные источники. ``InboundMessage``
-            # (``bus/events.py:25-37``) НЕ имеет полей ``session_key`` /
-            # ``user_id`` (есть ``sender_id`` и ``session_key_override``),
-            # поэтому читаем ``session_key`` с ``TurnDelivery``-экземпляра
-            # (атрибут установлен ``TurnDelivery.create(msg, session_key)``
-            # в ``turn_delivery.py:85-103``), а идентификатор пользователя —
-            # с ``lifecycle_message.sender_id``.
-            session_key = getattr(self, "session_key", None)
-            sender_id = (
-                getattr(lifecycle, "sender_id", None)
-                if lifecycle is not None
-                else None
-            )
-
-            failure_error_kind = getattr(self, "_failure_error_kind", None)
-
-            exception_available = exc is not None
-            exception_type = (
-                type(exc).__name__ if exc is not None else None
-            )
-            exception_message = str(exc) if exc is not None else None
-
-            outbound_metadata = dict(base_metadata)
-            outbound_metadata["_error_kind"] = "internal"
-            outbound_metadata["_final_turn"] = True
-
-            try:
-                from nanobot.bus.events import OutboundMessage
-            except Exception:
-                OutboundMessage = None  # type: ignore[assignment]
-
-            if OutboundMessage is not None:
-                try:
-                    outbound = OutboundMessage(
-                        channel=channel,
-                        chat_id=chat_id,
-                        content=internal_error,
-                        metadata=outbound_metadata,
-                    )
-                    bus = getattr(self, "bus", None)
-                    publish_outbound = getattr(bus, "publish_outbound", None)
-                    if callable(publish_outbound):
-                        result = publish_outbound(outbound)
-                        if asyncio.iscoroutine(result):
-                            await result
-                except Exception as exc_pub:
-                    logger.warning(
-                        "TurnDelivery.fail wrapper: failed to publish "
-                        "fallback outbound: {}",
-                        exc_pub,
-                    )
-
-            # Запись в ``agent_gateway_logs`` через defensive helper
-            # (try_log_event сам обрабатывает svc=None / not running /
-            # log_event exception). Fail-open: при любом сбое БД —
-            # WARNING, оборот продолжается.
-            if log_to_db and db_logging_service is not None:
-                try:
-                    summary_text = (
-                        str(failure_error_kind)
-                        if failure_error_kind
-                        else "turn_failed"
-                    )
-                    log_event = LogEvent(
-                        event_type="turn_failed",
-                        level="ERROR",
-                        session_id=(
-                            session_key
-                            if isinstance(session_key, str)
-                            else None
-                        ),
-                        channel=channel,
-                        actor=None,
-                        summary=summary_text,
-                        payload={
-                            "kind": "internal",
-                            "failure_error_kind": failure_error_kind,
-                            "agent_id": agent_id,
-                            "sender_id": sender_id,
-                            "chat_id": chat_id,
-                            "exception_type": exception_type,
-                            "exception_message": exception_message,
-                            "exception_available": exception_available,
-                        },
-                        metadata={
-                            "fallback_text_len": len(internal_error),
-                            "publish_completion": bool(publish_completion),
-                        },
-                        user_id=(
-                            sender_id
-                            if isinstance(sender_id, str)
-                            else None
-                        ),
-                    )
-                    try_log_event(
-                        db_logging_service,
-                        log_event,
-                        producer="runtime_patcher",
-                        event_type="turn_failed",
-                    )
-                except Exception as exc_log:
-                    logger.warning(
-                        "TurnDelivery.fail wrapper: failed to build "
-                        "log_event: {}",
-                        exc_log,
-                    )
-
-            # Вызов оригинального ``fail`` — ради ``turn_completed``
-            # runtime-event. На время вызова ``self.bus`` подменяется на
-            # ``_OutboundSilencer``, который НЕ публикует outbound (но
-            # пропускает остальные атрибуты bus через ``__getattr__``).
-            # Подмена атрибута экземпляра безопасна для конкурентных
-            # оборотов (один ``TurnDelivery`` живёт один оборот).
-            original_bus = getattr(self, "bus", None)
-            if original_bus is not None:
-                self.bus = _OutboundSilencer(original_bus)
-            try:
-                result = original_fail(
-                    self, publish_completion=publish_completion
-                )
-                if asyncio.iscoroutine(result):
-                    await result
-            finally:
-                if original_bus is not None:
-                    self.bus = original_bus
-
-        TurnDelivery.fail = _wrap_fail
-        return True, "TurnDelivery.fail patched"
 
     # ------------------------------------------------------------------
     # Патч 3: SubagentManager._SubagentHook → БД-логирование подагентов

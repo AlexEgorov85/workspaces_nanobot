@@ -430,6 +430,7 @@ class ApplicationContext:
             cron_service=cron_service,
             db_logging_service=ctx.db_logging_service,
             agent_id=agent_id,
+            settings=ctx.settings,
             project_hooks=project_hooks or None,
             framework_hooks=[tool_result_archive_hook]
             if tool_result_archive_hook is not None
@@ -1880,7 +1881,7 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
     if ctx.session_manager is None:
         return None
     try:
-        from config import get_setting
+        from config import get_setting, require_setting
 
         pg_dsn = get_setting("channels", "postgres", "dsn", default="")
     except Exception:
@@ -1905,11 +1906,11 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
         sync_cfg.get("sync_lag_threshold_seconds", 3600)
     )
 
+    # Имена таблиц — обязательные ключи конфигурации: литерал в коде означал бы
+    # вторую копию объявления, которая молча разойдётся с project.json/профилем.
     schema = get_setting("channels", "postgres", "schema", default="public")
-    meta_table = get_setting("channels", "postgres", "meta_table",
-                            default="agent_session_meta")
-    messages_table = get_setting("channels", "postgres", "messages_table",
-                                default="agent_session_messages")
+    meta_table = require_setting("channels", "postgres", "meta_table")
+    messages_table = require_setting("channels", "postgres", "messages_table")
 
     from lib.services.session_cold_sync_service import SessionColdSyncService
 

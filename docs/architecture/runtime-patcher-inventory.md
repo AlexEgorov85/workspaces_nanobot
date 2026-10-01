@@ -37,25 +37,21 @@ runtime patch'ом — это отдельный loader
 
 ## Сводная таблица (nanobot-ai 0.3.5)
 
-Финальный inventory после `runtime-patcher-composition-cleanup`:
-**ровно 12 patches** в `apply_all()` / `_PATCH_SPECS` /
-`canonical_runtime_patches()` (попарно равны — exact-match тест
+Состояние после change `enterprise-mcp-platform`, фаза 6: **ровно 6 patches**
+в `apply_all()` / `_PATCH_SPECS` / `canonical_runtime_patches()` (попарно
+равны — exact-match тест
 [`tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`](../../tests/test_runtime_patcher.py)).
+Количество намеренно не выписано числом в тесте: проверяются правила, а не
+выписка.
 
 | # | Патч | Target (nanobot API) | Risk | Required | Категория | Условие удаления |
 |---|---|---|---|---|---|---|
 | 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | MEDIUM | ✓ | **REMOVE** | **Уже не нужен.** `workspace` и `max_tool_result_chars` уже прокинуты: `AgentLoop` → `AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`. Патч переписывает работающую функцию |
-| 2 | `save_turn` | `agent._save_turn` | HIGH | ✓ | **REMOVE** | Следствие патча 1: результат персистится в момент возврата tool'а, усечение не теряет оригинал. Upstream санитайзит через `_sanitize_persisted_blocks` |
-| 3 | `exec_limits` | глобалы `exec_session.MAX_OUTPUT_CHARS` + import-frozen схема | MEDIUM | — | KEEP | upstream даст конфигурацию лимитов вывода. Подкласс не достаёт: потолок в глобале модуля, схема заморожена `deepcopy` в `base.py:336` |
-| 4 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + схема | MEDIUM | — | **REMOVE** | `tools.exec.timeout` уже прокинут (`config_service.py:277`), `0` = без лимита. Остаток — подкласс `ExecTool`. Обоснование «legal 7–10 мин» отпадает с переездом legal в MCP |
-| 5 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | **PARTIAL** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, подкласс не перехватывает; они лишь значения по умолчанию (per-call `head_limit` есть) |
-| 6 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `_final_turn` → `TurnEndEvent`; хук на стадии `run` гарантированно раньше outbound при `await bus.publish`. `_tool_audit` и `media` — либо событие + чтение на канале, либо узкий патч: `media` никогда не заполняется nanobot, штатный слот `_agent_ui` пишется только на этапе сборки |
-| 7 | `async_save` | `agent.sessions.save` | MEDIUM | — | **REMOVE** | `agent.sessions` — собственный `PGSessionManager`. Обёртка делается при создании в `session_storage.py` |
-| 8 | `session_dir_watch` | `sessions.save` (диагностика) | LOW | — | **REMOVE** | Гейт выключен по умолчанию, тестов нет |
-| 9 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. Проверить, запускаются ли субагенты в деплое — если нет, патч удаляется |
-| 10 | `turn_delivery_fail` | `TurnDelivery.fail` (хардкоженный литерал) | MEDIUM | — | **REMOVE** | `AgentLoop(turn_delivery_factory=...)` — публичный параметр, конструкций `TurnDelivery(` в пакете две и обе в фабрике. Подкласс `TurnDeliveryFactory` покрывает 100% инстансов. Инжектить в gateway и CLI, сохранив `WebuiTurnRoutePolicy` |
-| 11 | `session_content_cleanup` | `Session.add_message` | LOW | — | **REMOVE** | `PGSessionManager.save` + `clean_text.py`, который уезжает в `libs/data` |
-| 12 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | — | KEEP→REMOVE | документы уезжают в `libs/document` |
+| 2 | `exec_limits` | глобалы `exec_session.MAX_OUTPUT_CHARS` + import-frozen схема | MEDIUM | — | KEEP | upstream даст конфигурацию лимитов вывода. Подкласс не достаёт: потолок в глобале модуля, схема заморожена `deepcopy` в `base.py:336` |
+| 3 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + схема параметра | MEDIUM | — | **KEEP (спорно)** | Снимать нельзя, пока у навыков нет своего таймаута: патч поднимает потолок `600` до `gateway.exec_timeout_cap_sec` (по умолчанию 3600). Обоснование в спецификации — «legal 7–10 мин» — отпадает только вместе с переездом `legal_summarizer` в платформу (фаза 11). До тех пор правдивая категория — **KEEP**, а не REMOVE: `tools.exec.timeout=0` снимает лимит только когда агент **не** передаёт явный `timeout`, а `TOOLS.md` учит его передавать |
+| 4 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | **PARTIAL** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, подкласс не перехватывает; они лишь значения по умолчанию (per-call `head_limit` есть) |
+| 5 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `TurnEndEvent` в 0.3.5 **не существует** (проверено инспекцией пакета, см. ADR `turn-delivery-public-extension.md`), поэтому пункт «`_final_turn` → `TurnEndEvent`» плана нереализуем в этой формулировке. Остаётся перенос на существующие `EventSink` / `RuntimeEventPublisher` либо решение оставить патч — это отдельное решение владельца, а не молчаливое |
+| 6 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. Проверить, запускаются ли субагенты в деплое — если нет, патч удаляется |
 
 Колонка и каталог внесены в рамках openspec change
 [`enterprise-mcp-platform`](../../openspec/changes/enterprise-mcp-platform/).
@@ -68,8 +64,8 @@ runtime patch'ом — это отдельный loader
 архитектурное нарушение наравне с патчем без записи в этом документе.
 
 
-`Required = ✓` (4 патча: `assemble_outbound`, `save_turn`,
-`subagent_logging`, `context_governor`) — критичность для
+`Required = ✓` (3 патча: `assemble_outbound`, `subagent_logging`,
+`context_governor`) — критичность для
 diagnostics в startup-баннере. **НЕ** означает startup-abort
 (см. `openspec/specs/runtime/context/spec.md`).
 
@@ -87,7 +83,8 @@ diagnostics в startup-баннере. **НЕ** означает startup-abort
 | `AgentTurnHookContext.metadata` / `.attributes` | мутабельные `dict`, передаваемые каждой `AgentTurnHookFactory` | второй канал для per-turn данных, чище ключей в `OutboundMessage.metadata` |
 | `AgentTurnHookFactory` | `Callable[[AgentTurnHookContext], AgentHook \| None]`; цепочка собирается в `agent/turn_hooks.py` | официальная фабрика per-turn хуков |
 | `finalize_content(ctx, content) -> str \| None` | вызывается в `agent/runner.py` в трёх местах | **единственная хук-точка, подменяющая значение** |
-| 23 события | `TurnCompleted` (несёт `outcome`, `failure_kind`, `failure_error_kind`, `failure_attempts`), `TurnEndEvent`, `SessionTurnPersisted`, `SessionTurnStarted`, `ContextCompactionEvent`, `RecoveryStateEvent`, `RetryStatusEvent`, `RetryWaitEvent` | замена инъекции в `metadata` подпиской |
+| 23 события | `TurnCompleted` (несёт `outcome`, `failure_kind`, `failure_error_kind`, `failure_attempts`), `SessionTurnPersisted`, `SessionTurnStarted`, `ContextCompactionEvent`, `RecoveryStateEvent`, `RetryStatusEvent`, `RetryWaitEvent` | замена инъекции в `metadata` подпиской |
+| ~~`TurnEndEvent`~~ | **не существует в 0.3.5** | проверено инспекцией установленного пакета: в `nanobot.agent` есть `AgentEvent`, `StreamDeltaEvent`, `StreamEndEvent`, `StreamedResponseEvent`, `TurnContext`, `EventSink`, `TurnRoute`, `RetryStatusEvent`. Модуля `nanobot.agent.events` нет. Пункты плана, ссылающиеся на `TurnEndEvent`, нереализуемы как написаны (ADR `turn-delivery-public-extension.md`) |
 
 Собственный `AgentProgressHook` в наборе `nanobot` публикует события
 прогресса через тот же `EventSink` — публикация из хука является задуманным
@@ -139,14 +136,19 @@ return result, {...}                           # возвращается ИСХ
 
 ### Ожидаемый результат
 
-12 патчей → **4–5**. Шесть заменяются хуками, событиями или собственным
-классом (`1` частично, `2`, `6`, `7`, `10`, `11`), один удаляется (`8`), один
-уходит по миграции доменов (`12`).
+6 патчей → **3–4**. `turn_delivery_fail` уже переехал на публичный параметр
+`AgentLoop(turn_delivery_factory=...)`; из трёх оставшихся кандидатов на снятие
+`context_governor` (уже не нужен по сути), `exec_timeout_cap` (только после
+переезда `legal_summarizer` в платформу) и `assemble_outbound` (нужно решение
+о переносе на `EventSink` / `RuntimeEventPublisher` — `TurnEndEvent` в 0.3.5
+нет). `exec_limits`, `tool_limits` и `subagent_logging` остаются: точки
+расширения у них структурно нет.
 
-Остаются: `1` — только подстановка ссылки для встроенных tool'ов, и при
-переносе тяжёлых запросов в MCP он тоже исчезает; `9` — у `SubagentManager`
-нет фабрики хуков, точка вставки структурно отсутствует; `3` и `5` — нет
-конфигурации upstream; `4` — пересматривается вместе с уходом legal в MCP.
+Остаются: `context_governor` — только подстановка ссылки для встроенных
+tool'ов, и при переносе тяжёлых запросов в MCP он тоже исчезает;
+`subagent_logging` — у `SubagentManager` нет фабрики хуков, точка вставки
+структурно отсутствует; `exec_limits` и `tool_limits` — конфигурации upstream
+нет; `exec_timeout_cap` — пересматривается вместе с уходом legal в фазу 11.
 
 ---
 
@@ -175,6 +177,36 @@ return result, {...}                           # возвращается ИСХ
   через `OutboundMessage.event: ContextCompactionEvent`;
 - `compact_command` → upstream `nanobot.command.builtin.cmd_compact`;
 - `idle_guard` → upstream `AutoCompact._is_expired` при `_ttl <= 0`.
+
+### `turn_delivery_fail`
+
+Удалён в change `enterprise-mcp-platform`, фаза 6 (пункт 6.1). Нативная замена —
+`lib/services/turn_delivery_factory.py`:
+`FallbackTurnDeliveryFactory` внедряется публичным параметром
+`AgentLoop(turn_delivery_factory=...)` из `AgentFactory.create()`; переопределение
+`fail()` публикует настроенный fallback **сам** и не зовёт `super().fail()`.
+
+Что это дало сверх патча:
+
+- двойная публикация невозможна конструктивно, поэтому
+  `_OutboundSilencer` — прокси, подменявший `self.bus` на время вызова
+  upstream-метода, — удалён вместе с патчем;
+- поломка при апгрейде nanobot громкая и ранняя: `AgentLoop.__init__`
+  валидирует переданную фабрику (`factory.bus is bus`);
+- маршрутизация не переписана: `create()`/`unrouted()` вызываются через
+  `super()`, подменяется только класс собранного экземпляра.
+
+Осознанный размен, зафиксированный в ADR
+`docs/architecture/decisions/turn-delivery-public-extension.md`: переопределение
+дублирует ~8 строк upstream-логики `fail()` (публикация + `turn_completed`).
+
+Контракт закреплён `tests/test_turn_delivery_factory.py` (17 тестов); запрет
+возврата патча — `REMOVED_PATCHES` в `tests/test_runtime_patcher.py`.
+
+Побочный эффект переноса: CLI-путь (`cli_agent.py` → `AgentFactory`) тоже
+получил настраиваемый fallback. Раньше патч применялся только в
+`ApplicationContext`, и в CLI пользователь видел upstream-литерал
+«Sorry, I encountered an error.».
 
 ### `context_bridge_seed`
 
@@ -332,7 +364,12 @@ risk: HIGH (CRITICAL пересмотрен до HIGH — публичные а�
 tests: tests/test_runtime_patcher.py::test_subagent_logging*
 ```
 
-### 10. `patch_turn_delivery_fail(settings, db_logging_service=None, agent_id=None)`
+### 10. ~~`patch_turn_delivery_fail`~~ — УДАЛЁН (фаза 6, п. 6.1)
+
+> Запись сохранена как указатель на то, что патч делал, — по контракту и
+> содержимому журнала. Реализации в `runtime_patcher.py` больше нет; см.
+> «Удалённые патчи (REMOVED)» выше и ADR
+> `docs/architecture/decisions/turn-delivery-public-extension.md`.
 
 ```yaml
 PATCH: turn_delivery_fail

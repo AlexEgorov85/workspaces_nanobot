@@ -71,6 +71,7 @@ class AgentFactory:
         cron_service: Any | None = None,
         db_logging_service: Any | None = None,
         agent_id: str | None = None,
+        settings: Any = None,
         project_hooks: list[Any] | None = None,
         framework_hooks: list[Any] | None = None,
         print_llm_calls: bool = False,
@@ -90,6 +91,9 @@ class AgentFactory:
                 передан, ``AgentLoop`` получает фабрику оборота для
                 ``DatabaseLoggingHook`` (per-turn инстансы, конкурентно-безопасно).
             agent_id: id агента для колонки ``agent_id`` в логах.
+            settings: merged ``SETTINGS`` — читается
+                ``gateway.error_messages.*`` для fallback'а на internal-ошибку.
+                ``None`` — дефолтный текст и ``log_to_db=True``.
             project_hooks: плагины из ``workspace/hooks/`` (после auto-scan).
                 ``None``/``[]`` — только фреймворковые хуки.
             framework_hooks: готовые инстансы дополнительных фреймворковых
@@ -120,6 +124,8 @@ class AgentFactory:
         """
         from nanobot.agent.loop import AgentLoop
         from nanobot.agent.tools.registry import ToolRegistry
+
+        from lib.services.turn_delivery_factory import build_turn_delivery_factory
 
         hooks: list[Any] = []
         # ToolAuditHook — обязателен: каналы и CLI рендерят его записи
@@ -196,6 +202,19 @@ class AgentFactory:
             "hook_factories": hook_factories,
             "tool_registry": ToolRegistry(),
         }
+        # Fallback на internal-ошибку — через публичную точку nanobot, а не
+        # патчем (ADR turn-delivery-public-extension). Путь один: иначе путь,
+        # забытый при сборке, снова покажет пользователю upstream-литерал.
+        # ``None`` — upstream-модуль недоступен, тогда AgentLoop возьмёт
+        # фабрику сам (build_turn_delivery_factory уже записал причину).
+        turn_delivery_factory = build_turn_delivery_factory(
+            bus,
+            settings=settings,
+            db_logging_service=db_logging_service,
+            agent_id=agent_id,
+        )
+        if turn_delivery_factory is not None:
+            kwargs["turn_delivery_factory"] = turn_delivery_factory
         if cron_service is not None:
             kwargs["cron_service"] = cron_service
         if usage_store is not None:
