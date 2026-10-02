@@ -3,15 +3,18 @@
 Определяется в нашем namespace (см.
 ``openspec/changes/post-0.3.5-patches-cleanup/design.md D1``), потому
 что ``nanobot.events.SubagentTurnCompleted`` не существует в 0.3.5.
-Subagent идёт через ``AgentRunner.run`` (``nanobot/agent/subagent.py:427``),
-минуя ``TurnDelivery`` — поэтому штатный ``TurnCompleted`` не публикуется.
+Subagent исполняется ``SubagentManager._run_subagent`` /
+``_run_admitted_subagent`` (``nanobot/agent/subagent.py``) — мимо
+``TurnDelivery`` основного цикла, поэтому штатный ``TurnCompleted`` там не
+публикуется.
 
 Публикуется через ``bus.publish(event)`` из
-``_SubagentLoggingHook.after_run`` (``lib/services/runtime_patcher.py:1682``),
-подписка на ``SubagentTurnCompleted`` регистрируется в
-``RuntimeEventsSubscriber._handle_subagent_turn_completed`` —
-контракт payload ``subagent_run_finished`` остаётся идентичен
-``_SubagentLoggingHook._finalize`` (``runtime_patcher.py:1712-1737``).
+``_SubagentLoggingHook._publish_subagent_turn_completed``
+(``lib/services/runtime_patcher.py``; зовётся из ``after_run`` и
+``on_error`` того же хука), подписка на ``SubagentTurnCompleted``
+регистрируется в ``RuntimeEventsSubscriber._handle_subagent_turn_completed``
+— контракт payload ``subagent_run_finished`` остаётся идентичен
+``_SubagentLoggingHook._finalize`` (там же).
 """
 
 from __future__ import annotations

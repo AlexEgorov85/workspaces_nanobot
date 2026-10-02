@@ -1,6 +1,6 @@
 """ContextCompactionService — единая точка записи факта сжатия контекста.
 
-Три входа — один путь записи (заметка в ``agent_conversation_messages``,
+Два входа — один путь записи (заметка в ``agent_conversation_messages``,
 loguru INFO, опциональный Rich-вывод в терминал gateway):
 
   1. **Ручной запуск**: slash-команда ``/compact`` (upstream
@@ -12,18 +12,17 @@ loguru INFO, опциональный Rich-вывод в терминал gatewa
      ``compact_idle_session``), замеряет состояние сессии до/после
      и формирует ``report``.
 
-  2. **Авто idle-сжатие** (``AutoCompact._archive``). Обёртка
-     ``runtime_patcher._wrap_auto_compact_archive``
-     вызывает :py:meth:`record_external_compaction` после успешного
-     оригинального ``_archive``, передавая готовые замеры.
+  2. **Авто-сжатие upstream** (``AutoCompact`` и
+     ``Consolidator.maybe_consolidate_by_tokens``). Обёрток в
+     ``runtime_patcher`` для них нет: nanobot сам публикует
+     ``nanobot.events.ContextCompactionEvent``, канал фильтрует его через
+     ``CompactionEventSubscriber`` и зовёт
+     :py:meth:`notify_session_compacted`. Раньше docstring описывала
+     ``_wrap_auto_compact_archive`` и ``_wrap_maybe_consolidate_by_tokens`` —
+     таких функций в ``runtime_patcher`` никогда не было на этой ветке, и
+     описание обещало перехват, которого не было.
 
-  3. **Авто token-budget сжатие**
-     (``Consolidator.maybe_consolidate_by_tokens``). Обёртка
-     ``runtime_patcher._wrap_maybe_consolidate_by_tokens``
-     делает то же: diff ``last_consolidated`` до/после +
-     ``record_external_compaction``.
-
-Результат для всех трёх путей одинаков: один ``format_report``,
+Результат для обоих путей одинаков: один ``format_report``,
 один ``_write_history_notice``, одна loguru-строка. Пользователь и
 логи не различают, было ли сжатие ручным или автоматическим.
 
