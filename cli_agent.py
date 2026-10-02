@@ -177,7 +177,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
 
 
 def _run_patched(args: argparse.Namespace) -> None:
-    """CLI-агент с PGSessionManager и workspace-хуками."""
+    """CLI-агент с холодным зеркалом сессий и workspace-хуками."""
     from lib.cli.console_loop import run_repl
     from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext

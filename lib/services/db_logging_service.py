@@ -41,10 +41,10 @@ def try_log_event(
 ) -> bool:
     """Defensive helper для producer'ов: попробовать записать событие.
 
-    Используется из sync-путей (``PgDuckDbSyncService._log_sync_event``,
-    ``DuckDbCacheStore`` upsert/close-события, ``PreloadService._emit_health_event``,
+    Используется из sync-путей (``SessionColdSyncService``,
     ``ContextCompactionService._record_event_log`` после `_notify`-разделения
-    concerns) и других мест, где прямой вызов ``svc.log_event`` мог бы
+    concerns, загрузки снимка capability ``data``) и других мест, где прямой
+    вызов ``svc.log_event`` мог бы
     упасть с ``AttributeError`` при ``svc is None`` или ``AttributeError``
     при ``not svc.is_running()``.
 
