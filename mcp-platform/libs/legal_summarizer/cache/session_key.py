@@ -6,16 +6,15 @@
 приходит параметром операции.
 
 Отсюда и порядок приоритета: **явный ``session_id`` контракта — основной
-источник.** Ветка ``SESSION_KEY`` из окружения оставлена только как
-переходная совместимость и будет снята пунктом 11.5 вместе с чтением
-окружения; ``SESSION_KEY`` не выставляется нигде в репозитории, то есть
-на практике сегодня работает fallback на имя файла — и именно из-за этого
-кэш оказывается в папке, названной по документу, а не по сессии.
+источник.** Ветка ``SESSION_KEY`` из окружения снята: платформа читает окружение
+только через реестр настроек (``test_settings_registry.py``), а ключ в
+окружении и не выставлялся нигде в репозитории — то есть ветка была
+мёртвой. Источник ключа — ``session_id`` из контракта операции (п. 11.5);
+fallback на имя файла остаётся лишь на случай, когда сессии нет.
 """
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -62,9 +61,6 @@ def resolve_session_key(
     """
     if session_id:
         return safe_session_key(session_id)
-    env_key = os.environ.get("SESSION_KEY")
-    if env_key:
-        return safe_session_key(env_key)
     if file_path is not None:
         try:
             name = Path(file_path).name

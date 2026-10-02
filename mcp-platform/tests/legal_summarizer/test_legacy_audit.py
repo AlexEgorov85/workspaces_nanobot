@@ -6,14 +6,7 @@ from pathlib import Path
 
 _PLATFORM_ROOT = Path(__file__).resolve().parents[2]
 _LIB_DIR = _PLATFORM_ROOT / "libs" / "legal_summarizer"
-_SKILL_DIR = (
-    _PLATFORM_ROOT
-    / "servers"
-    / "enterprise"
-    / "capabilities"
-    / "legal_summarizer"
-    / "skill"
-)
+_SKILL_DIR = _LIB_DIR / "skill"
 # Раньше скилл лежал в агенте и подключал себя в sys.path; в платформе
 # корень и так на месте (mcp-platform/tests/conftest.py).
 

@@ -49,10 +49,17 @@ from libs.enterprise_common.execution.context import (  # noqa: E402
 
 __all__ = ["chat", "LlmOperationError", "LlmUnavailable"]
 
-_LLM_TRACE_ENABLED = (
-    "--llm-trace" in sys.argv
-    or os.environ.get("LEGAL_SUMMARIZER_LLM_TRACE") == "1"
-)
+def _trace_enabled() -> bool:
+    """Флаг трассировки: аргумент запуска ИЛИ настройка домена.
+
+    Раньше второй источник - ``LEGAL_SUMMARIZER_LLM_TRACE`` в окружении -
+    недоступен: на платформе окружение читает только реестр настроек.
+    """
+    if "--llm-trace" in sys.argv:
+        return True
+    from libs.legal_summarizer.llm.config import llm_trace_enabled
+
+    return llm_trace_enabled()
 
 
 def _identity() -> _McpCallContext | None:
@@ -71,19 +78,22 @@ def _identity() -> _McpCallContext | None:
     чем выдуманная сессия, которая потом попадёт в журнал как настоящая.
     ``request_id`` необязателен — клиент платформы досоставит самостоятельный.
     """
-    session_id = os.environ.get("ENTERPRISE_SESSION_ID")
-    user_id = os.environ.get("ENTERPRISE_USER_ID")
+    from libs.legal_summarizer.llm.config import get_identity
+
+    identity = get_identity()
+    session_id = identity.get("session_id")
+    user_id = identity.get("user_id")
     if not session_id or not user_id:
         return None
     return _McpCallContext(
         session_id=session_id,
         user_id=user_id,
-        request_id=os.environ.get("ENTERPRISE_REQUEST_ID") or None,
+        request_id=identity.get("request_id") or None,
     )
 
 
 def _trace(stage: str, **fields) -> None:
-    if not _LLM_TRACE_ENABLED:
+    if not _trace_enabled():
         return
     parts = [f"{k}={v}" for k, v in fields.items()]
     sys.stderr.write(

@@ -34,6 +34,9 @@ __all__ = (
     "get_context_window_tokens",
     "get_default_length",
     "get_execution_config",
+    "get_identity",
+    "llm_trace_enabled",
+    "mr_trace_enabled",
     "get_llm_config",
     "get_max_retries",
     "get_timeout_sec",
@@ -65,6 +68,9 @@ class LegalConfig:
     brief_context: Mapping[str, Any] = field(default_factory=dict)
     execution: Mapping[str, Any] = field(default_factory=dict)
     context_window_tokens: int | None = None
+    mr_trace: bool = False
+    llm_trace: bool = False
+    identity: Mapping[str, str] = field(default_factory=dict)
 
 
 #: Дефолты — значения, которые агент держал в
@@ -173,6 +179,34 @@ def get_context_window_tokens() -> int | None:
 
 def get_default_length() -> str:
     return str(_active.cli.get("default_length", "medium"))
+
+
+def mr_trace_enabled() -> bool:
+    """Отладочный флаг трассировки map-reduce.
+
+    Раньше читался из ``LEGAL_SUMMARIZER_MR_TRACE`` в окружении. На платформе
+    окружение читает только реестр, а флаг - свойство домена, поэтому он
+    приходит настройкой.
+    """
+    return _active.mr_trace
+
+
+def llm_trace_enabled() -> bool:
+    """Отладочный флаг трассировки LLM-вызовов (было ``LEGAL_SUMMARIZER_LLM_TRACE``)."""
+    return _active.llm_trace
+
+
+def get_identity() -> dict[str, str]:
+    """Идентичность оборота: ``session_id`` / ``user_id`` / ``request_id``.
+
+    Раньше читалась из ``ENTERPRISE_*`` в окружении подпроцесса - так было,
+    пока скилл запускался агентом отдельным процессом. Теперь домен живёт в
+    платформе, читать окружение напрямую нельзя, а окончательным источником
+    должен стать контракт операции (п. 8.7a/8.7c). Пусто - оборот вне
+    контекста: ``_meta`` не уйдёт вовсе, и сервер ответит
+    ``identity_missing``, что точнее выдуманной сессии в журнале.
+    """
+    return dict(_active.identity)
 
 
 def get_timeout_sec() -> float:

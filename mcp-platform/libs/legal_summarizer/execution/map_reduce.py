@@ -44,6 +44,7 @@ from libs.legal_summarizer.execution.hierarchical import (
     reduce_chunks_hierarchical,
 )
 import libs.legal_summarizer.llm.calls as _llm_calls_mod
+from libs.legal_summarizer.llm.config import mr_trace_enabled
 from libs.legal_summarizer.llm.sanitize import (
     extract_subject,
     strip_think_blocks,
@@ -282,13 +283,9 @@ def _reduce_phase(
       * direct-режим не вызывает ``_reduce_phase`` — manifest пишется
         через ``build_manifest`` с ``section_summaries={}``.
     """
-    import os
     import sys
 
-    _MR_TRACE_ENABLED = (
-        "--mr-trace" in sys.argv
-        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
-    )
+    _MR_TRACE_ENABLED = mr_trace_enabled()
 
     def _mr_trace(stage: str, **fields) -> None:
         if not _MR_TRACE_ENABLED:
@@ -494,18 +491,14 @@ def run_map_reduce_execution(
 
     Финальный manifest + write_result делает ``application.execution_orchestration``.
 
-    Диагностика (``LEGAL_SUMMARIZER_MR_TRACE=1`` или ``--mr-trace``):
+    Диагностика (``LegalConfig.mr_trace``):
     печатает в stderr структурный trace каждой фазы (chunks, partials,
     reduce inputs/outputs) — нужно для отладки "потерянных" данных
     в map-reduce.
     """
-    import os
     import sys
 
-    _MR_TRACE_ENABLED = (
-        "--mr-trace" in sys.argv
-        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
-    )
+    _MR_TRACE_ENABLED = mr_trace_enabled()
 
     def _mr_trace(stage: str, **fields) -> None:
         if not _MR_TRACE_ENABLED:

@@ -25,14 +25,12 @@ from pathlib import Path
 
 _PLATFORM_ROOT = Path(__file__).resolve().parents[3]
 _LIB_DIR = _PLATFORM_ROOT / "libs" / "legal_summarizer"
-_SKILL_DIR = (
-    _PLATFORM_ROOT
-    / "servers"
-    / "enterprise"
-    / "capabilities"
-    / "legal_summarizer"
-    / "skill"
-)
+# Payload скилла (SKILL.md, README.md, prompts/, references/) лежит с
+# доменом, а не в ``servers/enterprise/capabilities/``: каталог в
+# ``capabilities/`` обязан иметь ``tools/*.py`` и запись в реестре
+# ``CAPABILITIES``, иначе его считают недоношенной заготовкой. Перенос
+# payload в capability - пункт 11.4, единым куском с tools и реестром.
+_SKILL_DIR = _LIB_DIR / "skill"
 _TESTS_DIR = _PLATFORM_ROOT / "tests" / "legal_summarizer"
 
 _RUNTIME_LAYERS = (

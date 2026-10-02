@@ -9,21 +9,22 @@ from __future__ import annotations
 from pathlib import Path
 
 
-#: Промпты — не часть кода домена, а его payload: после переноса в
-#: платформу они лежат рядом с ``SKILL.md``, в capability-каталоге
-#: ``servers/enterprise/capabilities/legal_summarizer/skill/prompts/``.
+#: Промпты лежат с доменом, в ``libs/legal_summarizer/skill/prompts/`` -
+#: рядом с ``SKILL.md`` и ``references/``. Пока payload не переехал в
+#: capability (п. 11.4), держать его в ``capabilities/`` нельзя: страж
+#: ``test_no_capability_without_operations`` требует у каждого каталога в
+#: ``capabilities/`` наличие ``tools/*.py``, а
+#: ``test_every_capability_on_disk_is_in_the_registry`` - запись в реестре
+#: ``CAPABILITIES``. Половинчатая capability - это заготовка, которую реестр
+#: стражей называет недоношенной.
 #:
-#: Якорь — от этого файла, а не от ``cwd``: ``parents[3]`` от
-#: ``libs/legal_summarizer/llm/prompts_runtime.py`` — корень платформы.
+#: Якорь — от этого файла, а не от ``cwd``: ``parents[1]`` от
+#: ``libs/legal_summarizer/llm/prompts_runtime.py`` — корень домена.
 #: Прежний ``parents[2]`` указывал на каталог скилла агента и после
 #: переноса вёл в несуществующий ``libs/prompts/`` — конвейер падал на
 #: ``load_prompt`` ещё до первого LLM-вызова (см. ``llm.calls``).
-_PLATFORM_ROOT = Path(__file__).resolve().parents[3]
-_PROMPTS_DIR = (
-    _PLATFORM_ROOT
-    / "servers" / "enterprise" / "capabilities" / "legal_summarizer"
-    / "skill" / "prompts"
-)
+_DOMAIN_ROOT = Path(__file__).resolve().parents[1]
+_PROMPTS_DIR = _DOMAIN_ROOT / "skill" / "prompts"
 
 _PROMPT_FILES = {
     "summarize_system": _PROMPTS_DIR / "summarize_system.md",

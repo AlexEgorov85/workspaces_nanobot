@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from libs.legal_summarizer.document.structure import DocumentStructure
 from libs.legal_summarizer.execution.config import HierarchicalReducerConfig
+from libs.legal_summarizer.llm.config import mr_trace_enabled
 
 def deterministic_truncate(text: str, max_chars: int) -> str:
     """Deterministic head + tail truncate с omission marker.
@@ -69,14 +70,10 @@ def reduce_sections_to_document(
     ``llm_runner is None`` — финальный reduce пропускается и берётся
     детерминированный join.
     """
-    import os
     import sys
     import time as _time
 
-    _MR_TRACE = (
-        "--mr-trace" in sys.argv
-        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
-    )
+    _MR_TRACE = mr_trace_enabled()
 
     def _mr_trace(stage: str, **fields) -> None:
         if not _MR_TRACE:
@@ -186,18 +183,14 @@ def reduce_chunks_hierarchical(
 
     Используется когда chunks ещё не просуммированы.
 
-    Диагностика (``--mr-trace`` / ``LEGAL_SUMMARIZER_MR_TRACE=1``):
+    Диагностика (``LegalConfig.mr_trace``):
     логирует в stderr сколько sections реально получили summaries
     (vs сколько было в section_ids), и в каком раунде остановился
     hierarchical reduce.
     """
-    import os
     import sys
 
-    _MR_TRACE = (
-        "--mr-trace" in sys.argv
-        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
-    )
+    _MR_TRACE = mr_trace_enabled()
 
     def _mr_trace(stage: str, **fields) -> None:
         if not _MR_TRACE:

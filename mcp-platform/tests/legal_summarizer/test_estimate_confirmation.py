@@ -13,15 +13,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 _SKILL_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from libs.legal_summarizer import llm  # noqa: F401
-import libs.legal_summarizer.llm.config
+from libs.legal_summarizer import llm
+# noqa не нужен: тесты обращаются к llm.config как к атрибуту пакета,
+# и подмодуль config обязан быть загружен именно этим импортом.
+import libs.legal_summarizer.llm.config  # noqa: F401
 
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
@@ -44,10 +44,6 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import libs.legal_summarizer.application.service as _summarizer
-
-    import libs.legal_summarizer.execution.pipeline as _pipeline_mod
-
 def _build_large_doc(tmp_path: Path, sections: int = 8) -> str:
     """Large doc → multiple chunks."""
     parts = []
@@ -58,10 +54,6 @@ def _build_large_doc(tmp_path: Path, sections: int = 8) -> str:
             + "\n\n"
         )
     return "".join(parts)
-
-from libs.legal_summarizer import llm  # noqa: F401
-import libs.legal_summarizer.llm.config
-
 
 def test_confirmation_contains_chunks_selected(tmp_path, monkeypatch):
     """confirmation_required содержит chunks_selected (run-level)."""
@@ -144,6 +136,9 @@ def test_requires_continuation_uses_selected_count(tmp_path, monkeypatch):
             },
         },
     )
+    # Без подмены LLM тест поднимал бы процесс платформы и уходил в
+    # сеть: проверять тут нужно requires_continuation, а не провайдера.
+    _install_llm_mocks(monkeypatch)
 
     text = _build_large_doc(tmp_path, sections=8)
     p = _write_doc(tmp_path, text)

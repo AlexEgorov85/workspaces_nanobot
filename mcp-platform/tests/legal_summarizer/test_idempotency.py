@@ -15,6 +15,22 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
     p.write_text(text, encoding="utf-8")
     return p
 
+def _install_llm_mocks(monkeypatch):
+    """Подменить LLM-шов: тест проверяет идемпотентность, а не провайдера."""
+    import libs.legal_summarizer.llm.calls as llm_calls
+
+    def _fake_batch(chunks, **kwargs):
+        return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
+
+    monkeypatch.setattr(llm_calls, 'llm_batch', _fake_batch)
+    monkeypatch.setattr(
+        llm_calls, 'llm_section_reduce', lambda *a, **kw: 'section summary',
+    )
+    monkeypatch.setattr(
+        llm_calls, 'llm_document_reduce', lambda *a, **kw: 'doc summary',
+    )
+
+
 def _patch_run_canonical_pipeline(monkeypatch):
     """Подменяем ``run_canonical_pipeline`` счётчиком вызовов."""
     import libs.legal_summarizer.application.pipeline_structure as _pipeline_mod
@@ -33,6 +49,7 @@ def _patch_run_canonical_pipeline(monkeypatch):
 def test_idempotent_run_does_not_call_pipeline(tmp_path: Path, monkeypatch):
     """Запуск с уже-completed manifest → pipeline НЕ вызывается."""
     calls = _patch_run_canonical_pipeline(monkeypatch)
+    _install_llm_mocks(monkeypatch)
 
     import libs.legal_summarizer.application.service as summarizer
     text = "1. Пункт\n\nТекст документа для саммари."
@@ -58,6 +75,7 @@ def test_idempotent_run_does_not_call_pipeline(tmp_path: Path, monkeypatch):
 def test_different_inputs_create_different_operation_id(tmp_path: Path, monkeypatch):
     """Разные text/length/path → разные operation_id → нет cache hit."""
     calls = _patch_run_canonical_pipeline(monkeypatch)
+    _install_llm_mocks(monkeypatch)
 
     import libs.legal_summarizer.application.service as summarizer
     text1 = "1. Пункт 1\n\nТекст первый."
