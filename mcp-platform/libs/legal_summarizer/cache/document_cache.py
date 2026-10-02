@@ -84,21 +84,40 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _skill_repo_root() -> Path:
-    """Стабильный абсолютный корень репо, выведенный из расположения этого файла.
+#: Корень платформы. Используется только как каталог данных по умолчанию,
+#: когда владелец не объявил ``cache_root``; выводить из него корень
+#: репозитория агента больше нельзя - такого репозитория у модуля нет.
+_PLATFORM_ROOT = Path(__file__).resolve().parents[3]
 
+
+def _default_cache_root() -> Path:
+    """Корень кэша, когда операция не передала ``workspace_root``.
+
+    Раньше здесь стояло ``Path(__file__).resolve().parents[5]`` - индекс,
+    верный для агента, где модуль лежал по пути
     ``<repo>/workspace/skills/legal_summarizer/scripts/cache/document_cache.py``.
-    ``parents[5]`` → корень репо. Не зависит от cwd процесса.
+    После переноса в платформу тот же индекс указывал на каталог **над**
+    репозиторием, то есть кэш писался в домашний каталог пользователя, а не
+    в каталог данных проекта.
+
+    Источник теперь один - :func:`get_cache_root`, то есть объявление
+    владельца. Пока оно не задано, берётся каталог данных платформы; молча
+    вернуться к выводу из расположения модуля нельзя (п. 11.5).
     """
-    return Path(__file__).resolve().parents[5]
+    from libs.legal_summarizer.llm.config import get_cache_root
+
+    configured = get_cache_root()
+    if configured is not None:
+        return Path(configured)
+    return _PLATFORM_ROOT / "var" / "legal_summarizer"
 
 
 def _cache_root(workspace_root: Path | str | None, session_key: str) -> Path:
     """Корень document-level cache для конкретной сессии.
 
-    ``<repo>/workspace/data_store/cache/sessions/<safe_session_key>/documents/``.
+    ``<root>/workspace/data_store/cache/sessions/<safe_session_key>/documents/``.
     """
-    root = Path(workspace_root) if workspace_root is not None else _skill_repo_root()
+    root = Path(workspace_root) if workspace_root is not None else _default_cache_root()
     safe = safe_session_key(session_key or "default")
     return (
         root

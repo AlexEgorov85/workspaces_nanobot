@@ -195,12 +195,24 @@ class NormalizedManifest:
 
 
 def skill_repo_root() -> Path:
-    """Корень репозитория, выведенный из расположения этого скрипта.
+    """Корень, от которого считаются пути operation-level состояния.
 
-    Модуль лежит по пути ``<repo>/workspace/skills/legal_summarizer/legal_summarizer/cache/manifest.py``.
-    ``parents[5]`` от его абсолютного пути — корень репо.
+    Имя оставлено прежним - на него ссылается страж раскладки
+    (``test_document_cache_boundaries``), - но смысл изменился. Раньше здесь
+    стояло ``Path(__file__).resolve().parents[5]``: индекс, верный для агента
+    (``<repo>/workspace/skills/legal_summarizer/cache/manifest.py``). После
+    переноса в платформу тот же индекс указывал на каталог **над**
+    репозиторием, то есть состояние писалось в домашний каталог пользователя.
+
+    Теперь корень приходит из :func:`get_cache_root` - объявления владельца,
+    а до него берётся каталог данных платформы (п. 11.5).
     """
-    return Path(__file__).resolve().parents[5]
+    from libs.legal_summarizer.llm.config import get_cache_root
+
+    configured = get_cache_root()
+    if configured is not None:
+        return Path(configured)
+    return Path(__file__).resolve().parents[3] / "var" / "legal_summarizer"
 
 
 def manifest_root(workspace_root: Path | str | None) -> Path:

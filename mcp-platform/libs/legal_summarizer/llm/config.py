@@ -29,6 +29,7 @@ __all__ = (
     "configure",
     "current",
     "get_brief_context_config",
+    "get_cache_root",
     "get_chunking_config",
     "get_cli_config",
     "get_context_window_tokens",
@@ -71,6 +72,10 @@ class LegalConfig:
     mr_trace: bool = False
     llm_trace: bool = False
     identity: Mapping[str, str] = field(default_factory=dict)
+    #: Корень файлового кэша домена. ``None`` - «объявления нет», а не
+    #: «каталог по умолчанию»: выводить корень из расположения модуля после
+    #: переноса означало бы указать на каталог над репозиторием (п. 11.5).
+    cache_root: str | None = None
 
 
 #: Дефолты — значения, которые агент держал в
@@ -194,6 +199,18 @@ def mr_trace_enabled() -> bool:
 def llm_trace_enabled() -> bool:
     """Отладочный флаг трассировки LLM-вызовов (было ``LEGAL_SUMMARIZER_LLM_TRACE``)."""
     return _active.llm_trace
+
+
+def get_cache_root() -> str | None:
+    """Объявленный корень файлового кэша домена или ``None``.
+
+    ``None`` означает «владелец не объявил», а не «использовать каталог по
+    умолчанию». Разница принципиальна: корень, выведенный из расположения
+    модуля после переноса, указывал на каталог над репозиторием, и кэш
+    оказывался в домашнем каталоге пользователя. Читатель обязан решать,
+    чем заменить «не объявлено» (п. 11.5).
+    """
+    return _active.cache_root
 
 
 def get_identity() -> dict[str, str]:
