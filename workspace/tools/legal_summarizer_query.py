@@ -1,129 +1,66 @@
-"""``legal_summarizer_query`` — follow-up tool по сохранённой operation_id.
+"""``legal_summarizer_query`` — follow-up вопрос по сохранённой операции.
 
-Регистрируется автоматически через ``RuntimePatcher.patch_project_tools``
-(см. ``lib/services/runtime_patcher.py``).
+Регистрируется автоматически через
+``lib/services/project_tool_loader.py::register_project_tools``.
 
-Зачем: без этого tool'а агент на follow-up вопрос ("сколько статей?",
-"какие разделы?", "что в чанке 12?") вынужден перепарсить PDF через
-``exec``+pdfplumber (200+ сек, часто с ошибкой кириллицы в Windows-cp1251).
-Здесь же один CLI-вызов ``cli_query.py`` читает manifest/result/chunks
-из ``data_store/cache/skills/legal_summarizer/<op_id>/`` и возвращает JSON.
+Зачем: без этого tool'а агент на follow-up вопрос («сколько статей?», «какие
+разделы?», «что в чанке 12?») вынужден перепарсить PDF заново.
 
-Конфиг в ``config.json``::
+Раньше этот вопрос уходил в ``cli_query.py``, поднятый **подпроцессом**:
+интерпретатор запускался ради чтения JSON из уже разобранного документа.
+Теперь домен живёт в платформе (change ``enterprise-mcp-platform``, фаза
+11), короткий вопрос - это одна операция ``query_operation`` capability
+``legal_summarizer``, и subprocess не нужен.
 
-    {
-      "tools": {
-        "legal_summarizer_query": {
-          "enable": true,
-          "timeout_sec": 60
-        }
-      }
-    }
-
-Кросс-платформенность (Windows + Linux):
-  * ``subprocess.run([...], shell=False, encoding="utf-8")`` — без шелла,
-    без кавычек/пайпов, без зависимости от PATH/активации venv.
-  * ``sys.executable`` + абсолютный путь к ``cli_query.py`` (через
-    ``parents[3]`` от самого файла tool'а) — не зависит от cwd.
-  * ``PYTHONUTF8=1`` и ``PYTHONIOENCODING=utf-8`` уже выставлены на
-    entry-points (``gateway.py``/``cli_agent.py``),
-    дочерний Python тоже в UTF-8 — кириллица в путях не ломается.
-  * ``capture_output=True`` + ``text=True`` (cp1251-safe).
-
-Контракт и поведение (IPC с ``cli_query.py``)
-==============================================
-
-Wrapper работает в трёх режимах, отличая success / domain error /
-process failure по комбинации exit code и ``status``-поля в stdout.
-
-**exit 0 + ``status == "ok"`` (success)**
-    Tool возвращает payload сериализованный как JSON-строка
-    (``ensure_ascii=False``, ``default=str``).
-
-**exit ≠ 0 + ``status == "error"`` (domain error — pass-through)**
-    Tool **пробрасывает** JSON из stdout as is. Все поля CLI-envelope
-    (``operation_id``, ``error_type``, ``path``, ``version_observed``,
-    ``message``, и любые будущие) сохраняются без переименования.
-    Никакого собственного ``error_type`` или дополнительного envelope
-    не ставится. Это включает доменные ошибки:
-
-    * ``manifest_not_found`` — manifest.json отсутствует на диске;
-    * ``manifest_corrupted`` — manifest.json есть, но не парсится;
-    * ``manifest_unsupported_version`` — manifest.json не формата v2
-      (другая ``version`` или поле отсутствует / не приводится к int).
-
-    Подробности диагностики — в ``SKILL.md`` секция «IPC contract for
-    follow-up queries».
-
-**exit ≠ 0 + любой другой stdout (process failure)**
-    Tool возвращает собственный envelope::
-
-        {"status": "error",
-         "error_type": "cli_failed",
-         "message": "cli_query вернул exit=<N>. stderr: <фрагмент>"}
-
-    Сюда попадает: пустой stdout, stdout не JSON, stdout — JSON-массив,
-    dict без поля ``status``, dict со ``status != "error"``.
-
-Wrapper-уровневые ошибки (не зависят от CLI stdout)
----------------------------------------------------
-
-* ``timeout`` — ``cli_query.py`` превысил ``tools.legal_summarizer_query.timeout_sec``;
-* ``cli_not_found`` — ``cli_query.py`` отсутствует по ожидаемому пути;
-* ``subprocess_error`` — ``subprocess.run`` бросил ``OSError`` до старта;
-* ``empty_response`` — exit 0, но stdout пустой;
-* ``invalid_json`` — exit 0, но stdout не парсится как JSON.
-
-Контракт зафиксирован в ``workspace/skills/legal_summarizer/SKILL.md``
-(секция «IPC contract for follow-up queries»). Нормативная спека — в
-``openspec/specs/skills/legal-summarizer-query/spec.md``.
+Конфиг читается из секции ``tools.legal_summarizer_query`` в ``config.json``
+(через ``ctx._settings_ref.tools``, потому что pydantic-``ToolsConfig``
+незнакомые секции отбрасывает).
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
+from nanobot.agent.tools.base import Tool, tool_parameters
 from pydantic import BaseModel, Field
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from lib.services.enterprise_mcp_client import (
+    CallIdentity,
+    EnterpriseMcpUnavailable,
+    EnterpriseOperationError,
+)
+
+#: Операция платформы, которую зовёт этот tool. Единственная: отдельного
+#: каталога операций у capability нет, а выдумывать имена нельзя - неизвестное
+#: имя отверг бы сам реестр.
+_OPERATION = "query_operation"
+
+#: Поля, которые принимает операция. Список берётся отсюда, а не из памяти
+#: модели: неизвестное поле отвергнет схема операции.
+_FIELDS = ("stats", "articles", "chunks", "sections", "tree", "all")
+
+
+def _cap(text: str, max_chars: int) -> str:
+    """Обрезать так, чтобы потолок ДЕЙСТВИТЕЛЬНО держался.
+
+    Своя обрезка, а не ``truncate_middle``: тот возвращает ``max_chars`` плюс
+    маркер, то есть потолок не является потолком. Когда под голову, маркер и
+    хвост места нет - остаётся префикс.
+    """
+    marker = f"\n\n... ({len(text) - max_chars:,} chars truncated) ...\n\n"
+    room = max_chars - len(marker)
+    if room < 8:
+        return text[:max_chars]
+    head = room // 2
+    return text[:head] + marker + text[-(room - head):]
 
 
 class LegalSummarizerQueryToolConfig(BaseModel):
     """Конфиг секции ``tools.legal_summarizer_query`` в ``config.json``."""
 
     enable: bool = True
-    timeout_sec: int = Field(default=60, ge=1, le=600)
-    workspace_root: str | None = None  # None = вывести из __file__
-
-
-def _resolve_workspace_root(arg: Optional[str]) -> Path:
-    """Кросс-платформенный путь к корню репо.
-
-    Приоритет: явно переданный ``workspace_root`` из конфига → корень из
-    расположения самого tool'а (``<repo>/workspace/tools/<this>.py``,
-    ``parents[2]``).
-    """
-    if arg:
-        return Path(arg).resolve()
-    # workspace/tools/legal_summarizer_query.py → parents[2] = корень репо.
-    return Path(__file__).resolve().parents[2]
-
-
-def _resolve_cli_path(workspace_root: Path) -> Path:
-    """Абсолютный путь к ``cli_query.py``."""
-    return (
-        workspace_root
-        / "workspace"
-        / "skills"
-        / "legal_summarizer"
-        / "scripts"
-        / "cli_query.py"
-    )
+    max_result_chars: int = Field(default=20000, ge=500, le=200000)
 
 
 @tool_parameters({
@@ -132,36 +69,32 @@ def _resolve_cli_path(workspace_root: Path) -> Path:
         "operation_id": {
             "type": "string",
             "description": (
-                "operation_id ранее выполненного summarize "
-                "(поле result.operation_id из прошлого ответа)."
+                "Идентификатор операции суммаризации. Обязателен: без него "
+                "нечего спрашивать. Возвращается тем вызовом, который "
+                "разбирал документ."
             ),
         },
         "field": {
             "type": "string",
-            "enum": ["stats", "articles", "chunks", "sections", "tree", "all"],
+            "enum": list(_FIELDS),
             "description": (
-                "Что вернуть: stats — ключевые метрики + article_count, "
-                "articles — только article_count, chunks — список чанков с "
-                "summary, sections — список section_path + heading, "
-                "tree — иерархия секций, all — весь manifest."
+                "Что вернуть: stats (метрики и число статей) - по умолчанию; "
+                "articles; chunks (сводки по чанкам); sections; tree "
+                "(иерархия разделов); all (manifest целиком, крупный ответ)."
             ),
-            "default": "stats",
         },
         "max_chunk_summary_chars": {
             "type": "integer",
-            "minimum": 100,
-            "maximum": 10000,
             "description": (
-                "Обрезка summary чанка для поля chunks (default 1500). "
-                "Игнорируется для других field'ов."
+                "Обрезка текста сводки чанка для поля 'chunks'. "
+                "По умолчанию 1500."
             ),
-            "default": 1500,
         },
     },
     "required": ["operation_id"],
 })
 class LegalSummarizerQueryTool(Tool):
-    """Follow-up запросы по сохранённой operation_id навыка legal_summarizer."""
+    """Ответить follow-up вопросом по уже разобранному юридическому документу."""
 
     config_key: ClassVar[str] = "legal_summarizer_query"
 
@@ -169,12 +102,14 @@ class LegalSummarizerQueryTool(Tool):
         self,
         *,
         config: LegalSummarizerQueryToolConfig,
+        client: Any = None,
         request_id_source: Any = None,
     ) -> None:
         self.config = config
-        # Источник PK оборота (``DbLoggingService``). Нужен, чтобы подпроцесс
-        # знал не только «кто», но и «какой оборот» — иначе журнал платформы
-        # не связал бы его вызов с вопросом.
+        self._client = client
+        #: Экземпляр ``DbLoggingService`` - источник ``request_id`` текущего
+        #: оборота. Берётся из контекста, потому что индекс оборотов живёт в
+        #: нём, а не в модуле: метод, а не функция.
         self._request_id_source = request_id_source
 
     @classmethod
@@ -183,98 +118,51 @@ class LegalSummarizerQueryTool(Tool):
 
     @classmethod
     def _read_settings_section(cls, ctx: Any) -> dict[str, Any]:
-        """Прочитать секцию ``tools.<config_key>`` из ``ctx._settings_ref``."""
+        """Секция ``tools.legal_summarizer_query`` из настроек.
+
+        pydantic-``ToolsConfig`` из nanobot знает только встроенные подсекции
+        и неизвестные отбрасывает, поэтому читаем сырые настройки.
+        """
         settings = getattr(ctx, "_settings_ref", None)
         if settings is None:
             return {}
-        try:
-            tools_section = settings.tools
-        except AttributeError:
-            return {}
+        tools_section = getattr(settings, "tools", None)
         if tools_section is None:
             return {}
-        try:
-            section = getattr(tools_section, cls.config_key)
-        except AttributeError:
-            return {}
+        section = getattr(tools_section, cls.config_key, None)
         if section is None:
             return {}
         if isinstance(section, dict):
             return dict(section)
-        out: dict[str, Any] = {}
-        for field_name in ("enable", "timeout_sec", "workspace_root"):
-            if hasattr(section, field_name):
-                out[field_name] = getattr(section, field_name)
-        if not out:
-            try:
-                out = dict(vars(section))
-            except Exception:
-                pass
-        return out
+        try:
+            return dict(section)
+        except Exception:
+            return {"enable": bool(getattr(section, "enable", True))}
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
-        section = cls._read_settings_section(ctx)
-        return bool(section.get("enable", True))
+        return bool(cls._read_settings_section(ctx).get("enable", True))
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
         section = cls._read_settings_section(ctx)
         try:
-            config = cls.config_cls()(**section)
-        except Exception:
-            config = cls.config_cls()
-        return cls(
-            config=config,
-            request_id_source=getattr(ctx, "db_logging_service", None),
-        )
-
-    def _identity_env(self) -> dict[str, str]:
-        """Идентичность оборота для окружения подпроцесса.
-
-        Из ``RequestContext`` и журнала, никогда из аргументов модели: значение,
-        присланное моделью, границей изоляции не является.
-
-        Пусто вне оборота. Тогда подпроцесс не пошлёт ``_meta`` вовсе, и сервер
-        ответит ``identity_missing`` — что и правильно. Выдумывать значения здесь
-        нельзя: подставленный ``session_id`` выглядел бы в журнале как настоящая
-        сессия, а подставленный ``request_id`` — как существующий оборот.
-
-        ``request_id`` необязателен: платформенный клиент досоставит
-        самостоятельный, если оборота нет. Подменять его нечем — либо он найден,
-        либо его нет.
-        """
-        try:
-            from nanobot.agent.tools.context import (
-                current_request_context,
-                current_request_session_key,
+            config = cls.config_cls()(
+                enable=section.get("enable", True),
+                max_result_chars=int(section.get("max_result_chars", 20000)),
             )
         except Exception:
-            return {}
-        try:
-            ctx = current_request_context()
-            session_id = current_request_session_key()
-        except Exception:
-            return {}
-        if ctx is None or not session_id:
-            return {}
-
-        sender_id = getattr(ctx, "sender_id", None)
-        if not isinstance(sender_id, str) or not sender_id:
-            return {}
-
-        env = {
-            "ENTERPRISE_SESSION_ID": str(session_id),
-            "ENTERPRISE_USER_ID": sender_id,
-        }
-        if self._request_id_source is not None:
-            try:
-                request_id = self._request_id_source.get_request_id(str(session_id))
-            except Exception:
-                request_id = None
-            if request_id:
-                env["ENTERPRISE_REQUEST_ID"] = str(request_id)
-        return env
+            config = cls.config_cls()()
+        # Клиент enterprise-mcp - единственный путь к состоянию операции.
+        # ``None``: раздел ``enterprise_mcp`` выключен или не задан
+        # (project.json). Tool остаётся зарегистрированным и отвечает
+        # структурной ошибкой, чтобы модель видела причину, а не
+        # «неизвестный инструмент».
+        return cls(
+            config=config,
+            client=getattr(ctx, "_enterprise_mcp", None),
+            request_id_source=getattr(ctx, "db_logging_service", None),
+        )
 
     @property
     def name(self) -> str:
@@ -283,13 +171,15 @@ class LegalSummarizerQueryTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Follow-up запрос к навыку legal_summarizer по ранее сохранённой "
-            "operation_id: возвращает article_count, chunks, sections, stats "
-            "без перепарсинга документа. Используй, когда пользователь "
-            "спрашивает про уже проанализированный документ («сколько "
-            "статей?», «какие разделы?», «что в чанке N?»). "
-            "Аргументы: operation_id (обяз.), field (stats|articles|chunks|"
-            "sections|tree|all)."
+            "Follow-up вопрос по уже разобранному юридическому документу, по "
+            "его operation_id: 'сколько статей?', 'какие разделы?', 'что в "
+            "чанке 12?'. Зовёт операцию query_operation capability "
+            "legal_summarizer платформы. Документ заново НЕ разбирается: "
+            "ответ берётся из сохранённого состояния операции, поэтому "
+            "вопрос дешёвый. Без operation_id вызов бессмысленен - его "
+            "возвращает разбор документа. Поля: stats (по умолчанию), "
+            "articles, chunks, sections, tree, all (крупный ответ, "
+            "начинай с stats). Возвращает JSON операции."
         )
 
     async def execute(
@@ -300,127 +190,104 @@ class LegalSummarizerQueryTool(Tool):
         max_chunk_summary_chars: int = 1500,
         **_kwargs: Any,
     ) -> str:
-        workspace_root = _resolve_workspace_root(self.config.workspace_root)
-        cli_path = _resolve_cli_path(workspace_root)
-        if not cli_path.is_file():
+        if field not in _FIELDS:
             return self._error(
-                "cli_not_found",
-                f"cli_query.py не найден по ожидаемому пути {cli_path}. "
-                "Проверьте целостность репозитория.",
+                "invalid_params",
+                f"field должен быть одним из {list(_FIELDS)}, получено {field!r}",
             )
 
-        # ``subprocess.run`` со списком аргументов (без shell=True) — нет
-        # проблем с кавычками/пайпами на Windows. ``sys.executable`` — тот же
-        # интерпретатор, что и gateway (venv активна автоматически).
-        argv = [
-            sys.executable,
-            str(cli_path),
-            "--operation-id",
-            operation_id,
-            "--field",
-            field,
-            "--workspace-root",
-            str(workspace_root),
-            "--max-chunk-summary-chars",
-            str(int(max_chunk_summary_chars)),
-        ]
-        # env наследуется; PYTHONUTF8/PYTHONIOENCODING выставлены на entry-points.
-        env = os.environ.copy()
-        # Идентичность оборота — в окружение подпроцесса, а не в аргументы
-        # командной строки. Аргументы пишет модель, и значение, пришедшее от
-        # модели, границей изоляции не является: модель назвала бы себя любой
-        # сессией. Окружение собирается здесь, на конкретный вызов, — и не
-        # остаётся в процессе после возврата, поэтому следующий вызов не
-        # унаследует чужие значения.
-        env.update(self._identity_env())
+        client = self._client
+        if client is None:
+            return self._error(
+                "mcp_unavailable",
+                "Клиент enterprise-mcp не создан: раздел enterprise_mcp "
+                "выключен или не задан (project.json). Состояние операции "
+                "доступно только через него.",
+            )
 
+        arguments = {
+            "operation_id": operation_id,
+            "field": field,
+            "max_chunk_summary_chars": max_chunk_summary_chars,
+        }
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=str(workspace_root),
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.config.timeout_sec,
-                shell=False,
-                check=False,
+            raw = await client.call(
+                _OPERATION, arguments, identity=self._identity()
             )
-        except subprocess.TimeoutExpired as exc:
-            return self._error(
-                "timeout",
-                f"cli_query.py превысил timeout {self.config.timeout_sec}с. "
-                f"stderr (если есть): {exc.stderr or '<пусто>'}",
-            )
-        except OSError as exc:
-            return self._error(
-                "subprocess_error",
-                f"Не удалось запустить {sys.executable} {cli_path}: {exc}",
-            )
+        except EnterpriseOperationError as exc:
+            return self._error(exc.code, exc.message)
+        except EnterpriseMcpUnavailable as exc:
+            return self._error("mcp_unavailable", str(exc))
+        except Exception as exc:  # noqa: BLE001 - модель не должна видеть traceback
+            return self._error("unexpected_error", str(exc))
 
-        if completed.returncode != 0:
-            return self._handle_nonzero_exit(completed)
-
-        stdout = (completed.stdout or "").strip()
-        if not stdout:
-            return self._error(
-                "empty_response",
-                "cli_query.py не вернул stdout (возможно, manifest.json пуст или повреждён).",
-            )
-
-        # Проверим, что stdout — валидный JSON.
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            return self._error(
-                "invalid_json",
-                f"cli_query вернул не-JSON: {exc}; первые 500 символов: {stdout[:500]}",
-            )
-
-        return json.dumps(payload, ensure_ascii=False, default=str)
-
-    def _handle_nonzero_exit(self, completed: subprocess.CompletedProcess) -> str:
-        """Обработать non-zero exit cli_query.py: pass-through или cli_failed.
-
-        При ``returncode != 0``:
-
-        1. Пытаемся распарсить stdout как JSON. Если это dict с
-           top-level ``status == "error"`` (строгое равенство) — это
-           доменная ошибка CLI, пробрасываем as is (все поля сохранены).
-        2. Любой другой исход (stdout пустой / stdout не JSON /
-           stdout — JSON-массив / dict без поля ``status`` /
-           dict со ``status != "error"``) трактуем как реальную поломку
-           CLI и возвращаем собственный envelope ``cli_failed`` со
-           первыми 1000 символами stderr.
-        """
-        stdout_raw = completed.stdout or ""
-        parsed: Any = None
-        try:
-            parsed = json.loads(stdout_raw)
-        except (ValueError, TypeError):
-            parsed = None
-
-        if (
-            isinstance(parsed, dict)
-            and parsed.get("status") == "error"
-        ):
-            return json.dumps(parsed, ensure_ascii=False, default=str)
-
-        stderr_fragment = (completed.stderr or "").strip()[:1000] or "<пусто>"
-        return self._error(
-            "cli_failed",
-            f"cli_query вернул exit={completed.returncode}. "
-            f"stderr: {stderr_fragment}",
+        if len(raw) <= self.config.max_result_chars:
+            return raw
+        return json.dumps(
+            {
+                "status": "success",
+                "operation": _OPERATION,
+                "truncated": True,
+                "message": (
+                    f"ответ длиннее {self.config.max_result_chars} символов и "
+                    "ужат; сузьте запрос (конкретнее поле, меньше "
+                    "max_chunk_summary_chars) и повторите"
+                ),
+                "preview": _cap(raw, self.config.max_result_chars),
+            },
+            ensure_ascii=False,
+            default=str,
         )
 
     def _error(self, error_type: str, message: str) -> str:
-        payload = {
-            "status": "error",
-            "error_type": error_type,
-            "message": message,
-        }
-        return json.dumps(payload, ensure_ascii=False)
+        return json.dumps(
+            {"status": "error", "error_type": error_type, "message": message},
+            ensure_ascii=False,
+        )
 
+    def _identity(self) -> CallIdentity | None:
+        """Личность оборота - из ``RequestContext``, никогда из аргументов модели.
 
-__all__ = ["LegalSummarizerQueryTool", "LegalSummarizerQueryToolConfig"]
+        Вне оборота возвращается ``None``: тогда сервер сам скажет
+        ``identity_missing``. Придумывать значения здесь нельзя - выдуманный
+        ``session_id`` выглядел бы как настоящая запись в журнале.
+        """
+        try:
+            from nanobot.agent.tools.context import (
+                current_request_context,
+                current_request_session_key,
+            )
+        except Exception:
+            return None
+        try:
+            ctx = current_request_context()
+        except Exception:
+            return None
+        if ctx is None:
+            return None
+
+        try:
+            session_id = current_request_session_key()
+        except Exception:
+            session_id = None
+        if not session_id:
+            return None
+
+        sender_id = getattr(ctx, "sender_id", None)
+        user_id = sender_id if isinstance(sender_id, str) and sender_id else None
+        if not user_id:
+            return None
+
+        request_id = None
+        source = self._request_id_source
+        if source is not None:
+            try:
+                request_id = source.get_request_id(str(session_id))
+            except Exception:
+                request_id = None
+
+        return CallIdentity(
+            session_id=str(session_id),
+            user_id=user_id,
+            request_id=request_id,
+        )

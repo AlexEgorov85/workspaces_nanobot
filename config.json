@@ -722,8 +722,7 @@
     },
     "legal_summarizer_query": {
       "enable": true,
-      "timeout_sec": 60,
-      "workspace_root": null
+      "max_result_chars": 20000
     },
     "column_descriptions": {
       "enable": true,
