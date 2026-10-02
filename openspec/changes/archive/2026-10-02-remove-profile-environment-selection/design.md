@@ -234,3 +234,70 @@ active-документации и runtime-коду, а не к `CHANGELOG.md` �
 миграций данных нет, схема не меняется, public API `config` не меняется.
 Единственное необратимое — удалённые тесты восстанавливаются из
 коммита.
+
+---
+
+## Дополнение 2026-10-02: почему дельты спеки удалены
+
+Change выполнен по коду и закрыт, но `openspec archive` его не принимал:
+
+```
+configuration/profiles ADDED failed for header
+"### Requirement: Application entrypoint profile contract различает
+gateway и CLI" - already exists
+```
+
+Причина — та же, что у `startup-schema-validation`: обе дельты были
+слиты в активные спеки вручную до применения инструментом.
+
+Прежде чем удалять дельты, каждое требование сверено с активной спекой
+построчно. Результат:
+
+| Capability | Требование | Состояние |
+|---|---|---|
+| `runtime/entrypoints` | ADDED `ApplicationContext.create MUST NOT принимать profile` | идентично активной |
+| `runtime/entrypoints` | ADDED `Production entrypoints MUST NOT передавать profile…` | идентично активной |
+| `runtime/entrypoints` | MODIFIED `Deprecated kwargs с явной compatibility boundary` | идентично активной |
+| `runtime/entrypoints` | MODIFIED `CLI имеет фиксированный профиль test` | идентично активной |
+| `runtime/entrypoints` | MODIFIED `Единая typed signature… с role` | **тот же текст, иначе разбит на строки** |
+| `configuration/profiles` | ADDED `Application entrypoint profile contract…` | в активной **дополнительный** сценарий `Streamlit invocation is explicitly defined`, которого в дельте нет |
+| `configuration/profiles` | MODIFIED `Разрешение до инициализации runtime` | идентично активной |
+| `configuration/profiles` | MODIFIED `Profiles are limited to a whitelist` | идентично активной |
+| `configuration/profiles` | MODIFIED `CLI entrypoint имеет фиксированный профиль test` | текст требования идентичен; разницу давали следующие за ним секции `## Forbidden Behavior`, `## Dependencies` и далее, попавшие в тело требования при разборе |
+| `configuration/profiles` | REMOVED `Application entrypoint requires --profile` | **уже отсутствует** в активной |
+| `configuration/profiles` | REMOVED `All application entrypoints share identical lifecycle contract` | **уже отсутствует** в активной |
+
+Итог: семь требований применены и совпадают дословно, ещё три расходятся
+только переносами строк либо тем, что в активной версии **больше**, чем в
+дельте (сценарий про Streamlit). REMOVED-требования уже удалены — их отказ
+и давал сообщение `nothing to remove`.
+
+Поэтому применение дельты **откатило бы** более поздние правки: потерялся
+бы сценарий про Streamlit, а требования перезаписались бы устаревшими
+переносами строк. Форма `MODIFIED` требует дословно повторить тело
+требования целиком, то есть дельта стала бы второй копией нормативного
+текста, расходящейся с активной спекой при каждой её правке.
+
+Решение: дельты удалены, в `.openspec.yaml` выставлен `skip_specs: true` —
+штатный механимент для change'а, который намеренно не трогает спеки.
+
+### Проверка контракта по коду
+
+Архивация не должна закрывать change, который на самом деле не выполнен,
+поэтому контракт проверен по реальному коду, а не по чекбоксам:
+
+1. `ApplicationContext.create` — параметров `script_dir`, `workspace_dir`,
+   `role`, `storage_override`, `session_override`; `profile` в сигнатуре
+   отсутствует.
+2. Ни один вызов `create(...)` в production-коде (`lib/`, `tools/`,
+   `gateway.py`, `cli_agent.py`) не передаёт `profile=` — проверено обходом
+   AST, а не текстовым поиском.
+3. `_resolve_enable_kwargs` отвергает любой ключ вне
+   `DEPRECATED_ENABLE_KWARGS` через `TypeError`, поэтому `profile=` даёт
+   `TypeError`, а не молчаливый игнор. Живая проверка подтвердила: и
+   `profile=`, и опечатка `enable_aduit=` отвергаются.
+4. `gateway.py` и `cli_agent.py` вызывают `config._initialize_settings(...)`
+   раньше `ApplicationContext.create(...)` — профиль разрешается до
+   composition root.
+5. Живая проверка `create(role="gateway", …)` без `profile`: `ctx.profile`
+   равен `test`, то есть значение пришло из `SETTINGS`.

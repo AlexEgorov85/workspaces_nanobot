@@ -1,0 +1,17 @@
+schema: spec-driven
+created: 2026-09-29
+
+# Дельты этого change'а уже применены к активным спекам
+# `configuration/profiles` и `runtime/entrypoints` — слиты вручную до того,
+# как инструмент их применил.
+#
+# `openspec archive` отказывался закрывать change:
+#   configuration/profiles ADDED failed for header
+#   "### Requirement: Application entrypoint profile contract различает
+#   gateway и CLI" - already exists
+#
+# Переписывать дельту как MODIFIED нельзя, и это видно построчным diff'ом:
+# активная версия каждого требования новее дельты, поэтому её применение
+# откатило бы более поздние правки. Разбор — в design.md, раздел
+# «Дополнение 2026-10-02».
+skip_specs: true

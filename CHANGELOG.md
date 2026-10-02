@@ -545,19 +545,34 @@
   ужесточён: только `{"prod", "test"}` (раньше было regex
   `[a-z0-9_-]+` — фактически любое имя; введение третьего профиля
   требует отдельного OpenSpec change).
-- **`ApplicationContext.create(profile=...)`**: убрана избыточная
-  ctx-пересборка при `profile != _ACTIVE_PROFILE` (после change
-  `_ACTIVE_PROFILE` module-level global больше нет — `ApplicationContext`
-  просто читает уже инициализированный `SETTINGS` из `_LazySettings`).
-  Если caller вызвал `create` без предварительного entrypoint init —
-  `ConfigurationError` (`SETTINGS["profile"]` через proxy).
-- **Application subprocess получает профиль через argv, не через env.**
-  `lib.services.subprocess_manager.spawn_streamlit` теперь явно
-  добавляет `--profile=<SETTINGS["profile"]>` в argv child
-  `streamlit_app.py` (раньше child падал с
-  `ConfigurationError("--profile is required")` на module-level, и
-  Streamlit UI не стартовал). Подробности — `docs/INTERNAL_API.md`
-  § «Передача профиля в application subprocess».
+- **`ApplicationContext.create(profile=...)` — параметр удалён, это
+  BREAKING-изменение** (change `remove-profile-environment-selection`).
+  Убрана избыточная ctx-пересборка при `profile != _ACTIVE_PROFILE` (после
+  change `_ACTIVE_PROFILE` module-level global больше нет —
+  `ApplicationContext` просто читает уже инициализированный `SETTINGS` из
+  `_LazySettings`). Если caller вызвал `create` без предварительного
+  entrypoint init — `ConfigurationError` (`SETTINGS["profile"]` через proxy).
+  **Профиль выбирается на границе приложения, до composition root:**
+  `gateway.py` принимает `argv --profile`, `cli_agent.py` имеет
+  фиксированный `test`, оба зовут `config._initialize_settings(...)` **до**
+  `ApplicationContext.create(...)`.
+  - `profile` отсутствует в сигнатуре, и передача через `**kwargs` даёт
+    `TypeError`, а не молчаливый игнор: `create` отвергает любой ключ вне
+    `DEPRECATED_ENABLE_KWARGS`. Тот же код отвергает и опечатки вроде
+    `enable_aduit=` — намеренно, чтобы промах был явной ошибкой.
+  - `create(role="gateway", …)` без `profile` берёт профиль из
+    `SETTINGS["profile"]`; способ выбора профиля в composition root
+    неизвестен и не нужен.
+  - Профиль разрешается ровно один раз за старт и после этого не меняется.
+- **Профиль доходит до application subprocess через argv, не через env.**
+  `lib.services.subprocess_manager.spawn_streamlit` явно добавляет
+  `--profile=<SETTINGS["profile"]>` в argv child-процесса (раньше child
+  падал с `ConfigurationError("--profile is required")` на module-level).
+  Подробности — `docs/INTERNAL_API.md` § «Передача профиля в application
+  subprocess».
+  *Замечание: сам `streamlit_app.py` удалён фазой 1 миграции
+  `enterprise-mcp-platform`; запись сохранена как описание правки переходного
+  периода, применять её к текущему дереву уже не нужно.*
 
 - **`history_search`: пагинация и честные truncation-флаги**
   (`openspec/changes/improve-history-search-pagination-and-logging`).
