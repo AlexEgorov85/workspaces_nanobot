@@ -40,9 +40,15 @@ class ChannelFactory:
         self,
         print_worker_activity: bool = False,
         db_logging_service: Any | None = None,
+        enterprise_mcp: Any | None = None,
     ) -> None:
         self._print_worker_activity = print_worker_activity
         self._db_logging_service = db_logging_service
+        # Клиент ``enterprise-mcp``: единственный путь канала к данным задач.
+        # Своего пула PostgreSQL у канала нет - платформа объявлена его
+        # владельцем, и второй пул означал бы вторую половину соединений к
+        # той же таблице.
+        self._enterprise_mcp = enterprise_mcp
 
     def create_all(
         self,
@@ -127,7 +133,9 @@ class ChannelFactory:
             "print_worker_activity": self._print_worker_activity,
         }
         pg_channel = PostgresChannel(
-            ch_cfg, bus, db_logging_service=self._db_logging_service,
+            ch_cfg, bus,
+            db_logging_service=self._db_logging_service,
+            enterprise_mcp=self._enterprise_mcp,
         )
         pg_channel.send_progress = config.channels.send_progress
         pg_channel.send_tool_hints = config.channels.send_tool_hints

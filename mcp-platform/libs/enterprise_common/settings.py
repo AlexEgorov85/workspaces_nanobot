@@ -802,6 +802,7 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
         service="servers/enterprise/capabilities/data/service/main.py",
         tools=(
             "append_assistant_message",
+            "append_reasoning",
             "claim_task",
             "delete_assistant_message",
             "fail_task",

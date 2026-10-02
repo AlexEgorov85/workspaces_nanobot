@@ -34,13 +34,7 @@ from typing import Any
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from psycopg2.extras import Json
 from rich.console import Console
-from utils.db import async_execute as execute
-from utils.db import async_fetch as fetch  # noqa: F401 — атрибут модуля патчится тестами
-from utils.db import async_fetchone as fetchone
-from utils.db import async_fetchval as fetchval
-from utils.db import async_transaction as transaction
 from utils.jsonb import decode_jsonb as _decode_jsonb
 from utils.media import (
     deserialize as media_deserialize,
@@ -54,6 +48,7 @@ from utils.media import (
 from utils.session_file_store import SessionFileStore
 
 from lib.channels.message_exchange import MessageExchange
+from lib.channels.queue_ops import QueueOps
 from lib.utils.outbound_meta import FINAL_TURN_KEY, is_dropped
 
 _WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
@@ -110,6 +105,7 @@ class PostgresChannel(BaseChannel):
         *,
         db_logging_service: Any | None = None,
         compaction_event_subscriber: Any | None = None,
+        enterprise_mcp: Any | None = None,
     ) -> None:
         super().__init__(config, bus)
         # Опциональный ``DbLoggingService`` для долговечного журнала
@@ -158,6 +154,13 @@ class PostgresChannel(BaseChannel):
             )
         # пауза перед повторным захватом задачи со статусом error (сек)
         self._error_retry_delay: int = int(_get("error_retry_delay", 60))
+        # ---- операции очереди ----
+        # Единственный путь к данным задач. Своего пула PostgreSQL у канала
+        # больше нет: платформа объявлена его владельцем, и второй пул
+        # означал бы второй набор соединений к той же таблице. Идентичность
+        # служебных вызовов несёт ``worker_id`` - он и раньше был у воркера,
+        # просто шёл только в лог.
+        self._ops = QueueOps(enterprise_mcp, worker_id=self._worker_id)
         # task_id задач, которые захвачены этим инстансом прямо сейчас.
         # Множество локальное: состояние захвата хранится в самой строке
         # задачи (status='processing'), поэтому heartbeat и таблица
@@ -208,8 +211,9 @@ class PostgresChannel(BaseChannel):
         # ---- рассуждения (reasoning) ----
         # assistant_msg_id → накопленный текст рассуждений
         self._reasoning_buffers: dict[str, str] = {}
-        # блокировка для атомарности read-modify-write reasoning в БД
-        self._reasoning_io_lock = asyncio.Lock()
+        # Блокировки на сброс рассуждений больше нет: дописывание атомарно на
+        # платформе, и локальный замо́к был нужен ровно потому, что раньше
+        # атомарности не было.
         self._flush_task: asyncio.Task | None = None
 
         # ---- откат зависших processing (single-режим) ----
@@ -303,8 +307,9 @@ class PostgresChannel(BaseChannel):
             self._unstick_task = None
         # Вернуть незавершённые задачи в пул (их подберёт следующий цикл).
         await self._return_claimed_to_pool()
-        # db — глобальный singleton из utils.db, закрывается при выходе
-        # из процесса. Явно не закрываем, чтобы не сломать другие каналы.
+        # Пул PostgreSQL принадлежит платформе и живёт в её процессе: у канала
+        # своего соединения больше нет, закрывать нечего. Сессия
+        # ``enterprise-mcp`` закрывается владельцем клиента.
 
     async def _return_claimed_to_pool(self) -> None:
         """Вернуть незавершённые задачи этого инстанса в пул при остановке.
@@ -316,19 +321,15 @@ class PostgresChannel(BaseChannel):
         """
         if not self._claimed_ids:
             return
-        async with transaction() as conn:
-            for task_id in list(self._claimed_ids):
-                await conn.execute(
-                    f"UPDATE {self._fq_table} SET status = 'pending', "
-                    f"updated_at = NOW() "
-                    f"WHERE id = %s AND status = 'processing'",
-                    task_id,
-                )
-                await conn.execute(
-                    f"DELETE FROM {self._fq_table} WHERE reply_to = %s "
-                    f"AND role = 'assistant' AND status = 'processing'",
-                    task_id,
-                )
+        # Один вызов на весь список, а не цикл по задачам: между вызовами
+        # процесс можно убить, и тогда часть задач осталась бы в processing
+        # до таймаута, а их заглушки — до следующего захвата.
+        try:
+            await self._ops.release_claimed_tasks(list(self._claimed_ids))
+        except Exception as exc:  # noqa: BLE001 - остановка не должна падать
+            self.logger.error(
+                "не удалось вернуть захваченные задачи в пул: {}", exc
+            )
         self._claimed_ids.clear()
 
     # ------------------------------------------------------------------
@@ -435,13 +436,9 @@ class PostgresChannel(BaseChannel):
         try:
             if not self._print_worker_activity:
                 return
-            row = await fetchone(
-                f"SELECT count(*) FILTER (WHERE status = 'pending') AS pending, "
-                f"count(*) FILTER (WHERE status = 'error') AS error "
-                f"FROM {self._fq_table} WHERE role = 'user'"
-            )
-            pending = int((row or {}).get("pending") or 0)
-            error = int((row or {}).get("error") or 0)
+            stats = await self._ops.queue_stats()
+            pending = stats.get("pending", 0)
+            error = stats.get("error", 0)
             summary = (pending, error)
             if summary != self._last_queue_summary:
                 self._last_queue_summary = summary
@@ -471,37 +468,28 @@ class PostgresChannel(BaseChannel):
                 self.logger.debug("Flush live context error: {}", e)
 
     async def _flush_reasoning(self) -> None:
-        """Сбросить все грязные буферы рассуждений в БД одной пачкой.
+        """Сбросить все грязные буферы рассуждений одной пачкой.
 
-        Атомарность гарантируется ``_reasoning_io_lock``: пока одна
-        корутина читает-модифицирует-пишет, другая ждёт. Это исключает
-        race condition между ``_flush_reasoning`` и финальным ``send()``.
-
-        Алгоритм:
-          1. Захватить ``_reasoning_buffers`` и обнулить (swap)
-          2. Для каждого assistant_msg_id с непустым delta:
-             a. ``async with _reasoning_io_lock``
-             b. SELECT metadata → дописать reasoning → UPDATE
+        Дописывание выполняется на платформе (``append_reasoning``), где
+        конкатенация происходит в SQL поверх уже обновлённого значения.
+        Раньше здесь стоял ``_reasoning_io_lock`` поверх чтения-склейки-записи:
+        блокировка была нужна ровно потому, что операция не была атомарной, и
+        это признавалось молча. Теперь гонки нет — и блокировки тоже.
         """
         if not self._reasoning_buffers:
             return
         buffers = self._reasoning_buffers
         self._reasoning_buffers = {}
         for assistant_msg_id, delta in buffers.items():
-            if delta:
-                async with self._reasoning_io_lock:
-                    row = await fetchone(
-                        f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
-                        assistant_msg_id,
-                    )
-                    if not row:
-                        continue
-                    meta = _decode_jsonb(row["metadata"])
-                    meta["reasoning"] = (meta.get("reasoning") or "") + delta
-                    await execute(
-                        f"UPDATE {self._fq_table} SET metadata = %s, updated_at = NOW() WHERE id = %s",
-                        meta, assistant_msg_id,
-                    )
+            if not delta:
+                continue
+            try:
+                await self._ops.append_reasoning(assistant_msg_id, delta)
+            except Exception as exc:  # noqa: BLE001 - сброс не роняет цикл
+                self.logger.warning(
+                    "не удалось дописать рассуждение в {}: {}",
+                    assistant_msg_id, exc,
+                )
 
     async def _flush_live_context(self) -> None:
         """Живое обновление занятости контекста в processing-строки.
@@ -527,21 +515,19 @@ class PostgresChannel(BaseChannel):
             block = get_context_window(f"postgres:{chat_id}")
             if not block:
                 continue
-            async with self._reasoning_io_lock:
-                row = await fetchone(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
+            # Полная замена значения, а не дописывание: патч здесь и уместен.
+            # Сверка с прежним значением ушла вместе с чтением - зато не
+            # осталось окна, где два сброса решают по-разному, кто прав.
+            try:
+                await self._ops.patch_message_metadata(
                     assistant_msg_id,
+                    {"context_window": block},
+                    role="assistant",
                 )
-                if not row:
-                    continue
-                meta = _decode_jsonb(row["metadata"])
-                if meta.get("context_window") == block:
-                    continue
-                meta["context_window"] = block
-                await execute(
-                    f"UPDATE {self._fq_table} SET metadata = %s, updated_at = NOW() "
-                    f"WHERE id = %s",
-                    meta, assistant_msg_id,
+            except Exception as exc:  # noqa: BLE001 - прогресс-бар не критичен
+                self.logger.debug(
+                    "не удалось обновить context_window для {}: {}",
+                    assistant_msg_id, exc,
                 )
 
     # ------------------------------------------------------------------
@@ -613,10 +599,7 @@ class PostgresChannel(BaseChannel):
 
         # Race-fix: после claim повторно проверяем статус (между SELECT
         # подзапроса и UPDATE захвата AW мог пометить cancelled).
-        cur_status = await fetchval(
-            f"SELECT status FROM {self._fq_table} WHERE id = %s",
-            user_msg_id,
-        )
+        cur_status = await self._status_of(user_msg_id)
         if cur_status == "cancelled":
             self.logger.info(
                 "user_stop_signal: priority skipping cancelled msg {} (chat={})",
@@ -733,64 +716,20 @@ class PostgresChannel(BaseChannel):
         """
         max_retries = self._max_stuck_retries
         timeout_s = self._processing_timeout
-        recovered: list[str] = []
 
-        async with transaction() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT id, metadata FROM {self._fq_table}
-                WHERE role = 'user' AND status = 'processing'
-                AND updated_at + interval '1 second' * %s < NOW()
-                """,
-                timeout_s,
-            )
-            for row in rows:
-                msg_id = str(row["id"])
-                meta = _decode_jsonb(row["metadata"])
-                retry_count = meta.get("retry_count", 0) + 1
-                meta["retry_count"] = retry_count
-
-                if retry_count >= max_retries:
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"metadata = %s, updated_at = NOW() WHERE id = %s",
-                        meta, msg_id,
-                    )
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"updated_at = NOW() WHERE reply_to = %s "
-                        f"AND role = 'assistant' AND status = 'processing'",
-                        msg_id,
-                    )
-                    self.logger.warning(
-                        "User msg {} exceeded max retries ({}/{})",
-                        msg_id, retry_count, max_retries,
-                    )
-                    recovered.append(msg_id)
-                else:
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'pending', "
-                        f"metadata = %s, updated_at = NOW() WHERE id = %s",
-                        meta, msg_id,
-                    )
-                    await conn.execute(
-                        f"DELETE FROM {self._fq_table} WHERE reply_to = %s "
-                        f"AND role = 'assistant' AND status IN ('processing', 'failed')",
-                        msg_id,
-                    )
-                    self.logger.warning(
-                        "Released stuck user msg {} (retry {}/{})",
-                        msg_id, retry_count, max_retries,
-                    )
-                    recovered.append(msg_id)
-
-            # orphaned assistant-сообщения без живой user-пары
-            await conn.execute(
-                f"UPDATE {self._fq_table} SET status = 'failed', "
-                f"updated_at = NOW() WHERE role = 'assistant' "
-                f"AND status = 'processing' "
-                f"AND updated_at + interval '1 second' * %s < NOW()",
-                timeout_s,
+        # Отбор зависших, счётчик попыток, терминальный переход, правка
+        # assistant-строки и зачистка осиротевших ответов — одна транзакция на
+        # платформе. Разнести это на вызовы значило бы вернуть в канал ровно
+        # ту гонку, ради устранения которой операция и вынесена: счётчик
+        # попыток растёт, ответ удаляется, а задача остаётся в обработке.
+        recovered = await self._ops.unstick_tasks(
+            processing_timeout_sec=timeout_s,
+            max_stuck_retries=max_retries,
+        )
+        for msg_id in recovered:
+            self.logger.warning(
+                "Released or failed stuck user msg {} (max retries {})",
+                msg_id, max_retries,
             )
 
         return recovered
@@ -877,49 +816,46 @@ class PostgresChannel(BaseChannel):
         затем backoff внешнего ``WHERE``. Расхождение порядка здесь не
         синтаксическая ошибка, а тихая подмена: ``error_retry_delay``
         попал бы в ``ANY(%s)``, и priority-путь отсекался бы всегда.
+
+        SQL переехал на платформу операцией ``claim_task`` — там же и
+        гарантия атомарности захвата. Здесь важно другое: возвращается ровно
+        одна задача или ``None``, и ``None`` — это «очередь пуста», а не
+        «запрос не разобран». Второе раньше выглядело бы так же.
         """
-        priority_clause = ""
-        params: tuple = (self._error_retry_delay, self._error_retry_delay)
-        if priority_contents is not None:
-            priority_clause = "  AND content = ANY(%s)\n"
-            params = (
-                self._error_retry_delay,
-                list(priority_contents),
-                self._error_retry_delay,
-            )
-        row = await fetchone(
-            f"""
-            UPDATE {self._fq_table}
-            SET status = 'processing', updated_at = NOW()
-            WHERE id = (
-                SELECT id FROM {self._fq_table}
-                WHERE role = 'user'
-                  AND (
-                      status = 'pending'
-                      OR (status = 'error'
-                          AND updated_at + interval '1 second' * %s < NOW())
-                  )
-                  AND status != 'cancelled'
-{priority_clause}                  AND NOT EXISTS (
-                      SELECT 1 FROM {self._fq_table} m2
-                      WHERE m2.chat_id = {self._fq_table}.chat_id
-                        AND m2.role = 'user'
-                        AND m2.status = 'processing'
-                  )
-                ORDER BY created_at ASC
-                LIMIT 1
-            )
-            AND (
-                status = 'pending'
-                OR (status = 'error'
-                    AND updated_at + interval '1 second' * %s < NOW())
-            )
-            AND status != 'cancelled'
-            RETURNING id, chat_id, user_id, content, media, metadata, created_at
-            """,
-            *params,
+        return await self._ops.claim_task(
+            error_retry_delay_sec=self._error_retry_delay,
+            priority_contents=priority_contents,
         )
-        return row
+
+    def _session_id_for(self, msg_id: str | None) -> str | None:
+        """Идентификатор сессии оборота для подписи вызова.
+
+        Известен по чату, к которому принадлежит задача. ``None`` — оборот
+        не разобран, и подпись соберётся из идентификатора сообщения: лучше
+        слабая, но честная привязка, чем отказ обслуживать очередь.
+        """
+        if not msg_id:
+            return None
+        chat_id = self._msg_chat.get(msg_id)
+        return f"chat:{chat_id}" if chat_id else f"task:{msg_id}"
+
+    def _user_id_for(self, msg_id: str | None) -> str | None:
+        """Пользователь оборота для подписи вызова."""
+        if not msg_id:
+            return None
+        ctx = self._msg_ctx.get(msg_id) or {}
+        return ctx.get("user_id") or None
+
+    async def _status_of(self, user_msg_id: str) -> str | None:
+        """Текущий статус задачи. ``None`` — строки нет.
+
+        Нужна перепроверке отмены после захвата: AW может пометить задачу
+        ``cancelled`` между отбором кандидата и ``UPDATE`` захвата, и тогда
+        наш ``SELECT`` уже прошёл, а захват состоялся.
+        """
+        row = await self._ops.get_message(user_msg_id)
+        return str(row.get("status")) if row else None
+
     async def _poll_once(self, exchange: MessageExchange) -> bool:
         """Забрать самое старое сообщение (через клейм) и отправить агенту.
 
@@ -957,10 +893,7 @@ class PostgresChannel(BaseChannel):
         # 'cancelled' ПОСЛЕ SELECT подзапроса, но ДО UPDATE захвата — наш
         # SELECT уже прошёл, и мы захватили запись. Эта повторная проверка
         # закрывает окно race.
-        cur_status = await fetchval(
-            f"SELECT status FROM {self._fq_table} WHERE id = %s",
-            user_msg_id,
-        )
+        cur_status = await self._status_of(user_msg_id)
         if cur_status == "cancelled":
             self.logger.info(
                 "user_stop_signal: skipping cancelled msg {} (chat={})",
@@ -978,10 +911,9 @@ class PostgresChannel(BaseChannel):
         # в этом же процессе (в БД chat уже считается занятым, но защищаемся
         # от гонки между клеймом и фактическим диспатчем).
         if chat_id in self._chat_inflight:
-            await execute(
-                f"UPDATE {self._fq_table} SET status = 'pending', "
-                f"updated_at = NOW() WHERE id = %s",
-                user_msg_id,
+            await self._ops.update_task_status(
+                user_msg_id, "pending", role="user",
+                session_id=f"chat:{chat_id}", user_id=user_id,
             )
             self._claimed_ids.discard(user_msg_id)
             self.logger.debug(
@@ -1016,10 +948,9 @@ class PostgresChannel(BaseChannel):
             self.logger.exception(
                 "Failed to insert assistant placeholder for {}", user_msg_id,
             )
-            await execute(
-                f"UPDATE {self._fq_table} SET status = 'pending', "
-                f"updated_at = NOW() WHERE id = %s",
-                user_msg_id,
+            await self._ops.update_task_status(
+                user_msg_id, "pending", role="user",
+                session_id=f"chat:{chat_id}", user_id=user_id,
             )
             self._claimed_ids.discard(user_msg_id)
             return False
@@ -1061,16 +992,9 @@ class PostgresChannel(BaseChannel):
 
         Возвращает ``assistant_msg_id`` — ID созданной записи.
         """
-        row = await fetchone(
-            f"""
-            INSERT INTO {self._fq_table}
-                (chat_id, role, content, reply_to, status, created_at, updated_at)
-            VALUES (%s, 'assistant', '', %s, 'processing', NOW(), NOW())
-            RETURNING id
-            """,
-            chat_id, user_msg_id,
+        assistant_msg_id = await self._ops.append_assistant_message(
+            chat_id=chat_id, reply_to=user_msg_id,
         )
-        assistant_msg_id = str(row["id"])
         self._msg_ctx[user_msg_id] = {
             "assistant_msg_id": assistant_msg_id,
             "tool_events": [],
@@ -1104,55 +1028,37 @@ class PostgresChannel(BaseChannel):
           — чистит буфер рассуждений для этого assistant_msg_id
         """
         chat_id = self._msg_chat.get(user_msg_id)
-        async with transaction() as conn:
-            meta_row = await conn.fetchrow(
-                f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
+        # Счётчик попыток, терминальный переход и правка assistant-строки —
+        # одна транзакция на платформе. Разнести их на вызовы значило бы
+        # оставить задачу с увеличенным счётчиком и старым статусом: лимит
+        # повторов исчерпается, а обработана задача будет ни разу.
+        try:
+            outcome = await self._ops.fail_task(
                 user_msg_id,
+                assistant_msg_id,
+                reason,
+                self._max_stuck_retries,
+                session_id=f"chat:{chat_id}" if chat_id else None,
+                user_id=(self._msg_ctx.get(user_msg_id) or {}).get("user_id"),
             )
-            meta = _decode_jsonb(meta_row["metadata"]) if meta_row else {}
-            retry_count = meta.get("retry_count", 0) + 1
-            meta["retry_count"] = retry_count
-            meta["error"] = reason
+        except Exception as exc:  # noqa: BLE001 - ошибка не должна течь дальше
+            self.logger.error(
+                "не удалось зафиксировать ошибку задачи {}: {}", user_msg_id, exc,
+            )
+            return
 
-            if retry_count < self._max_stuck_retries:
-                # повторяемая ошибка — error + backoff
-                if assistant_msg_id:
-                    await conn.execute(
-                        f"DELETE FROM {self._fq_table} WHERE id = %s "
-                        f"AND role = 'assistant'",
-                        assistant_msg_id,
-                    )
-                await conn.execute(
-                    f"UPDATE {self._fq_table} SET status = 'error', "
-                    f"metadata = %s, updated_at = NOW() "
-                    f"WHERE id = %s",
-                    meta, user_msg_id,
-                )
-                self.logger.warning(
-                    "User msg {} error ({}/{}) [{}]",
-                    user_msg_id, retry_count, self._max_stuck_retries, reason,
-                )
-            else:
-                # терминальный failed
-                if assistant_msg_id:
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET content = %s, "
-                        f"metadata = %s, status = 'failed', updated_at = NOW() "
-                        f"WHERE id = %s",
-                        f"Internal error: {reason}", {"error": reason},
-                        assistant_msg_id,
-                    )
-                await conn.execute(
-                    f"UPDATE {self._fq_table} SET status = 'failed', "
-                    f"metadata = %s, updated_at = NOW() "
-                    f"WHERE id = %s",
-                    meta, user_msg_id,
-                )
-                self.logger.error(
-                    "User msg {} failed ({}/{}) [{}]",
-                    user_msg_id, retry_count, self._max_stuck_retries, reason,
-                )
-        status = "error" if retry_count < self._max_stuck_retries else "failed"
+        status = str(outcome.get("status") or "error")
+        retry_count = int(outcome.get("retry_count") or 0)
+        if status == "failed":
+            self.logger.error(
+                "User msg {} failed ({}/{}) [{}]",
+                user_msg_id, retry_count, self._max_stuck_retries, reason,
+            )
+        else:
+            self.logger.warning(
+                "User msg {} error ({}/{}) [{}]",
+                user_msg_id, retry_count, self._max_stuck_retries, reason,
+            )
         self._lifecycle_log(
             "failed", user_msg_id, chat_id=chat_id,
             assistant_msg_id=assistant_msg_id,
@@ -1384,42 +1290,19 @@ class PostgresChannel(BaseChannel):
 
         db_media = await self._embed_media_for_db(msg.media or [])
         try:
-            async with transaction() as conn:
-                row = await conn.fetchrow(
-                    f"SELECT metadata, media, content FROM {self._fq_table} "
-                    f"WHERE id = %s",
-                    assistant_msg_id,
-                )
-                existing_meta = _decode_jsonb(row["metadata"]) if row else {}
-                existing_meta.update(meta)
-
-                existing_media = row["media"] if row else []
-                if isinstance(existing_media, str):
-                    existing_media = json.loads(existing_media) if existing_media else []
-                if not isinstance(existing_media, list):
-                    existing_media = []
-                merged_media = list(existing_media)
-                for m in db_media:
-                    if m not in merged_media:
-                        merged_media.append(m)
-
-                existing_content = row["content"] if row else ""
-                if not isinstance(existing_content, str):
-                    existing_content = ""
-                if msg.content and msg.content != existing_content:
-                    existing_content = (
-                        f"{existing_content}\n\n{msg.content}" if existing_content
-                        else msg.content
-                    )
-
-                await conn.execute(
-                    f"UPDATE {self._fq_table} "
-                    f"SET content = %s, metadata = %s, buttons = %s, media = %s, "
-                    f"updated_at = NOW() WHERE id = %s",
-                    existing_content, existing_meta,
-                    Json(msg.buttons or []), Json(merged_media),
-                    assistant_msg_id,
-                )
+            # Накопление контента и слияние media - read-modify-write по
+            # строке, и он обязан быть одним вызовом: два конкурирующих
+            # merge'а прочитали бы одно и то же старое значение, и правка
+            # одного потерялась бы молча - обе выглядели бы удачными.
+            await self._ops.merge_tool_delivery(
+                assistant_msg_id,
+                content=msg.content or "",
+                metadata_patch=meta,
+                buttons=list(msg.buttons or []),
+                media=db_media,
+                session_id=self._session_id_for(msg_id),
+                user_id=self._user_id_for(msg_id),
+            )
         except Exception:
             self.logger.exception(
                 "Failed to merge tool delivery for msg_id={}", msg_id,
@@ -1478,52 +1361,15 @@ class PostgresChannel(BaseChannel):
             },
         )
 
-        # user_stop_signal: проверяем, не был ли user-запрос отменён ПОКА
-        # LLM работал (от claim до finalize может пройти минута и более
-        # при длинных запросах). Если AW пометил user-сообщение как
-        # 'cancelled' — НЕ пишем ответ, освобождаем ресурсы. Status user'а
-        # НЕ трогаем (он уже 'cancelled' от AW).
-        cur_user_status = await fetchval(
-            f"SELECT status FROM {self._fq_table} WHERE id = %s",
-            user_msg_id,
-        )
-        if cur_user_status == "cancelled":
-            self.logger.info(
-                "user_stop_signal: dropping final response for cancelled user msg "
-                "{} (chat={}, assistant={})",
-                user_msg_id, chat_id, assistant_msg_id,
-            )
-            self._lifecycle_log(
-                "cancelled_drop", user_msg_id, chat_id=chat_id,
-                assistant_msg_id=assistant_msg_id,
-            )
-            # Удаляем assistant-заглушку (если была создана), claim, локальный
-            # контекст. Не трогаем user-строку — её уже пометил AW.
-            try:
-                await execute(
-                    f"DELETE FROM {self._fq_table} WHERE id = %s "
-                    f"AND role = 'assistant'",
-                    assistant_msg_id,
-                )
-            except Exception:
-                self.logger.warning(
-                    "user_stop_signal: failed to delete assistant placeholder {}",
-                    assistant_msg_id,
-                )
-            self._msg_ctx.pop(user_msg_id, None)
-            self._claimed_ids.discard(user_msg_id)
-            self._release_slot(user_msg_id)
-            if chat_id:
-                self._drop_context_bridge(chat_id)
-            self._activity_print(
-                f"× [task-worker] {self._worker_id} отменил задачу {user_msg_id} "
-                f"(chat {chat_id}) [cancelled by user]"
-            )
-            return
+        # Проверки отмены здесь больше нет: она выполняется внутри
+        # ``finalize_turn`` одной транзакцией с записью ответа. Отдельный
+        # шаг оставлял окно - между «прочитал status» и «записал ответ»
+        # отмена успевала прийти, и ответ ложился поверх задачи, которую
+        # пользователь уже отменил. Теперь этот порядок невозможен.
 
-        # Дописываем остатки рассуждений перед финальным ответом.
-        # Делаем это ВНЕ финальной транзакции (race с _flush_reasoning
-        # исключается через _reasoning_io_lock).
+        # Дописываем остатки рассуждений перед финальным ответом. Отдельно от
+        # финализации: дописывание атомарно само по себе, а смешивать его с
+        # закрытием оборота незачем.
         reasoning_delta = ""
         if assistant_msg_id in self._reasoning_buffers:
             delta = self._reasoning_buffers.pop(assistant_msg_id, "")
@@ -1533,57 +1379,55 @@ class PostgresChannel(BaseChannel):
             buf = " ".join(ctx["reasoning_buf"])
             reasoning_delta = buf + (" " if reasoning_delta else "") + reasoning_delta
         if reasoning_delta:
-            async with self._reasoning_io_lock:
-                row = await fetchone(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
-                    assistant_msg_id,
+            # Вне финализации и без локки: конкатенация атомарна на платформе.
+            # Гонка, которую раньше прикрывал ``_reasoning_io_lock``, больше не
+            # существует - блокировка была нужна ровно потому, что операция
+            # не была атомарной.
+            try:
+                await self._ops.append_reasoning(assistant_msg_id, reasoning_delta)
+            except Exception as exc:  # noqa: BLE001 - рассуждение не критично
+                self.logger.warning(
+                    "не удалось дописать рассуждение перед финализацией: {}", exc,
                 )
-                if row:
-                    meta_row = _decode_jsonb(row["metadata"])
-                    meta_row["reasoning"] = (meta_row.get("reasoning") or "") + reasoning_delta
-                    await execute(
-                        f"UPDATE {self._fq_table} SET metadata = %s, "
-                        f"updated_at = NOW() WHERE id = %s",
-                        meta_row, assistant_msg_id,
-                    )
 
         db_media = await self._embed_media_for_db(msg.media or [])
 
         try:
-            async with transaction() as conn:
-                row = await conn.fetchrow(
-                    f"SELECT metadata, media, content FROM {self._fq_table} "
-                    f"WHERE id = %s",
-                    assistant_msg_id,
+            # Ответ и статус задачи закрываются одной транзакцией на
+            # платформе. Отдельной проверки отмены ДО этого вызова больше
+            # нет: она перенесена внутрь ``finalize_turn``, потому что как
+            # внешний шаг оставляла окно - отмена успевала прийти между
+            # проверкой и записью, и ответ ложился поверх отменённой задачи.
+            outcome = await self._ops.finalize_turn(
+                user_msg_id,
+                assistant_msg_id,
+                content=msg.content or "",
+                metadata_patch=meta,
+                buttons=list(msg.buttons or []),
+                media=db_media,
+                session_id=f"chat:{chat_id}" if chat_id else None,
+                user_id=(ctx or {}).get("user_id"),
+            )
+            if str(outcome.get("outcome")) == "cancelled_drop":
+                self.logger.info(
+                    "user_stop_signal: dropping final response for cancelled "
+                    "user msg {} (chat={}, assistant={})",
+                    user_msg_id, chat_id, assistant_msg_id,
                 )
-                existing_meta = _decode_jsonb(row["metadata"]) if row else {}
-                existing_meta.update(meta)
-                existing_media = row["media"] if row else []
-                if isinstance(existing_media, str):
-                    existing_media = json.loads(existing_media) if existing_media else []
-                if not isinstance(existing_media, list):
-                    existing_media = []
-                final_media = db_media if db_media else existing_media
-                existing_content = row["content"] if row else ""
-                if not isinstance(existing_content, str):
-                    existing_content = ""
-                # Пустой final_content (синтетический _final_turn после
-                # message(...)) → берём накопленный merge'ом.
-                final_content = msg.content if msg.content else existing_content
-                await conn.execute(
-                    f"UPDATE {self._fq_table} "
-                    f"SET content = %s, metadata = %s, buttons = %s, "
-                    f"media = %s, "
-                    f"status = 'completed', updated_at = NOW() WHERE id = %s",
-                    final_content, existing_meta,
-                    Json(msg.buttons or []), Json(final_media),
-                    assistant_msg_id,
+                self._lifecycle_log(
+                    "cancelled_drop", user_msg_id, chat_id=chat_id,
+                    assistant_msg_id=assistant_msg_id,
                 )
-                await conn.execute(
-                    f"UPDATE {self._fq_table} SET status = 'completed', "
-                    f"updated_at = NOW() WHERE id = %s",
-                    user_msg_id,
+                self._msg_ctx.pop(user_msg_id, None)
+                self._claimed_ids.discard(user_msg_id)
+                self._release_slot(user_msg_id)
+                if chat_id:
+                    self._drop_context_bridge(chat_id)
+                self._activity_print(
+                    f"× [task-worker] {self._worker_id} отменил задачу "
+                    f"{user_msg_id} (chat {chat_id}) [cancelled by user]"
                 )
+                return
             self._lifecycle_log(
                 "db_committed", user_msg_id, chat_id=chat_id,
                 assistant_msg_id=assistant_msg_id,
@@ -1849,10 +1693,7 @@ class PostgresChannel(BaseChannel):
         if not result["user_msg_id"] and result["assistant_msg_id"]:
             aid = result["assistant_msg_id"]
             try:
-                row = await fetchone(
-                    f"SELECT reply_to FROM {self._fq_table} WHERE id = %s",
-                    aid,
-                )
+                row = await self._ops.get_message(aid)
             except Exception:
                 row = None
             if row and row.get("reply_to"):

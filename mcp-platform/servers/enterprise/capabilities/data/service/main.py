@@ -1575,6 +1575,52 @@ class DataService:
 
         return self.submit(_work, audience=audience)
 
+    def append_reasoning(
+        self,
+        assistant_msg_id: str,
+        delta: str,
+        *,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Дописать дельту рассуждений к ``metadata.reasoning`` ответа.
+
+        Именно дописывание, а не «прочитать, склеить, записать»: чтение и
+        запись в одном вызове ещё не делают их атомарными относительно другой
+        корутины, которая дописывает своё. В канале эту гонку прикрывал
+        ``asyncio.Lock`` - то есть отсутствие атомарности признавалось самим
+        кодом, просто молча.
+
+        Конкатенация выполняется в SQL, поэтому два параллельных сброса не
+        могут потерять кусок друг друга: ``jsonb_set`` поверх уже
+        обновлённого значения, а не поверх прочитанного ранее.
+        """
+        self._require_runtime(audience, "append_reasoning")
+        if not assistant_msg_id or not str(assistant_msg_id).strip():
+            raise InvalidRequestError("append_reasoning: не задан assistant_msg_id")
+        if not delta:
+            return {"updated": False, "length": 0}
+        table = _qualified(task_table or self._require_task_table("append_reasoning"))
+        sql = (
+            f"UPDATE {table} SET metadata = jsonb_set("
+            "COALESCE(metadata, '{{}}'::jsonb), '{reasoning}', "
+            "to_jsonb(COALESCE(metadata ->> 'reasoning', '') || %s::text), "
+            "true), updated_at = NOW() "
+            "WHERE id = %s AND role = 'assistant' "
+            "RETURNING COALESCE(metadata ->> 'reasoning', '')"
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(sql, [delta, assistant_msg_id])
+                row = cur.fetchone()
+            return {
+                "updated": row is not None,
+                "length": len(str(row[0])) if row is not None else 0,
+            }
+
+        return self.submit(_work, audience=audience)
+
     def finalize_turn(
         self,
         user_msg_id: str,
