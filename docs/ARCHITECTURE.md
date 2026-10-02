@@ -1196,6 +1196,25 @@ RETURNING id, chat_id, user_id, content, media, metadata, created_at
 `error` и `failed` разведены: `error` (retry-каунтер в `metadata.retry_count`
 не исчерпан) должен вернуться в пул после паузы; `failed` — immutable-терминал.
 
+**Как читать ответ агента (контракт потребителя).** Assistant-строка
+создаётся **до** генерации: `_insert_assistant_message` вставляет
+`role='assistant'`, `content=''`, `status='processing'` в момент захвата
+задачи — чтобы веб-сервер мог начать опрашивать ответ, пока агент ещё
+работает. `content` и `metadata` заполняются только в конце оборота
+(`send()` → `UPDATE ... SET content = %s`). Поэтому **пустая
+`processing`-строка — это норма, а не «агент не ответил»**.
+
+Правильный предикат готового ответа:
+
+```sql
+WHERE role = 'assistant' AND status = 'completed' AND content <> ''
+```
+
+Читать по `reply_to = <id пользовательского сообщения>`. Ожидание
+`status='completed'` **без** проверки непустого `content` даёт гонку: строка
+уже существует, но ещё пуста. Наблюдалось при прогонах на реальных данных —
+опросчик успевал увидеть пустой ответ раньше, чем его пропатчил канал.
+
 > **Известный дефект.** Ветка повтора `error` сейчас недостижима: внешний
 > `AND status = 'pending'` отсекает строку, выбранную подзапросом по
 > `status = 'error'`. `_mark_failed` переводит задачу в `error` с обещанием
@@ -1576,7 +1595,17 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
   `check()` прогоняет все check'и в `try/except` и сводит в `ReadinessReport`.
 - **Статусы:** `READY` (required + optional UP), `DEGRADED` (required OK, optional
   DOWN), `NOT_READY` (required DOWN). Сводное правило — `compute_overall_status`.
-  Required зависимости: PG, DuckDB cache; optional: vector search, Redis.
+- **Компоненты:** сейчас зарегистрирован только `postgres`. Проверки
+  `duckdb_cache` и `vector_search` сняты в фазе 5 (п. 5.8) вместе со снимком
+  в агенте; Redis-канал удалён. Здоровье снимка и векторных индексов отвечает
+  платформа (capability `data` / `vectors`).
+- **Required-ness `postgres` выводится из конфига:** БД required, если включён
+  `channels.postgres` **или** `storage_mode == "postgres"`. Если канал выключен и
+  storage в file-режиме, недоступность БД — `DEGRADED`, а не `NOT_READY`.
+  Здоровье определяется ping'ом по пулу: имя класса менеджера сессий как признак
+  не годится, потому что `build_session_manager` возвращает библиотечный
+  `SessionManager` (не подкласс), и гейт по имени `PG`/`Postgres` не срабатывал
+  никогда.
 - **Объекты** `ctx.runtime_health` / `ctx.runtime_readiness` создаются
   в `ApplicationContext.create()`.
 
