@@ -13,7 +13,8 @@
     выносящую синхронный ``save`` из event-loop в executor (6.3).
 
 Возвращает ``(manager, mode)``:
-  * ``mode == "postgres"`` — PGSessionManager;
+  * ``mode == "postgres"`` — upstream ``SessionManager`` поверх
+    ``SanitizingSessionStore`` (см. ``lib/session/pg_session_manager.py``);
   * ``mode == "file"`` — ``SessionManager`` (если ``return_file_manager``)
     или ``None`` (вызывающий сам создаст дефолтное хранилище, как CLI).
 """
@@ -109,7 +110,12 @@ def install_async_save(manager: Any) -> Any:
 
 
 class SessionStorageService:
-    """Фабрика SessionManager / PGSessionManager на основе конфигурации.
+    """Фабрика хранилищ сессий на основе конфигурации.
+
+    Менеджер сессий — всегда класс библиотеки ``SessionManager``. Своё
+    поведение агент добавляет не подклассом, а слоем ``SessionStore``
+    (``SanitizingSessionStore``): hot-path чтение/запись — целиком
+    upstream (JSONL), PostgreSQL — только cold-storage mirror.
 
     Замечание: до этого плана этот класс сам читал ``session_manager.json``
     через ``_load_override()`` и применял его к ``pg_cfg`` **после**
@@ -158,7 +164,8 @@ class SessionStorageService:
 
         Returns:
             ``(mode, manager)``:
-              * ``mode == "postgres"`` — manager = ``PGSessionManager``;
+              * ``mode == "postgres"`` — manager = upstream
+                ``SessionManager`` поверх ``SanitizingSessionStore``;
               * ``mode == "file"`` — manager = ``SessionManager``
                 (если ``return_file_manager=True``) или ``None``.
 
@@ -191,8 +198,13 @@ class SessionStorageService:
                 raise SessionStorageError(
                     "storage=postgres but no PostgreSQL DSN in config"
                 )
-            from lib.session.pg_session_manager import PGSessionManager
+            from lib.session.pg_session_manager import build_session_manager
 
+            # Имена таблиц cold-storage уходят в ``SessionColdSyncService``
+            # (его конструктор собирает ``ApplicationContext``), а сам
+            # ``SessionManager`` из библиотеки про них не знает. Но
+            # отсутствие имён — ошибка конфигурации, и её надо назвать
+            # здесь, а не молча уронить на старте синка.
             messages_table = pg_cfg.get("messages_table", "")
             meta_table = pg_cfg.get("meta_table", "")
             if not messages_table or not meta_table:
@@ -202,16 +214,7 @@ class SessionStorageService:
                     "(нет авто-дефолтов в коде). "
                     f"messages_table={messages_table!r}, meta_table={meta_table!r}"
                 )
-            manager = PGSessionManager(
-                workspace=workspace,
-                dsn=dsn,
-                schema=pg_cfg.get("schema", "public"),
-                messages_table=messages_table,
-                meta_table=meta_table,
-                min_conn=int(pool_cfg.get("min_conn", 1)),
-                max_conn=int(pool_cfg.get("max_conn", 4)),
-                pool_timeout=float(pool_cfg.get("pool_timeout", 5.0)),
-            )
+            manager = build_session_manager(workspace)
             return "postgres", install_async_save(manager)
 
         if return_file_manager:

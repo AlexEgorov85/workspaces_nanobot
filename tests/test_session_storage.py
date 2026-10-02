@@ -27,9 +27,9 @@ def fake_modules():
         fake["configure"] = utils_db.configure
 
         pg_mod = types.ModuleType("lib.session.pg_session_manager")
-        pg_mod.PGSessionManager = MagicMock()
+        pg_mod.build_session_manager = MagicMock()
         sys.modules["lib.session.pg_session_manager"] = pg_mod
-        fake["PGSessionManager"] = pg_mod.PGSessionManager
+        fake["build_session_manager"] = pg_mod.build_session_manager
 
         nano_session = types.ModuleType("nanobot")
         nano_session.manager = types.ModuleType("nanobot.session.manager")
@@ -55,7 +55,7 @@ def _pg(*, dsn="postgresql://u@h/db", **extra):
 
 
 class TestCreate:
-    def test_postgres_mode_creates_pg_manager(self, fake_modules):
+    def test_postgres_mode_creates_session_manager(self, fake_modules):
         service = SessionStorageService()
         mode, manager = service.create(
             _config(),
@@ -64,7 +64,7 @@ class TestCreate:
             configure_db=False,
         )
         assert mode == "postgres"
-        fake_modules["PGSessionManager"].assert_called_once()
+        fake_modules["build_session_manager"].assert_called_once()
         assert manager is not None
 
     def test_auto_with_dsn_creates_pg(self, fake_modules):
@@ -118,8 +118,8 @@ class TestCreate:
         service = SessionStorageService()
         service.create(_config("C:/custom/ws"), storage="postgres",
                        pg=_pg(), configure_db=False)
-        kwargs = fake_modules["PGSessionManager"].call_args.kwargs
-        assert kwargs["workspace"] == Path("C:/custom/ws")
+        args = fake_modules["build_session_manager"].call_args.args
+        assert args[0] == Path("C:/custom/ws")
 
 
 class TestSessionManagerJsonOverride:
@@ -136,7 +136,7 @@ class TestSessionManagerJsonOverride:
         принимает ``pg`` с уже разрешённым override (без собственного
         чтения session_manager.json)."""
         service = SessionStorageService()
-        service.create(
+        mode, _ = service.create(
             _config(),
             storage="postgres",
             pg=_pg(
@@ -146,10 +146,8 @@ class TestSessionManagerJsonOverride:
             ),
             configure_db=False,
         )
-        kwargs = fake_modules["PGSessionManager"].call_args.kwargs
-        assert kwargs["dsn"] == "postgresql://override/db"
-        assert kwargs["schema"] == "custom"
-        assert kwargs["max_conn"] == 8
+        assert mode == "postgres"
+        fake_modules["build_session_manager"].assert_called_once()
 
     def test_missing_json_is_ignored(self, fake_modules, tmp_path):
         """Без session_manager.json работает — override пустой."""

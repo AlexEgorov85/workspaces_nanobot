@@ -84,7 +84,6 @@ def error_retry_mock_db():
         for name in (
             "lib.channels.postgres_channel",
             "lib.channels.message_exchange",
-            "lib.channels.priority_commands",
         ):
             sys.modules.pop(name, None)
 

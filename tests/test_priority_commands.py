@@ -1,134 +1,81 @@
-"""Регресс-тесты для priority_commands source of truth.
+"""Priority-команды: источник истины — реестр библиотеки.
 
-Покрывает контракт с ``nanobot.command.router.CommandRouter``:
-  * в 0.3.5+ ``_priority`` атрибут существует, но ``{}`` сразу после
-    ``CommandRouter()`` — старый код ронял функцию до ``()``;
-  * если router регистрирует commands — объединение с defaults;
-  * если router недоступен — defaults.
+Раньше список ``/stop``, ``/restart``, ``/status`` был продублирован у нас
+в коде, а снятие снимался ещё и с пустым ``CommandRouter._priority`` из
+nanobot 0.3.5+. Теперь перечень берётся из самого реестра: поднимаем
+``CommandRouter``, регистрируем встроенные команды и читаем результат.
+
+Тест защищает две вещи, которые ломают priority-поллинг тихо:
+  * перечень непустой (иначе SQL-фильтр ``content = ANY('{}')`` отберёт
+    ноль кандидатов и ``/stop`` перестанет доходить мимо очереди);
+  * перечень совпадает с тем, что реально зарегистрировано в библиотеке,
+    то есть канал фильтрует по тем же командам, которые обрабатывает
+    ``CommandRouter``.
 """
-from __future__ import annotations
 
-from unittest.mock import patch
+from __future__ import annotations
 
 import pytest
 
 
-@pytest.fixture
-def reset_module():
-    """Переимпортируем модуль, чтобы has-fallback был свежим."""
-    import importlib
-    import lib.channels.priority_commands as m
+class TestPriorityCommandContents:
+    def test_contains_floor_set(self) -> None:
+        """Регрессия для nanobot 0.3.5+: ``_priority`` — пустой dict сразу
+        после ``CommandRouter()``, поэтому регистрируем встроенные команды
+        перед чтением."""
+        from lib.channels.message_exchange import priority_command_contents
 
-    importlib.reload(m)
-    return m
-
-
-class TestGetPriorityCommandsDefaults:
-    def test_returns_defaults_when_router_empty(self, reset_module):
-        """Регрессия для nanobot 0.3.5+: ``CommandRouter._priority`` —
-        это пустой dict после ``CommandRouter()``. Старый код
-        делал ``tuple({}.keys())`` = ``()`` и был fallback.
-        """
-        cmds = reset_module.get_priority_commands()
+        cmds = priority_command_contents()
         assert "/stop" in cmds
         assert "/restart" in cmds
         assert "/status" in cmds
 
-    def test_defaults_contain_floor_set(self, reset_module):
-        cmds = reset_module.get_priority_commands()
-        assert len(cmds) >= 3
+    def test_shape_is_deterministic(self) -> None:
+        from lib.channels.message_exchange import priority_command_contents
+
+        cmds = priority_command_contents()
         assert isinstance(cmds, tuple)
-        for c in cmds:
-            assert isinstance(c, str)
-            assert c.startswith("/")
+        assert len(cmds) >= 3
+        assert all(isinstance(c, str) and c.startswith("/") for c in cmds)
+        # Порядок детерминирован между вызовами: SQL-фильтр получает один и
+        # тот же список, иначе меняется текст запроса на каждый poll.
+        assert cmds == priority_command_contents()
 
+    def test_matches_router_registry(self) -> None:
+        """Перечень обязан совпадать с реестром библиотеки: канал отбирает
+        кандидата по этому списку, а обрабатывает его ``CommandRouter``."""
+        from nanobot.command.builtin import register_builtin_commands
+        from nanobot.command.router import CommandRouter
 
-class TestGetPriorityCommandsWithRouter:
-    def test_unions_router_with_defaults(self, reset_module):
-        """Если router регистрирует свои команды — они добавляются
-        ПОВЕРХ defaults (не заменяют)."""
+        from lib.channels.message_exchange import priority_command_contents
 
-        class FakeRouter:
-            priority_commands = {"my_command": object()}
-            _priority = {}
+        router = CommandRouter()
+        register_builtin_commands(router)
 
-        with patch.object(reset_module, "CommandRouter", FakeRouter):
-            cmds = reset_module.get_priority_commands()
-        assert "/stop" in cmds
-        assert "my_command" in cmds
+        assert set(priority_command_contents()) == set(router._priority)
 
-    def test_unions_with_private_priority(self, reset_module):
-        """Legacy / private атрибут ``_priority`` тоже учитывается."""
+    def test_agrees_with_public_is_priority(self) -> None:
+        """Публичный ``is_priority`` и наш перечень не должны разойтись."""
+        from nanobot.command.builtin import register_builtin_commands
+        from nanobot.command.router import CommandRouter
 
-        class FakeHandler:
-            pass
+        from lib.channels.message_exchange import priority_command_contents
 
-        class FakeRouter:
-            priority_commands = None
-            _priority = {"/foo": FakeHandler(), "/bar": FakeHandler()}
+        router = CommandRouter()
+        register_builtin_commands(router)
 
-        with patch.object(reset_module, "CommandRouter", FakeRouter):
-            cmds = reset_module.get_priority_commands()
-        assert "/stop" in cmds
-        assert "/foo" in cmds
-        assert "/bar" in cmds
+        for cmd in priority_command_contents():
+            assert router.is_priority(cmd), cmd
 
-    def test_deduplicates(self, reset_module):
-        """Если router регистрирует ``/stop`` — он не дублируется."""
+    def test_every_registered_command_is_covered(self) -> None:
+        """Обратная сторона: команда из реестра не должна выпасть из
+        перечня, иначе она потеряет priority-путь."""
+        from nanobot.command.builtin import register_builtin_commands
+        from nanobot.command.router import CommandRouter
 
-        class FakeRouter:
-            priority_commands = {}
-            _priority = {"/stop": object()}
+        from lib.channels.message_exchange import priority_command_contents
 
-        with patch.object(reset_module, "CommandRouter", FakeRouter):
-            cmds = reset_module.get_priority_commands()
-        assert cmds.count("/stop") == 1
+        router = CommandRouter()
+        register_builtin_commands(router)
 
-    def test_accepts_list_attribute(self, reset_module):
-        class FakeRouter:
-            priority_commands = ["/alpha", "/beta"]
-            _priority = {}
-
-        with patch.object(reset_module, "CommandRouter", FakeRouter):
-            cmds = reset_module.get_priority_commands()
-        assert "/alpha" in cmds
-        assert "/beta" in cmds
-        assert "/stop" in cmds
-
-    def test_order_is_deterministic(self, reset_module):
-        """Порядок MUST быть стабильным: сначала defaults в зафиксированном
-        порядке, затем discovered — в порядке обнаружения.
-
-        Регрессия: реализация на ``tuple(set)`` давала порядок, зависящий
-        от hash-seed процесса, поэтому логи и snapshot'ы сравнения
-        priority_polling расходились между запусками.
-        """
-
-        class FakeRouter:
-            priority_commands = ["/alpha", "/beta"]
-            _priority = {"/gamma": object()}
-
-        with patch.object(reset_module, "CommandRouter", FakeRouter):
-            first = reset_module.get_priority_commands()
-            second = reset_module.get_priority_commands()
-
-        assert first == second, (first, second)
-        assert first[: len(reset_module._DEFAULT_PRIORITY_COMMANDS)] == (
-            reset_module._DEFAULT_PRIORITY_COMMANDS
-        ), first
-        assert list(first[len(reset_module._DEFAULT_PRIORITY_COMMANDS):]) == [
-            "/alpha",
-            "/beta",
-            "/gamma",
-        ], first
-
-    def test_defaults_order_preserved_when_router_empty(self, reset_module):
-        """Пустой router — порядок ровно как в ``_DEFAULT_PRIORITY_COMMANDS``."""
-
-        class FakeRouter:
-            priority_commands = {}
-            _priority = {}
-
-        with patch.object(reset_module, "CommandRouter", FakeRouter):
-            cmds = reset_module.get_priority_commands()
-        assert cmds == reset_module._DEFAULT_PRIORITY_COMMANDS, cmds
+        assert set(router._priority) <= set(priority_command_contents())

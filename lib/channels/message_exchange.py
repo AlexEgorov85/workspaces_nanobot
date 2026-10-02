@@ -1,7 +1,7 @@
 """Общий движок обмена сообщениями для каналов.
 
-``postgres_channel`` и ``redis_channel`` кардинально различаются транспортом
-(SQL-таблица vs Redis-очереди), но разделяют одинаковую оркестрацию:
+``postgres_channel`` был единственным каналом со своей оркестрацией оборота,
+и она кардинально отличается от стандартных каналов библиотеки:
 
   * цикл поллинга входящих сообщений и backoff при ошибках;
   * ограничение параллельности (семафор + множество in-flight);
@@ -42,6 +42,30 @@ from utils.media import (
 from utils.media import (
     serialize as media_serialize,
 )
+
+
+def priority_command_contents() -> tuple[str, ...]:
+    """Список priority-команд для SQL-фильтра priority-поллинга.
+
+    Источник — реестр библиотеки: поднимаем ``CommandRouter``, регистрируем
+    встроенные команды и читаем получившиеся priority-хендлеры. Список
+    ``/stop``, ``/restart``, ``/status`` у нас больше не продублирован
+    в коде: он меняется только вместе с библиотекой.
+
+    Почему нужен именно перечень, а не ``CommandRouter.is_priority(text)``:
+    канал отбирает кандидата одним запросом ``content = ANY(%s)``, то есть
+    список уходит в SQL до того, как текст сообщения прочитан. Публичного
+    API перечисления в nanobot нет, поэтому читаем ``_priority`` — версия
+    библиотеки запинена точно (``nanobot-ai==0.3.5``), а сам факт регистрации
+    встроенных команд проверяется тестом
+    ``tests/test_priority_commands.py``.
+    """
+    from nanobot.command.builtin import register_builtin_commands
+    from nanobot.command.router import CommandRouter
+
+    router = CommandRouter()
+    register_builtin_commands(router)
+    return tuple(router._priority)
 
 
 class MessageExchange:

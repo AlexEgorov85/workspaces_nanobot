@@ -667,6 +667,6 @@ class SessionColdSyncService:
 def resolve_default_sqlite_path() -> Path:
     """Дефолтный путь к SQLite-файлу ``LLMUsageStore`` из design D4.
 
-    Используется в ``lib.services.llm_usage_store_factory``.
+    Хранилище создаёт библиотека: ``nanobot.llm_usage.get_llm_usage_store()``.
     """
     return Path.home() / ".cache" / "nanobot" / "usage" / "usage.db"

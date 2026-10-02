@@ -557,7 +557,8 @@ class PostgresChannel(BaseChannel):
             пройдёт в AgentLoop;
           * ищет сообщения с ``content`` из списка priority-команд nanobot
             (``/stop``, ``/restart``, ``/status`` — через
-            ``lib.channels.priority_commands.get_priority_commands()``);
+            ``lib.channels.message_exchange.priority_command_contents()``,
+            который читает реестр библиотеки);
           * не создаёт assistant-placeholder (команда не ответ);
           * не блокируется ``_chat_inflight`` (priority должен пройти даже
             для chat'а, у которого уже активна обычная задача);
@@ -598,8 +599,9 @@ class PostgresChannel(BaseChannel):
              ``chat_inflight``.
           4. Освобождаем claim + lease + msg_ctx.
         """
-        from lib.channels.priority_commands import get_priority_commands
-        row = await self._claim_one(priority_contents=get_priority_commands())
+        from lib.channels.message_exchange import priority_command_contents
+
+        row = await self._claim_one(priority_contents=priority_command_contents())
         if row is None:
             return False
 

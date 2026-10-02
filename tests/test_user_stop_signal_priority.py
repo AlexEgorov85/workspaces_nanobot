@@ -71,23 +71,24 @@ def priority_polling_mock_db(tmp_path):
 
         sys.modules.pop("lib.channels.postgres_channel", None)
         sys.modules.pop("lib.channels.message_exchange", None)
-        sys.modules.pop("lib.channels.priority_commands", None)
 
+        from lib.channels.message_exchange import (
+            MessageExchange,
+            priority_command_contents,
+        )
         from lib.channels.postgres_channel import PostgresChannel
-        from lib.channels.message_exchange import MessageExchange
-        from lib.channels.priority_commands import get_priority_commands
 
         class _Holder:
             def __init__(self):
                 self.PostgresChannel = PostgresChannel
                 self.MessageExchange = MessageExchange
-                self.get_priority_commands = get_priority_commands
+                self.priority_command_contents = priority_command_contents
                 self.db = db_mod
 
             def __iter__(self):
                 yield PostgresChannel
                 yield MessageExchange
-                yield get_priority_commands
+                yield priority_command_contents
                 yield db_mod
 
         yield _Holder()
@@ -379,7 +380,7 @@ class TestPollPriorityInbound:
 
     @pytest.mark.asyncio
     async def test_passes_priority_contents_to_claim(self, priority_polling_mock_db):
-        from lib.channels.priority_commands import get_priority_commands
+        from lib.channels.message_exchange import priority_command_contents
         PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
         ch._claim_one = AsyncMock(return_value=None)
@@ -387,7 +388,7 @@ class TestPollPriorityInbound:
         exchange = MagicMock()
         await ch.poll_priority_inbound(exchange)
 
-        expected = get_priority_commands()
+        expected = priority_command_contents()
         ch._claim_one.assert_awaited_once()
         call_kwargs = ch._claim_one.await_args.kwargs
         assert call_kwargs.get("priority_contents") == expected

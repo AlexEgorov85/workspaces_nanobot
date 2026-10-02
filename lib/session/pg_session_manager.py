@@ -1,36 +1,46 @@
-"""Compatibility layer: PGSessionManager теперь — cold-storage mirror.
+"""Хранилище сессий агента: upstream ``SessionManager`` + наш ``SessionStore``.
 
 После ``storage-hybridization`` (см. спеку
-``openspec/specs/storage/session-hybridization/spec.md``) этот
-класс **НЕ пишет** в ``agent_session_meta`` / ``agent_session_messages``
-напрямую. Hot-path операции (``get_or_create``, ``save``,
-``list_sessions``, ``read_session_metadata``, ``read_session_file``)
-делегируются в upstream ``SessionManager`` (JSONL), который является
-единственным source of truth.
+``openspec/specs/storage/session-hybridization/spec.md``) сессии НЕ пишутся
+в ``agent_session_meta`` / ``agent_session_messages`` напрямую. Единственный
+writer — upstream ``SessionManager`` (JSONL), а PostgreSQL остаётся
+cold-storage mirror'ом в отдельном фоновом ``SessionColdSyncService``.
 
-PG остаётся как cold-storage mirror через отдельный фоновый сервис
-``SessionColdSyncService``. См.:
+Вся своя семантика агента живёт в одном месте — в слое ``SessionStore``:
 
-- ``lib/services/session_cold_sync_service.py`` — зеркалирование;
-- ``docs/architecture/storage-layers.md`` — общая модель хранения;
-- design ``openspec/changes/storage-hybridization/design.md`` § D6
-  и § D-Pool.
+* upstream объявил ``SessionStore`` (``nanobot/session/manager.py:526``)
+  как ``Protocol`` и принимает ``store=`` в конструкторе
+  (``SessionManager.__init__``, строка 1647);
+* наш вклад — ``SanitizingSessionStore``: перед записью на диск контент
+  всех сообщений проходит через ``clean_text`` (санитизация NUL и
+  литеральных ``\\u0000``..``\\u0003``, см.
+  ``workspace/utils/clean_text.py``). Раньше это делал патч
+  ``RuntimePatcher.patch_session_content_cleanup``, оборачивавший
+  ``Session.add_message``; теперь санитизация стоит на границе записи,
+  рядом с потребителем (PostgreSQL не принимает NUL в text-литералах).
 
-Этот класс сохранён исключительно как тонкий compatibility layer для
-56 call-sites, использующих ``PGSessionManager``-импорт и его
-конструкторские параметры (``dsn``, ``schema``, ``messages_table``,
-``meta_table``). Никаких side-effect'ов в hot path.
+Почему ``SanitizingSessionStore`` наследует ``JsonlSessionStore``, а не
+оборачивает его: ``SessionManager.save_runtime_checkpoint`` (строка 1794)
+ускоряет оборот, только если ``self._store is self._jsonl_store`` — иначе
+он молча деградирует до полной перезаписи транскрипта на каждой
+безопасной точке восстановления. Наследование сохраняет этот fast-path и
+все path/repair-примитивы, а ``build_session_manager`` одной строкой
+возвращает идентичность (см. комментарий внутри).
+
+Никаких прямых ``INSERT/UPDATE`` в таблицы сессий — это архитектурный
+инвариант (``tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables``).
+
+См. также:
+
+- ``lib/services/session_cold_sync_service.py`` — зеркалирование в PG;
+- ``docs/architecture/storage-layers.md`` — общая модель хранения.
 """
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from loguru import logger
-from nanobot.session.manager import Session, SessionManager
+from nanobot.session.manager import JsonlSessionStore, Session, SessionManager
 
 from workspace.utils.clean_text import clean_text
 
@@ -57,114 +67,47 @@ def clean_session_content(session: Session) -> None:
             message["content"] = clean_text(message["content"])
 
 
-class PGSessionManager(SessionManager):
-    """Cold-storage mirror поверх upstream ``SessionManager``.
+class SanitizingSessionStore(JsonlSessionStore):
+    """``SessionStore`` upstream'а + санитизация NUL на границе записи.
 
-    Hot-path методы (``get_or_create``, ``save``, ``list_sessions``,
-    ``read_session_metadata``, ``read_session_file``) делегируются в
-    ``super()`` (upstream JSONL). Никаких прямых SQL-операций в hot
-    path — это архитектурный инвариант (см. design D6 / R6,
-    ``tests/test_storage_hybridization.py::test_no_direct_sql_to_session_tables_in_hot_path``).
-
-    Конструкторские параметры (``dsn``, ``schema``, ``messages_table``,
-    ``meta_table``) сохранены для обратной совместимости с 56 call-sites;
-    ``SessionColdSyncService`` получает DSN / имена таблиц из
-    ``ApplicationContext`` отдельно (не из этого класса).
+    Единственное отличие от ``JsonlSessionStore`` — ``save()`` сперва
+    вычищает контент, потом отдаёт запись базовому классу. Остальные
+    примитивы протокола (``load``/``delete``/``read``/``read_metadata``/
+    ``update_metadata``/``list_sessions``) наследуются без изменений.
     """
 
-    def __init__(
-        self,
-        workspace: Path,
-        dsn: str = "",
-        schema: str = "public",
-        messages_table: str = "",
-        meta_table: str = "",
-        **kwargs: Any,
-    ) -> None:
-        self.workspace = Path(workspace).expanduser().resolve()
-        if not messages_table or not meta_table:
-            raise ValueError(
-                "PGSessionManager: messages_table и meta_table обязательны "
-                "(channels.postgres.messages_table / meta_table). "
-                f"messages_table={messages_table!r}, meta_table={meta_table!r}"
-            )
-        super().__init__(workspace=self.workspace)
-        self._schema = schema
-        self._meta_table = meta_table
-        self._messages_table = messages_table
-        self._fq_meta = self._quote(f"{schema}.{meta_table}")
-        self._fq_messages = self._quote(f"{schema}.{messages_table}")
-
-        if dsn:
-            from utils.db import configure as _cfg
-            _cfg(dsn)
-
-    def close(self) -> None:
-        """No-op: PG-соединения живут в общем пуле ``utils.db``."""
-        return None
-
-    def get_or_create(self, key: str) -> Session:
-        """Делегирует в upstream ``SessionManager`` (JSONL).
-
-        Раньше этот метод читал/писал ``agent_session_meta`` /
-        ``agent_session_messages`` напрямую. Теперь — единственный
-        writer сессий upstream (см. design D6).
-        """
-        return super().get_or_create(key)
-
     def save(self, session: Session, *, fsync: bool = False) -> None:
-        """Делегирует в upstream ``SessionManager.save`` (JSONL).
-
-        Перед записью контент проходит через ``clean_text`` — санитизацию
-        NUL (0x00) и литеральных ``\\u0000``..``\\u0003`` (см.
-        ``workspace/utils/clean_text.py``). Раньше это делал патч
-        ``RuntimePatcher.patch_session_content_cleanup``, оборачивавший
-        ``Session.add_message``; здесь санитизация живёт на границе
-        записи, рядом с потребителем (PostgreSQL не принимает NUL в
-        text-литералах).
-
-        Никаких прямых ``INSERT/UPDATE`` в
-        ``agent_session_meta`` / ``agent_session_messages`` — это
-        архитектурный инвариант (см. test_storage_hybridization).
-        """
         clean_session_content(session)
         super().save(session, fsync=fsync)
 
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """Делегирует в upstream ``SessionManager.list_sessions``."""
-        return super().list_sessions()
 
-    def read_session_metadata(self, key: str) -> dict[str, Any] | None:
-        """Делегирует в upstream ``SessionManager.read_session_metadata``."""
-        return super().read_session_metadata(key)
+def build_session_manager(workspace: Path | str) -> SessionManager:
+    """Собрать upstream ``SessionManager`` поверх ``SanitizingSessionStore``.
 
-    def read_session_file(self, key: str) -> dict[str, Any] | None:
-        """Делегирует в upstream ``SessionManager.read_session_file``."""
-        return super().read_session_file(key)
+    Args:
+        workspace: корень workspace. Хранилище сессий upstream держит
+            ВНЕ него (``~/.nanobot/sessions``), поэтому параметр влияет
+            только на namespace и миграцию, а не на путь к JSONL.
 
-    def invalidate(self, key: str) -> None:
-        """No-op: ``SessionManager`` (upstream) сам управляет кешем."""
-        return None
+    Returns:
+        Готовый ``SessionManager`` (класс библиотеки, не подкласс).
+    """
+    resolved = Path(workspace).expanduser().resolve(strict=False)
+    store = SanitizingSessionStore(resolved)
+    manager = SessionManager(workspace=resolved, store=store)
+    # ``SessionManager.__init__`` всегда создаёт собственный
+    # ``JsonlSessionStore`` и кладёт его в ``_jsonl_store`` (строка 1655).
+    # Мы передаём свой store в ``store=``, поэтому ``_store is
+    # _jsonl_store`` иначе False — и ``save_runtime_checkpoint`` молча
+    # деградировал бы до полной перезаписи транскрипта (строка 1798).
+    # Одна строка.private-каплинг восстанавливает fast-path; обе
+    # ссылки должны указывать на один и тот же store.
+    manager._jsonl_store = store
+    return manager
 
-    def delete_session(self, key: str) -> bool:
-        """Делегирует в upstream ``SessionManager.delete_session``."""
-        return super().delete_session(key)
 
-    def flush_all(self) -> int:
-        """No-op: upstream ``SessionManager`` сам флашит JSONL при shutdown.
-
-        Возвращает 0 (нет кеша для flush'а — кеш живёт в upstream).
-        """
-        return 0
-
-    @staticmethod
-    def _validate_ident(part: str) -> None:
-        if not part or not part.replace("_", "").replace("$", "").isalnum():
-            raise ValueError(f"Unsafe SQL identifier part: {part!r}")
-
-    @classmethod
-    def _quote(cls, ident: str) -> str:
-        parts = ident.split(".")
-        for part in parts:
-            cls._validate_ident(part)
-        return ".".join(f'"{p}"' for p in parts)
+__all__ = [
+    "SanitizingSessionStore",
+    "build_session_manager",
+    "clean_session_content",
+]

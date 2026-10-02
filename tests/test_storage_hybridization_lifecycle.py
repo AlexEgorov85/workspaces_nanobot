@@ -133,10 +133,16 @@ class TestUsageStoreLifecycleMock:
 
 
 class TestLLMObserverMockSmoke:
-    def test_wrap_provider_snapshot_loader_attaches_observer_to_provider(
+    """Подписка observer'а живёт в ``AgentFactory`` (инлайн, без своего модуля).
+
+    Покрываем тот же контракт, что и раньше: snapshot-обёртка подписывает
+    провайдера учётом вызовов LLM и переживает ``store=None``.
+    """
+
+    def test_snapshot_loader_attaches_observer_to_provider(
         self, tmp_path: Path,
     ) -> None:
-        from lib.services.llm_observer import wrap_provider_snapshot_loader
+        from lib.core.agent_factory import AgentFactory
         from nanobot.llm_usage.store import LLMUsageStore
 
         store = LLMUsageStore(tmp_path / "u.db")
@@ -155,13 +161,14 @@ class TestLLMObserverMockSmoke:
         def _base_loader(*, preset_name=None, **kwargs):
             return _StubSnapshot()
 
-        wrapped = wrap_provider_snapshot_loader(_base_loader, store)
+        config = SimpleNamespace(build_provider_snapshot=_base_loader)
+        wrapped = AgentFactory._wrap_provider_snapshot_loader(config, store, None)
         snap = wrapped(preset_name="main")
         assert snap.provider.observer == store.record
         store.close()
 
-    def test_wrap_provider_snapshot_loader_works_with_none_store(self) -> None:
-        from lib.services.llm_observer import wrap_provider_snapshot_loader
+    def test_snapshot_loader_works_with_none_store(self) -> None:
+        from lib.core.agent_factory import AgentFactory
 
         class _StubSnapshot:
             provider = None
@@ -169,6 +176,7 @@ class TestLLMObserverMockSmoke:
         def _base_loader(*, preset_name=None, **kwargs):
             return _StubSnapshot()
 
-        wrapped = wrap_provider_snapshot_loader(_base_loader, None)
+        config = SimpleNamespace(build_provider_snapshot=_base_loader)
+        wrapped = AgentFactory._wrap_provider_snapshot_loader(config, None, None)
         snap = wrapped()
         assert snap is not None

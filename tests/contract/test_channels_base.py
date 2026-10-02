@@ -1,4 +1,4 @@
-"""BaseChannel: ABC-контракт канала (PostgresChannel/RedisChannel)."""
+"""BaseChannel: ABC-контракт канала (``PostgresChannel``)."""
 
 from __future__ import annotations
 

@@ -165,9 +165,10 @@ class TestNoDbLoggingServiceLLMUsage:
     """
 
     def test_no_event_type_llm_usage_in_lib(self) -> None:
-        whitelist = [
-            _LIB_ROOT / "services" / "llm_observer.py",
-        ]
+        # Подписка observer'а живёт в AgentFactory._wrap_provider_snapshot_loader
+        # и не пишет ни одного event_type — только зовёт
+        # provider.set_llm_call_observer. Исключений из правила не осталось.
+        whitelist: list[Path] = []
         offenders: list[tuple[str, int, str]] = []
         for path in _iter_python_files(_LIB_ROOT):
             if path.resolve() in {w.resolve() for w in whitelist}:
@@ -182,30 +183,37 @@ class TestNoDbLoggingServiceLLMUsage:
         if offenders:
             details = "\n".join(f"{p}:{ln}: {snippet}" for p, ln, snippet in offenders)
             pytest.fail(
-                "event_type=\"llm_usage\" found in lib/ outside "
-                "lib.services.llm_observer. LLM usage is content-free "
-                "metadata — use LLMUsageStore, not DbLoggingService:\n"
+                "event_type=\"llm_usage\" found in lib/. LLM usage is "
+                "content-free metadata — use LLMUsageStore, not DbLoggingService:\n"
                 + details
             )
 
 
-class TestPGSessionManagerDocstring:
-    """``PGSessionManager.__doc__`` явно говорит «mirror поверх upstream».
+class TestSessionStoreLayerHoldsOurSemantics:
+    """Менеджер сессий — класс библиотеки; наша семантика — в store-слое.
 
-    Это контракт для новых разработчиков: класс — НЕ hot-path writer
-    (см. design R6).
+    Контракт для новых разработчиков: агент не подклассует
+    ``SessionManager``, а ставит свой ``SessionStore`` (см. design R6).
+    Санитизация NUL обязана жить в store, иначе она продолжит
+    «работать» на обходе пути записи.
     """
+    def test_session_manager_is_not_subclassed(self, tmp_path: Path) -> None:
+        from nanobot.session.manager import SessionManager
 
-    def test_docstring_says_mirror(self) -> None:
-        from lib.session.pg_session_manager import PGSessionManager
+        from lib.session.pg_session_manager import build_session_manager
 
-        doc = PGSessionManager.__doc__ or ""
-        assert "mirror" in doc.lower(), (
-            "PGSessionManager docstring must mention mirror; got: " + doc[:200]
+        mgr = build_session_manager(tmp_path)
+        assert type(mgr) is SessionManager, (
+            "менеджер сессий должен быть ровно классом библиотеки, "
+            f"а не подклассом: {type(mgr).__mro__[:2]}"
         )
-        assert "upstream" in doc.lower(), (
-            "PGSessionManager docstring must mention upstream; got: " + doc[:200]
-        )
+
+    def test_sanitizing_store_subclasses_library_store(self) -> None:
+        from nanobot.session.manager import JsonlSessionStore
+
+        from lib.session.pg_session_manager import SanitizingSessionStore
+
+        assert issubclass(SanitizingSessionStore, JsonlSessionStore)
 
 
 import pytest  # noqa: E402 — placed after class definitions to keep grouped

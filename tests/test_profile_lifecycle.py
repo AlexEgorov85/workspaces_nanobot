@@ -501,7 +501,7 @@ def test_application_context_rejects_profile_kwarg() -> None:
     assert "profile" not in inspect.signature(ApplicationContext.create).parameters
     assert "profile" not in DEPRECATED_ENABLE_KWARGS, (
         "profile не должен входить в deprecated compatibility kwargs — "
-        "у него нет migration path в project.json"
+        "у него нет migration path в config.json"
     )
 
     with pytest.raises(TypeError) as excinfo:
