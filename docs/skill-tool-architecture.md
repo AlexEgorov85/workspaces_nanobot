@@ -253,86 +253,94 @@ CLI — **операционный** интерфейс доставки capabil
 
 ## Resource `label` — opaque marker для Skill-логики
 
-`TableResource.label` — опциональная opaque-метка на dataclass-ресурсе таблицы,
-позволяющая skill'у найти «свою» таблицу по семантической роли, не зная её
-реального имени в PostgreSQL. Поле объявлено в `lib/services/table_registry.py`,
-заполняется из `config.json::skills.<name>.tables[]` (объектная форма).
+`label` — опциональная opaque-метка на объявлении таблицы, позволяющая capability
+найти «свою» таблицу по семантической роли, не зная её реального имени в
+PostgreSQL.
 
-Загрузка кэша (`CacheLoadService`, `DuckDbCacheStore`) **игнорирует** `label` —
-это **не** routing marker и **не** влияет на кэш. Значение label —
-domain knowledge конкретного skill'а; `lib/` не содержит конкретных констант
-label.
+> **Владелец поменялся.** Метка объявляется в
+> `mcp-platform/platform.json → audit.tables` (объектная форма
+> `{"name": ..., "label": ...}`) и разбирается при построении конфигурации
+> capability в `mcp-platform/servers/enterprise/server.py::_audit_config`.
+> Прежний владелец — `TableResource.label` в `lib/services/table_registry.py` и
+> lookup `TableRegistry.resources_by_label()` — снят 2026-10-01 вместе с
+> локальным кэшем.
 
 ### Контракт
 
-- `TableResource.label: str | None = None` — поле dataclass, **opaque для runtime**.
-- Задаётся через `tables[]` в `config.json` в объектной форме: `{"name": "...", "label": "..."}`
-  (см. `TableEntry` в `lib/core/project_settings.py`).
-- Загрузка кэша (`CacheLoadService`, `DuckDbCacheStore`) **игнорирует** label —
-  это **не** routing marker.
+- `label` — **opaque для runtime**: строка, которую платформа не интерпретирует,
+  кроме сравнения с известным значением.
+- Задаётся в `platform.json → audit.tables` в объектной форме.
+- Разбор: `_audit_config()` идёт по списку записей; запись с меткой
+  `scripts_registry` возвращается отдельно и **в доменные таблицы не попадает** —
+  аудит не должен читать собственные скрипты в обход проверки строк.
+- Это **не** routing marker: ни загрузка снимка, ни FAISS-индексация метку не
+  читают.
 
 ### Lookup
 
-```python
-from lib.services.table_registry import table_registry
+Lookup-а как метода больше нет — разделение выполняется один раз при сборке
+конфигурации (`server.py::_audit_config`):
 
-scripts_table = table_registry.resources_by_label("scripts_registry")[0]
+```python
+registry, tables = "", []
+for name, label in settings.get("ENTERPRISE_AUDIT_TABLES"):
+    if label == SCRIPTS_REGISTRY_LABEL:
+        registry = name
+    else:
+        tables.append(name)
 ```
 
-Метод `TableRegistry.resources_by_label(label: str) -> tuple[TableResource, ...]`
-проходит по всем регистрациям, фильтрует `enabled` (как `table_resources()`),
-собирает ресурсы с совпадающим `label`, дедуплицирует по `name`. Неизвестный
-label возвращает `()`. Disabled-ресурсы пропускаются.
+Каталог скриптов уезжает в capability отдельным ключом (`scripts_registry.table`),
+доменные таблицы — в `audit.tables`. Реестр, пришедший из окружения голой
+строкой, остаётся пустым, и capability отвечает `registry_unavailable`: строка
+не умеет сказать «это реестр», а выдать его за доменную таблицу хуже, чем не
+выдать.
 
 ### DoD
 
-Skill может объявить свою метку и находить соответствующую таблицу без знания
-её реального имени в PG. Это позволяет добавлять новые Skill-специфичные роли
-(например, `label="users_lookup"`, `label="events_stream"`) без правок `lib/`.
+Capability может объявить свою метку и находить соответствующую таблицу без
+знания её реального имени в PG. Это позволяет добавлять новые доменные роли
+(например, `label="users_lookup"`) без правок кода платформы.
 
 ### Пример: audit_analyzer + scripts_registry
 
-В `config.json` (секция `skills.audit_analyzer`, имена таблиц — настраиваемые):
+В `mcp-platform/platform.json` (секция `audit`, имена таблиц настраиваемые):
 
 ```json
-"skills": {
-  "audit_analyzer": {
-    "tables": [
-      {"name": "oarb.audits"},
-      {"name": "oarb.violations"},
-      {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
-    ]
-  }
+"audit": {
+  "tables": [
+    {"name": "oarb.audits"},
+    {"name": "oarb.violations"},
+    {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
+  ],
+  "row_ceiling": 500
 }
 ```
 
-`ApplicationContext._auto_register_skills` создаёт:
+`_audit_config()` из этого объявления собирает конфигурацию capability:
 
-- `TableResource(name="oarb.audits")` (label=None)
-- `TableResource(name="oarb.violations")` (label=None)
-- `TableResource(name="public.agent_predefined_scripts", label="scripts_registry")`
-
-При восстановлении CLI (commit `f4b646e`) skill-обвязка вернулась:
-`scripts/db_loader.py` при этом не восстанавливался — реестр
-предопределённых скриптов читается через
-`lib.core.skill_config.get_predefined_scripts_table("audit_analyzer")`
-(predefined-скрипты — DB-first, отдельная SQL-генерация удалена) и
-используется skill'ом `scripts/generated_sql_mode.py` для few-shot retrieval:
+- `audit.tables` → `["oarb.audits", "oarb.violations"]` (без метки);
+- `scripts_registry.table` → `"public.agent_predefined_scripts"`.
 
 ### Negative contract
 
-- Tool **не должен** читать `label` (см. TARGET §5/§6 — Tool не знает domain).
-- Runtime-sync **не должен** интерпретировать `label` как routing marker.
-- `lib/` **не должен** содержать конкретных значений label (например,
-  `"scripts_registry"` как константу в `lib/`). Это **domain knowledge skill'а**.
+- Tool агента **не должен** читать `label`: он работает с операциями capability и
+  не знает домена.
+- Синхронизация снимка и сборка индексов **не должны** интерпретировать `label`
+  как routing marker.
+- Общий код платформы **не должен** содержать доменных значений метки: это
+  domain knowledge объявления.
 
 ### Тесты
 
-| Тест | Что проверяет |
-|---|---|
-| `tests/test_table_registry.py::TestLabelLookup` | unit-тесты метода `resources_by_label()` (default `None`, constructor, поиск, неизвестный label, disabled-пропуск, независимость от track-колонки) |
-| `tests/test_auto_register_skills.py::TestAutoRegisterPredefinedScriptsTable` | интеграционные тесты через `_auto_register_skills` (label ставится для `predefined_scripts_table`) |
-| `tests/test_skill_config_api.py::TestPredefinedScripts::test_lookup_from_table_registry` | end-to-end через `skill_config.get_predefined_scripts_table()` (lookup через registry) |
+Контракт проверяется на стороне capability `audit`: разбор объявления и отказ
+`registry_unavailable` при реестре без метки — в
+`mcp-platform/tests/test_audit_capability.py`, поведение реестра — в
+`test_audit_lib_registry.py` (в том числе `registry_corrupt` на битой строке).
+
+Прежние тесты `tests/test_table_registry.py::TestLabelLookup`,
+`test_auto_register_skills.py` и `test_skill_config_api.py` удалены вместе с
+реестром.
 
 Любое использование `label` в слое, который работает с данными
 (`mcp-platform/libs/vectors/`, `libs/enterprise_data/`) — архитектурная

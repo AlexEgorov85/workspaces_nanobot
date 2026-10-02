@@ -1607,8 +1607,9 @@ llm.describe()           → dict       # что настроено, без кл
 `internal_error` вместо `upstream_unavailable`. Бизнес-логики в слое нет: сервис
 не строит промпты и не разбирает доменный ответ — это проверяется тестом.
 
-Агентских копий нет: `lib/services/llm_client.py` и `lib/services/llm_config.py`
-удалены. Навыки, работающие отдельными процессами, ходят в модель через
+Агентских копий нет: `lib/services/llm_client.py` (удалён) и
+`lib/services/llm_config.py` (удалён) сняты 2026-10-02. Навыки, работающие
+отдельными процессами, ходят в модель через
 `mcp-platform/libs/enterprise_client/llm.py` — клиент платформы, который
 поднимает лёгкий экземпляр сервера (`--capabilities llm`, без доступа к
 данным, поэтому не становится вторым владельцем пула PostgreSQL и блокировки
@@ -1733,9 +1734,10 @@ nanobot/
 │   │   ├── runtime_events_subscriber.py  #     подписка на runtime-события → turn-метрики
 │   │   ├── compaction_event_subscriber.py#     событие context_compacted → шина
 │   │   ├── session_cold_sync_service.py  #     daemon: upstream JSONL → PG cold-storage mirror
-│   │   ├── llm_observer.py               #     обёртки observer-pipeline (fail-soft)
-│   │   ├── llm_usage_store_factory.py    #     фабрика upstream LLMUsageStore
-│   │   └── llm_client.py                 #     call_llm / call_llm_async (OpenAI-compatible HTTP)
+│   │   # сняты 2026-10-02 вместе с уходом общения с моделью в mcp-platform:
+│   │   ├── ~~llm_observer.py~~              #     observer'ы свёрнуты в AgentFactory._wrap_provider_snapshot_loader
+│   │   ├── ~~llm_usage_store_factory.py~~   #     хранилище создаёт библиотека (nanobot.llm_usage)
+│   │   └── ~~llm_client.py~~                #     call_llm / call_llm_async — ушло в capability llm
 │   │   # DDL для DbLoggingService (agent_gateway_logs, имя через logging.db.table_name) — в sql/logs/
 │   ├── cli/                              #  вынесено из cli_agent.py
 │   │   ├── console_loop.py               #   REPL + typewriter + consume_outbound

@@ -265,3 +265,110 @@ def test_markdown_relative_links_resolve() -> None:
         "Сломанные ссылки в документации:\n"
         + "\n".join(f"  {src} -> {dst}" for src, dst in broken)
     )
+
+
+#: Модули агента, снятые 2026-10-01/02 при переезде подсистем в
+#: ``mcp-platform``. Список курируемый, а не «любой несуществующий путь»:
+#: широкая проверка даёт столько шума на исторических ADR и снапшотах
+#: инвентаря, что её начинают отключать, и тогда она бесполезна.
+_REMOVED_AGENT_MODULES = (
+    # локальный снимок DuckDB (фаза 5)
+    "lib/services/duckdb_cache_store.py",
+    "lib/services/cache_provider.py",
+    "lib/services/cache_provider_impl.py",
+    "lib/services/cache_load_service.py",
+    "lib/utils/duckdb_query.py",
+    # реестр ресурсов и декларативная регистрация (фаза 5)
+    "lib/services/table_registry.py",
+    "lib/core/skill_registration.py",
+    "lib/core/infra_registration.py",
+    "lib/core/skill_config.py",
+    # векторная подсистема (фаза 4/5) и её скрипты
+    "lib/services/vector_index_service.py",
+    "lib/services/preload_service.py",
+    "lib/services/text_splitter.py",
+    "tools/build_vectors.py",
+    "tools/check_indexes.py",
+    # прочее, снятое позже
+    "lib/services/transcription_service.py",
+    "lib/channels/redis_channel.py",
+    "lib/services/llm_client.py",
+    "lib/services/llm_config.py",
+    "lib/services/llm_usage_store_factory.py",
+    "lib/services/llm_observer.py",
+)
+
+#: Символы, которых в проекте нет вовсе (не файлы, а классы/функции).
+_REMOVED_AGENT_SYMBOLS = (
+    "PGSessionManager",
+    "TableRegistry",
+    "TableResource",
+    "VectorIndexService",
+    "CacheLoadService",
+    "DuckDbCacheStore",
+)
+
+#: Пометки, по которым видно, что ссылка на снятое дана намеренно.
+_REMOVED_MARKERS = (
+    "снят", "Снят", "СНЯТ", "удалён", "удален", "Удалён", "Удален",
+    "не существует", "нет в репо", "нет в дереве", "переехал", "уехал",
+    "перенесён", "перенесен", "заменён", "заменен", "~", "был", "была",
+    "было", "были", "истори", "История", "прежн", "Прежн",
+)
+
+#: Подкаталоги и файлы документации, которые историю хранят по назначению.
+_DOC_HISTORY_DIRS = (
+    "docs/audit",
+    "docs/architecture/decisions",
+    "docs/architecture/decisions/",
+)
+_DOC_HISTORY_FILES = (
+    "docs/architecture/nanobot-inventory.md",
+    "docs/TARGET_ARCHITECTURE.md",
+    "docs/MIGRATION.md",
+    "docs/PLAN-SPEC-COMPLETION.md",
+    # надгробие: весь файл посвящён снятой подсистеме
+    "docs/table-registry.md",
+)
+
+
+def _doc_files() -> list[Path]:
+    out: list[Path] = []
+    for f in sorted((_PROJECT_ROOT / "docs").rglob("*.md")):
+        rel = f.relative_to(_PROJECT_ROOT).as_posix()
+        if any(rel.startswith(d) for d in _DOC_HISTORY_DIRS):
+            continue
+        if rel in _DOC_HISTORY_FILES:
+            continue
+        out.append(f)
+    return out
+
+
+def test_docs_do_not_point_at_removed_agent_modules() -> None:
+    """docs/ не должна отправлять читателя в снятый модуль как в живой.
+
+    Страж на корневой ``README.md`` не смотрит в ``docs/`` вообще, и гниль
+    пережила две волны переезда: гайд по созданию skill'а предписывал завести
+    ``scripts/skill_config.py``, а страница про реестр ресурсов в 494 строки
+    описывала подсистему, снятую со временем локального снимка.
+
+    Ссылка на снятое допустима, только если в той же строке видно намерение
+    (пометка об устаревании или явная историческая рамка файла) — иначе
+    читатель примет её за инструкцию.
+    """
+    stale: list[str] = []
+    needles = _REMOVED_AGENT_MODULES + _REMOVED_AGENT_SYMBOLS
+    for f in _doc_files():
+        rel = f.relative_to(_PROJECT_ROOT).as_posix()
+        for num, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            hit = next((n for n in needles if n in line), None)
+            if hit is None:
+                continue
+            if any(mark in line for mark in _REMOVED_MARKERS):
+                continue
+            stale.append(f"  {rel}:{num} -> {hit}")
+    assert not stale, (
+        "docs/ ссылается на снятые модули без пометки об устаревании:\n"
+        + "\n".join(stale[:40])
+        + (f"\n... ещё {len(stale) - 40}" if len(stale) > 40 else "")
+    )

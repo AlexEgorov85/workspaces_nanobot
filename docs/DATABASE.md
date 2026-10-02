@@ -11,14 +11,14 @@
 > данных и владение снимком у capability `data` платформы. Ниже — что эти
 > имена значили, чтобы читать платформенный контракт и историю миграций.
 
-**Интерфейс** — `lib/services/cache_provider.py`, три роли в одном модуле:
+**Интерфейс** — снятый `lib/services/cache_provider.py`, три роли в одном модуле:
 
 - `CacheProvider` (ABC) — **роль чтения**: `is_ready()`, `preload_indexes()`,
   `search_vector()`, `query_sql()`, `explain()`, `get_schema()`, `close()`.
   Ни одного write-метода здесь нет: потребитель не пишет в кэш.
 - `CacheIngestion` (ABC) — **роль записи**: `upsert_records()`,
   `replace_records()`, `ensure_schema()`. Её получает только
-  `CacheLoadService` — единственный writer, он же владелец файла на
+  `CacheLoadService` (снят) — единственный writer, он же владелец файла на
   время загрузки.
 - `CacheStore(CacheProvider, CacheIngestion)` — полный контракт единственного
   хранилища; именно он лежит в `ApplicationContext.cache_provider` и его
@@ -27,9 +27,9 @@
 - `SearchResult` (dataclass): `content`, `score`, `source`, `table`, `pk_value`,
   `chunk`, `matched_chunks`, `row`.
 
-**Реализация** — `lib/services/duckdb_cache_store.py`:
+**Реализация** — снятый `lib/services/duckdb_cache_store.py`:
 
-- `DuckDbCacheStore` — **единственная** concrete-реализация `CacheStore`:
+- `DuckDbCacheStore` (снят) — **единственная** concrete-реализация `CacheStore`:
   DuckDB-файл кэша + векторные индексы в памяти. Создаётся только через
   `open_cache_provider(*, mode)`; конструктор и `connect()` напрямую
   оставлены для тестов реализации, не для production-кода.
@@ -41,9 +41,9 @@
   соединение на время вызова и закрывает сразу после. Writer'ом (а он
   блокирует и остальных) является только загрузка.
 - Репликация PG → кэш в интерфейсе **не** участвует: её владеет
-  `CacheLoadService`, который и вызывает роли записи.
+  `CacheLoadService` (снят), который и вызывает роли записи.
 
-**Общие помощники** — `lib/services/cache_provider_impl.py` (не реализация
+**Общие помощники** — снятый `lib/services/cache_provider_impl.py` (не реализация
 интерфейса, а то, что нужно и реализации, и потребителям конфигурации):
 
 - `get_embedding()` (Ollama `/api/embed`), `read_embedding_config()`,
@@ -55,7 +55,7 @@
   импортируются **лениво** внутри функций — импорт модуля остаётся лёгким,
   и gateway может управлять жизненным циклом без побочных эффектов.
 
-**Точка создания провайдера** — `lib/services/cache_provider.py::open_cache_provider(*, mode)`.
+**Точка создания провайдера** — снятая `lib/services/cache_provider.py::open_cache_provider(*, mode)`.
 Функции и модуля в агенте больше нет: снимком владеет capability `data` платформы
 (фаза 5, п. 5.8), и точка создания провайдера уехала вместе с ним
 (`mcp-platform/libs/enterprise_data/snapshot/store.py`). Она сама резолвила путь
@@ -63,7 +63,7 @@
 получал `CacheStore` и не знал, какая реализация стоит за интерфейсом. Раньше
 навык делегировал ей через `lib/core/skill_config.build_cache_provider()`
 (skill-side — `scripts/skill_config.build_cache_provider()`), тот же путь
-использовал `tools/build_vectors.py`. **Сейчас к этому пути не обращается
+использовал снятый `tools/build_vectors.py`. **Сейчас к этому пути не обращается
 никто:** ни навык, ни runtime — данные аудита идут операциями capability `audit`
 по MCP, файл снимка открывает capability `data` платформы, а сборку векторов
 делает `mcp-platform/servers/enterprise/build_index.py`, который снимок вообще
@@ -184,7 +184,7 @@
 | `skills.audit_analyzer.vector_indexes[*].name` | Имена FAISS-индексов (`index_name` в операции `vector_search`; persisted-файлов нет — индексы живут в памяти процесса) | `audits_index`, `violations_index`, `audit_reports_index` — **примеры текущей инсталляции** |
 | ~~`skills.audit_analyzer.llm.*`~~ | — | **удалено (9.6)**: выбор модели принадлежит capability `llm`. `max_tokens` / `temperature` объявляет платформа — `mcp-platform/platform.json` → `llm.max_tokens` / `llm.temperature` |
 | ~~`skills.audit_analyzer.cli.*`~~ | — | **удалено вместе с CLI навыка (фаза 9)**: `default_mode` / `max_retries` / `timeout_sec` больше не существуют, режим выбирает модель, а не флаг командной строки |
-| `gateway.vector.index.storage_table` | Таблица сырых эмбеддингов; регистрируется через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` | `oarb.audit_vectors` |
+| `gateway.vector.index.storage_table` | Таблица сырых эмбеддингов. Регистрация через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` **снята (фаза 5)**: индексы объявляет платформа, `mcp-platform/platform.json` → `vectors.storage_table` | `oarb.audit_vectors` |
 | `gateway.vector.index.default_root` | Каталог FAISS-индексов (в runtime не персистится — FAISS в памяти) | `data_store/vectors` |
 | `gateway.vector.index.indexes.<name>` | Декларативный конфиг индексов (`table`, `pk`, `source_table`, `content_columns`, `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`, `enabled`) — единственный источник; PG-реестр не читается | `audits_index`, `violations_index`, `audit_reports_index` |
 | `gateway.sync.*` | **удалена** — поллинга и пересинхронизации больше нет | — |
@@ -199,7 +199,14 @@
 > расхождении доверять платформенному объявлению: запросы к данным идут через
 > него, и только агент читает своё.
 
-Декларация — единый источник истины. `ApplicationContext._auto_register_skills` (см. `lib/core/application_context.py`) читает эту секцию при старте и автоматически создаёт `TableResource`/`VectorResource` в `table_registry`. Никакого `register.py` не требуется. Для добавления нового skill достаточно добавить секцию `skills.<name>` в `config.json`. DoD-проверка — `tests/test_resource_universality.py`.
+Декларация — единый источник истины. Регистрация навыков в реестре снята
+(фаза 5, 2026-10-01): `ApplicationContext._auto_register_skills` больше нет,
+`TableResource`/`VectorResource` сняты вместе с `table_registry` —
+`lib/core/application_context.py` при старте ничего не регистрирует.
+`config.json` остаётся источником настроек навыка, которые агент читает как
+есть, а состав снимка объявляет capability `data` платформы
+(`mcp-platform/platform.json` → `audit.tables`). Никакого `register.py` по-прежнему
+не требуется.
 
 > Примечание: ретраи *генерации* SQL в режиме `generated_sql` захардкожены в
 > `generated_sql_mode.py` (`MAX_RETRIES = 3` → до 4 попыток) и от `cli_max_retries`
@@ -218,11 +225,12 @@ DSN подключается только через `channels.postgres.dsn` в 
 
 > **Раздел целиком платформенный (фаза 5, пп. 5.8 и удаление кластера).**
 > 2026-10-01 из агента снесены сами модули кластера: `duckdb_cache_store.py`,
-> `cache_provider.py`, `cache_provider_impl.py`, `cache_load_service.py`,
-> `preload_service.py`, `vector_index_service.py`, `lib/utils/duckdb_query.py`,
-> `lib/core/skill_config.py`, а также `tools/build_vectors.py` и
-> `tools/check_indexes.py` (заменены на
-> `mcp-platform/servers/enterprise/build_index.py` и операцию `index_stats`).
+> `cache_provider.py`, `cache_provider_impl.py`, `cache_load_service.py`.
+> Сняты и прочие его части: `preload_service.py`, `vector_index_service.py`,
+> снятый `lib/utils/duckdb_query.py`, снятый `lib/core/skill_config.py`, а также
+> заменены на платформу `tools/build_vectors.py` и `tools/check_indexes.py`
+> (вместо них — `mcp-platform/servers/enterprise/build_index.py` и операция
+> `index_stats`).
 > Из `requirements.txt` агента убраны `duckdb`, `faiss-cpu`, `numpy`, `pyarrow`.
 > `TableRegistry`, `skill_registration.py` и `infra_registration.py` тоже сняты
 > вместе с реестром: состав снимка объявляет capability `data`
@@ -235,8 +243,8 @@ DSN подключается только через `channels.postgres.dsn` в 
 > | Прежнее имя (агент) | Где живёт сейчас |
 > |---|---|
 > | `cache_provider.py` (`CacheProvider`/`CacheIngestion`/`CacheStore`) | `mcp-platform/libs/enterprise_data/snapshot/contracts.py` |
-> | `duckdb_cache_store.py` (`DuckDbCacheStore`) | `mcp-platform/libs/enterprise_data/snapshot/store.py` |
-> | `cache_load_service.py` (`CacheLoadService`) | `mcp-platform/libs/enterprise_data/loader.py` (`SnapshotLoadService`) |
+> | `duckdb_cache_store.py` (прежний `DuckDbCacheStore`) | `mcp-platform/libs/enterprise_data/snapshot/store.py` |
+> | `cache_load_service.py` (прежний `CacheLoadService`) | `mcp-platform/libs/enterprise_data/loader.py` (`SnapshotLoadService`) |
 > | `cache_provider_impl.py` (общие помощники) | `mcp-platform/libs/vectors/{config,signature,embedding}.py` |
 > | `preload_service.py` | `mcp-platform/libs/vectors/preload.py` + `owner.py` |
 > | `resolve_cache_path()` | `mcp-platform/libs/enterprise_data/snapshot/store.py` |
@@ -257,11 +265,11 @@ DSN подключается только через `channels.postgres.dsn` в 
 удалён вместе с кластером: на платформе загрузку снимка запускает capability
 `data`, а не composition root агента.
 
-- **`CacheLoadService`** (`lib/services/cache_load_service.py`) — единственный
-  владелец подключения к PostgreSQL и единственный writer. Держит
+- **снятый `CacheLoadService`** (`lib/services/cache_load_service.py`) — прежний
+  единственный владелец подключения к PostgreSQL и единственный writer. Держал
   `CacheStore` напрямую (без колбэков — колбэки были лишним посредником между
-  единственным писателем и его же хранилищем), выполняет **синхронную** загрузку
-  и не порождает потоков. Для каждой таблицы из реестра:
+  единственным писателем и его же хранилищем), выполнял **синхронную** загрузку
+  и не порождал потоков. Для каждой таблицы из реестра:
   - `_fetch_schema()` — структура из PG `information_schema.columns` +
     `pg_description` (колонки, типы, NOT NULL, комментарии);
   - `store.ensure_schema()` — создаёт таблицу **с типами из PG** (включая пустые);
@@ -277,7 +285,7 @@ DSN подключается только через `channels.postgres.dsn` в 
   слотов, означало бы драку за слоты. Ошибка соединения — `CacheLoadError`
   (громко); отсутствующая в PG таблица — запись в `missing_tables` без
   исключения.
-- **`DuckDbCacheStore`** — DuckDB-файл кэша + FAISS-индексы в памяти.
+- **прежний `DuckDbCacheStore`** — DuckDB-файл кэша + FAISS-индексы в памяти.
   `ensure_schema()` создаёт таблицы с типами из PG и сохраняет комментарии +
   исходные PG-типы в мета-таблицу `__nanobot_meta.__schema_meta` (входит в
   снимок). `get_schema()` возвращает исходные PG-типы и комментарии (без них —
@@ -302,11 +310,12 @@ DSN подключается только через `channels.postgres.dsn` в 
 сразу после. Между запросами процесс файла не касается, поэтому файл физически
 свободен всегда — в том числе для навыка, запущенного в отдельном процессе.
 
-Схема в `gateway.py::main()`:
+Схема прежней агентской сборки (в `gateway.py::main()` было так; сейчас загрузкой
+снимка занимается capability `data` платформы):
 
 ```mermaid
 flowchart LR
-    CREATE["ApplicationContext.create()"] --> LOAD["CacheLoadService.load()"]
+    CREATE["ApplicationContext.create()"] --> LOAD["CacheLoadService.load() — снят"]
     LOAD -->|ensure_schema + upsert, синхронно| RW["CacheStore (READ_WRITE)"]
     RW -->|close| FREE[("cache.duckdb свободен")]
     FREE -->|preload, один раз| FAISS["FAISS в память"]
@@ -332,14 +341,13 @@ writer; поскольку writer'ом является только загру�
 
 #### Полный цикл (что происходит по шагам)
 
-1. **Старт** (`gateway.py::main()`): `ApplicationContext.create()` читает
-   секции `skills.*` и `gateway.vector` из `config.json`, регистрирует ресурсы
-   в `TableRegistry`, поднимает пул и проверяет схему, затем
-   `_init_cache_runtime()`.
+1. **Старт** (`gateway.py::main()`): `ApplicationContext` поднимает пул и
+   проверяет схему. Регистрации ресурсов в `TableRegistry` (снят вместе с
+   реестром, фаза 5) больше нет — снимок наполняет capability `data` платформы.
 2. **Стадия 1 — запись.** `open_cache_provider(mode=READ_WRITE)`;
-   `CacheLoadService.load()` синхронно тянет все зарегистрированные таблицы
-   (таблицы скиллов + `gateway.vector.index.storage_table`); в `finally` файл
-   закрывается. Слоты пула освобождаются сразу после возврата.
+   `CacheLoadService.load()` (снят) синхронно тянул прежние зарегистрированные
+   таблицы (таблицы скиллов + `gateway.vector.index.storage_table`); в
+   `finally` файл закрывался. Слоты пула освобождались сразу после возврата.
 3. **Стадия 2 — чтение.** `open_cache_provider(mode=READ_ONLY)` возвращает
    провайдера, который держит в памяти прогретые FAISS-индексы, но не держит
    файл.
@@ -352,8 +360,10 @@ writer; поскольку writer'ом является только загру�
 
 Загрузка фиксирует время завершения и публикует его как
 `cache_load_done.payload.loaded_at` в журнал `agent_gateway_logs` (плюс
-`started_at` и `duration_sec`); `CacheLoadService.get_stats()` отдаёт то же.
-С ним сверяются, чтобы не выдать устаревший снимок за «текущие» данные.
+`started_at` и `duration_sec`). Событие по-прежнему живое, но публикует его уже
+не агент: `CacheLoadService` (снят) заменён на `SnapshotLoadService` у
+capability `data`. С `loaded_at` сверяются, чтобы не выдать устаревший снимок за
+«текущие» данные.
 
 #### Управляющие ключи (`gateway.vector.index` / `gateway.cache` в `config.json`)
 
@@ -395,12 +405,19 @@ writer; поскольку writer'ом является только загру�
 
 #### Мониторинг
 
-- `CacheLoadService.get_stats()`: `tables`, `loaded_at`, `loaded_ok`, `errors`,
-  `missing_tables`, `rows_total`, `max_workers`.
-- `DuckDbCacheStore.get_stats()`: `tables` (кол-во строк), `upserts`,
-  `last_upsert_at`, `last_error`, `indexes_in_memory`, `vector_sources`.
+- ~~`CacheLoadService.get_stats()`~~ — **снят**. Те же поля (`tables`,
+  `loaded_at`, `loaded_ok`, `errors`, `missing_tables`, `rows_total`,
+  `max_workers`) отдаёт `SnapshotLoadService.get_stats()`
+  (`mcp-platform/libs/enterprise_data/loader.py`) — она же пишет их в журнал
+  событиями ниже, поэтому отдельного вызова не требуется.
+- ~~`DuckDbCacheStore.get_stats()`~~ — **снят**. На стороне платформы тот же
+  снимок состояния даёт `store.get_stats()` в
+  `mcp-platform/libs/enterprise_data/snapshot/store.py`: `is_ready`,
+  `cache_path`, `schema`, `mode`, `tables` (кол-во строк по таблицам),
+  `vector_sources`, `upserts`, `upsert_errors`, `last_upsert_at`, `last_error`.
 - Журнал `agent_gateway_logs`: события `cache_load_started` и `cache_load_done`
-  (время снимка, пропущенные таблицы, ошибки).
+  (время снимка, пропущенные таблицы, ошибки). Их публикует capability `data`,
+  не агент.
 - Внешний признак актуальности: mtime файла кеша (по умолчанию
   `~/.cache/nanobot/duckdb/cache.duckdb`; см. `resolve_cache_path()`).
 

@@ -170,7 +170,7 @@ sync-сервис не запускается вообще.
 ## Чистая миграция
 
 `storage-hybridization` — **чистая** миграция. Исторические
-сессии из старого `PGSessionManager` (если они есть в PG) ДОЛЖНЫ
+сессии из снятого `PGSessionManager` (если они есть в PG) ДОЛЖНЫ
 быть перенесены в upstream JSONL **до** deploy отдельным скриптом
 (вне scope этого change). После deploy upstream JSONL — единственный
 source of truth; всё, чего нет в `list_sessions()`, удаляется
@@ -247,8 +247,9 @@ sync пропускается для этой сессии (`sync_skipped_stale_
   в lifecycle.
 - `lib/core/project_settings.py` — `UsageStoreSettings`,
   `SessionColdSyncSettings`.
-- `lib/services/llm_usage_store_factory.py` — фабрика
-  `LLMUsageStore`.
-- `lib/services/llm_observer.py` — подключение observer-pipeline.
+- ~~`lib/services/llm_usage_store_factory.py`~~ — **снят**: хранилище создаёт
+  библиотека (`nanobot.llm_usage.get_llm_usage_store()`).
+- ~~`lib/services/llm_observer.py`~~ — **снят**: подписка observer'а свёрнута в
+  `AgentFactory._wrap_provider_snapshot_loader`.
 - `lib/services/runtime_health.py` — агрегация метрик.
 - `tests/test_storage_hybridization.py` — архитектурные гарды.

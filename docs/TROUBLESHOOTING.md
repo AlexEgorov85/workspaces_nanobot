@@ -4,11 +4,13 @@
 (раздел «Troubleshooting»); сюда перенесён без изменений, чтобы освободить
 навигационный хаб от деталей.
 
-> **TL;DR для диагноста:** логи — в stderr (loguru, `sys.stderr`); файловый
-> статистика пула соединений —
-> `CacheLoadService.get_stats()`;
-> зависшие `processing`-задачи — их вернёт в пул фоновый `_unstick_loop`; для
-> разблокировки сразу см. `docs/ARCHITECTURE.md` § «Воркеры не берут задачи».
+> **TL;DR для диагноста:** логи — в stderr (loguru, `sys.stderr`);
+> статистика пула соединений — `utils.db.get_stats()`; время и состав снимка —
+> payload событий `cache_load_started`/`cache_load_done` в
+> `agent_gateway_logs` (снимком грузит и владеет capability `data` платформы,
+> агент снимком не владеет); зависшие `processing`-задачи — их вернёт в пул
+> фоновый `_unstick_loop`; для разблокировки сразу см. `docs/ARCHITECTURE.md`
+> § «Воркеры не берут задачи».
 
 ---
 
@@ -61,16 +63,21 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 
 ### `FileNotFoundError: ~/.cache/nanobot/duckdb/cache.duckdb`
 
-DuckDB-кеш публикуется **только gateway'ом** через `DuckDbCacheStore.publish()`.
-Путь определяется в `resolve_cache_path()` (`lib/core/application_context.py`)
-— **единый механизм**, общий для gateway и CLI/skill:
+Снимок наполняет **только capability `data` платформы**: агент снимком не
+владеет и ничего в него не публикует; снятый метод `DuckDbCacheStore.publish()`
+не существует — сам `DuckDbCacheStore` снят 2026-10-01, а файл открывает и
+закрывает `mcp-platform/libs/enterprise_data/snapshot/store.py`. Путь
+объявляет платформа:
 
-  1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`
+  1. `mcp-platform/platform.json` → `data.snapshot_path` (путь к **файлу**;
+     пустое значение — «снимок ненастроен», операции снимка отвечают
+     `snapshot_unavailable`)
   2. **default** (v2.5.2+): `~/.cache/nanobot/duckdb/cache.duckdb`
      (POSIX `fcntl` работает там штатно)
 
-Запустите `python gateway.py --profile=prod` и подождите первого цикла
-синхронизации. Старый путь
+Файла нет, пока снимок не загружен, а загрузка разовая — она идёт при старте
+capability `data`. Состав и время загрузки смотрите в payload события
+`cache_load_done` журнала `agent_gateway_logs`. Старый путь
 `workspace/skills/audit_analyzer/cache/audit_cache.duckdb` из
 `project.json::in_memory_cache_path` больше не используется.
 
@@ -90,23 +97,27 @@ DuckDB `ATTACH ... READ_WRITE` берёт эксклюзивный `flock`, ко
     `/var/lib/nanobot/cache/`) — путь снимка объявляет платформа,
     `mcp-platform/platform.json` → `data.snapshot_path` (ключ
     `gateway.cache.local_path` агента снят);
-  * если старт выкидывает `[cache] WARNING: ... is on nfs ...` — путь попал
-    на NFS через symlink; см. `_warn_if_cache_path_on_nfs()` в
-    `lib/core/application_context.py` и уберите NFS из пути.
+  * если путь уводит снимок на NFS (в том числе через symlink), capability
+    `data` открывает файл с `UnsupportedFilesystemError`, а не предупреждением:
+    сначала уберите NFS из `data.snapshot_path`;
 
 ### `FAISS preload: no data in cache`
 
-Гонки с колбэками больше не существует: загрузка выполняется **синхронно и
-завершается до** `preload_indexes()`, а колбэков у загрузчика нет вовсе.
+Индексы в память прогревает capability `vectors` (лениво, отдельного вызова не
+требует), а снимок наполняет capability `data`. Агент в обоих не участвует —
+`CacheLoadService` (снят) и его `preload_indexes()` в дереве агента больше нет.
 
 Если preload не нашёл данных, причина одна из трёх:
 
-1. таблица векторов не попала в загрузку — проверьте
-   `CacheLoadService.get_stats()['tables']` и `missing_tables`;
-2. загрузка не состоялась — `CacheLoadError` прерывает старт, в журнале
-   `agent_gateway_logs` есть `cache_load_done` с `errors` и `loaded_ok`;
+1. таблица векторов не попала в загрузку — смотрите `tables` и
+   `missing_tables` в payload `cache_load_done` журнала `agent_gateway_logs`
+   (те же поля отдаёт `SnapshotLoadService.get_stats()`);
+2. загрузка не состоялась — в журнале `agent_gateway_logs` есть
+   `cache_load_done` с `errors` и `loaded_ok`; состав снимка объявляет
+   capability `data` (`mcp-platform/platform.json` → `data`);
 3. файл кэша старше данных — время снимка в
-   `cache_load_done.payload.loaded_at`; обновляется перезапуском процесса.
+   `cache_load_done.payload.loaded_at`; обновляется перезапуском процесса
+   платформы.
 
 ---
 
@@ -174,7 +185,7 @@ PowerShell интерпретирует `=` по-своему. Использу�
 |---|---|
 | `python tools/diagnose_startup.py --log <PATH>` | Парсер startup-лога gateway/CLI: извлекает секции `Hooks connected` / `Registered N tools` / `Custom (project) tools` / `Runtime patches`, сверяет с каноническими списками из `lib/services/runtime_inventory.py`. Печатает OK / DRIFT / CRITICAL по хукам/project tools/runtime patches. Exit 0 (ОК), 1 (critical), 2 (drift). Опции: `--strict` (warning → exit 1), `--json` (для CI), `--no-color`. См. «Startup-inventory drift» ниже. |
 | `python tools/diagnose_startup.py` (без `--log`) | Читает startup-лог из stdin — удобно для pipe: `python gateway.py --profile=prod 2>&1 \| python tools/diagnose_startup.py --no-color` |
-| `CacheLoadService.get_stats()` | `tables`, `loaded_at`, `loaded_ok`, `errors`, `missing_tables`, `rows_total`, `max_workers` |
+| ~~`CacheLoadService.get_stats()`~~ — **снят** | Те же поля (`tables`, `loaded_at`, `loaded_ok`, `errors`, `missing_tables`, `rows_total`, `max_workers`) отдаёт `SnapshotLoadService.get_stats()` у capability `data`; они же лежат в payload `cache_load_done`, поэтому отдельный вызов не нужен |
 | `DbLoggingService.get_stats()` | `written`, `failed`, `queued`, `queue_size`, `batch_count`, `queue_full`, `connected`, `last_error`, `question_runs`, `last_purge_*` |
 
 ## Startup-inventory drift

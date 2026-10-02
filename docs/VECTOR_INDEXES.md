@@ -380,9 +380,9 @@ DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 ## Сигнатура индекса
 
 `compute_index_signature(cfg)` и `verify_index_signature(stored_meta, current_cfg)` —
-`mcp-platform/libs/vectors/signature.py` (портированы из
-`lib/services/cache_provider_impl.py` без изменений). SHA256 от канонической
-конфигурации сборки по полям `INDEX_SIGNATURE_FIELDS`:
+`mcp-platform/libs/vectors/signature.py`: портированы из модуля агента
+снятого `lib/services/cache_provider_impl.py` без изменений. SHA256 от
+канонической конфигурации сборки по полям `INDEX_SIGNATURE_FIELDS`:
 `src_table`, `pk_column`, `content_cols`, `embedding_cols`, `track_column`,
 `embedding_model`, `embedding_dimension`, `chunk_size`, `chunk_overlap`, `metric`.
 

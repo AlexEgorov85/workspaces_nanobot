@@ -174,7 +174,7 @@ workspace/skills/<skill_name>/
 
 - **Никаких `register.py`** — мёртвый паттерн. Регистрации ресурсов больше нет
   (§6): объявление навыка — это данные в `config.json`, а не код.
-- **Никаких `scripts/skill_config.py`** — модуль `lib/core/skill_config.py`
+- **Никаких `scripts/skill_config.py`** — снятый модуль `lib/core/skill_config.py`
   снят (§5). Параметры прогона skill берёт из своей секции в `config.json`.
 - **Никаких `scripts/cli.py` с `--mode ...`** — CLI навыка удалён; возврат ловит
   `tests/test_docs_consistency.py::test_readme_md_describes_the_live_audit_analyzer_entrypoint`.

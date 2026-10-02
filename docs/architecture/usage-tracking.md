@@ -171,8 +171,8 @@ Whitelist — `AgentFactory._wrap_provider_snapshot_loader` (обёртка жи
 
 ## Файлы
 
-- `lib/services/llm_usage_store_factory.py`, `lib/services/llm_observer.py` —
-  **удалены**: хранилище создаёт библиотека
+- `lib/services/llm_usage_store_factory.py`, `lib/services/llm_observer.py` — **удалены**:
+  хранилище создаёт библиотека
   (`nanobot.llm_usage.get_llm_usage_store()`), а подписка observer'а свёрнута в
   `AgentFactory._wrap_provider_snapshot_loader`.
 - `lib/core/application_context.py` — регистрация.

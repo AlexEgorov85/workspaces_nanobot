@@ -129,7 +129,10 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 > развёртываниях могут отличаться. Файла `project.json` больше нет: его секции
 > переехали в `config.json` (`gateway.agent.<name>`) либо в конфиг платформы.
 
-Реестр таблиц PG → DuckDB — в [docs/table-registry.md](docs/table-registry.md).
+Состав таблиц снимка и векторных индексов объявляет платформа:
+`mcp-platform/platform.json` (`audit.tables`, `vectors.indexes`). Прежний
+[docs/table-registry.md](docs/table-registry.md) описывает снятый реестр
+ресурсов и как инструкция не годится.
 
 ## 🧪 Тестирование
 
@@ -169,7 +172,7 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | **[CHANGELOG.md](CHANGELOG.md)** | История релизов (Keep a Changelog / SemVer) |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Диагностический runbook |
 | **[docs/MIGRATION.md](docs/MIGRATION.md)** | Сводка изменений между релизами + breaking changes |
-| **[docs/table-registry.md](docs/table-registry.md)** | Реестр таблиц PG → DuckDB |
+| **[docs/table-registry.md](docs/table-registry.md)** | ~~Реестр таблиц~~ — снят, надгробие с картой «куда что уехало» |
 | **[docs/skill-tool-architecture.md](docs/skill-tool-architecture.md)** | Контракт Skill ↔ Tool |
 | **[docs/architecture/](docs/architecture/)** | Инвентаризация зависимостей и monkey-patch'ей |
 | **[lib/channels/README.md](lib/channels/README.md)** | Каналы (Postgres/Redis): DDL, поток, конфиг |
