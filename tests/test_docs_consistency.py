@@ -10,12 +10,15 @@ Maintenance»). Каждое нарушение — регрессия: код �
 1. ``AGENTS.md`` не упоминает удалённые/несуществующие модули
    (``workspace/utils/doc_index.py``, ``workspace/utils/text_chunking.py``,
    ``workspace/tools/doc_index_search.py``).
-2. ``README.md`` описывает `audit_analyzer` как CLI-based skill
-   (реальность: `workspace/skills/audit_analyzer/scripts/cli.py` активен).
+2. ``README.md`` не предлагает удалённый вход ``
+   workspace/skills/audit_analyzer/scripts/cli.py``: CLI у навыка больше нет,
+   доступ к данным аудита даёт инструмент ``audit_analyzer_query``.
 3. `config.json` не содержит дублирующихся ключей в секциях
    верхнего уровня (двойной ``duckdb_query`` в ``gateway``).
 4. Все ссылки в ``.md`` файлах (относительные) ведут на существующие
    файлы.
+5. Каждая спека OpenSpec объявляет владельца темы (``## Scope``), и все спеки
+   перечислены в ``openspec/specs/OWNERSHIP.md``.
 """
 
 from __future__ import annotations
@@ -50,6 +53,57 @@ def test_agents_md_no_forbidden_module_references() -> None:
         assert ref not in text, (
             f"AGENTS.md упоминает {ref}, но файла нет в репозитории"
         )
+
+
+#: Токены из инвентаря, которые похожи на путь, но им не являются:
+#: вызовы в библиотеке nanobot и пути к символам (``модуль::функция``).
+_NOT_REPO_PATH = re.compile(r"^nanobot/|::")
+
+_REPO_PATH = re.compile(r"^[\w.][\w./-]*\.(?:py|md|json|jsonc|toml|txt|ya?ml)$")
+
+
+def _layout_paths(text: str) -> list[str]:
+    """Квалифицированные пути из секции инвентаря ``AGENTS.md``.
+
+    Зачёркнутое вырезается целиком: там документ говорит «удалено», и
+    упоминание удалённого — правильная документация, а не ссылка на живой код.
+
+    Проверяется не всякий путь со слешем, а только тот, чей ПЕРВЫЙ сегмент —
+    существующий каталог верхнего уровня этого репозитория. Инвентарь
+    справедливо ссылается и на чужие деревья: на файлы библиотеки ``nanobot``
+    (``agent/tools/mcp.py``, ``audio/transcription.py``) и на пакеты платформы
+    относительно её корня (``libs/enterprise_data/sql_safety.py``). Такие пути
+    не разрешаются отсюда и проверять их наличие нельзя. А ``lib/...``,
+    ``workspace/...``, ``tools/...``, ``docs/...``, ``mcp-platform/...`` —
+    утверждения о НАШЕМ коде, и они обязаны быть правдой.
+    """
+    top_level = {entry.name for entry in _PROJECT_ROOT.iterdir() if entry.is_dir()}
+    layout = text.partition("## Project Layout")[2].partition("\n## ")[0]
+    live = re.sub(r"~~.*?~~", "", layout, flags=re.DOTALL)
+    found: set[str] = set()
+    for token in re.findall(r"`([^`\n]+)`", live):
+        token = token.strip()
+        if token.split("/", 1)[0] not in top_level:
+            continue
+        if _REPO_PATH.match(token) and not _NOT_REPO_PATH.search(token):
+            found.add(token)
+    return sorted(found)
+
+
+def test_agents_md_project_layout_paths_exist() -> None:
+    """Каждый путь из инвентаря ``AGENTS.md`` указывает на существующий файл.
+
+    ``_FORBIDDEN_DOC_REFERENCES`` ловит три заранее вписанных имени и молчит обо
+    всём, что появилось после: инвентарь протухал именно так — модуль уехал в
+    ``mcp-platform``, а строка с ним осталась. Разбор самой секции ловит класс
+    ошибки, а не экземпляр, и потому не требует правки при каждом переезде.
+    """
+    text = (_PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    missing = [path for path in _layout_paths(text) if not (_PROJECT_ROOT / path).exists()]
+    assert not missing, (
+        "инвентарь AGENTS.md ссылается на несуществующие файлы: "
+        f"{missing}. Модуль уехал в mcp-platform — опиши перенос, а не надгробье."
+    )
 
 
 def test_readme_md_describes_the_live_audit_analyzer_entrypoint() -> None:
@@ -140,10 +194,30 @@ def test_config_json_no_duplicate_keys() -> None:
     assert not flat, f"config.json содержит дублирующиеся ключи: {flat}"
 
 
-@pytest.mark.skip(
-    reason="Out of scope for 0.3.5 upgrade — broken links in docs/README.md "
-    "and openspec/specs/COMPONENTS.md (legacy spec paths)",
-)
+def test_open_spec_ownership_index_covers_every_spec() -> None:
+    """Индекс владения спеками полон и не врёт.
+
+    Проект разделён на два дерева кода — агента и платформу ``mcp-platform`` —
+    и половина рефакторинга состоит в переезде подсистем между ними. Раздел
+    ``## Scope`` отвечает, чей это код; ``OWNERSHIP.md`` собирает ответы в
+    один список. Индекс без этого рано или поздно перестаёт совпадать с
+    каталогом, и тогда он врёт тихо: читатель верит ему, а не проверяет.
+    """
+    specs_dir = _PROJECT_ROOT / "openspec" / "specs"
+    index = specs_dir / "OWNERSHIP.md"
+    assert index.is_file(), (
+        f"нет {index.relative_to(_PROJECT_ROOT)}: без него нечем ответить на "
+        "вопрос «какие спеки об MCP» без чтения всех спек подряд"
+    )
+    listed = index.read_text(encoding="utf-8")
+    missing = [
+        path.relative_to(specs_dir).as_posix()
+        for path in sorted(specs_dir.glob("**/spec.md"))
+        if path.relative_to(specs_dir).as_posix() not in listed
+    ]
+    assert not missing, f"спеки не перечислены в OWNERSHIP.md: {missing}"
+
+
 def test_markdown_relative_links_resolve() -> None:
     """Все относительные ссылки в .md файлах ведут на существующие файлы."""
     skip_parts = {
@@ -154,6 +228,10 @@ def test_markdown_relative_links_resolve() -> None:
         "node_modules",
         "skills",
         "benchmarks",
+        # Форк-клон репозитория внутри рабочей копии. Это не документация
+        # ЭТОГО проекта: её правят и проверяют в своей ветке, а её поломки
+        # не должны ронять страж здесь.
+        ".worktrees",
     }
 
     def is_skipped(p: Path) -> bool:
