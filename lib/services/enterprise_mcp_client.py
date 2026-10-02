@@ -535,9 +535,19 @@ def client_from_settings(
     command = section.get("command")
     if not command:
         return None
+    args = list(section.get("args") or [])
+    # Агент передаёт платформе ТОЛЬКО имя контура, и только когда контур
+    # отличается от базы. Значения имён таблиц не передаются никогда: они
+    # объявлены в ``mcp-platform/platform.json → profiles.<имя>``, и значение,
+    # присланное вызывающей стороной, сделало бы вход в данные агента
+    # независимым от его конфигурации (ровно тот класс дефекта, который
+    # чинили в фазе 9 — «окружение приоритетнее файла»).
+    profile = str((settings.get("profile") or "") if settings is not None else "").strip()
+    if profile and profile != "prod":
+        args += ["--profile", profile]
     return EnterpriseMcpClient(
         command=str(command),
-        args=list(section.get("args") or []),
+        args=args,
         cwd=section.get("cwd"),
         tool_timeout_sec=float(
             section.get("tool_timeout_sec") or DEFAULT_TOOL_TIMEOUT_SEC
