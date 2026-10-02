@@ -11,6 +11,11 @@ sync service, cache service, channel) обязан превращаться
 в `LogEvent` и передаваться через `DbLoggingService`;
 прямой SQL-fallback в журнал запрещён.
 
+## Scope
+
+`shared` — единственный writer остался в агенте, а запись идёт транспортом в операцию `log_events` платформы
+Реализация: `lib/services/log_transport.py` + `mcp-platform/.../data/tools/log_events.py`
+
 ## Requirements
 
 ### Requirement: Single writer invariant of agent_gateway_logs
@@ -77,8 +82,7 @@ Runtime-producers не читают эти значения напрямую.
 
 - **WHEN** любой runtime-компонент (agent loop,
   hook, subagent, `ContextCompactionService`,
-  `PgDuckDbSyncService`, `DuckDbCacheStore`,
-  `PreloadService`, `PostgresChannel`) эмитит
+  `PostgresChannel`) эмитит
   structured event
 - **THEN** запись в `agent_gateway_logs` SHALL
   произойти через `db_logging_service.log_event(...)`
@@ -766,7 +770,7 @@ The system SHALL принимать параметр `flush_interval_sec`
   (`logging.db.flush_interval_sec`) через
   `ConfigurationResolver` → `ProjectSettings` →
   `ApplicationContext` → конструктор `DbLoggingService`.
-  Сервис НЕ читает `config.json`/`project.json` напрямую.
+  Сервис НЕ читает `config.json` напрямую.
 - **Boundary ошибок валидации** (двухуровневый):
   - На уровне **модели** `LoggingDbSettings` —
     `pydantic.ValidationError` при выходе за диапазон
@@ -777,20 +781,20 @@ The system SHALL принимать параметр `flush_interval_sec`
     `validate_project_settings` не может построить
     `ProjectSettings` (например, опечатка в имени секции,
     битый JSON). Интеграционный тест на пути
-    `project.json → ConfigurationResolver → ProjectSettings`
+    `config.json → ConfigurationResolver → ProjectSettings`
     ловит именно `ConfigurationError`.
   - В обоих случаях — fail-fast, до старта сервиса.
 - Поведение worker'а (батчевый flush по `flush_interval_sec`
   или `batch_size`, дедлайн-цикл с таймаутом) SHALL остаться
-  как описано в `lib/services/db_logging_service.py:548-606`.
+  как описано в `lib/services/db_logging_service.py:800-876`.
 
 #### Scenario: Дефолтное значение
-- **WHEN** в `project.json` отсутствует `logging.db.flush_interval_sec`
+- **WHEN** в `config.json` отсутствует `logging.db.flush_interval_sec`
 - **THEN** валидация `LoggingDbSettings` принимает дефолт `5.0`,
   `DbLoggingService._flush_interval == 5.0`
 
 #### Scenario: Ускоренный flush
-- **WHEN** `project.json::logging.db.flush_interval_sec = 1.0`
+- **WHEN** `config.json::logging.db.flush_interval_sec = 1.0`
 - **THEN** валидация принимает значение,
   `DbLoggingService._flush_interval == 1.0`,
   события в среднем видны в БД через 1–3 секунды
@@ -802,8 +806,8 @@ The system SHALL принимать параметр `flush_interval_sec`
   с указанием диапазона, `ApplicationContext` НЕ
   вовлекается
 
-#### Scenario: Битый project.json — ConfigurationError на resolver
-- **WHEN** `project.json` содержит невалидный JSON
+#### Scenario: Битый config.json — ConfigurationError на resolver
+- **WHEN** `config.json` содержит невалидный JSON
   или отсутствует обязательная секция, через которую
   валидируется `flush_interval_sec`
 - **THEN** `ConfigurationResolver` / `validate_project_settings`

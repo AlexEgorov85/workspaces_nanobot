@@ -9,6 +9,11 @@
 предотвратить "расползание" session data по сторам и обеспечить
 чёткие границы владения каждым слоем.
 
+## Scope
+
+`agent` — зеркало холодного хранилища сессий — агентское
+Реализация: `lib/session/pg_session_manager.py`, `lib/services/session_cold_sync_service.py`
+
 ## Requirements
 
 ### Requirement: Hot path сессий через upstream SessionManager
@@ -317,7 +322,7 @@ observability для диагностики сломанного sync.
 
 #### Scenario: enabled=false отключает sync
 
-- **WHEN** в `project.json` на реплике установлено
+- **WHEN** в `config.json` на реплике установлено
   `"gateway": {"session_cold_sync": {"enabled": false}}`
 - **THEN** `SessionColdSyncService` НЕ запускает фоновую
   задачу на этой реплике.
@@ -547,7 +552,7 @@ JSONL, считается устаревшим и удаляется cleanup-ц�
 `connect()` или `create_pool()`.
 
 Полные правила (DI, advisory lock, threading, батчи, метрики,
-shutdown order) — в `openspec/changes/storage-hybridization/design.md`
+shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridization/design.md`
 § «Connection pool» (D-Pool). Здесь фиксируется только
 нормативный контракт.
 

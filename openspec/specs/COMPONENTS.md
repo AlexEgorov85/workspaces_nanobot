@@ -46,7 +46,7 @@
 
 | Компонент | Реализация | Спецификация | Статус |
 |-----------|------------|--------------|--------|
-| Profiles | `project.json::profiles` (конфигурация) | [`configuration/profiles`](configuration/profiles/spec.md) | partial |
+| Profiles | `config.json::profiles` (конфигурация) | [`configuration/profiles`](configuration/profiles/spec.md) | partial |
 
 ### Data
 

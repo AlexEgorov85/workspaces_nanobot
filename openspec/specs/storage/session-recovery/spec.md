@@ -3,6 +3,11 @@
 ## Purpose
 Lets the runtime safely recover sessions whose JSONL source is older than the PostgreSQL cold mirror (volume restore, host migration, multi-instance misconfiguration). Provides explicit, opt-in recovery modes so the gateway never silently overwrites authoritative cold-storage data.
 
+## Scope
+
+`agent` — по замыслу агентская подсистема, но **реализации нет ни в одном дереве** — см. примечание в `OWNERSHIP.md`
+Реализация: не найдена — спека описывает то, чего пока нет
+
 ## Requirements
 
 ### Requirement: Session recovery is opt-in via explicit mode

@@ -4,6 +4,11 @@
 
 Определение границы между `ApplicationContext` (долгоживущая общая инфраструктура) и состоянием сессии/выполнения. Граница гарантирует, что runtime-инфраструктура не накапливает эфемерные данные и что переходы жизненного цикла детерминированы.
 
+## Scope
+
+`agent` — точка сборки сервисов агента
+Реализация: `lib/core/application_context.py`
+
 ## Responsibility
 
 Runtime Context отвечает за:
@@ -37,7 +42,7 @@ Runtime Context отвечает за:
 
 ApplicationContext предоставляет:
 - единый корень сборки runtime-сервисов
-- доступ к ConfigService, CacheProvider, VectorIndexService
+- доступ к ConfigService
 - детерминированный lifecycle (start/stop)
 - изоляцию от session state
 
@@ -114,7 +119,7 @@ nanobot» в `openspec/specs/runtime/context/spec.md`.
 
 `ApplicationContext.create()` MUST вызывать `RuntimePatcher.apply_all`
 после инициализации сервисов и до того, как `ApplicationContext`
-отдаёт `ctx.agent` внешним потребителям (gateway, CLI, streamlit).
+отдаёт `ctx.agent` внешним потребителям (gateway, CLI).
 
 `ApplicationContext.start()` SHALL NOT вызывать
 `RuntimePatcher.apply_all()` или отдельные `patch_*` методы
@@ -130,7 +135,7 @@ patches: `start()` их не применяет, ни прямо, ни косв�
 **Семантика failed-патчей и `PatchSpec.required`:**
 
 `PatchSpec.required: bool` — это metadata для diagnostics
-(startup-баннер, `diff_runtime_patches()`, `diagnose_startup.py`),
+(startup-баннер, `diff_runtime_patches()`, `tools/diagnose_startup.py`),
 а **НЕ** триггер прерывания startup. Если `apply_all` оставляет
 непустой `report.failed`, система MUST логировать warning со
 всеми именами failed-патчей (включая те, у которых
@@ -161,8 +166,8 @@ patches: `start()` их не применяет, ни прямо, ни косв�
 - **AND** `ApplicationContext.start()` MUST NOT вызывать
   `RuntimePatcher.apply_all` ни прямо, ни через отдельные
   `patch_*` методы `RuntimePatcher`.
-- **AND** внешние entrypoint'ы (`cli_agent.py`, `gateway.py`,
-  `streamlit_app.py`) MUST NOT вызывать `RuntimePatcher.apply_all`
+- **AND** внешние entrypoint'ы (`cli_agent.py`, `gateway.py`)
+  MUST NOT вызывать `RuntimePatcher.apply_all`
   или отдельные `patch_*` методы, входящие в `apply_all`, после
   возврата из `create()`.
 
@@ -234,8 +239,6 @@ patches: `start()` их не применяет, ни прямо, ни косв�
 
 ApplicationContext хранит ссылки на:
 - ConfigService
-- CacheProvider
-- VectorIndexService
 - другие infrastructure сервисы
 
 НЕ хранит:
@@ -259,7 +262,7 @@ ApplicationContext хранит ссылки на:
 
 - AgentFactory — создание agent loop
 - ChannelManager — инициализация каналов
-- CLI/Gateway/Streamlit — точки входа приложения
+- CLI/Gateway — точки входа приложения
 
 ## Implementation
 
@@ -268,8 +271,6 @@ ApplicationContext хранит ссылки на:
 
 Связанные компоненты:
 - `lib/services/config_service.py:ConfigService`
-- `lib/services/cache_provider.py:CacheProvider`
-- `lib/data/vector_index_service.py:VectorIndexService`
 
 ## Verification
 

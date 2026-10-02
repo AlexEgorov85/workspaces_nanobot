@@ -7,6 +7,11 @@
 диагностики manifest и поведение wrapper при success / domain error /
 process failure.
 
+## Scope
+
+`platform` — домен и IPC-контракт уехали в capability `legal_summarizer`; в агенте осталась только регистрация tool'а-обёртки
+Реализация: `mcp-platform/libs/legal_summarizer/`, `workspace/tools/legal_summarizer_query.py`
+
 ## Requirements
 
 ### Requirement: Subprocess IPC contract between tool wrapper and CLI query

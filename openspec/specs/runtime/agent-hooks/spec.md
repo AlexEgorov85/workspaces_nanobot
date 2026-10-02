@@ -8,6 +8,11 @@
 Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фиксируется
 отдельным требованием в `runtime/context` (MODIFIED).
 
+## Scope
+
+`agent` — хуки подключаются фабрикой агента
+Реализация: `lib/core/agent_factory.py`, `lib/hooks/`
+
 ## Requirements
 
 ### Requirement: Хуки обязаны наследовать `nanobot.agent.hook.AgentHook`
@@ -36,11 +41,11 @@ Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фикс
 
 ### Requirement: Завершение работы `AgentLoop`
 
-Код завершения работы (`gateway.py::_run`, `lib/cli/console_loop.py`, `benchmarks/runner.py`) ДОЛЖЕН вызывать `await agent.aclose()`, а НЕ `agent.close_mcp()`. Метод `close_mcp` удалён в nanobot 0.3.5; корректный shutdown API — `aclose()` (без параметров, async).
+Код завершения работы (`gateway.py::_run`, `lib/cli/console_loop.py`) ДОЛЖЕН вызывать `await agent.aclose()`, а НЕ `agent.close_mcp()`. Метод `close_mcp` удалён в nanobot 0.3.5; корректный shutdown API — `aclose()` (без параметров, async).
 
 #### Сценарий: Cleanup MCP на shutdown
 
-- **КОГДА** gateway/CLI/benchmarks завершают работу
+- **КОГДА** gateway/CLI завершают работу
 - **ТОГДА** они ДОЛЖНЫ `await agent.aclose()`
 - **И НЕ ДОЛЖНЫ** вызывать `agent.close_mcp()` — это приведёт к `AttributeError` и неконтролируемому падению процесса
 

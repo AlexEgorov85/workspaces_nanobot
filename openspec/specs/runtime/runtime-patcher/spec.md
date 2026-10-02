@@ -8,6 +8,11 @@ monkey-patch'ей к upstream `nanobot.agent.loop.AgentLoop`. Контракт
 соответствию inventory и единственному источнику `required`/`optional`
 метаданных.
 
+## Scope
+
+`agent` — патчи рантайма применяются в агенте
+Реализация: `lib/services/runtime_patcher.py`, `lib/services/runtime_inventory.py`
+
 ## Requirements
 
 ### Requirement: `RuntimePatcher` владеет только адаптацией upstream runtime API
@@ -62,8 +67,8 @@ canonical spec для loader'а НЕ создаётся, запись в
 
 `ApplicationContext.create()` MUST быть единственным production
 call site для `RuntimePatcher.apply_all()`. После возврата из
-`create()` ни один entrypoint (`cli_agent.py`, `gateway.py`,
-`streamlit_app.py`) SHALL NOT вызывать `apply_all()` или отдельные
+`create()` ни один entrypoint (`cli_agent.py`, `gateway.py`)
+SHALL NOT вызывать `apply_all()` или отдельные
 `patch_*` методы `RuntimePatcher`, входящие в `apply_all`.
 
 Контракт держится **архитектурно** (отсутствие повторных
@@ -90,10 +95,10 @@ call site'ов), а не runtime-механизмом idempotency. `RuntimePatch
   `ctx.runtime_patcher.patch_assemble_outbound(...)` повторно;
   существующий дубль SHALL быть удалён.
 
-#### Scenario: gateway и streamlit не повторно применяют patches
+#### Scenario: gateway не повторно применяет patches
 
-- **WHEN** `gateway.py` или `streamlit_app.py` стартует
-- **THEN** они ДОЛЖНЫ полагаться на `ApplicationContext.create()` как
+- **WHEN** `gateway.py` стартует
+- **THEN** он ДОЛЖЕН полагаться на `ApplicationContext.create()` как
   на единственную точку применения patches и SHALL NOT вызывать
   `patch_*` методы `RuntimePatcher` напрямую.
 
@@ -115,13 +120,15 @@ call site'ов), а не runtime-механизмом idempotency. `RuntimePatch
   или эквивалентного) в production-код не вводится — production
   semantics не меняется ради тестов.
 
-### Requirement: Точное соответствие inventory (финально — 12 patches)
+### Requirement: Точное соответствие inventory (финально — 6 patches)
 
 Множество имён patches, вызываемых `RuntimePatcher.apply_all()`,
 множество ключей `_PATCH_SPECS` и множество имён в
 `lib.services.runtime_inventory.canonical_runtime_patches()` SHALL
-быть попарно равны. **Финальное состояние: 12 patches в каждом из
-трёх множеств** (после удаления `project_tools`). Любое расхождение
+быть попарно равны. **Финальное состояние: 6 patches в каждом из
+трёх множеств** — `exec_limits`, `exec_timeout_cap`, `tool_limits`,
+`assemble_outbound`, `subagent_logging`, `repeat_guard_block`
+(после удаления `project_tools`). Любое расхождение
 считается drift'ом и SHALL быть обнаружено архитектурным тестом.
 
 #### Scenario: Дрейф между apply_all и PatchSpec невозможен
@@ -135,7 +142,7 @@ call site'ов), а не runtime-механизмом idempotency. `RuntimePatch
     `self._record(report, "<name>", ...)`);
   - `set(RuntimePatcher.patch_specs())`;
   - `{p.name for p in canonical_runtime_patches()}`.
-  Все три множества SHALL быть попарно равны (финально — по 12
+  Все три множества SHALL быть попарно равны (финально — по 6
   имён). Это инвариант «three sets exactly equal», а не
   subset-проверка (`assert key in actual` ужесточается до
   `assert set(actual) == expected`).
@@ -156,14 +163,13 @@ call site'ов), а не runtime-механизмом idempotency. `RuntimePatch
   `apply_all()`
 - **THEN** тест SHALL упасть, сигнализируя drift; такие записи
   (`compact_tracking`, `compact_command`, `idle_guard`)
-  SHALL быть удалены в этой change.
+  SHALL быть удалены.
 
 #### Scenario: Фактические элементы apply_all без PatchSpec запрещены
 
 - **WHEN** `apply_all()` зовёт `patch_*` метод, для которого нет
   записи в `_PATCH_SPECS`
-- **THEN** тест SHALL упасть; такие элементы (`turn_delivery_fail`,
-  `session_dir_watch`) SHALL получить `PatchSpec` в этой change.
+- **THEN** тест SHALL упасть; такой элемент SHALL получить `PatchSpec`.
 
 #### Scenario: `project_tools` исключён из runtime inventory
 

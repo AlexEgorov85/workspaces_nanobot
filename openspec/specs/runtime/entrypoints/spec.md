@@ -3,6 +3,11 @@
 ## Purpose
 Определяет контракт application entrypoint'ов (`cli_agent.py`, `gateway.py`) поверх единого composition root. Оба entrypoint'а вызывают `ApplicationContext.create(role=...)` с одной и той же typed signature; различие только в `role` и опциональных CLI-runtime-флагах. AgentLoop остаётся transport-agnostic: transport (CLI = in-memory bus / gateway = PostgresChannel) живёт ниже AgentLoop, не в нём. Cache runtime — abstract (`CacheProvider` interface), владение sync'ом определяется через PG-level ownership claim через отдельную таблицу `agent_cache_ownership` с фиксированным ownership key `local_cache`. Concrete cache implementation (`DuckDbCacheStore`) находится только в composition root и в разделе concrete adapter; runtime consumers работают только через `CacheProvider` interface.
 
+## Scope
+
+`agent` — точки входа и lifecycle агента
+Реализация: `gateway.py`, `cli_agent.py`, `lib/lifecycle/`
+
 ## Requirements
 
 ### Requirement: Единая typed signature ApplicationContext.create с role
@@ -44,8 +49,8 @@ CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **од�
 
 #### Scenario: Defaults для enable_* берутся из конфига
 
-- **WHEN** в `project.json` отсутствуют ключи `gateway.enable_db_logging`, `gateway.enable_audit`, `gateway.enable_cron`, `gateway.print_llm_calls`
-- **THEN** `ApplicationContext.create()` MUST использовать значения: `enable_db_logging=True`, `enable_audit=True`, `enable_cron=True`, `print_llm_calls=False`
+- **WHEN** в `config.json` отсутствуют ключи `gateway.enable_db_logging`, `gateway.enable_audit`, `gateway.enable_cron`, `gateway.print_llm_calls`
+- **THEN** `ApplicationContext.create()` MUST использовать значения: `enable_db_logging=True`, `enable_audit=True`, `enable_cron=False`, `print_llm_calls=False`
 
 ### Requirement: Deprecated kwargs с явной compatibility boundary
 
@@ -60,7 +65,7 @@ MUST NOT приниматься `ApplicationContext.create()`; их переда
 
 Перечень deprecated kwargs SHALL состоять ровно из этих четырёх
 параметров. `profile` MUST NOT входить в этот перечень: у него нет
-migration path в `project.json`, и он не является deprecated API.
+migration path в `config.json`, и он не является deprecated API.
 
 #### Scenario: Deprecated kwargs через **kwargs продолжают работать
 
@@ -93,7 +98,7 @@ migration path в `project.json`, и он не является deprecated API.
 Deprecated compatibility boundary (`DEPRECATED_ENABLE_KWARGS`) предназначена
 исключительно для `enable_db_logging`, `enable_audit`, `enable_cron`,
 `print_llm_calls` — параметров с определённым migration path в
-`project.json` (`gateway.*`). У `profile` такого migration path нет: он не
+`config.json` (`gateway.*`). У `profile` такого migration path нет: он не
 является deprecated API, а уже не является API `ApplicationContext` вовсе.
 
 `ApplicationContext` MUST NOT знать, каким способом был выбран профиль.

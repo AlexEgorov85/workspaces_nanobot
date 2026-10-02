@@ -4,6 +4,11 @@
 
 Определение того, как разрешается prod/test профиль проекта и правила, управляющие поведением на основе профиля. Разрешение профиля происходит во время загрузки конфигурации; бизнес-логика НЕ ДОЛЖНА ветвиться по профилю.
 
+## Scope
+
+`shared` — профиль разрешается агентом, а оверлей имён таблиц применяет платформа; расхождение имён валит старт
+Реализация: `profiles/test.jsonc` + `mcp-platform/platform.json → profiles.test`
+
 ## Responsibility
 
 Profiles отвечают за:
@@ -15,7 +20,7 @@ Profiles отвечают за:
 
 ### Owns
 - механизмом разрешения профиля на этапе загрузки конфигурации
-- применением profile-specific overlays к project.json
+- применением profile-specific overlays к config.json
 - предоставлением resolved profile через SETTINGS для infrastructure
 
 ### Does Not Own
@@ -24,8 +29,8 @@ Profiles отвечают за:
 - созданием новых профилей без OpenSpec change
 
 ### May Depend On
-- project.json (базовая конфигурация)
-- config.json (локальные overrides)
+- config.json (базовая конфигурация)
+- session_manager.json (локальные overrides)
 - .secrets.env (секреты)
 
 ### Must Not Depend On
@@ -58,7 +63,7 @@ through an environment variable, or through re-resolution.
 
 #### Scenario: Профиль разрешён при загрузке конфигурации
 
-- **КОГДА** `project.json`, `config.json` и `.secrets.env` объединены
+- **КОГДА** `config.json`, `session_manager.json` и `.secrets.env` объединены
 - **ТОГДА** активный профиль ДОЛЖЕН быть разрешён и сохранён в `SETTINGS` до запуска любого другого runtime-кода
 
 #### Scenario: Application entrypoint parses --profile
@@ -121,7 +126,7 @@ through an environment variable, or through re-resolution.
 
 ### Requirement: Profile overlays применяются в документированном порядке
 
-Система ДОЛЖНА применять profile-specific overlays к `project.json` согласно документированному порядку слияния. При активном профиле `test` система ДОЛЖНА выбирать test-specific table suffixes (`*_test`) в пяти runtime-ключах (`channels.postgres.{table_name, messages_table, meta_table}`, `logging.db.{table_name, question_runs_table}`), НЕ ДОЛЖНА молча fallback на non-test имена, и для каждого из пяти разрешённых runtime-имён ДОЛЖНА существовать таблица `public.agent_*_test` в БД. Отсутствие таблицы SHALL приводить к ошибке выполнения первого же обращения канала/сервиса/инструмента, а не к тихой подмене на prod-таблицу. Test-таблицы создаются DDL из `sql/<domain>/create_public_agent_*_test.sql` и применяются через `python tools/apply_test_profile_tables.py` (или эквивалентный ручной psql-запуск тех же пяти скриптов). Отдельной миграции для них нет: они не входят в `sql/migrations/`.
+Система ДОЛЖНА применять profile-specific overlays к `config.json` согласно документированному порядку слияния. При активном профиле `test` система ДОЛЖНА выбирать test-specific table suffixes (`*_test`) в пяти runtime-ключах (`channels.postgres.{table_name, messages_table, meta_table}`, `logging.db.{table_name, question_runs_table}`), НЕ ДОЛЖНА молча fallback на non-test имена, и для каждого из пяти разрешённых runtime-имён ДОЛЖНА существовать таблица `public.agent_*_test` в БД. Отсутствие таблицы SHALL приводить к ошибке выполнения первого же обращения канала/сервиса/инструмента, а не к тихой подмене на prod-таблицу. Test-таблицы создаются DDL из `sql/<domain>/create_public_agent_*_test.sql` и применяются через `python tools/apply_test_profile_tables.py` (или эквивалентный ручной psql-запуск тех же пяти скриптов). Отдельной миграции для них нет: они не входят в `sql/migrations/`.
 
 #### Scenario: Test профиль разрешает test таблицы
 - **КОГДА** активный профиль равен `test`
@@ -556,12 +561,12 @@ Gateway entrypoint `gateway.py` MAY принимать `--profile`; это тр�
 ## Dependencies
 
 - `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные принципы
-- `project.json` — базовая конфигурация с профилями
+- `config.json` — базовая конфигурация с профилями
 - `lib/services/config_service.py:ConfigService` — реализация разрешения
 
 ## Configuration
 
-Профили определяются в `project.json`:
+Профили определяются в `config.json`:
 
 ```json
 {
@@ -573,13 +578,13 @@ Gateway entrypoint `gateway.py` MAY принимать `--profile`; это тр�
 ```
 
 Разрешение происходит через:
-1. Базовый profile из project.json
-2. Overrides из config.json
+1. Базовый profile из config.json
+2. Overrides из session_manager.json
 3. Переменные окружения из .secrets.env
 
 ## Lifecycle
 
-1. **Загрузка**: project.json читается при старте
+1. **Загрузка**: config.json читается при старте
 2. **Разрешение**: активный профиль определяется из явного startup-контракта entrypoint (argv `--profile` для `gateway.py`; фиксированный `test` для `cli_agent.py`)
 3. **Слияние**: profile-specific overlays применяются к базовой конфигурации
 4. **Фиксация**: resolved profile сохраняется в SETTINGS
@@ -614,7 +619,7 @@ Resolved profile хранится в SETTINGS как строка (`"prod"` ил
 - `lib/services/config_service.py:ConfigService`
 
 Связанные компоненты:
-- `project.json` — определение профилей
+- `config.json` — определение профилей
 - `docs/PROFILES.md` — описание реализации
 
 ## Verification

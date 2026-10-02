@@ -6,6 +6,11 @@ Defines the observer-pattern contract for nanobot-ai runtime events
 subscribing to `MessageBus.publish`-based event streams, with explicit
 lifecycle (`start`/`stop`) and idempotent context-bridge seeding.
 
+## Scope
+
+`agent` — подписка на runtime-события — агентская
+Реализация: `lib/services/runtime_events_subscriber.py`
+
 ## Requirements
 
 ### Requirement: Подписка на TurnRuntimeAdmitted для seed context bridge

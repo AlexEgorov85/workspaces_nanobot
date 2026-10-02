@@ -3,6 +3,11 @@
 ## Purpose
 Конфигурируемый заготовленный ответ при необработанном исключении в `AgentLoop._process_message` (upstream-`nanobot`) с записью деталей в долговечный журнал `agent_gateway_logs`. Заменяет захардкоженный `"Sorry, I encountered an error."` в `TurnDelivery.fail` на операторски-редактируемый текст без утечки traceback'а пользователю.
 
+## Scope
+
+`agent` — fallback-ответ на внутреннюю ошибку настраивается агентом
+Реализация: `lib/services/turn_delivery_factory.py`
+
 ## Requirements
 
 ### Requirement: Подстановка заготовленного текста при internal-ошибке
@@ -14,23 +19,23 @@
 > получал два ответа. Контракт требовал «заменить», не «дополнить».
 
 WHEN `AgentLoop._process_message` ловит `Exception` (любое исключение, кроме `asyncio.CancelledError`) и зовёт `TurnDelivery.fail`,
-THEN система SHALL отправить пользователю **ровно один** `OutboundMessage` с `content` равным `gateway.error_messages.internal_error` из `project.json` (или default-значению `_DEFAULT_INTERNAL_ERROR_TEXT`, если секция отсутствует),
+THEN система SHALL отправить пользователю **ровно один** `OutboundMessage` с `content` равным `gateway.error_messages.internal_error` из `config.json` (или default-значению `_DEFAULT_INTERNAL_ERROR_TEXT`, если секция отсутствует),
 AND система SHALL **не вызывать** upstream `fail()` для публикации его собственного `OutboundMessage` (вместо этого вызов upstream сохраняется только ради `turn_completed` runtime-event, см. требование `Сохранение runtime-event публикации`),
 AND ни один `publish_outbound` SHALL NOT содержать `content="Sorry, I encountered an error."`.
 
-#### Scenario: Default-текст при отсутствии project.json-секции
+#### Scenario: Default-текст при отсутствии config.json-секции
 
-- **WHEN** в `project.json` нет `gateway.error_messages.internal_error`
+- **WHEN** в `config.json` нет `gateway.error_messages.internal_error`
 - **THEN** пользователь получает `OutboundMessage.content = "Я не справился с вашим вопросом. Попробуйте, пожалуйста, переформулировать конкретнее — например, уточните ключевую часть или приведите пример."`
 
-#### Scenario: Custom-текст из project.json
+#### Scenario: Custom-текст из config.json
 
-- **WHEN** в `project.json` указано `gateway.error_messages.internal_error = "Сервис временно недоступен."`
+- **WHEN** в `config.json` указано `gateway.error_messages.internal_error = "Сервис временно недоступен."`
 - **THEN** пользователь получает `OutboundMessage.content = "Сервис временно недоступен."`
 
 #### Scenario: Невалидный тип секции
 
-- **WHEN** в `project.json` `gateway.error_messages.internal_error` имеет тип, отличный от `string` (например, число или массив)
+- **WHEN** в `config.json` `gateway.error_messages.internal_error` имеет тип, отличный от `string` (например, число или массив)
 - **THEN** старт gateway/CLI падает с `ConfigurationError` (fail-fast на Pydantic-валидации), runtime-до пользователя ошибка не доходит
 
 #### Scenario: Ровно один outbound и ни одного upstream-литерала
@@ -82,12 +87,12 @@ AND при `log_to_db=false` система SHALL **не** вызывать `try
 
 #### Scenario: Запись при log_to_db=true
 
-- **WHEN** в `project.json` `gateway.error_messages.log_to_db=true` (или отсутствует — default)
+- **WHEN** в `config.json` `gateway.error_messages.log_to_db=true` (или отсутствует — default)
 - **THEN** в таблице `agent_gateway_logs` появляется строка с `event_type="turn_failed"` и `payload`, содержащим тип и текст оригинального исключения
 
 #### Scenario: Без записи при log_to_db=false
 
-- **WHEN** в `project.json` `gateway.error_messages.log_to_db=false`
+- **WHEN** в `config.json` `gateway.error_messages.log_to_db=false`
 - **THEN** в `agent_gateway_logs` НЕ появляется новая строка для этого `turn_failed`; оригинальное исключение остаётся только в `loguru`
 
 #### Scenario: Отсутствие DbLoggingService

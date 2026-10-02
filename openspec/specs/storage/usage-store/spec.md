@@ -11,6 +11,11 @@ hook в nanobot 0.3.5). Контракт фиксирует раздельную
 семантику с `DbLoggingService`: `LLMUsageStore` — content-free
 per-call metadata, `DbLoggingService` — content-rich audit-trail.
 
+## Scope
+
+`agent` — хранилище usage создаёт библиотека nanobot, обвязка — агентская
+Реализация: `lib/core/agent_factory.py::_wrap_provider_snapshot_loader`
+
 ## Requirements
 
 ### Requirement: LLMUsageStore подключается через observer-pipeline
@@ -233,7 +238,7 @@ metadata-only LLM usage. `DbLoggingService` НЕ ДОЛЖЕН
 ### Requirement: Конфигурация UsageStore
 
 Путь к SQLite-файлу `LLMUsageStore` MUST быть
-конфигурируемым через `project.json::gateway.usage_store.sqlite_path`
+конфигурируемым через `config.json::gateway.usage_store.sqlite_path`
 (опционально, дефолт — `<get_runtime_subdir("usage")>/usage.db`).
 Никаких других ключей конфигурации для `LLMUsageStore` в
 рамках этого change: размер retention, WAL-mode,
@@ -253,7 +258,7 @@ hardcoded в `nanobot.llm_usage.store`).
 #### Scenario: явный путь UsageStore
 
 - **WHEN** `gateway.usage_store.sqlite_path` задан в
-  `project.json` (например, `"~/.cache/nanobot/usage.db"`)
+  `config.json` (например, `"~/.cache/nanobot/usage.db"`)
 - **THEN** `LLMUsageStore` создаётся по этому пути.
 - **AND** путь MUST расширяться через `Path(...).expanduser()`
   для поддержки `~`.

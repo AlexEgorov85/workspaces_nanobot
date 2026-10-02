@@ -8,6 +8,11 @@
 
 Skills и Tools — **параллельные потребители** общей runtime-инфраструктуры, а не два уровня одной цепочки. Ни один слой не является подсистемой другого.
 
+## Scope
+
+`agent` — правило о слоях навыков и инструментов репозитория агента
+Реализация: `workspace/skills/`, `workspace/tools/`, `lib/services/project_tool_loader.py`
+
 ## Responsibility
 
 Skill/Tool Boundary отвечает за:
@@ -33,7 +38,7 @@ Skill/Tool Boundary отвечает за:
 
 ### May Depend On
 - agent runtime (выбор и вызов Tool'а агентом)
-- project.json (конфигурация skills и tools)
+- config.json (конфигурация skills и tools)
 - shared runtime infrastructure (`lib/services`, `lib/core`, `lib/utils`)
 
 ### Must Not Depend On
@@ -140,7 +145,7 @@ Tool'ом MAY становиться только capability, удовлетво
 - превращать любую callable-функцию в Tool только на основании её generic-природы или того, что она «уже реализована»
 - считать shared runtime infrastructure (`lib/services`, `lib/core`, `lib/utils`) частью Tool-слоя
 - создавать fallback path, который bypass эту границу (нет «legacy Skill import» или «secondary Tool call» механизма)
-- создавать второй реестр Skills или Tools вне объявленного в `project.json::skills.*`
+- создавать второй реестр Skills или Tools вне объявленного в `config.json::skills.*`
 - добавлять альтернативный execution path (например, Tool напрямую callable без tool-call interface)
 
 ## Dependencies
@@ -149,11 +154,11 @@ Tool'ом MAY становиться только capability, удовлетво
 - `docs/skill-tool-architecture.md` — описание реализации (descriptive)
 - `docs/SKILL_AUTHORING.md` — руководство по созданию Skills
 - `openspec/specs/data/cache-provider/spec.md` — контракт shared SQL-кэша/FAISS
-- `project.json` — конфигурация skills и tools
+- `config.json` — конфигурация skills и tools
 
 ## Configuration
 
-Skills регистрируются декларативно в `project.json::skills.<name>` (валидация — `SkillSettings`, `extra="forbid"`):
+Skills регистрируются декларативно в `config.json::skills.<name>` (валидация — `SkillSettings`, `extra="forbid"`):
 
 ```json
 {
@@ -164,21 +169,21 @@ Skills регистрируются декларативно в `project.json::s
 }
 ```
 
-Tools **не** перечисляются в реестре `project.json`: они обнаруживаются
+Tools **не** перечисляются в реестре `config.json`: они обнаруживаются
 автоматически по `workspace/tools/*.py` (`lib/services/project_tool_loader.py::register_project_tools`).
 Их секции конфигурации читаются из `ctx._settings_ref.tools.<config_key>`
 (исторические секции — `gateway.<config_key>`), например
 `gateway.compact.*` для `compact_context`.
 
-Правило: перечисление capability в `project.json` конфигурирует Skill,
+Правило: перечисление capability в `config.json` конфигурирует Skill,
 а не регистрирует Tool.
 
 ## Lifecycle
 
-1. **Регистрация**: Skills объявляются в `project.json::skills.*`; Tools обнаруживаются по `workspace/tools/*.py`
+1. **Регистрация**: Skills объявляются в `config.json::skills.*`; Tools обнаруживаются по `workspace/tools/*.py`
 2. **Инициализация**: agent runtime загружает оба набора при старте
 3. **Вызов**: агент выбирает capability; Tool вызывается агентом, Skill работает через свои scripts и runtime interfaces — Skill не вызывает Tool
-4. **Обновление**: новые Skills/Tools добавляются через change в `project.json` / `workspace/tools/`
+4. **Обновление**: новые Skills/Tools добавляются через change в `config.json` / `workspace/tools/`
 
 ## State
 
@@ -211,7 +216,7 @@ Tools **не** перечисляются в реестре `project.json`: он
 - `docs/SKILL_AUTHORING.md` — руководство по authoring
 
 Связанные компоненты:
-- `project.json` — конфигурация skills
+- `config.json` — конфигурация skills
 - `workspace/skills/` — директория Skills
 - `workspace/tools/` — директория Tools (auto-discovery)
 - `lib/services/project_tool_loader.py` — регистрация project tools

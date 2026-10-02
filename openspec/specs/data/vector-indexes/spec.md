@@ -4,6 +4,11 @@
 
 Определение логической модели для векторных индексов: источник конфигурации, lifecycle индекса, доступ Skills/сервисов и поведение при ошибке. Векторные индексы управляются централизованно и предоставляются через `CacheProvider.search_vector`.
 
+## Scope
+
+`platform` — сборка и владение FAISS-индексами уехали в capability `vectors`; агент индексы не строит и не хранит
+Реализация: `mcp-platform/libs/vectors/`, объявления в `platform.json → vectors.indexes`
+
 ## Responsibility
 
 Vector Indexes отвечают за:
@@ -15,7 +20,7 @@ Vector Indexes отвечают за:
 ## Boundary
 
 ### Owns
-- конфигурацией векторных индексов в project.json
+- конфигурацией векторных индексов в config.json
 - сборкой и хранением FAISS индексов
 - предоставлением vector search API через CacheProvider.search_vector
 
@@ -25,7 +30,7 @@ Vector Indexes отвечают за:
 - альтернативными vector storage backends
 
 ### May Depend On
-- project.json (конфигурация индексов)
+- config.json (конфигурация индексов)
 - FAISS library
 - PostgreSQL (хранение embeddings)
 - CacheProvider (доступ к индексу)
@@ -38,7 +43,7 @@ Vector Indexes отвечают за:
 ## Public Contract
 
 VectorIndexService предоставляет:
-- загрузку конфигурации индексов из project.json
+- загрузку конфигурации индексов из config.json
 - сборку FAISS индексов через build_vectors.py
 - поиск по векторному сходству через CacheProvider.search_vector
 
@@ -46,12 +51,12 @@ VectorIndexService предоставляет:
 
 ### Requirement: Единый источник конфигурации
 
-Система ДОЛЖНА читать конфигурацию векторного индекса только из `gateway.vector.index.indexes.*` в `project.json`.
+Система ДОЛЖНА читать конфигурацию векторного индекса только из `gateway.vector.index.indexes.*` в `config.json`.
 
 #### Scenario: Конфигурация индекса
 
 - **КОГДА** векторный индекс добавлен или изменён
-- **ТОГДА** его декларация ДОЛЖНА находиться под `gateway.vector.index.indexes.<name>` в `project.json`
+- **ТОГДА** его декларация ДОЛЖНА находиться под `gateway.vector.index.indexes.<name>` в `config.json`
 
 ### Requirement: Storage table зарегистрирован через infra API
 
@@ -105,7 +110,7 @@ VectorIndexService предоставляет:
 
 #### Scenario: Смена таблицы через настройки
 
-- **WHEN** оператор меняет значение `gateway.vector.index.storage_table` или `gateway.vector.index.signature_table` в `project.json`
+- **WHEN** оператор меняет значение `gateway.vector.index.storage_table` или `gateway.vector.index.signature_table` в `config.json`
 - **THEN** система SHALL использовать новые имена без изменений в коде спецификации или runtime-коде, требующих релизов.
 
 ### Requirement: Hydrated payload берётся из DuckDB-снапшота
@@ -221,7 +226,7 @@ VectorIndexService предоставляет:
 
 ## Lifecycle
 
-1. **Конфигурация**: индексы определяются в project.json
+1. **Конфигурация**: индексы определяются в config.json
 2. **Сборка**: build_vectors.py строит FAISS индексы из данных
 3. **Публикация**: индексы сохраняются в default_root
 4. **Загрузка**: индексы загружаются по demand при query
@@ -236,7 +241,7 @@ VectorIndexService хранит:
 
 ## Invariants
 
-- Конфигурация читается только из project.json
+- Конфигурация читается только из config.json
 - Все индексы FAISS-backed
 - Единый access path через CacheProvider.search_vector
 - Нет legacy table reads
@@ -267,5 +272,5 @@ VectorIndexService хранит:
 
 Валидация включает:
 1. Проверка отсутствия прямого доступа к FAISS из Skills (code review)
-2. Проверка конфигурации только из project.json (тесты)
+2. Проверка конфигурации только из config.json (тесты)
 3. Проверка отсутствия legacy table reads (grep, тесты)

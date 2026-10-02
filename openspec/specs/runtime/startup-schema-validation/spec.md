@@ -9,9 +9,14 @@
 сообщением, содержащим полный список недостающих таблиц в формате
 `schema.table`.
 
+## Scope
+
+`agent` — pre-startup проверка runtime-таблиц принадлежит агенту; у платформы своя, для её собственных таблиц
+Реализация: `lib/services/schema_validation.py`
+
 ## Ответственность
 
-- Pre-startup проверка наличия 6 runtime-таблиц в БД.
+- Pre-startup проверка наличия 5 runtime-таблиц в БД.
 - Жёсткая блокировка старта (`exit 2` + `stderr`) при отсутствии любой
   из таблиц.
 - Резолв списка ожидаемых таблиц ТОЛЬКО из merged SETTINGS
@@ -235,7 +240,7 @@ SHALL формировать сообщение на русском, содер�
 2. Список недостающих ключей в формате `channels.postgres.*` /
    `logging.db.*` (по одному на строку).
 3. Имя активного профиля.
-4. Подсказку с указанием конкретной секции `project.json`
+4. Подсказку с указанием конкретной секции `config.json`
    (`channels.postgres.*` / `logging.db.*`), где ключ должен быть
    определён.
 
@@ -247,7 +252,7 @@ SHALL формировать сообщение на русском, содер�
 - **WHEN** в settings отсутствуют ожидаемые ключи
 - **THEN** `_MissingConfigKeys.__str__` возвращает сообщение
   на русском, содержащее имя профиля, список недостающих ключей
-  и подсказку про секцию `project.json`
+  и подсказку про секцию `config.json`
 
 ## Запрещённое поведение
 
@@ -327,7 +332,7 @@ SHALL формировать сообщение на русском, содер�
 - Любой startup-error (отсутствие таблиц, отсутствие ключей в
   settings, ошибка БД) идёт через `ConfigurationError` →
   `exit 2` + `stderr`.
-- Имена 6 runtime-таблиц ВСЕГДА резолвятся из
+- Имена 5 runtime-таблиц ВСЕГДА резолвятся из
   `SETTINGS["channels"]["postgres"]` + `SETTINGS["logging"]["db"]`,
   не из кода проверки.
 - `SchemaValidationError.missing: list[MissingTable]` отсортирован
@@ -337,7 +342,7 @@ SHALL формировать сообщение на русском, содер�
 
 | Ситуация | Поведение |
 |----------|-----------|
-| Все 6 таблиц на месте | No-op (старт продолжается) |
+| Все 5 таблиц на месте | No-op (старт продолжается) |
 | 1+ таблиц отсутствуют | `SchemaValidationError` → `exit 2` |
 | Ключ `channels.postgres.*` отсутствует в settings | `_MissingConfigKeys` (наследник `SchemaValidationError`) → `exit 2` |
 | Ключ `logging.db.*` отсутствует в settings | `_MissingConfigKeys` → `exit 2` |
@@ -348,4 +353,3 @@ SHALL формировать сообщение на русском, содер�
 
 - `gateway.py:main()` — startup-boundary.
 - `cli_agent.py:main()` — startup-boundary.
-- `streamlit_app.py` (через ApplicationContext) — startup-boundary.
