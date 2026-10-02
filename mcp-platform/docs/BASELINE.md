@@ -155,7 +155,7 @@ cd mcp-platform && python -m pytest -q
 | Тест | Чей | Почему |
 |---|---|---|
 | `tests/test_vectors_indexing.py::TestBuildFaissIndex::test_cosine_normalizes_vectors` | предсуществующий | дефект изоляции в `test_server_bootstrap.py`: из `sys.modules` вычищается только верхний `numpy`, подмодули остаются от прежнего экземпляра → рекурсия в ленивом `__getattr__`. Воспроизводится тремя файлами: `test_vectors_capability.py`, `test_server_bootstrap.py`, `test_vectors_indexing.py` |
-| `tests/test_settings_registry.py::TestRegistryIsComplete::test_every_declared_name_is_read_somewhere` | **чужой, в работе** | объявлены `ENTERPRISE_LOG_RETENTION_DAYS` и `ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND`, которые пока никто не читает. Правятся `libs/enterprise_common/settings.py` и `platform.json` — файлы вне владения фазы 8 |
+| `tests/test_settings_registry.py::TestRegistryIsComplete::test_every_declared_name_is_read_somewhere` | **чужой, в работе** | объявлены `ENTERPRISE_LOG_RETENTION_DAYS` и `ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND`, которые пока никто не читает. Правятся `libs/enterprise_common/settings.py` и `platform.json` — файлы вне владения фазы 8. **Устарело:** на 2026-10-02 тест проходит — оба имени читаются в `servers/enterprise/server.py` (`log_retention_days=`, `purge_empty_outbound=` в `DataService`), объявлены в `platform.json → data.log_retention_days: 90` и `data.log_purge_empty_outbound: true`, а правило очистки применяет `capabilities/data/tools/purge_logs.py` |
 
 Четыре падения в `tests/legal_summarizer/`, наблюдавшиеся в начале фазы
 (`test_structure_identity`, `test_structure_document_analysis`,
@@ -209,7 +209,7 @@ cd mcp-platform && python -m pytest -q
 ## Решение по снимку DuckDB (на baseline не влияет)
 
 Числа тестов в этом документе не менялись: коммит правил только план. Код агента
-(`lib/`, `workspace/`, `sql/`, `requirements.txt`, `project.json`) не тронут.
+(`lib/`, `workspace/`, `sql/`, `requirements.txt`, `config.json`) не тронут.
 
 Предыдущая редакция change `enterprise-mcp-platform` выписывала локальный снимок
 DuckDB из проекта и считала это ~2 600 удаляемых строк и 10 удаляемых тестовых
