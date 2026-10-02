@@ -1,0 +1,338 @@
+"""DocumentStructure как SoT для всех downstream'ов.
+
+Этот модуль — **точка сборки** canonical pipeline:
+
+    file → DocumentLoader → DocumentIdentity → DocumentStructure
+        → repair → validate → ChunkPlanner → DocumentAnalysis
+        → ExecutionPlan → batch execution → ...
+
+Все компоненты принимают ``DocumentStructure`` как вход; не делают
+повторных определений heading/numbering/etc.
+
+Canonical pipeline — единственный production path. Legacy API
+(``SectionTree``, ``DocumentSection``, ``build_section_tree``) удалены.
+
+Document-level cache: ``DocumentCache`` (см. ``cache/document_cache.py``).
+Pipeline **не** знает про cache paths / marker / snapshot filenames —
+это ответственность ``DocumentCache``. Pipeline только проверяет
+наличие snapshot через ``DocumentCache.is_complete`` и зовёт
+``DocumentCache.read_snapshot`` / ``write_snapshot``. Change detection
+работает через ``document_id`` hash (SHA-256 от path+size+mtime);
+invalidate явно не требуется, потому что новый файл = новый
+``document_id`` = cache miss.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from libs.legal_summarizer.cache.document_cache import DocumentCache
+from libs.legal_summarizer.chunking.chunks import Chunk
+from libs.legal_summarizer.document.analysis import (
+    DocumentAnalysis,
+)
+from libs.legal_summarizer.chunking.chunker import (
+    ChunkPlanner,
+)
+from libs.legal_summarizer.document.loader import (
+    DocumentLoader,
+)
+from libs.legal_summarizer.document.heading import (
+    detect_heading_candidates,
+)
+from libs.legal_summarizer.document.hierarchy import (
+    StructureTreeBuilderConfig,
+    build_document_structure,
+)
+from libs.legal_summarizer.document.identity import (
+    DocumentIdentity,
+)
+from libs.legal_summarizer.document.structure import (
+    DocumentStructure,
+)
+from libs.legal_summarizer.document.physical import (
+    PhysicalDocument,
+)
+from libs.legal_summarizer.document.repair import (
+    repair_structure,
+)
+from libs.legal_summarizer.document.title import (
+    resolve_title,
+)
+from libs.legal_summarizer.document.validation import (
+    ValidationReport, validate_structure,
+)
+
+
+def _read_context_window_tokens() -> int | None:
+    """Окно модели в токенах из настроек домена.
+
+    Раньше читалось ``config.json::agents.defaults.contextWindowTokens``
+    агента, который к домену отношения не имеет. Теперь значение приходит
+    из :mod:`libs.legal_summarizer.llm.config`: его объявляет capability
+    ``legal_summarizer``, а не чужой настройкой модели.
+
+    Returns:
+        int или None если окно неизвестно.
+    """
+    from libs.legal_summarizer.llm.config import get_context_window_tokens
+
+    return get_context_window_tokens()
+
+
+@dataclass(frozen=True)
+class PipelineResult:
+    """Полный результат canonical pipeline."""
+
+    analysis: DocumentAnalysis
+    validation: ValidationReport
+    chunks: tuple[Chunk, ...]
+
+
+def _try_load_cached_pipeline_result(
+    *,
+    path: str | Path,
+    workspace_root: Path | str | None,
+    session_key: str = "default",
+    include_retrieval_index: bool = True,
+) -> PipelineResult | None:
+    """Попробовать загрузить cached ``PipelineResult`` из document-level cache.
+
+    Условия cache hit:
+      * ``workspace_root`` не None (для path resolution);
+      * файл существует;
+      * snapshot complete для текущего ``document_id``
+        (SHA-256 от path+size+mtime — если файл изменился,
+        ``document_id`` другой → cache miss → reparse).
+
+    При hit восстанавливает ``PhysicalDocument``, ``DocumentStructure``,
+    ``Chunk[]``, ``ValidationReport`` из их ``to_dict``. ``RetrievalIndex``
+    пересобирается заново (детерминированно из chunks+structure),
+    если ``include_retrieval_index=True``; иначе ``analysis.retrieval_index``
+    остаётся ``None`` (как и на cache miss с тем же параметром).
+
+    Note:
+        Change detection работает через ``document_id`` hash, не через
+        explicit ``DocumentIdentity.is_fresh`` check. Когда файл
+        изменяется, ``DocumentIdentity.from_path(path)`` создаёт
+        identity с новым fingerprint → новый ``document_id`` →
+        ``cache.is_complete`` возвращает ``False`` → cache miss.
+        Старый snapshot остаётся на диске как orphan (cache hygiene
+        responsibility вне scope этого метода).
+
+    Returns:
+        ``PipelineResult`` или ``None`` при miss.
+    """
+    if workspace_root is None:
+        return None
+
+    try:
+        identity = DocumentIdentity.from_path(path)
+    except (FileNotFoundError, OSError):
+        return None
+
+    cache = DocumentCache(workspace_root, session_key)
+
+    if not cache.is_complete(identity.document_id):
+        return None
+
+    snap = cache.read_snapshot(identity.document_id)
+    if snap is None:
+        return None
+    physical_data, analysis_data, _meta = snap
+    if physical_data is None or analysis_data is None:
+        return None
+
+    try:
+        physical = PhysicalDocument.from_dict(physical_data)
+        structure = DocumentStructure.from_dict(analysis_data["structure"])
+        validation = ValidationReport.from_dict(
+            analysis_data.get("validation") or {},
+        )
+        chunks = tuple(Chunk.from_dict(c) for c in analysis_data["chunks"])
+    except (KeyError, TypeError, ValueError):
+        # Битый snapshot — инвалидируем и cache miss.
+        cache.invalidate(identity.document_id)
+        return None
+
+    analysis = DocumentAnalysis.build(
+        physical=physical,
+        structure=structure,
+        chunks=chunks,
+        identity=identity,
+        include_retrieval_index=include_retrieval_index,
+        semantic_records={},
+    )
+
+    return PipelineResult(
+        analysis=analysis,
+        validation=validation,
+        chunks=chunks,
+    )
+
+
+def _write_document_snapshot_after_pipeline(
+    *,
+    path: str | Path,
+    workspace_root: Path | str | None,
+    physical: PhysicalDocument,
+    identity: DocumentIdentity,
+    structure: DocumentStructure,
+    validation: ValidationReport,
+    chunks: tuple[Chunk, ...],
+    analysis: DocumentAnalysis,
+    session_key: str = "default",
+) -> None:
+    """Сохранить document-level snapshot после успешного canonical pipeline.
+
+    Используется только при cache miss. При cache hit snapshot
+    уже существует и ``DocumentCache.write_snapshot`` выбросит
+    ``RuntimeError`` — мы это явно НЕ вызываем в hit-ветке.
+    """
+    if workspace_root is None:
+        return
+
+    analysis_payload = {
+        "version": 1,
+        "document_id": identity.document_id,
+        "structure": structure.to_dict(),
+        "chunks": [c.to_dict() for c in chunks],
+        "validation": validation.to_dict(),
+    }
+    retrieval_meta: dict[str, Any] | None = None
+    if analysis.retrieval_index is not None:
+        retrieval_meta = {
+            "chunk_count": len(analysis.retrieval_index.chunks),
+            "term_count": len(analysis.retrieval_index.term_to_chunks),
+        }
+
+    cache = DocumentCache(workspace_root, session_key)
+    try:
+        cache.write_snapshot(
+            document_id=identity.document_id,
+            physical_data=physical.to_dict(),
+            analysis_data=analysis_payload,
+            retrieval_index_meta=retrieval_meta,
+        )
+    except RuntimeError:
+        # Уже complete (конкурентная запись или race) — это OK, ничего не делаем.
+        pass
+
+
+def run_canonical_pipeline(
+    path: str | Path,
+    *,
+    text: str | None = None,
+    apply_repair: bool = True,
+    include_retrieval_index: bool = True,
+    workspace_root: Path | str | None = None,
+    session_key: str = "default",
+) -> PipelineResult:
+    """Запустить canonical pipeline.
+
+    При наличии document-level cache — попытка cache hit:
+    если файл не менялся (mtime/size) и snapshot complete — возвращаем
+    восстановленный ``PipelineResult`` без повторного парсинга PDF/DOCX,
+    heading detection, structure build, ChunkPlanner.
+
+    При cache miss — полный pipeline + запись snapshot в конце.
+
+    Args:
+        path: путь к документу.
+        text: полный текст (для fallback title resolution).
+        apply_repair: применить repair pass.
+        include_retrieval_index: построить inverted index.
+        workspace_root: корень workspace.
+        session_key: ключ сессии для session-scoped cache-пути.
+
+    Returns:
+        ``PipelineResult`` с ``DocumentAnalysis``, ``ValidationReport``,
+        и ``chunks``.
+    """
+    # cache hit branch.
+    cached = _try_load_cached_pipeline_result(
+        path=path,
+        workspace_root=workspace_root,
+        session_key=session_key,
+        include_retrieval_index=include_retrieval_index,
+    )
+    if cached is not None:
+        return cached
+
+    # Cache miss — existing pipeline.
+    loader = DocumentLoader()
+    physical = loader.load(path, workspace_root=workspace_root)
+    identity = DocumentIdentity.from_path(physical.path)
+
+    candidates = detect_heading_candidates(
+        physical.blocks, pdf_path=str(path) if str(path).endswith(".pdf") else None,
+        physical_doc=physical,
+    )
+    struct = build_document_structure(
+        candidates,
+        total_blocks=len(physical.blocks),
+        config=StructureTreeBuilderConfig(document_id=identity.document_id),
+    )
+    title = resolve_title(physical, text=text)
+    if title is not None:
+        struct = DocumentStructure(
+            document_id=struct.document_id,
+            title=title,
+            nodes=struct.nodes,
+            root_id=struct.root_id,
+            preamble_node_id=struct.preamble_node_id,
+            numbering=struct.numbering,
+            total_blocks=struct.total_blocks,
+            coverage_ratio=struct.coverage_ratio,
+        )
+
+    if apply_repair:
+        struct, _ = repair_structure(struct)
+
+    validation = validate_structure(struct, physical)
+
+    from libs.legal_summarizer.chunking.chunker import (
+        ChunkPlanner,
+        DocumentStructureChunkerConfig,
+        build_chunk_config_from_runtime,
+    )
+    context_window_tokens = _read_context_window_tokens()
+    chunker_config = DocumentStructureChunkerConfig(
+        chunk_config=build_chunk_config_from_runtime(
+            context_window_tokens=context_window_tokens,
+        ),
+    )
+    planner = ChunkPlanner(config=chunker_config)
+    chunks = tuple(planner.plan(physical, struct))
+
+    analysis = DocumentAnalysis.build(
+        physical=physical,
+        structure=struct,
+        chunks=chunks,
+        identity=identity,
+        include_retrieval_index=include_retrieval_index,
+    )
+
+    # write snapshot после успешного pipeline (cache miss).
+    _write_document_snapshot_after_pipeline(
+        path=path,
+        workspace_root=workspace_root,
+        physical=physical,
+        identity=identity,
+        structure=struct,
+        validation=validation,
+        chunks=chunks,
+        analysis=analysis,
+        session_key=session_key,
+    )
+
+    return PipelineResult(
+        analysis=analysis,
+        validation=validation,
+        chunks=chunks,
+    )
+
+
+__all__ = ["PipelineResult", "run_canonical_pipeline"]

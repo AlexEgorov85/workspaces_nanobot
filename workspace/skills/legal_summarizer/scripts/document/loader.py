@@ -12,7 +12,16 @@ Legacy ``load_physical_document`` удалён. Все consumers
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+#: Корень платформы — от этого файла, а не от
+#: ``cwd``: ``scripts/document/loader.py`` → ``parents[5]`` = корень репозитория.
+#: Парсер офисных файлов один на проект и живёт там
+#: (change ``enterprise-mcp-platform``, фаза 11).
+_PLATFORM_ROOT = Path(__file__).resolve().parents[5] / "mcp-platform"
+if str(_PLATFORM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM_ROOT))
 
 from document.physical import (
     PhysicalDocument,
@@ -22,7 +31,7 @@ from document.physical import (
     _iter_txt_blocks,
     _pick_title_from_text,
 )
-from workspace.utils.office_files import detect_format
+from libs.office import detect_format
 
 
 class DocumentLoader:

@@ -1,22 +1,31 @@
 """Document IO: извлечение plain text из файла документа.
 
-Тонкая обёртка над ``workspace.utils.office_files.extract_text`` с
+Тонкая обёртка над ``libs.office.extract_text`` с
 поддержкой brief-режима для PDF (первые 100 стр. + до 300К символов
 через pypdf).
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from workspace.utils.office_files import extract_text
+#: Корень платформы — от этого файла, а не от
+#: ``cwd``: ``scripts/application/document_io.py`` → ``parents[5]`` = корень репозитория.
+#: Парсер офисных файлов один на проект и живёт там
+#: (change ``enterprise-mcp-platform``, фаза 11).
+_PLATFORM_ROOT = Path(__file__).resolve().parents[5] / "mcp-platform"
+if str(_PLATFORM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM_ROOT))
+
+from libs.office import extract_text
 
 
 _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 
 
 def load_text(path, *, mode: str = "full") -> str:
-    """Извлечь plain text из файла через office_files.
+    """Извлечь plain text из файла через парсер (``libs.office``).
 
     ``mode='brief'`` для PDF: первые 100 стр. + до 300К символов через pypdf.
     ``mode='full'`` (по умолчанию): полная экстракция через pdfplumber/extract_text.

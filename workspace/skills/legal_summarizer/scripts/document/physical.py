@@ -1,13 +1,13 @@
 """PhysicalDocument: нормализованный список блоков документа с координатами.
 
-Это **adapter** над ``workspace.utils.office_files``, не parser.
+Это **adapter** над ``libs.office``, не parser.
 
-Что берём из office_files:
-  * ``extract_structure(path)`` → ``title``, ``begin``, ``end``, ``text``,
-    ``format``, ``size_bytes`` (full text).
-  * ``extract_tables(path)`` → для DOCX/PDF: список таблиц.
+Что берём у парсера (``libs.office``):
+  * ``extract_text(path)`` → полный текст документа; ``title``,
+    ``format``, ``size_bytes`` собираются из него точечными
+    обёртками (``_build_structure_dict``).
 
-Чего office_files не возвращает, и мы добавляем сами (точечные обёртки):
+Чего парсер не возвращает, и мы добавляем сами (точечные обёртки):
   * ``PdfReader.pages[i].extract_text()`` → отдельный ``DocumentBlock``
     с ``page_index=i+1``.
   * ``Document.paragraphs[i].text`` → отдельный ``DocumentBlock``
@@ -38,15 +38,19 @@
 
 from __future__ import annotations
 
-import json
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from workspace.utils.office_files import (
-    detect_format,
-    extract_tables,
-)
+#: Корень платформы — от этого файла, а не от
+#: ``cwd``: ``scripts/document/physical.py`` → ``parents[5]`` = корень репозитория.
+#: Парсер офисных файлов один на проект и живёт там
+#: (change ``enterprise-mcp-platform``, фаза 11).
+_PLATFORM_ROOT = Path(__file__).resolve().parents[5] / "mcp-platform"
+if str(_PLATFORM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM_ROOT))
+
 from cache.manifest import manifest_root
 from document.identity import (
     DocumentIdentity,
@@ -211,12 +215,12 @@ def _build_structure_dict(path: Path, fmt: str) -> dict[str, Any]:
     """Построить минимальный dict с полями, нужными PhysicalDocument.
 
     Поля: ``title``, ``text``, ``begin``, ``end``, ``format``, ``size_bytes``.
-    Аналог ранее существовавшего ``office_files.extract_structure``.
+    Аналог ранее существовавшего ``extract_structure`` из парсера.
     """
     text = ""
     text_error: str | None = None
     try:
-        from workspace.utils.office_files import extract_text
+        from libs.office import extract_text
         text = extract_text(path)
     except Exception as e:
         text_error = str(e)
@@ -234,7 +238,7 @@ def _build_structure_dict(path: Path, fmt: str) -> dict[str, Any]:
 
 
 def _table_to_text(table: list[list[str]]) -> str:
-    """Склеить таблицу в текст с ``|``-разделителем ячеек (как office_files)."""
+    """Склеить таблицу в текст с ``|``-разделителем ячеек (как в парсере)."""
     lines: list[str] = []
     for row in table:
         cells = [c.strip() if c else "" for c in row]

@@ -7,9 +7,12 @@
 решает, когда прочитать документ, инструментом — порог переносится в этот
 tool, а не в промпт.
 
-Извлечение текста делегировано ``workspace/utils/office_files.py``
-(DOCX/XLSX/XLS/PDF/PPTX/CSV/TXT) — единственный парсер в агенте. Модуль
-остаётся здесь (п. 6.13: ``tests/test_office_files.py`` не переезжает).
+Извлечение текста делегировано парсеру платформы
+(``mcp-platform/libs/office``, DOCX/XLSX/XLS/PDF/PPTX/CSV/TXT) — единственному
+парсеру в проекте. Агент импортирует его напрямую, а не через MCP: отдельная
+операция ради локального чтения файла была бы вторым путём к тому же разбору.
+Тест парсера остаётся в прогоне агента (п. 6.13:
+``tests/test_office_files.py`` не переезжает).
 
 Регистрация — стандартный путь project tools:
 ``lib.services.project_tool_loader.register_project_tools`` (auto-discover
@@ -30,6 +33,7 @@ tool, а не в промпт.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -37,7 +41,14 @@ from pydantic import BaseModel, Field
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 
-#: Форматы, которые умеет ``utils.office_files.extract_text``.
+#: Корень платформы — от этого файла, а не от ``cwd``: ``workspace/tools/``
+#: → ``parents[2]`` = корень репозитория. Зависимость строго односторонняя:
+#: платформа не знает про агента, агент читает платформенный парсер.
+_PLATFORM_ROOT = Path(__file__).resolve().parents[2] / "mcp-platform"
+if str(_PLATFORM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM_ROOT))
+
+#: Форматы, которые умеет ``libs.office.extract_text``.
 SUPPORTED_SUFFIXES: tuple[str, ...] = (
     "docx", "xlsx", "xls", "pdf", "pptx", "csv", "txt",
 )
@@ -202,9 +213,9 @@ class DocumentReadTool(Tool):
         start = _as_offset(offset)
 
         try:
-            from utils.office_files import extract_text
+            from libs.office import extract_text
         except Exception as exc:
-            return ToolResult.error(f"Error: office_files import failed: {exc}")
+            return ToolResult.error(f"Error: office parser import failed: {exc}")
 
         try:
             text = extract_text(target)

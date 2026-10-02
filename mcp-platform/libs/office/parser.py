@@ -1,10 +1,23 @@
+"""Разбор офисных документов — единственный парсер в проекте.
+
+Перенесён 2026-10-02 из ``workspace/utils/office_files.py`` (change
+``enterprise-mcp-platform``, фаза 11). Платформа владеет логикой, потребители
+её вызывают: ``libs/legal_summarizer/document/physical.py`` (adapter поверх
+разбора) и tool агента ``document_read``.
+
+Поддержка: DOCX/XLSX/XLS/PDF/PPTX/CSV/TXT. Импорты движков ленивые — модуль
+импортируется без единой третьесторонней библиотеки, а разбор поднимает
+только тот движок, который нужен конкретному файлу. Вторая копия парсера в
+агенте была бы второй реализацией одного и того же разбора: расхождение в
+разделителях таблиц или в определении кодировки проявилось бы сначала в
+юридическом суммаризаторе, а потом в ответах агента.
+"""
+
 from __future__ import annotations
 
 import csv
 import mimetypes
 from pathlib import Path
-
-import chardet
 
 
 def detect_format(path: str | Path) -> str:
@@ -18,19 +31,33 @@ def detect_format(path: str | Path) -> str:
     return ""
 
 
+def _detect_encoding(raw: bytes) -> tuple[str, float]:
+    """Кодировка байтов по ``chardet``; ``("", 0.0)``, если он недоступен.
+
+    Импорт ленивый и необязательный: платформа не объявляет ``chardet``
+    зависимостью, и без него должна оставаться работоспособной, а не
+    неимпортируемой. Нулевая уверенность отправляет текст в цепочку
+    кодировок в :func:`_read_text_auto`, где решение принимается перебором.
+    """
+    try:
+        from chardet import detect
+    except ImportError:
+        return "", 0.0
+    detected = detect(raw) or {}
+    return str(detected.get("encoding") or ""), float(detected.get("confidence") or 0.0)
+
+
 def _read_text_auto(path: Path) -> str:
     raw = path.read_bytes()
-    detected = chardet.detect(raw)
-    encoding = detected.get("encoding") or "utf-8"
-    confidence = float(detected.get("confidence") or 0.0)
-    if confidence < 0.7:
-        for fallback in ("utf-8", "cp1251", "latin-1"):
-            try:
-                return raw.decode(fallback)
-            except UnicodeDecodeError:
-                continue
-        return raw.decode("utf-8", errors="replace")
-    return raw.decode(encoding, errors="replace")
+    encoding, confidence = _detect_encoding(raw)
+    if encoding and confidence >= 0.7:
+        return raw.decode(encoding, errors="replace")
+    for fallback in ("utf-8", "cp1251", "latin-1"):
+        try:
+            return raw.decode(fallback)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def _extract_docx(path: Path) -> str:

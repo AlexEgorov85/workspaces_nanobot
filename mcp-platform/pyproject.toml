@@ -40,6 +40,26 @@ dependencies = [
     # Вывод пула PostgreSQL в консоль (libs/enterprise_data/db.py). Тоже
     # ленивый: без него платформа обязана работать, просто молча.
     "rich>=13.0",
+    # Разбор офисных документов. Живёт в libs/office (перенесён из агента,
+    # п. 11.1) и читается доменом legal_summarizer: document/physical.py,
+    # document/loader.py, application/document_io.py. Пины — как в
+    # requirements.txt агента: сервер запускается тем же интерпретатором
+    # (project.json::enterprise_mcp.command = ${NANOBOT_PYTHON}), поэтому
+    # «свой» диапазон версий здесь означал бы расхождение с окружением
+    # агента, а не свободу выбора.
+    "python-docx==1.2.0",
+    "openpyxl==3.1.5",
+    # .xls (старый бинарный формат) — openpyxl его не читает.
+    "xlrd==2.0.2",
+    "pypdf==5.9.0",
+    "pdfplumber==0.11.10",
+    "python-pptx==1.0.2",
+    # Определение кодировки текстовых файлов. В libs/office/parser.py
+    # необязателен: без него кодировка подбирается перебором
+    # utf-8/cp1251/latin-1, но точность падает, поэтому пакет объявлен.
+    "chardet==7.6.0",
+    # Структурированный лог домена (libs/legal_summarizer/document/hierarchy.py).
+    "loguru==0.7.3",
 ]
 
 [project.optional-dependencies]

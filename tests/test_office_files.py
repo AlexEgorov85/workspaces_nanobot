@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -8,7 +9,14 @@ from docx import Document
 from openpyxl import Workbook
 from pptx import Presentation
 
-from workspace.utils import office_files as of
+#: Парсер офисных файлов живёт в платформе (change ``enterprise-mcp-platform``,
+#: фаза 11), а тест остаётся в прогоне агента (п. 6.13). Копии парсера в
+#: проекте быть не должно, поэтому проверяем платформенный модуль.
+_PLATFORM_ROOT = Path(__file__).resolve().parents[1] / "mcp-platform"
+if str(_PLATFORM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM_ROOT))
+
+from libs.office import parser as of  # noqa: E402
 
 
 @pytest.fixture
