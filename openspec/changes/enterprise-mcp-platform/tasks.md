@@ -410,10 +410,16 @@
       обязателен**: без него сервер поднимается, а чтение отдаёт
       `infrastructure_error` («снимок недоступен»), а не «индексов нет» —
       разница между «нечего искать» и «нечем искать» обязана быть видна
-- [ ] 3.6 Перенести `tools/build_vectors.py` (сборка эмбеддингов), `tools/check_indexes.py`.
-      **Не начато.** Обе утилиты работают через агентские `cache_provider` и
-      `vector_index_service`, которые уезжают в фазах 4/5; до их переезда
-      перенос утилит завёл бы вторую реализацию сборки
+- [x] 3.6 Перенести `tools/build_vectors.py` (сборка эмбеддингов), `tools/check_indexes.py`.
+      **Выполнено 2026-10-01** (коммит `4c1b550`). Обе утилиты снесли из агента;
+      сборка живёт на платформе: `mcp-platform/libs/vectors/builder.py` (625
+      строк) и точка входа `mcp-platform/servers/enterprise/build_index.py`.
+      Попутно исправлен `DuckDbSnapshotStore.get_schema` — схема берётся из
+      `oarb`, а не угадывается как `main`. Проверки:
+      `mcp-platform/tests/test_vector_builder.py`,
+      `test_build_index_entry.py`, `test_dependency_declaration.py`.
+      *Чекбокс оставался пустым с текстом «Не начато» — работа была сделана, а
+      трекер отстал; это тот же класс дефекта, что и у 3.14.*
 - [x] 3.7 Конфигурация: `gateway.vector.index.indexes.*` → конфиг `enterprise-mcp`.
       **Решение:** не «переезд», а передача. Агент остаётся источником
       истины: `project.json → gateway.vector.index` экспортируется в
