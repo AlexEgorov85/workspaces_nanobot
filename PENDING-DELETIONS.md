@@ -265,21 +265,25 @@ git rm tools/build_vectors.py \
 | `mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py` | Заглушка на месте удалённой операции `claim_task` (коммит `944535e`). Код операции вырезан, файл оставлен пустым намеренно: загрузчик по соглашению пропускает модули с именем, начинающимся с `_`, поэтому операция не публикуется. Сам файл не нужен | `git rm mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py` |
 | `mcp-platform/servers/enterprise/capabilities/data/tools/_update_task_status.py` | То же для `update_task_status`: обе операции над очередью задач удалены решением владельца, в capability `data` очередь не осталась | `git rm mcp-platform/servers/enterprise/capabilities/data/tools/_update_task_status.py` |
 | `mcp-platform/_live_audit_tables.py` | Черновой прогон по таблицам аудита, в git не отслеживается, к миграции не относится | удалить вручную (файл не отслеживается, `git rm` не подходит) |
-| `lib/services/llm_client.py` | Мёртвый код: общение с моделью принадлежит платформе, навыки ходят в `mcp-platform/libs/llm` через `libs/enterprise_client/llm.py`. Production-импортёров не осталось: сосед снял последнего вызывающего из `project_settings.py`. Держат его только `tests/test_dependency_direction.py:143` (упоминание в комментарии) и страж `tests/test_llm_goes_through_mcp.py::test_agent_has_no_llm_client_module`, помеченный `xfail` до ручного удаления | `git rm lib/services/llm_client.py` |
-| `lib/services/llm_config.py` | То же. Импортируется из `llm_client.py:39` и из `tests/test_llm_config.py` (6 мест) — то есть пока жив первый, второй нельзя выкинуть молча. Пока жив и `llm_client.py`, `lib/utils/retry.py` (пункт 3.14) считался заблокированным вторым держателем | `git rm lib/services/llm_config.py` |
+| `lib/services/llm_client.py` | ~~Мёртвый код~~ **УДАЛЁН 2026-10-02**, коммитом соседа `515e56f` (`chore(platform): снесён мёртвый LLM-кластер агента, закрыт п. 3.14`). Запись оставлена, чтобы по списку было видно, что пункт закрыт, а не забыт | — |
+| `lib/services/llm_config.py` | То же, тем же коммитом | — |
+| `lib/utils/retry.py` | То же, тем же коммитом. Пункт 3.14 закрыт по факту: файла нет ни на диске, ни в индексе, импортёров не осталось | — |
+| `tests/test_llm_config.py` | То же, тем же коммитом — предмет у него был ровно один | — |
 
-Порядок важен: `llm_client.py` удаляется раньше `llm_config.py`, иначе падает
-`tests/test_llm_config.py`. Вместе с ними уходит и сам тест мёртвого модуля —
-предмет у него ровно один:
+Порядок из старой записи («`llm_client.py` раньше `llm_config.py`, иначе падает
+`tests/test_llm_config.py`») стал неактуальным: снесены все трое одним проходом,
+и зависимости между ними не возникло.
 
 ```bash
 git rm tests/test_llm_config.py
 ```
 | `mcp-platform/.sessions_demo/` | Демонстрационный каталог файлов сессии, оставшийся после прогона `SessionWorkspace` вручную. Содержит только синтетические артефакты `sess-DEMO-1`, к проекту не относится | удалить вручную (каталог не отслеживается) |
-| `sql/vectors/create_vector_index_config.sql` | Мёртвый DDL: самая конфигурация индексов живёт в `project.json`. `migrate.py` обходит только `sql/migrations/`, файл не исполняется. Код вырезан, осталась заглушка (фаза 5, п. 5.9) | `git rm sql/vectors/create_vector_index_config.sql` |
-| `sql/vectors/create_vector_index_store.sql` | Мёртвый DDL: persisted FAISS-кеш удалён ещё change `remove-vector-index-store`, таблица снесена миграцией `V003`. Не исполняется. То же, что и предыдущий (фаза 5, п. 5.9) | `git rm sql/vectors/create_vector_index_store.sql` |
+| `sql/vectors/create_vector_index_config.sql` | Мёртвый DDL: конфигурация индексов живёт в `mcp-platform/platform.json → vectors.indexes`. `migrate.py` обходит только `sql/migrations/`, файл не исполняется. Код вырезан (фаза 5, п. 5.9), осталась заглушка, которая **сама себя объявляет мёртвой**: строка 11 файла — «Удалить вручную: git rm …». Проверено 2026-10-02: кода, читающего файл, в репозитории нет; остались только упоминания в `sql/README.md:44`, `mcp-platform/docs/TARGET-ARCHITECTURE.md:529` и `CHANGELOG.md` (история) | `git rm sql/vectors/create_vector_index_config.sql`, затем поправить `sql/README.md:44` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:529` |
+| `sql/vectors/create_vector_index_store.sql` | Мёртвый DDL: persisted FAISS-кеш удалён ещё change `remove-vector-index-store`, таблица снесена миграцией `V003`. Не исполняется, заглушка с самообъявлением на строке 12. Упоминания — только `sql/README.md:45` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:530` | `git rm sql/vectors/create_vector_index_store.sql`, затем поправить `sql/README.md:45` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:530` |
 | `project.json → gateway.vector.index.*` | **Дубликат объявлений.** `mcp-platform/platform.json` сам признаёт его: «остаётся до переноса build-инструментов (фаза 8)». Перенос сделан (`mcp-platform/libs/vectors/builder.py`), условие выполнено. Читает агент: `lib/core/infra_registration.py:39` ← `lib/core/application_context.py:1292`. Правка чужой части конфига — сначала согласовать | вырезать секцию из `project.json` |
-| `project.json → skills.audit_analyzer.tables` | **Дубликат объявлений.** Объявление переехало в `mcp-platform/platform.json → audit.tables`; агент больше не отдаёт его процессу. Читает только `tools/generate_comments_sql.py:36` — оставшийся черновик. Таблица объявляется дважды в двух конфигах, и разъедутся они молча | вырезать секцию + `git rm tools/generate_comments_sql.py` |
+| `tools/generate_comments_sql.py` | Черновик, который не запускается. Вся логика на верхнем уровне модуля — нет `main()`, нет `if __name__` — поэтому **`import tools.generate_comments_sql` пишет файл** (находка `docs/audit/reports/13-tools.md:262`). Плюс падает на импорте с `FileNotFoundError`: читает `workspace/skills/audit_analyzer/cache/schema.json`, которого в репозитории нет. Единственный держатель мёртвой секции `project.json → skills.audit_analyzer.tables` | `git rm tools/generate_comments_sql.py` — **после** вырезания секции из `project.json`. Вывод `sql/comments/apply_all_comments.sql` (упомянут в `sql/README.md:48,166`) оставить: он самодостаточен и ни от чего не зависит |
+| `project.json → skills.audit_analyzer.tables` | **Дубликат объявлений.** Объявление переехало в `mcp-platform/platform.json → audit.tables`; агент больше не отдаёт его процессу. Читает только `tools/generate_comments_sql.py:36` — оставшийся черновик. Таблица объявляется дважды в двух конфигах, и разъедутся они молча. Правка чужой части конфига — сначала согласовать | вырезать секцию, **затем** `git rm tools/generate_comments_sql.py` |
+| `tests/_test_sql_safety.py` | Тест мёртвого модуля: импортирует `lib.utils.sql_safety`, которого нет с фазы 9. Отключён префиксом `_` (pytest не собирает) и потому не падает — то есть молча не проверяет ничего. Импорт указывает и на старое имя без подчёркивания, то есть файл устарел вместе с модулем | `git rm tests/_test_sql_safety.py` |
 
 ## Python-слой навыка `audit_analyzer` (фаза 9)
 
@@ -372,11 +376,54 @@ git rm -r workspace/skills/audit_analyzer/scripts/_removed_predefined \
 | `mcp-platform/.tmp_prompt_out.txt` | ассистент (вывод того же прогона) |
 | `.tmp_probe_audit.py`, `.tmp_audit_out.txt` | ассистент (сквозная проверка capability audit при запрещённом PG) |
 | `.tmp_probe_pipeline.py`, `.tmp_pipeline_out.txt` | ассистент (проверка замкнутости: правка в PG → векторы → снимок → поиск; строка возвращалась как была) |
+| `patch_registry_once.py` | ассистент (одноразовая правка этого же реестра: замена должна найти ровно одно совпадение, иначе скрипт падает и файл не трогает. Задача выполнена, скрипт не нужен) | удалить вручную |
+| `nopg_placeholder/` | ассистент (ошибочно созданный каталог, к проекту отношения не имеет) | удалить вручную целиком |
 | `mcp-platform/.tmp_probe_stale.py` | ассистент (создал и проверил остаток `oarb.stale_marker`; на нём доказано, что обычная загрузка снимок **не** пересоздаёт. Свою задачу выполнил — вывод перенесён в `tests/test_snapshot_reset.py`) |
 | `tests/test_user_stop_signal.dump`, `tests/test_user_stop_signal_priority.dump` | ассистент |
 | `-v` (корень, 0 байт) | Служебный мусор: пустой файл от неверно процитированного флага `-v`. Не принадлежит проекту ни по смыслу, ни по содержимому. Владелец не установлен — удалить как «свой» без разбора рискованно | `rm -- ./-v` |
 
-## Чего делать не надо
+## Пункты 0.5 и 0.6 — удаление заблокировано, проверено 2026-10-02
+
+Оба пункта живут в `openspec/changes/enterprise-mcp-platform/tasks.md` (файл
+соседнего воркера, туда не лезем), а проверенные факты — здесь.
+
+**0.5 `workspace/skills/audit_analyzer/err1.log`** — файл на месте, 445 байт,
+13.09. Не отслеживается: `.gitignore:2` — `*.log`. Удалить без `mavis-trash`
+нельзя, `git rm` не подходит.
+
+**0.6 `workspace/data_store/cache/**` — формулировка задачи опасна, как есть
+выполнять нельзя.** В каталоге 3346 файлов на 88.7 МБ, из них `.py` — 82.
+Рядом лежат реальные результаты прошлых сессий: 2285 `.json`, 611 `.md`,
+221 `.marker`, 85 `.txt`, 35 `.png`, 14 `.pdf`. «Удалить каталог» снёс бы их.
+
+Главная находка, которой нет в формулировке пункта: **из 82 `.py` на 56
+приходится на `sessions/` — и это не черновики, а рабочий каталог рантайма.**
+`project.json:62` объявляет `"media_cache_dir": "data_store/cache/sessions"`,
+а `project.json:324` — `"persist_max_files": 100` с комментарием «Макс. файлов
+в data_store/cache/sessions/». То есть в этом каталоге лежит живой кеш
+медиа сессий, и там же стоят файлы трёхдневной давности. Слепой
+`rm -rf **/*.py` по этому каталогу заденет рабочую область.
+
+Раскладка 82 `.py` (проверено 2026-10-02):
+
+| Каталог | `.py` | Что это |
+|---|---|---|
+| корень `cache/` | 8 | черновики: `probe_cache.py`, `rc.py`, `trace_imports.py`, `test_all_modes.py`, `check_parents.py`, `find_lines.py`, `_list_tables.py`, `_vector_code.py` |
+| `cache/scripts/` | 7 | черновики |
+| `cache/audit_query/` | 6 | черновики |
+| `cache/baselines/` | 4 | черновики |
+| `cache/find_duplicates/` | 1 | черновик |
+| `cache/sessions/` | **56** | **артефакты прошлых сессий, не черновики** — удалять отдельным решением |
+
+Безопасный порядок для человека: 26 файлов вне `sessions/` (настоящие
+черновики) → отдельное решение по 56 в `sessions/` → два `.pyc` в
+`__pycache__` (тоже мусор, но лежат внутри этих каталогов).
+
+Ни один из 82 не отслеживается git: `git ls-files` по каталогу отдаёт
+единственный файл — `sessions/postgres_chat_alice_1/metadata.json`, и он
+`.json`, то есть в «удалить только `.py`» не попадает.
+
+
 
 Не удалять и не «чинить» файлы соседнего воркера, даже если они выглядят
 недоделанными: у него идёт своя работа по фазе 8.
@@ -396,3 +443,215 @@ git rm -r workspace/skills/audit_analyzer/scripts/_removed_predefined \
 (`openspec/changes/enterprise-mcp-platform/`) и `mcp-platform/tests/
 test_dependency_declaration.py` (страж объявлений зависимостей, п. 5.14). Их
 не коммитить и не переписывать, пока их автор сам этого не сделает.
+
+## Фаза 7 — журналирование через `enterprise-mcp`
+
+Сделано 2026-10-02: `lib/services/log_transport.py` (новый), шов в
+`lib/services/db_logging_service.py`, `tests/test_log_transport.py` (30 тестов).
+Прогон агента: 3473 passed, ruff чист по своим файлам.
+
+**Разрыв контракта, вскрывшийся при реализации 7.2: батч нельзя отправить
+одним вызовом.** Операция `log_events` берёт `session_id` / `user_id` /
+`request_id` **из контекста вызова**, а не из тела батча — в схеме элемента
+этих полей нет вовсе (`log_events.py`, докстринг; на сервере `log_events()` в
+`data/service/main.py` присваивает каждому событию `session_id`/`user_id`/
+`request_id` из параметров метода). Проверено, что `platform.json` уже держит
+`execution.require_call_meta = true`, то есть подпись обязательна, а не
+опциональна.
+
+Причина такого решения на платформе сделана намеренно: иначе батч под видом
+журналирования оборота записал бы события в чужую сессию. Но у агента батч
+смешанный — события разных сессий, оборотов и пользователей лежат в одной
+очереди, и у части событий `user_id` нет вовсе:
+
+| Источник события | `session_id` | `user_id` | `request_id` |
+|---|---|---|---|
+| `database_logging_hook.py` (tool/llm) | есть | через индекс запроса | есть |
+| `db_logging_bus.py` (inbound/outbound) | `session_key` | от `sender_id` | `message_id` |
+| `runtime_events_subscriber` `turn_completed` | `context.session_key` | **нет** | **нет** |
+| `runtime_patcher` (subagent) | `subagent:<task_id>` | `parent_user_id` | есть |
+| `postgres_channel._log_event` | **нет** | **нет** | **нет** |
+| `log_sync_event` | `"gateway:sync"` | **нет** | **нет** |
+| `log_error` (без сессии) | **нет** | **нет** | **нет** |
+
+Решение: `group_by_identity()` режет батч на группы по
+`(session_id, user_id, request_id)`, каждая группа уходит своим вызовом
+`log_events`. События без `session_id`/`user_id` подписать нечем, а выдумывать
+им личность нельзя — это ровно то, от чего платформа защищается. Они уходят в
+локальный fallback и в счётчик `dropped`. `request_id` в ключе группировки
+участвует, но его отсутствие вызов не блокирует: клиент дополняет его сам
+(`_meta_for`).
+
+**Закрыто кодом:** 7.1 (буфер с дропом при переполнении — был и раньше), 7.2
+(батчевый flush в `log_events`), 7.3 (`LocalFallbackSink` — файл на случай
+недоступного сервера, потеря видна счётчиком `dropped`/`fallback_written`), 7.6
+(остановленный `enterprise-mcp` не блокирует ход).
+
+**Что НЕ сделано и почему.**
+
+* **PG-путь оставлен рабочим дефолтом.** `mcp_writer`/`fallback_sink` в
+  `DbLoggingService` — необязательные параметры; при `None` работает старый путь
+  через `utils.db`. Транспорт выбирается **при сборке**, а не «попробовать MCP,
+  не вышло — писать в базу»: такой fallback был бы вторым владельцем пула
+  записи, которого change и устраняет. Переключение дефолта и снос
+  `_insert_batch` / `_upsert_question_run` / `_ensure_schema` / `_db_run` —
+  отдельный шаг: он заденет 8+ тестов агента (`test_db_logging_service`,
+  `test_application_context_logging`, `test_subagent_logging`,
+  `test_hooks_database_logging`, `test_unified_event_logging_*`,
+  `test_runtime_events_subscriber`, `test_storage_hybridization`), и миграция
+  должна идти в том же ходе, что и снос пути, иначе тесты останутся
+  проверяющими то, чего в рантайме уже нет.
+* **7.4 (retention/purge) не начат.** Операция `purge_logs` на платформе готова;
+  агент чистит сам (`purge_old`, `purge_empty_outbound`, `_purge_old`).
+  Перенос упирается в вопрос: `logging.db.retention_days` приходит в платформу
+  аргументом операции, и решать, где он живёт — в `platform.json` или остаётся
+  в `project.json` — нужно до кода, иначе получится два источника правды о
+  сроке хранения.
+* **`schema_validation.py:196` по-прежнему импортирует `psycopg2.errors`
+  напрямую** вместо операции `schema_check` (перенос 2.16 из фазы 2). Тянет за
+  собой перенос `SchemaValidationService` на MCP и пересекается с переключением
+  дефолта журналирования.
+* **Wiring в `application_context` не сделан.** `_make_db_logging()`
+  (`application_context.py:1269`) не собирает `mcp_writer`/`fallback_sink`:
+  для этого нужен живой event loop, а `DbLoggingService` создаётся в
+  `ApplicationContext.create()`, то есть **до** `asyncio.run()` в
+  `gateway.py:167`. Мост `LoopCallRunner` готов, но точка подключения loop'а к
+  сервису — вопрос к владельцу `gateway.py` / `application_context.py`.
+
+## Инвентаризация остатков агента (2026-10-02, по коду)
+
+Объём: агент (`lib` 17 899 + `workspace` 40 846 + `tools` 2 933) — **61 678
+строк** против платформы (`mcp-platform/libs` 32 173 + `servers` 4 365) —
+**36 538**. Агент больше платформы в 1,7 раза, при том что платформа владеет
+всем состоянием. Разведка шла двумя независимыми проходами (`lib`+`tools`,
+`workspace`); выводы про рискованные пункты перепроверены лично по коду.
+
+### A. Мёртвый код — снос безопасен, риск нулевой
+
+**ВЫПОЛНЕНО 2026-10-02** скриптом `cleanup_agent.ps1`: **18/18 целей удалены,
+артефакты обнулены** (`__pycache__` 0 шт / 0 МБ, `data_store` отсутствует).
+Прогон агента после чистки: 3365 passed, ruff по моим файлам чист, общее число
+ruff-ошибок упало с 520 (HEAD) до 515 — удаления ни одной не добавили.
+Удаление шло восстановимым лаунчером `mavis-trash` (всё в корзину).
+
+| Кандидат | Объём | Доказательство |
+|---|---|---|
+| `lib/services/_cache_load_service.py`, `_cache_provider.py`, `_cache_provider_impl.py`, `_duckdb_cache_store.py`, `_preload_service.py`, `_vector_index_service.py` | 6 × 11 стр. | остатки фазы 5; 0 `def`/`class`; **0 импортёров** |
+| `lib/utils/_duckdb_query.py`, `_sql_safety.py` | 11 + 9 стр. | то же; 0 импортёров |
+| `tools/_check_indexes.py`, `_build_vectors.py` | 2 × 11 стр. | tombstone, 0 определений, 0 импортёров |
+| `workspace/skills/audit_analyzer/scripts/_*.py` + `_removed_predefined/` + `_removed_tests/` | 154 стр., 16 `.py` | весь код навыка — tombstone; прод-код не импортирует, `tests/test_dependency_direction.py:99` такое прямо запрещает |
+| `workspace/utils/_office_files.py` | tombstone | сам предлагает `git rm` |
+| `*.pyc` уже удалённых модулей (`utils/office_files`, `utils/event_log`, `tools/duckdb_query_tool`, `tools/vector_search_tool`) | 6 файлов | байт-код несуществующих модулей |
+| `tools/generate_comments_sql.py` | 275 стр. | **сломан**: `:18` импортирует только `runtime_table`, а `:35` использует `load_config_json`/`ROOT` → `NameError`; `:63` читает несуществующий `audit_analyzer/cache/schema.json`; вызывающих нет |
+
+Команды для человека (само удаление заблокировано политикой среды):
+
+```bash
+git rm lib/services/_cache_load_service.py lib/services/_cache_provider.py \
+       lib/services/_cache_provider_impl.py lib/services/_duckdb_cache_store.py \
+       lib/services/_preload_service.py lib/services/_vector_index_service.py \
+       lib/utils/_duckdb_query.py lib/utils/_sql_safety.py \
+       tools/_check_indexes.py tools/_build_vectors.py \
+       tools/generate_comments_sql.py workspace/utils/_office_files.py
+git rm -r workspace/skills/audit_analyzer/scripts/_removed_predefined \
+          workspace/skills/audit_analyzer/scripts/_removed_tests
+git rm tools/_check_indexes.py
+```
+
+### B. Дубликаты платформы
+
+| Кандидат | Доказательство | Риск |
+|---|---|---|
+| `lib/services/text_splitter.py` (217 стр.) | `mcp-platform/libs/vectors/text_splitter.py` (222 стр.) — те же 6 функций, различие **только в докстринге и форматировании**; платформенный модуль сам объявляет «портировано из `lib/services/text_splitter.py`, удаление агентской копии — фазы 4/5/9». Прод-импортёров у агентской копии **0** (только `tests/test_text_splitter.py`; тот же набор тестов уже есть на платформе) | **низкий**: перенести/снять `tests/test_text_splitter.py` |
+| `workspace/skills/legal_summarizer` (15 704 стр. runtime + 20 401 стр. тестов) | живая параллельная копия `mcp-platform/libs/legal_summarizer/` (15 979 стр., те же 9 слоёв). Перенос в процессе — **зона соседа**, не трогать | **высокий** |
+| `workspace/skills/office_files/` | не объявлен ни в `project.json`, ни в `platform.json`; `SKILL.md` (8.9 КБ) ссылается на `workspace/utils/office_files.py`, которого **нет**; функциональность уехала в `libs/office` + tool `document_read` | **средний** |
+
+### C. Мёртвый вес на диске
+
+| Каталог | Объём | Комментарий |
+|---|---|---|
+| `workspace/data_store/` | **86.7 МБ, 3 272 файла** | кэш сессий, вложения PDF, чанки `gk_chunks`, `duckdb/cache.duckdb` (2.3 МБ) — всё от старого локального кэша, который уехал на платформу |
+| `*.pyc` по всему дереву | **27.7 МБ, 1 349 файлов** | включая 6 байт-кодов уже удалённых модулей |
+| `workspace/skills/legal_summarizer/tests/` | 20 401 стр. | тесты внутри навыка; при переносе кода на платформу уезжают вместе с ним |
+
+Итого мёртвого Python-кода **~160 строк**, мёртвых артефактов на диске — **~114 МБ**.
+
+### E. Мёртвые тесты агента (2026-10-02)
+
+**ВЫПОЛНЕНО 2026-10-02** скриптом `cleanup_tests.ps1`: **24/24 цели удалены**
+(23 tombstone-файла + пустой `test_pool_settings_seam.py`). В `tests/` осталось
+150 `.py` и ровно **3 tombstone-файла — все три принадлежат соседнему воркеру**
+(временно отключены им, не мертвы). Общее число ruff-ошибок по агенту:
+**520 (HEAD) → 515 (чистка кода) → 510 (чистка тестов)** — удаления ни одной не
+добавили.
+
+Аудит `tests/` двумя проходами по коду. **174 `.py`, 40 646 строк**; из них
+**24 файла были мёртвы**, и мёртвы они не по «устарелости», а потому что
+pytest их физически не собирает.
+
+| Кандидат | Объём | Почему мёртв (доказательство) |
+|---|---|---|
+| 23 tombstone-файла `tests/_test_*.py` + `tests/_patcher_fixtures.py` | **525 стр.** | префикс `_` исключает их из сбора pytest по умолчанию; 22 из них — докстринг с готовой командой `git rm` и **нулём определений**; `_test_sql_safety.py` (250 стр., 22 теста) импортирует `lib.utils.sql_safety`, которого **уже нет** — упал бы на импорте; `_patcher_fixtures.py` определяет фикстуры `seeded_bridge`/`seeded_bridge_with_usage`, которые **не использует ни один тест** (проверено поиском по всему дереву, `conftest.py` их не подключает) |
+| `tests/test_pool_settings_seam.py` | **0 байт** | файл пустой; pytest его собирает (имя с `test_`), но внутри ничего нет. Последний коммит — `0b84c51` |
+
+Итого: **−525 строк мёртвого кода**, который никогда не исполнялся. Ожидаемый
+результат прогона после удаления — **тот же**, что до: снимать нечего, потому
+что pytest этих файлов и не видел.
+
+**Не трогаем (зона соседнего воркера).** Три файла сосед только что переименовал
+из `test_*` в `_test_*`, то есть **временно отключил**, а не убил:
+`_test_legal_summarizer_identity.py`, `_test_legal_summarizer_query_ipc.py`,
+`_test_legal_summarizer_query_manifest_integration.py`. Отключение — его решение,
+и снимать его должен он. Скрипт `cleanup_tests.ps1` их исключает.
+
+**Проверено и НЕ является мусором:** «сироты» по импорту `test_enterprise_mcp_identity.py`
+(`libs.enterprise_common.*`) и `test_office_files.py` (`libs.office`) — ложные
+срабатывания, эти пакеты живут на платформе (`mcp-platform/libs/`). Подкаталоги
+`tests/contract/` (23 файла, 2634 стр.), `tests/benchmarks/`, `tests/integration/`
+живые, `conftest.py` в них — обычные файлы пакетов, не мусор.
+
+Скрипт: `cleanup_tests.ps1` (этап 0 — починка `mavis-trash`, этап 1 — прогон
+`-WhatIfOnly`, этап 2 — удаление, этап 3 — отчёт). Удаление восстановимое.
+
+
+Задача «удали мёртвое» упиралась в политику: удаление обязано идти через
+восстановимый лаунчер `mavis-trash`, а он на этой машине не проходил пробу
+готовности. Разобрано и **воспроизведено вручную 2026-10-02**.
+
+Причина — **не кодировка, а переводы строк**. `mavis-trash.cmd` записан с
+`LF` (0x0A) вместо `CRLF` (0x0D 0x0A). `cmd.exe` не считает `LF` концом
+строки и склеивает строки, из-за чего:
+
+- `set "ELECTRON_RUN_AS_NODE=1"` сливается с путём к exe, и первая строка
+  превращается в `'ECTRON_RUN_AS_NODE'` (теряются `set "` и два байта);
+- запуск exe получает обрезанный путь →
+  `The system cannot find the path specified` → проба не проходит.
+
+Проверено экспериментально, что кодировка здесь ни при чём: `OEMCP` машины =
+`65001` (UTF-8), и кириллица в пути профиля (`C:\Users\Алексей\…`) при UTF-8
+читается верно. Версия в спеке (п. 0.7), где причина названа как BOM, неполна:
+BOM действительно ломает разбор, но и без BOM файл остаётся битым из-за LF.
+Починка — перезаписать файл в UTF-8 **без BOM, но с CRLF**; после этого проба
+даёт `exit=1` + `mavis-trash: no files specified`, то есть ровно то, что ждёт
+рантайм. Правка в `C:\Users\Алексей\.minimax\bin\` — вне репозитория.
+
+Побочный эффект, важный для любых будущих скриптов PowerShell: проба пишет
+`no files specified` в **stderr**, а при `$ErrorActionPreference = 'Stop'`
+PowerShell превращает stderr нативной команды в фатальное исключение — то есть
+скрипт падал бы ровно на успешной пробе. В `cleanup_agent.ps1` это обойдено
+локальным понижением строгости вокруг вызовов лаунчера.
+
+Скрипт чистки: `cleanup_agent.ps1` (этап 0 — починка лаунчера, этап 1 — прогон
+-WhatIfOnly, этап 2 — удаление, этап 3 — отчёт). Удаление выполняется
+восстановимым лаунчером; всё, что он не смог, — с честным предупреждением.
+
+`CompactionEventSubscriber` **не подключён**: `lib/services/channel_factory.py:172`
+создаёт `PostgresChannel` без параметра `compaction_event_subscriber`, поэтому
+`postgres_channel.py:1293 gettattr(self, "_compaction_event_subscriber", None)`
+всегда даёт `None`, и `feed()` недостижим. Весь путь наблюдения компакции
+(`ContextCompactionEvent` → подписчик → `_write_history_notice` +
+событие `context_compacted`) в рантайме не работает. Удалять подписчик нельзя —
+сначала починить проводку. Проверено лично поиском по всему дереву: конструктор
+нигде не вызывается.
+
+
