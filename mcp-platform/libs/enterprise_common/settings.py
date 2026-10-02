@@ -600,6 +600,19 @@ SETTINGS: tuple[Setting, ...] = (
        "servers/enterprise/server.py:_build_container",
        "период сброса буфера журнала в базу, сек",
        file_key="data.log_flush_interval"),
+    # Срок жизни журнала и чистка мусора — ручки платформы, а не агента:
+    # очистка журнала пишет в ту же базу, и агентский ``retention_days``
+    # был вторым владельцем правила, из-за чего конфигурация расходилась с
+    # тем, что сервер применяет на самом деле.
+    _s("ENTERPRISE_LOG_RETENTION_DAYS", "int", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/capabilities/data/tools/purge_logs.py",
+       "сколько дней хранится запись журнала; 0 — не вычищать по сроку",
+       file_key="data.log_retention_days"),
+    _s("ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND", "bool", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/capabilities/data/tools/purge_logs.py",
+       "вычищать ли записи с пустым outbound (stream-чанки) независимо "
+       "от срока хранения",
+       file_key="data.log_purge_empty_outbound"),
     _s("ENTERPRISE_STATEMENT_TIMEOUT_MS", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "SET statement_timeout для запросов capability data, мс",
@@ -765,6 +778,8 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
             "ENTERPRISE_LOG_QUESTION_RUNS_TABLE",
             "ENTERPRISE_LOG_BUFFER_MAXLEN",
             "ENTERPRISE_LOG_FLUSH_INTERVAL",
+            "ENTERPRISE_LOG_RETENTION_DAYS",
+            "ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND",
             "ENTERPRISE_STATEMENT_TIMEOUT_MS",
             "ENTERPRISE_MAX_ROWS",
         ),

@@ -61,6 +61,8 @@
     "snapshot_path": "~/.cache/nanobot/duckdb/cache.duckdb",
     "log_buffer_maxlen": 2048,
     "log_flush_interval": 5.0,
+    "log_retention_days": 90,
+    "log_purge_empty_outbound": true,
     "statement_timeout_ms": 30000,
     "max_rows": 1000
   },
