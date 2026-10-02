@@ -221,6 +221,12 @@ class TestPlatformDeclaresEverything:
         """
         registry = _load_registry()
         raw = json.loads(PLATFORM_FILE.read_text(encoding="utf-8"))
+        # ``profiles`` — оверлей имён таблиц, а не настройки: он разбирается
+        # отдельно (read_profile_overlay) и проверяется своими тестами.
+        # Здесь секция снимается, иначе любое объявление профиля падало бы
+        # как «не зарегистрирован как настройка платформы».
+        for section in getattr(registry, "RESERVED_SECTIONS", ()):
+            raw.pop(section, None)
         file_keys = _flatten(raw)
         assert file_keys, "platform.json пуст — настройки платформы исчезли"
         assert "db.dsn" in file_keys, (

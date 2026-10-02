@@ -44,15 +44,56 @@ runtime-events-observability/spec.md` для нормативного контр
 
 from __future__ import annotations
 
-from typing import Any, Callable
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from loguru import logger
-
 from nanobot.bus.runtime_events import TurnCompleted, TurnRuntimeAdmitted
 
 from lib.events.subagent import SubagentTurnCompleted
 from lib.hooks.database_logging_hook import seed_context_window
 from lib.services.db_logging_service import LogEvent
+
+
+def _current_sender_id() -> str | None:
+    """``sender_id`` текущего оборота из контекста фреймворка.
+
+    Тот же самый ``InboundMessage.sender_id``, который ``make_inbound_logger``
+    отдаёт в ``register_request(user_id=...)`` (``nanobot/agent/loop.py:747``
+    берёт его из ``ctx.msg.sender_id``). Значение не выдумывается и не
+    подставляется: его нет — значит личности нет.
+
+    Нужен именно во время оборота: ``bind_request_context`` в
+    ``nanobot/agent/loop.py`` снимается до ``delivery.complete()``, поэтому
+    после финала оборота контекста уже не существует.
+    """
+    try:
+        from nanobot.agent.tools.context import current_request_context
+
+        ctx = current_request_context()
+    except Exception:
+        return None
+    if ctx is None:
+        return None
+    sender_id = getattr(ctx, "sender_id", None)
+    return sender_id if isinstance(sender_id, str) and sender_id else None
+
+
+@dataclass(frozen=True)
+class _TurnIdentity:
+    """Личность оборота, снятая в тот момент, когда она ещё существует.
+
+    События конца оборота (``turn_completed``) публикуются уже ПОСЛЕ
+    ``DatabaseLoggingHook.after_run``, который дергает ``clear_request`` и
+    опустошает индекс вопросов сервиса, и ПОСЛЕ снятия ``RequestContext``.
+    К этому моменту подписать событие нечем, поэтому личность снимается на
+    ``TurnRuntimeAdmitted`` — в середине оборота, где она ещё есть.
+    """
+
+    user_id: str
+    request_id: str | None = None
 
 
 def _set_subagent_default_bus(bus: Any) -> None:
@@ -113,6 +154,56 @@ class RuntimeEventsSubscriber:
         self._db_logging_service = db_logging_service
         self._unsubscribers: list[Callable[[], None]] = []
         self._started = False
+        # Личность оборота, снятая в середине оборота (см. ``_TurnIdentity``).
+        # Ключ — ``session_key``; сессии обрабатываются конкурентно, поэтому
+        # доступ под замком.
+        self._turn_identities: dict[str, _TurnIdentity] = {}
+        self._identity_lock = threading.Lock()
+        # События ``turn_completed``, у которых личность снять не удалось.
+        # Считаются здесь, а не молча теряются в транспорте.
+        self._unidentified_turn_events = 0
+
+    def unidentified_turn_events(self) -> int:
+        """Сколько ``turn_completed`` ушло в журнал без полной личности.
+
+        Ненулевое значение — прямое указание, что обороты теряются:
+        транспорт не отправит событие без ``user_id``, а оператор об этом
+        раньше не узнавал.
+        """
+        return self._unidentified_turn_events
+
+    def _capture_identity(self, session_key: str) -> None:
+        """Запомнить личность оборота, пока она ещё доступна.
+
+        Пишется только непустой ``sender_id``: подставленное значение
+        (``"unknown"`` и подобное) записало бы событие в чужую личность —
+        ровно то, от чего журнал намеренно отказывается. Если личности нет,
+        снимок не создаётся вовсе, и ``turn_completed`` уйдёт без неё
+        (с WARNING и счётчиком), а не с выдуманной.
+        """
+        if self._db_logging_service is None:
+            return
+        user_id = _current_sender_id()
+        if not user_id:
+            return
+        request_id: str | None = None
+        try:
+            request_id = self._db_logging_service.get_request_id(session_key)
+        except Exception:
+            # Журнал может быть недоступен — это не повод терять user_id,
+            # он уже получен и его достаточно для подписи вызова.
+            request_id = None
+        with self._identity_lock:
+            self._turn_identities[session_key] = _TurnIdentity(
+                user_id=user_id, request_id=request_id
+            )
+
+    def _take_identity(self, session_key: str) -> _TurnIdentity | None:
+        """Забрать снимок личности оборота (одноразово)."""
+        if not session_key:
+            return None
+        with self._identity_lock:
+            return self._turn_identities.pop(session_key, None)
 
     def start(self) -> None:
         """Зарегистрировать подписки на TurnRuntimeAdmitted через
@@ -174,6 +265,10 @@ class RuntimeEventsSubscriber:
         # повторного старта). См. design.md D4.
         _set_subagent_subscriber_registered(False)
         self._started = False
+        # Снимки identity переживать остановку не должны: следующий start()
+        # обслуживает уже другие обороты.
+        with self._identity_lock:
+            self._turn_identities.clear()
 
     async def _handle_turn_runtime_admitted(self, event: TurnRuntimeAdmitted) -> None:
         """Seed лимита окна/модели в мост ``_CONTEXT_BRIDGE``.
@@ -181,6 +276,10 @@ class RuntimeEventsSubscriber:
         Вызывается из upstream `RuntimeEventPublisher.turn_runtime_admitted`
         перед первой LLM-итерацией оборота (для всех не-system каналов,
         см. `nanobot/agent/turn_delivery.py:_default_route`).
+
+        Здесь же снимается личность оборота: событие приходит в середине
+        оборота, когда ``RequestContext`` привязан, а индекс вопросов
+        сервиса ещё не очищен. На ``TurnCompleted`` обоих уже не будет.
         """
         try:
             session_key = (event.context.session_key or "").strip()
@@ -190,6 +289,7 @@ class RuntimeEventsSubscriber:
             limit = getattr(runtime, "context_window_tokens", 0) or 0
             model = getattr(runtime, "model", "") or ""
             seed_context_window(session_key, limit=int(limit), model=str(model))
+            self._capture_identity(session_key)
         except Exception as exc:
             logger.opt(exception=True).warning(
                 "seed_context_window failed for {}: {}",
@@ -205,6 +305,18 @@ class RuntimeEventsSubscriber:
         usage_tokens, runtime_model. Не содержит ``final_content`` —
         для пользовательского контента остаётся ``run_finished`` в
         ``DatabaseLoggingHook.after_run``.
+
+        Личность (``user_id``/``request_id``) берётся из снимка, снятого
+        на ``TurnRuntimeAdmitted``: к моменту публикации этого события
+        индекс вопросов сервиса уже очищен ``clear_request``, а
+        ``RequestContext`` снят, поэтому подписать вызов иначе нечем.
+
+        **Документированный выбор при отсутствии снимка:** событие всё
+        равно уходит в очередь (так его поведение не меняется для вызовов
+        без ``sender_id``), но потеря становится видимой на месте —
+        WARNING и рост :meth:`unidentified_turn_events`. Выдуманный
+        ``user_id`` не подставляется никогда: транспорт всё равно
+        отбросил бы группу, но записал бы её под чужой личностью.
         """
         if self._db_logging_service is None:
             return
@@ -265,12 +377,26 @@ class RuntimeEventsSubscriber:
                 if runtime is not None
                 else None,
             }
+            identity = self._take_identity((context.session_key or "").strip())
+            if identity is None:
+                # Не выдумываем «unknown»: событие останется неподписанным,
+                # но потеря будет посчитана и залогирована здесь, а не
+                # обнаружится спустя время как пустой журнал.
+                self._unidentified_turn_events += 1
+                logger.warning(
+                    "turn_completed без личности для сессии {}: событие не "
+                    "будет записано (всего таких: {})",
+                    context.session_key,
+                    self._unidentified_turn_events,
+                )
             self._db_logging_service.log_event(LogEvent(
                 event_type="turn_completed",
                 actor="agent",
                 name="turn",
                 session_id=context.session_key,
                 channel=context.channel,
+                user_id=identity.user_id if identity is not None else None,
+                request_id=identity.request_id if identity is not None else None,
                 summary=f"turn {payload['outcome']} "
                 f"(latency={payload['latency_ms']}ms)",
                 payload=payload,

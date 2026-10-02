@@ -55,6 +55,10 @@ PRODUCTION_ALLOWLIST: dict[str, str] = {
 
 TEST_ALLOWLIST: dict[str, str] = {
     "tests/test_profile_integration.py": "предмет проверки — разбор профиля и его имён",
+    "tests/test_gateway_enterprise_mcp_startup.py": (
+        "предмет проверки — сверка профильных имён таблиц агента и платформы; "
+        "имена здесь и есть данные теста, а не обращение к боевым таблицам"
+    ),
     "tests/test_config_resolver.py": "предмет проверки — слияние конфигов и имён",
     "tests/test_no_hardcoded_table_names.py": "здесь лежат примеры самого правила",
     "tests/test_audit_analyzer_skill_doc.py": (

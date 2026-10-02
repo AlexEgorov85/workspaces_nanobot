@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,177 @@ def try_log_event(
             producer, event_type, exc,
         )
         return False
+
+
+#: Канал, за которым нет человека: входящее кладёт producer очереди, а общается
+#: он от имени заявителя, названного в строке очереди. Без ``sender_id`` подпись
+#: «user» была бы выдумкой — источник помечается собой.
+_QUEUE_CHANNELS = frozenset({"postgres"})
+
+# ---------------------------------------------------------------------------
+# Момент СОБЫТИЯ и выживаемый порядок.
+#
+# ``agent_gateway_logs.timestamp`` — момент ЗАПИСИ строки, и ставит его база
+# (``DEFAULT CURRENT_TIMESTAMP``) в момент батч-сброса. Это делает колонку
+# бесполезной для честной наблюдаемости: по живым данным за 02.10 на одну
+# миллисекунду легло до 14 строк, 10 вызовов tool'ов с одним tool_call_id
+# имели начало и конец в ОДНУ миллисекунду, а внутри пачки порядок перемешан.
+# Длительность НИ ОДНОГО этапа по такой колонке не считается.
+#
+# Поэтому событие получает собственное время в писателе — в момент, когда
+# ``DbLoggingService`` принимает его, а не в момент, когда база пишет батч —,
+# и оно переживает батчирование потому, что едет вместе с событием в JSONB
+# ``metadata``:
+#
+#   * ``metadata.occurred_at`` — ISO-8601 UTC, момент СОБЫТИЯ (читаемый);
+#   * ``metadata.seq``        — тот же момент в наносекундах, выживаемый
+#                                ключ ПОРЯДКА: ``ORDER BY seq, id``.
+#
+# Почему ``metadata``, а не колонка ``timestamp``. Колонку заполняют два
+# писателя — агент напрямую и платформа через операцию ``log_events``, где
+# ``timestamp`` жёстко равен ``now()`` в SQL
+# (``mcp-platform/servers/enterprise/capabilities/data/service/main.py``).
+# Если агент писал бы в неё момент события, одна и та же колонка означала бы
+# разное в зависимости от того, кто её заполнил, и читатель не смог бы это
+# отличить. ``metadata`` оба писателя передают как есть (поле уже держит
+# ``source``/``component``), поэтому DDL-миграция не нужна: достаточно
+# ``jsonb``-колонки, которая уже есть.
+#
+# ``timestamp`` при этом сохраняет свой честный смысл «когда строка легла»:
+# анализ задержки записи (очередь → сброс) остаётся возможным.
+# ---------------------------------------------------------------------------
+
+#: Ключи времени события в ``agent_gateway_logs.metadata``.
+EVENT_TIME_KEY = "occurred_at"
+EVENT_SEQ_KEY = "seq"
+
+#: Признак источника события (``metadata.source``) — по спецификации журнала
+#: он обязателен на каждой строке, и агент является writer'ом для всех
+#: проходящих через него событий. Значение объявлено платформой
+#: (``mcp-platform/libs/enterprise_common/eventing/models.py``,
+#: ``SOURCE_NANOBOT = "nanobot"``) и импортируется бы как константа, но
+#: агент не тянет дерево платформы в свои импорты (граница — протокол MCP),
+#: поэтому значение здесь литерал, а совпадение проверяет тест
+#: ``tests/test_turn_observability_events.py::TestEventAttribution``.
+EVENT_SOURCE_KEY = "source"
+EVENT_SOURCE_NANOBOT = "nanobot"
+
+#: Каноническое выражение порядка строк оборота.
+#:
+#: Объявлено РОВНО в одном месте: читатели обязаны переиспользовать его, а
+#: не вписывать выражение заново (пока выбран вариант хранения в ``metadata``
+#: — выражение, и любое переписывание молча превращает индексное чтение в
+#: полный скан). Выбор варианта хранения ещё НЕ измерен
+#: (``openspec/specs/logging-db/spec.md``, требование «Хранение момента
+#: события и идентификатора оборота выбрано замером плана запроса»), поэтому
+#: это выражение предварительное, а индекс по нему не заводится.
+TURN_ORDER_BY_SQL = "(metadata->>'seq')::bigint, id"
+
+#: Пол монотонности для ``seq`` в этом процессе (см. ``next_event_seq``).
+_SEQ_FLOOR = 0
+_SEQ_FLOOR_LOCK = threading.Lock()
+
+
+def next_event_seq() -> int:
+    """Вернуть ключ порядка для нового события (наносекунды системных часов).
+
+    Ключ выводится из ЧАСОВ, а не из локального счётчика процесса, потому что
+    журнал пишут ДВА процесса — агент и отдельный subprocess ``enterprise-mcp``,
+    и только часы у них общие. Плотный счётчик «1, 2, 3» на оборот потребовал
+    бы разделяемого аллокатора (новый владелец состояния и новая точка отказа
+    в горячем пути) и всё равно не покрыл бы события MCP-процесса. Часы дают
+    сквозной, переживаемый ключ: обе половины оборота упорядочиваются одним
+    выражением ``ORDER BY (metadata->>'seq')::bigint, id``.
+
+    Пол держит порядок строго монотонным ВНУТРИ процесса: если часы уйдут
+    назад (шаг NTP), два события не получат обратный порядок. Гонка за пол
+    безопасна — проигравший поток получит то же значение, а равные ``seq``
+    разводит ``id`` (UUID), то есть порядок восстановим всегда.
+    """
+    global _SEQ_FLOOR
+    raw = time.time_ns()
+    with _SEQ_FLOOR_LOCK:
+        if raw <= _SEQ_FLOOR:
+            raw = _SEQ_FLOOR + 1
+        _SEQ_FLOOR = raw
+    return raw
+
+
+def _iso_utc(epoch_sec: float) -> str:
+    """Момент события в ISO-8601 UTC (микросекунды) — читаемая форма ``seq``."""
+    return datetime.fromtimestamp(epoch_sec, tz=UTC).isoformat(
+        timespec="microseconds"
+    )
+
+
+def _event_seq(metadata: Any) -> int | None:
+    """Ключ порядка строки журнала или ``None``, если его нет.
+
+    ``None`` означает «момент события НЕИЗВЕСТЕН», а не «собылось позже
+    всего». Разница принципиальна: отсутствующий ключ, поставленный в конец
+    оборота, выглядел бы как честный порядок, и дефект обнаружился бы уже
+    по выводу. Поэтому такие строки обязаны попадать в отдельный счётчик, а
+    не в упорядоченную часть (см. :py:func:`order_turn_rows`).
+    """
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get(EVENT_SEQ_KEY)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class TurnOrder:
+    """Результат чтения оборота: порядок и ОТДЕЛЬНЫЙ счётчик неатрибутированных строк.
+
+    ``ordered`` — строки, у которых ключ порядка есть (в порядке по ``seq``,
+    равные ``seq`` разводит ``id``). ``unattributed`` — их количество среди
+    строк БЕЗ ключа; сами строки наружу не отдаются, потому что включить их
+    в порядок нельзя, а потерять молча — тоже. Читатель обязан сообщить
+    счётчик тому, кто спрашивает.
+    """
+
+    ordered: tuple[Any, ...]
+    unattributed: int
+
+
+def order_turn_rows(rows: Any) -> TurnOrder:
+    """Разложить строки оборота на упорядоченные и неатрибутированные.
+
+    Читатель журнала: строки приходят как отображения (``dict``/``RealDict``)
+    с полями ``id`` и ``metadata``. Порядок — по ``TURN_ORDER_BY_SQL``,
+    приведённый к сортировке в памяти, потому что каноническое выражение
+    живёт в одном месте, а писать его в SQL читатель не обязан.
+    """
+    ordered: list[tuple[int, str, Any]] = []
+    unattributed = 0
+    for row in rows or ():
+        seq = _event_seq(row.get("metadata") if hasattr(row, "get") else None)
+        if seq is None:
+            unattributed += 1
+            continue
+        ordered.append((seq, str(row.get("id") or ""), row))
+    ordered.sort(key=lambda item: (item[0], item[1]))
+    return TurnOrder(
+        ordered=tuple(item[2] for item in ordered),
+        unattributed=unattributed,
+    )
+
+
+def _default_actor(channel: str) -> str:
+    """Метка инициатора входящего, когда он не назван.
+
+    У очереди на том конце producer, а не человек, поэтому её входящее без
+    ``sender_id`` помечается ``queue:<channel>``. Остальные каналы — живой
+    собеседник на том конце, и для них «user» правдиво.
+    """
+    if channel in _QUEUE_CHANNELS:
+        return f"queue:{channel}"
+    return "user"
 
 
 def _json_safe(value: Any) -> Any:
@@ -261,6 +433,9 @@ class DbLoggingService:
         self._state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
+        # Итог журнала печатается один раз за процесс: повторный stop() (или
+        # перезапуск сервиса) не должен превращать остановку в поток строк.
+        self._stats_reported = False
 
         self._stats: dict[str, Any] = {
             "started_at": None,
@@ -271,7 +446,22 @@ class DbLoggingService:
             "queue_full": 0,
             "connected": False,
             "last_error": None,
+            # Счётчики контекста вопроса (``agent_question_runs``). Разделены,
+            # потому что раньше все пути обработки — включая два ранних
+            # ``return`` без единого вызова платформы — попадали в
+            # ``question_runs``, и число записанных вопросов совпадало с
+            # числом попыток. Теперь ``question_runs`` — только реально
+            # выполненные вызовы, а потерянные видны своими счётчиками:
+            # ``question_runs_skipped`` — подписать вызов было нечем (либо
+            # транспорт недоступен), ``question_runs_failed`` — платформа
+            # отказала или бросила.
             "question_runs": 0,
+            "question_runs_skipped": 0,
+            "question_runs_failed": 0,
+            # Не удалось зарегистрировать контекст вопроса на входящем
+            # сообщении (см. ``db_logging_bus.make_inbound_logger``). Оборот
+            # без request_id в журнале: события уйдут без связи с прогоном.
+            "registration_failures": 0,
             "last_purge_at": None,
             "last_purged_events": 0,
             "last_purged_runs": 0,
@@ -300,6 +490,13 @@ class DbLoggingService:
         # (через request_id matching), чтобы ни один компонент не получил
         # бы способ резолвить чужой identity по session_key.
         self._request_index: dict[str, dict[str, str | None]] = {}
+        # Снимок личности ВХОДА оборота. Живёт отдельно от индекса вопросов и
+        # переживает ``clear_request``: финальный ответ оборота публикуется уже
+        # после конца оборота, когда индекс пуст, а подписать событие без
+        # ``session_id``+``user_id`` транспорт не может (см.
+        # ``_take_turn_identity``). Кладёт ``register_request``, забирает
+        # ``log_outbound`` для ``outbound_final`` — ровно один раз.
+        self._turn_identity: dict[str, dict[str, str | None]] = {}
         self._request_index_lock = threading.Lock()
         self._schema_ok = False
 
@@ -351,7 +548,11 @@ class DbLoggingService:
         self._thread.start()
 
     def stop(self, timeout_sec: float = 15.0) -> None:
-        """Остановить worker, дождавшись опустошения очереди."""
+        """Остановить worker, дождавшись опустошения очереди.
+
+        После остановки печатается итог журнала (:meth:`report_stats`) — один
+        раз за процесс, чтобы потери не остались только в памяти сервиса.
+        """
         self._running = False
         self._stop_event.set()
         try:
@@ -361,6 +562,13 @@ class DbLoggingService:
         if self._thread is not None:
             self._thread.join(timeout_sec)
             self._thread = None
+        # Снимки личности входа относятся к оборотам этого процесса: после
+        # остановки подписчик не должен отдать их следующему start().
+        with self._request_index_lock:
+            self._turn_identity.clear()
+        if not self._stats_reported:
+            self._stats_reported = True
+            self.report_stats()
 
     def is_running(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
@@ -369,9 +577,47 @@ class DbLoggingService:
     # Публичный API (неблокирующий)
     # ------------------------------------------------------------------
 
+    def _stamp_event_time(self, event: LogEvent) -> None:
+        """Проставить событию момент СОБЫТИЯ и ключ порядка.
+
+        Зовётся из :py:meth:`log_event` — единственной точки входа всех
+        событий журнала (все ``log_*`` и ``try_log_event`` проходят через неё),
+        поэтому событие не может уйти в батч без своего времени. Общего
+        ``_enqueue`` для этого не хватает: он обслуживает ещё и
+        ``_QuestionRunRecord``, у которого момент события другой сути.
+
+        Момент хранится ОДИН раз, в ``metadata``: второго поля на
+        ``LogEvent`` сознательно нет — копия момента в объекте и в метаданных
+        рано или поздно разошлась бы, и разошёлся бы молча.
+
+        Ключи ставятся безусловно (перезаписывают значения producer'а): если
+        разрешить событию принести свой ``seq``, гарантия порядка перестала бы
+        выполняться ради одного недисциплинированного вызова, а расхождение
+        заметил бы только тот, кто уже сломал разбор оборота.
+        """
+        seq = next_event_seq()
+        metadata = dict(event.metadata or {})
+        metadata[EVENT_TIME_KEY] = _iso_utc(seq / 1_000_000_000)
+        metadata[EVENT_SEQ_KEY] = seq
+        # Атрибуция источника: этот метод и есть writer для всех проходящих
+        # через него событий, поэтому признак проставляется здесь, а не
+        # берётся у producer'а. Раньше признака не было ни у одной строки
+        # агента, и отличить его события от платформенных можно было только
+        # по имени источника процесса.
+        metadata[EVENT_SOURCE_KEY] = EVENT_SOURCE_NANOBOT
+        event.metadata = metadata
+
     def log_event(self, event: LogEvent) -> bool:
+        """Единственная точка входа события в журнал.
+
+        Здесь, а не в базе, событие получает момент СОБЫТИЯ (``_stamp_event_time``):
+        база ставит ``timestamp`` в момент сброса батча, и без собственной
+        метки событие теряет время своего этапа. Отфильтрованное по
+        ``min_level`` событие метку не получает — в журнал оно не попадёт.
+        """
         if not self._should_log(event.level):
             return False
+        self._stamp_event_time(event)
         return self._enqueue(event)
 
     # ------------------------------------------------------------------
@@ -424,6 +670,15 @@ class DbLoggingService:
                     "request_id": request_id,
                     "user_id": user_id,
                 }
+                # Снимок личности ВХОДА: ``sender_id`` известен только здесь и
+                # больше нигде в обороте. Кладём рядом с индексом, той же
+                # блокировкой — читатель снимка увидит либо старую, либо новую
+                # пару целиком. ``clear_request`` его НЕ трогает: финальный
+                # ответ приходит после конца оборота (см. ``_take_turn_identity``).
+                self._turn_identity[session_key] = {
+                    "request_id": request_id,
+                    "user_id": user_id,
+                }
         return self._enqueue(_QuestionRunRecord(
             request_id=request_id,
             session_id=session_key,
@@ -467,17 +722,68 @@ class DbLoggingService:
         response: str | None = None,
         media: list | None = None,
     ) -> bool:
-        """Обновить статус/summary/response вопроса (upsert в agent_question_runs)."""
+        """Обновить статус/summary/response вопроса (upsert в agent_question_runs).
+
+        Вызывается по ``request_id`` — к этому моменту session_key у вызывающего
+        уже нет (``after_run`` пришёл после ``clear_request`` по ContractContext'у
+        не достучаться). Но личность вопроса в сервисе есть: ``register_request``
+        положил её в индекс, и ``clear_request`` снимает её ПОСЛЕ этого вызова.
+        Без неё запись уходила в транспорт без ``session_id``/``user_id``, то
+        есть неподписанной, и отбрасывалась на раннем ``return`` — молча и при
+        этом с записью в счётчик ``question_runs``. Теперь личность берётся из
+        индекса; если её там нет, запись остаётся неподписанной (выдумывать
+        нечего) и будет посчитана пропущенной, а не записанной.
+        """
         if not request_id:
             return False
+        session_id, user_id = self._identity_of_request(request_id)
         return self._enqueue(_QuestionRunRecord(
             request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
             status=status,
             summary=summary,
             response=response,
             media=media,
             update_only=True,
         ))
+
+    def _take_turn_identity(self, session_key: str) -> dict[str, str | None] | None:
+        """Забрать снимок личности ВХОДА этой сессии — ровно один раз.
+
+        Отвечает не на вопрос «кто сейчас владеет сессией», а на другой: «с кем
+        пришёл тот входящий, который начал оборот». Поэтому это НЕ резолв
+        identity по одному ``session_key`` (см. запрет в ``__init__``): снимок
+        кладёт ``register_request``, где ``sender_id`` ещё есть, он переживает
+        ``clear_request`` и исчезает после первого же использования. Второе
+        событие конца оборота личности не получит — а получить чужую нельзя
+        тем более.
+
+        Остаточная гонка (та же, что принята в ``RuntimeEventsSubscriber``): если
+        между входящим и финальным ответом успеет зарегистрироваться НОВЫЙ
+        вопрос той же сессии, снимок будет взят у него.
+        """
+        if not session_key:
+            return None
+        with self._request_index_lock:
+            return self._turn_identity.pop(session_key, None)
+
+    def _identity_of_request(self, request_id: str) -> tuple[str | None, str | None]:
+        """Найти ``(session_id, user_id)`` вопроса по его ``request_id``.
+
+        Читается тот же индекс, что и в ``_enqueue``, и по тому же правилу:
+        личность берётся только из записи, заведённой ``register_request`` для
+        этого же ``request_id``. Чужая не подставляется, отсутствующая не
+        выдумывается — тогда вызывающий получит неподписанную запись и
+        посчитает её пропущенной.
+        """
+        with self._request_index_lock:
+            for session_key, entry in self._request_index.items():
+                if entry.get("request_id") != request_id:
+                    continue
+                user_id = entry.get("user_id")
+                return session_key, user_id if isinstance(user_id, str) else None
+        return None, None
 
     def log_inbound(
         self,
@@ -493,7 +799,14 @@ class DbLoggingService:
         level: str = "INFO",
         media: list | None = None,
     ) -> bool:
-        actor_val = actor or sender_id or "user"
+        """Записать входящее сообщение.
+
+        ``actor`` — тот, кто инициировал оборот. Если заявитель назван
+        (``sender_id``/явный ``actor``), им и подписывается событие: это и есть
+        личность, ради которой оборот существует. Если не назван, источник
+        помечается по правилу ``_default_actor``, а не константой «user».
+        """
+        actor_val = actor or sender_id or _default_actor(channel)
         payload: dict[str, Any] = {"content": content, "message_id": message_id}
         if sender_id:
             payload["sender_id"] = sender_id
@@ -529,6 +842,22 @@ class DbLoggingService:
         payload: dict[str, Any] = {"content": content}
         if media:
             payload["media"] = list(media)
+        # Финальный ответ оборота уходит из агента ПОСЛЕ конца оборота:
+        # ``DatabaseLoggingHook.after_run`` уже снял привязку вопроса
+        # (``clear_request``), поэтому индекс пуст и подписать событие нечем —
+        # транспорт отбросил бы группу, и в журнале не оказалось бы самого
+        # важного события. Личность берётся из одноразового снимка ВХОДА
+        # (см. ``_take_turn_identity``): выдумывать её нельзя, а взять свою —
+        # можно. Промежуточные сообщения снимок не трогают: конец оборота у
+        # них один.
+        user_id: str | None = None
+        effective_request_id = request_id
+        if kind == "outbound_final":
+            snapshot = self._take_turn_identity(session_id)
+            if snapshot:
+                user_id = snapshot.get("user_id")
+                if not effective_request_id:
+                    effective_request_id = snapshot.get("request_id")
         return self.log_event(LogEvent(
             event_type=kind,
             level=level,
@@ -539,7 +868,8 @@ class DbLoggingService:
             summary=content[: self._summary_max_chars] if content else "",
             payload=payload,
             metadata={"latency_ms": latency_ms, "tokens_used": tokens_used},
-            request_id=request_id,
+            request_id=effective_request_id,
+            user_id=user_id,
         ))
 
     def log_tool_call(
@@ -685,6 +1015,19 @@ class DbLoggingService:
             payload=payload or {},
         ))
 
+    def record_registration_failure(self, reason: str) -> None:
+        """Зафиксировать, что контекст вопроса на входящем не зарегистрирован.
+
+        Вызывается шиной (``db_logging_bus.make_inbound_logger``), когда
+        ``register_request`` не отработал: сообщение уйдёт дальше, но весь
+        оборот останется без ``request_id`` — ни в журнале событий, ни в
+        контексте вопроса. Молчать об этом нельзя: потеря видна только изнутри,
+        а логгер шины не имеет своих счётчиков.
+        """
+        with self._state_lock:
+            self._stats["registration_failures"] += 1
+            self._stats["last_error"] = f"register_request: {reason}"
+
     def get_stats(self) -> dict[str, Any]:
         with self._state_lock:
             s = dict(self._stats)
@@ -694,6 +1037,48 @@ class DbLoggingService:
             "oldest_queued_age_sec": self._compute_oldest_queued_age_sec(),
         })
         return s
+
+    def report_stats(self) -> dict[str, Any]:
+        """Напечатать снимок статистики журнала — один раз за жизнь процесса.
+
+        ``get_stats()`` вне тестов никто не звал, поэтому потерянные вопросы
+        оставались невидимы: счётчик рос, показывая записи, которых не было,
+        и никто не узнавал об этом, пока не оставалась пустая таблица. Одна
+        строка на остановке делает итог наблюдаемым без потока шума.
+
+        Returns:
+            Снимок ``get_stats()`` — чтобы вызывающий мог переиспользовать его
+            (например, в баннере), не печатая второй раз.
+        """
+        stats = self.get_stats()
+        losses = (
+            int(stats.get("failed") or 0)
+            + int(stats.get("dropped") or 0)
+            + int(stats.get("question_runs_failed") or 0)
+            + int(stats.get("question_runs_skipped") or 0)
+            + int(stats.get("registration_failures") or 0)
+            + int(stats.get("queue_full") or 0)
+        )
+        summary = (
+            "журнал агента: событий записано %s, потеряно %s, батчей %s, "
+            "контекстов вопроса записано %s (пропущено %s, отказов %s), "
+            "регистраций с ошибкой %s, в очереди %s%s"
+        )
+        args = (
+            stats.get("written", 0),
+            stats.get("dropped", 0),
+            stats.get("batch_count", 0),
+            stats.get("question_runs", 0),
+            stats.get("question_runs_skipped", 0),
+            stats.get("question_runs_failed", 0),
+            stats.get("registration_failures", 0),
+            stats.get("queue_size", 0),
+            f", последняя ошибка: {stats['last_error']}" if stats.get("last_error") else "",
+        )
+        # Потери — это WARNING, а не INFO: оператор с уровнем INFO увидит и
+        # чистый итог, но молчание при потерях обойтись не может.
+        logger.log(logging.WARNING if losses else logging.INFO, summary, *args)
+        return stats
 
     def _compute_oldest_queued_age_sec(self) -> float | None:
         """Возраст самого старого ``LogEvent`` в очереди (секунды).
@@ -1066,18 +1451,38 @@ class DbLoggingService:
         Отдельный метод по той же причине, что и ``_flush_batch_via_mcp``:
         контекст пишется не событием журнала, а отдельной операцией, и смешивать
         их в одном батче нельзя — они пишутся в разные таблицы.
+
+        Транспорт сообщает, состоялась ли запись. Раньше метод ничего не
+        возвращал, и ``question_runs`` рос на ЛЮБОМ выходе, включая два ранних
+        ``return`` внутри ``McpLogWriter.upsert_question_run``, где вызова
+        платформы не было вовсе: число «записанных вопросов» совпадало с
+        числом попыток, и потеря была не видна нигде. Теперь исходы разведены:
+        ``written`` / ``skipped`` / ``failed``, а отказ пишется в лог целиком —
+        иначе «сервер сказал, что записал» осталось бы неотличимым от тишины.
         """
         try:
-            self._mcp_writer.upsert_question_run(rec)
+            written = self._mcp_writer.upsert_question_run(rec)
         except Exception as exc:
+            logger.exception(
+                "контекст вопроса не записан (request_id=%s): %s",
+                rec.request_id,
+                exc,
+            )
             with self._state_lock:
                 self._stats["failed"] += 1
+                self._stats["question_runs_failed"] += 1
                 self._stats["last_error"] = f"question_run mcp: {exc}"
                 self._stats["connected"] = False
             return
         with self._state_lock:
-            self._stats["question_runs"] += 1
-            self._stats["connected"] = True
+            if written:
+                self._stats["question_runs"] += 1
+                self._stats["connected"] = True
+                return
+            self._stats["question_runs_skipped"] += 1
+        # Локальный след последнего шанса: до платформы запись не дошла, но
+        # после её смерти в файле останется хотя бы факт попытки.
+        self._write_fallback([rec])  # type: ignore[list-item]
 
     def _insert_batch(self, conn: Any, batch: list[LogEvent]) -> None:
         """Выполнить ``execute_batch`` INSERT на данном соединении."""

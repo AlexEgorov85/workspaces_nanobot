@@ -31,6 +31,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Имена событий оборота — из словаря платформы
+# (``mcp-platform/libs/enterprise_common/eventing/types.py``).
+#
+# Агент НЕ импортирует словарь: платформа объявляет этот контракт по
+# протоколу, и прямой импорт сделал бы зависимость кода агента от дерева
+# платформы (граница, которую репозиторий держит: агент ходит к платформе
+# через MCP-операции, а не через ``sys.path``). Соответствие имён словарю
+# проверяется тестом ``tests/test_turn_observability_events.py``, который
+# читает словарь как файл.
+#
+# Почему именно эти события. До правки в журнале не было ни начала оборота,
+# ни начала вызова модели, ни исхода оборота: `llm_call` нёс prompt и response
+# одним событием, а `run_finished` — только текст ответа. По таблице нельзя
+# было ни посчитать длительность этапа, ни ответить «успешен ли оборот».
+# ---------------------------------------------------------------------------
+EV_AGENT_STARTED = "agent.started"
+EV_AGENT_COMPLETED = "agent.completed"
+EV_AGENT_FAILED = "agent.failed"
+EV_LLM_REQUESTED = "llm.requested"
+EV_LLM_COMPLETED = "llm.completed"
+
+# ---------------------------------------------------------------------------
 # Мост per-iteration usage между хуком и патчами RuntimePatcher.
 #
 # Нужен для метрики занятости контекстного окна (``metadata.context_window``).
@@ -251,6 +273,27 @@ def _current_request_sender_id() -> str | None:
     return None
 
 
+def _messages_chars(messages: Any) -> int:
+    """Суммарный размер текста промпта в символах (дешёвый размер запроса).
+
+    Нужен ``llm.requested``: сам промпт там не дублируется (он лежит в
+    ``llm_call``), но без размера начало вызова модели не с чем связать, кроме
+    номера итерации. Считается одним проходом по уже существующим строкам —
+    ни копий, ни сериализации.
+    """
+    total = 0
+    for message in messages or ():
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, (list, tuple)):
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        total += len(part["text"])
+    return total
+
+
 def _usage_to_dict(usage: Any) -> dict | None:
     """Унифицированный адаптер ``LLMUsage | dict | None -> dict | None``.
 
@@ -339,6 +382,84 @@ class DatabaseLoggingHook(AgentHook):
         # ``after_iteration`` мог упаковать его вместе с ответом в llm_call.
         self._pending_prompt: list | None = None
         self._pending_iteration: int | None = None
+        # Момент начала оборота (``before_run``) — из него считается
+        # длительность оборота, которую раньше приходилось выводить вручную
+        # по десяткам строк.
+        self._turn_started_at: float | None = None
+        # Терминальное событие оборота пишется ровно одно: nanobot зовёт
+        # ``on_error`` и ``after_run`` последовательно при ошибке без
+        # исключения, а ``after_run`` — и вовсе без ``on_error``. Флаг
+        # гарантирует один ``agent.completed`` ИЛИ один ``agent.failed``,
+        # а не оба и не ноль.
+        self._turn_terminal_logged = False
+        # Момент начала текущей итерации LLM — длительность вызова модели.
+        self._iteration_started_at: float | None = None
+
+    # ------------------------------------------------------------------
+    # Запись событий оборота
+    # ------------------------------------------------------------------
+
+    def _log_stage(
+        self,
+        event_type: str,
+        *,
+        name: str,
+        summary: str,
+        payload: dict | None = None,
+        metadata: dict | None = None,
+        level: str = "INFO",
+    ) -> None:
+        """Записать событие оборота от имени хука.
+
+        Fail-soft: падение записи не должно ронять ход агента (та же политика,
+        что у ``log_tool_call`` и ``run_finished``), но и не теряется молча —
+        уходит в WARNING хука. Момент СОБЫТИЯ и ключ порядка проставляет
+        ``DbLoggingService.log_event`` (единственная точка входа), поэтому
+        здесь ничего про время писать не нужно.
+        """
+        from lib.services.db_logging_service import LogEvent
+
+        try:
+            self._service.log_event(LogEvent(
+                event_type=event_type,
+                level=level,
+                session_id=self._run_session_key,
+                request_id=self._request_id,
+                actor="agent",
+                name=name,
+                summary=summary,
+                payload=payload or {},
+                metadata=metadata or {},
+            ))
+        except Exception as exc:  # noqa: BLE001 - оборота не роняем
+            logger.warning(
+                "DbLoggingHook: событие %s не записано: %s", event_type, exc
+            )
+
+    def _resolve_model(self) -> str | None:
+        """Имя текущей модели (или ``None``).
+
+        В nanobot 0.3.5+ ``LLMResponse.model`` удалён — модель живёт на
+        ``AgentLoop.model`` (свойство
+        ``nanobot/agent/loop.py:218`` → ``runtime_resolver.runtime.model``),
+        поэтому хук берёт её через замыкание ``get_model``, заданное
+        ``make_db_logging_hook_factory``. Вынесено в одну точку, потому что
+        ``llm.requested``, ``llm.completed`` и ``llm_call`` обязаны назвать
+        ОДНУ и ту же модель: разъезд имён в трёх событиях одной итерации
+        сделал бы разбор вызова модели невозможным.
+        """
+        if not self._get_model:
+            return None
+        try:
+            return self._get_model()
+        except Exception:  # noqa: BLE001 - имя модели не критично
+            return None
+
+    def _turn_latency_ms(self) -> float | None:
+        """Длительность оборота от ``before_run`` (или ``None`` без старта)."""
+        if self._turn_started_at is None:
+            return None
+        return round((time.time() - self._turn_started_at) * 1000.0, 3)
 
     # ------------------------------------------------------------------
     # Tool-события
@@ -436,6 +557,85 @@ class DatabaseLoggingHook(AgentHook):
     # Run-level summary
     # ------------------------------------------------------------------
 
+    async def before_run(self, context: AgentRunHookContext) -> None:
+        """Оборот взят в обработку — ПЕРВОЕ событие оборота в журнале.
+
+        До него в журнале есть только ``inbound``: сообщение опубликовано в
+        шину и ждёт. Разница между моментами ``inbound`` и ``agent.started`` —
+        это время ожидания в очереди плюс restore/compact сессии, и без
+        ``agent.started`` его было неоткуда взять: ни в коде, ни в таблице
+        события начала оборота не существовало.
+
+        Выбран именно этот хук, потому что он ПУБЛИЧНАЯ точка nanobot и
+        вызывается на каждый ``runner.run()`` — раньше от ``inbound`` (шина) и
+        раньше ``DatabaseLoggingHook.after_run``. Альтернативы требовали бы
+        патча ``AgentLoop`` (запрещено политикой инвентаря) или второго
+        хука ради одного события.
+
+        ``AgentRunHookContext`` не содержит ``session_key``, поэтому личность
+        оборота берётся из полей инстанса, запечённых фабрикой на оборот.
+        """
+        self._turn_started_at = time.time()
+        self._turn_terminal_logged = False
+        self._log_stage(
+            EV_AGENT_STARTED,
+            name="turn",
+            summary="оборот взят в обработку",
+        )
+
+    def _log_turn_terminal(self, context: AgentRunHookContext, *, failed: bool) -> None:
+        """Терминальное событие оборота — ровно одно (``agent.completed``/``agent.failed``).
+
+        Исход берётся из ``context.error``, а длительность — из ``before_run``,
+        поэтому на вопрос «был ли оборот успешным и сколько занял» отвечает
+        сам журнал, а не ручной разбор строк. Значение ``stop_reason`` и
+        usage пишутся в metadata, чтобы исход читался без payload'а.
+
+        Текст ответа сюда НЕ кладётся: по спецификации журнала
+        (``openspec/specs/logging-db/spec.md``, «agent.responded сохраняет
+        текст финального ответа») формирование ответа, исход оборота и
+        доставка — три разных факта и три разных строки. Текст несёт
+        ``run_finished`` (будущее ``agent.responded``); смешивать их
+        нельзя, иначе исход оборота стал бы зависеть от наличия ответа.
+        """
+        if self._turn_terminal_logged:
+            return
+        self._turn_terminal_logged = True
+        usage_dict = _usage_to_dict(getattr(context, "usage", None)) or {}
+        metadata: dict[str, Any] = {
+            "outcome": "failed" if failed else "completed",
+            "latency_ms": self._turn_latency_ms(),
+            "stop_reason": getattr(context, "stop_reason", None),
+            "iterations": self._pending_iteration,
+            "tokens_used": usage_dict.get("total_tokens"),
+        }
+        if failed:
+            self._log_stage(
+                EV_AGENT_FAILED,
+                level="ERROR",
+                name="turn",
+                summary=(getattr(context, "error", None) or "оборот прерван")[:200],
+                payload={"error": getattr(context, "error", None)},
+                metadata=metadata,
+            )
+        else:
+            self._log_stage(
+                EV_AGENT_COMPLETED,
+                name="turn",
+                summary="оборот завершён",
+                metadata=metadata,
+            )
+
+    async def on_error(self, context: AgentRunHookContext) -> None:
+        """Оборот упал — фиксируем исход, пока не потеряли контекст.
+
+        nanobot зовёт ``on_error`` и при исключении (с последующим re-raise, без
+        ``after_run``), и при ошибке, пережившей обёртку итерации (тогда
+        ``after_run`` будет вызван следом). Флаг в ``_log_turn_terminal``
+        оставляет ровно одно терминальное событие в обоих случаях.
+        """
+        self._log_turn_terminal(context, failed=True)
+
     async def before_iteration(self, context: Any) -> None:
         # AgentRunHookContext не содержит session_key, ловим его здесь
         # (передаётся AgentHookContext со spec.session_key)
@@ -444,6 +644,28 @@ class DatabaseLoggingHook(AgentHook):
         # чтобы ``after_iteration`` упаковал его вместе с LLMResponse.
         self._pending_prompt = list(getattr(context, "messages", None) or [])
         self._pending_iteration = getattr(context, "iteration", None)
+        self._iteration_started_at = time.time()
+        # Начало вызова модели. Раньше модель была видна только по итогу:
+        # ``llm_call`` нёс prompt и response ОДНИМ событием, записанным после
+        # ответа, поэтому длительность вызова и сам факт «пошёл запрос» не
+        # оставляли в журнале никакого следа. Здесь пишется только размер
+        # запроса (полный промпт остаётся в ``llm_call``) — чтобы связать
+        # начало с архивом по ``iteration``, не дублируя мегабайты текста.
+        messages = self._pending_prompt
+        self._log_stage(
+            EV_LLM_REQUESTED,
+            name="llm",
+            summary=f"запрос итерации {self._pending_iteration} к модели",
+            payload={
+                "iteration": self._pending_iteration,
+                "messages": len(messages),
+                "prompt_chars": _messages_chars(messages),
+            },
+            metadata={
+                "iteration": self._pending_iteration,
+                "model": self._resolve_model(),
+            },
+        )
 
     async def after_iteration(self, context: Any) -> None:
         self._capture_context(context)
@@ -451,6 +673,35 @@ class DatabaseLoggingHook(AgentHook):
         # (последняя запись перед финалом = usage финальной итерации).
         _store_iteration_usage(self._run_session_key, getattr(context, "usage", None))
         response = getattr(context, "response", None)
+        # Конец вызова модели — ПЕРЕД ранним выходом по ``response is None``:
+        # итерация, не получившая ответа, тоже была вызовом модели, и её
+        # длительность иначе потерялась бы. Пишется до ``llm_call``, чтобы в
+        # порядке событий конец запроса не обгонял его архив.
+        iteration = self._pending_iteration or getattr(context, "iteration", None)
+        latency_ms = (
+            round((time.time() - self._iteration_started_at) * 1000.0, 3)
+            if self._iteration_started_at is not None
+            else None
+        )
+        # Модель резолвится ОДИН раз на итерацию: ``llm.completed`` и
+        # ``llm_call`` обязаны назвать одну и ту же, а второй вызов
+        # ``agent.model`` на итерацию — лишняя работа в горячем пути и
+        # лишний вызов ``get_model``, который contract-тест считает.
+        model = self._resolve_model()
+        self._log_stage(
+            EV_LLM_COMPLETED,
+            level="ERROR" if getattr(context, "error", None) else "INFO",
+            name="llm",
+            summary=f"ответ итерации {iteration} получен",
+            payload={"iteration": iteration},
+            metadata={
+                "iteration": iteration,
+                "model": model,
+                "latency_ms": latency_ms,
+                "finish_reason": getattr(response, "finish_reason", None),
+                "usage": _usage_to_dict(getattr(context, "usage", None)) or {},
+            },
+        )
         if response is None:
             return
         try:
@@ -458,22 +709,17 @@ class DatabaseLoggingHook(AgentHook):
 
             # Резолв имени модели: в nanobot 0.3.5+ ``LLMResponse.model``
             # удалён — он теперь живёт на ``AgentLoop.model`` (свойство
-            # ``runtime_resolver.runtime.model``). Фабрика фабрики
+            # ``runtime_resolver.runtime.model``). Фабрика
             # ``make_db_logging_hook_factory`` принимает опциональный
             # ``get_model`` callable, закрывающийся над ``agent.model``
             # (см. ``AgentFactory.create``). Если callable не передан
             # (тесты, fallback) — пишем с ``model=None``, и
             # ``log_llm_call`` ставит ``name="llm"``.
-            try:
-                model = self._get_model() if self._get_model else None
-            except Exception:
-                model = None
-
             self._service.log_llm_call(
                 session_id=self._run_session_key or "",
                 prompt=self._pending_prompt or [],
                 response=asdict(response),
-                iteration=self._pending_iteration or getattr(context, "iteration", None),
+                iteration=iteration,
                 model=model,
                 finish_reason=getattr(response, "finish_reason", None),
                 usage=_usage_to_dict(getattr(context, "usage", None)) or {},
@@ -517,6 +763,11 @@ class DatabaseLoggingHook(AgentHook):
                     summary=(context.final_content or "")[:200] or None,
                     response=context.final_content or None,
                 )
+            # Исход оборота — после ``run_finished`` (который несёт текст
+            # ответа) и ДО ``finally``: снимок личности вопроса живёт до конца
+            # ``try``. При ошибке, пережившей обёртку итерации, ``on_error``
+            # мог уже записать ``agent.failed`` — повторно не пишется.
+            self._log_turn_terminal(context, failed=bool(context.error))
         except Exception as exc:
             logger.warning("DbLoggingHook.after_run failed: %s", exc)
         finally:

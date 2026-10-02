@@ -125,12 +125,15 @@ class TestNoProductionDirectWriters:
         """AST-парсинг: ``cursor.execute(...)`` с SQL-литералом,
         содержащим имя logging-таблицы — запрещено вне owner'а."""
         if not py_path.is_file():
-            pytest.skip(f"file no longer exists: {py_path}")
-        text = py_path.read_text(encoding="utf-8")
+            pytest.fail(f"охраняемый файл исчез: {py_path}")
+        # utf-8-sig, а не utf-8: файл с BOM начинается с U+FEFF, и ast.parse
+        # на нём падает. Раньше это приводило к skip — то есть файл с BOM
+        # выпадал из-под охраны молча, оставаясь зелёным.
+        text = py_path.read_text(encoding="utf-8-sig")
         try:
             tree = ast.parse(text)
         except SyntaxError:
-            pytest.skip(f"cannot parse {py_path}")
+            pytest.fail(f"охраняемый файл не разбирается: {py_path}")
 
         offenders: list[str] = []
 
@@ -240,13 +243,14 @@ class TestNoDeletedModuleImports:
     ], ids=lambda p: str(p.relative_to(REPO_ROOT)))
     def test_no_deleted_module_import(self, py_path: Path) -> None:
         if not py_path.is_file():
-            pytest.skip(f"file no longer exists: {py_path}")
+            pytest.fail(f"охраняемый файл исчез: {py_path}")
         rel = py_path.relative_to(REPO_ROOT)
-        text = py_path.read_text(encoding="utf-8")
+        # См. комментарий выше про utf-8-sig и BOM.
+        text = py_path.read_text(encoding="utf-8-sig")
         try:
             tree = ast.parse(text)
         except SyntaxError:
-            pytest.skip(f"cannot parse {py_path}")
+            pytest.fail(f"охраняемый файл не разбирается: {py_path}")
 
         offenders: list[str] = []
 

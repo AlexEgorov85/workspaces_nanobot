@@ -216,7 +216,16 @@ class TestRegisterReadinessChecks:
         воспроизводил бы баг ``_submit(...).result`` вместо контракта.
         ``get`` бросает ошибку воркера либо возвращает ``None`` по таймауту.
 
+        ВАЖНО: ``_submit`` здесь только ЗАПИСЫВАЕТ переданный ``_Job`` и не
+        выполняет его. Тест может взять job из ``manager._submit.call_args`` и
+        запустить ``job.fn(fake_conn)`` сам — иначе тело пробы остаётся
+        непроверенным, а сломанный ``SELECT 1`` прошёл бы незамеченным.
+
         mode: ``alive`` | ``timeout`` | ``error``.
+
+        Returns:
+            ``(get_manager, manager)`` — оба нужны: первым проверяют, что пул
+            не дёргали вообще, второй хранит отправленные job'ы.
         """
         import importlib.util
         import sys
@@ -252,7 +261,16 @@ class TestRegisterReadinessChecks:
         # на момент вызова — значит подменять надо сам sys.modules.
         monkeypatch.setitem(sys.modules, "utils.db", real)
         monkeypatch.setattr(real, "_get_manager", get_manager, raising=False)
-        return get_manager
+        return get_manager, manager
+
+    @staticmethod
+    def _submitted_job(manager):
+        """Job, отправленный в пул последней проверкой."""
+        assert manager._submit.call_count == 1, (
+            "ожидалась ровно одна задача в пуле, отправлено %d"
+            % manager._submit.call_count
+        )
+        return manager._submit.call_args[0][0]
 
     def test_live_pool_is_up_despite_non_pg_manager_name(self, monkeypatch):
         """Живая БД + менеджер без PG в имени = UP (а не DOWN)."""
@@ -265,6 +283,48 @@ class TestRegisterReadinessChecks:
         report = ctx.runtime_readiness.check()
         assert report.components[0].status == "UP", report.components[0].detail
         assert report.status == "READY"
+        # Режим хранилища попадает в detail: без него в стартовом логе не
+        # видно, что БД проверена при file-режиме, а это и есть причина
+        # поднять вопрос «а точно ли проверяли?».
+        assert "storage_mode=file" in report.components[0].detail
+
+    def test_ping_really_executes_select_1(self, monkeypatch):
+        """Тело пробы обязано работать, а не только её решение.
+
+        Мок пула не выполняет отправленный job, поэтому без этого теста
+        сломанный ``SELECT 1`` (или неверное пользование курсором) прошёл бы
+        незамеченным: проверка приняла бы результат заглушки.
+        """
+        from lib.core.application_context import _register_readiness_checks
+
+        _get_manager, manager = self._patch_pool(monkeypatch, mode="alive")
+        ctx = self._ctx()
+        _register_readiness_checks(ctx)
+        ctx.runtime_readiness.check()
+
+        job = self._submitted_job(manager)
+        executed = []
+
+        class _Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, *params):
+                executed.append(sql)
+
+            def fetchone(self):
+                return (1,)
+
+        class _Conn:
+            def cursor(self):
+                return _Cursor()
+
+        result = job.fn(_Conn())
+        assert executed == ["SELECT 1"], executed
+        assert result is not None, "проба обязана вернуть строку, а не None"
 
     def test_dead_pool_is_down_and_not_ready(self, monkeypatch):
         """Мёртвая БД при включённом канале = DOWN и NOT_READY."""
@@ -317,15 +377,17 @@ class TestRegisterReadinessChecks:
         """БД не нужна и DSN нет — UP без ping'а, а не 2 с таймаут в DOWN."""
         from lib.core.application_context import _register_readiness_checks
 
-        get_manager = self._patch_pool(monkeypatch, mode="timeout")
+        get_manager, manager = self._patch_pool(monkeypatch, mode="timeout")
         ctx = self._ctx(channel_on=False, dsn="", storage_mode="file")
         _register_readiness_checks(ctx)
 
         report = ctx.runtime_readiness.check()
         assert report.components[0].status == "UP"
         assert report.status == "READY"
-        # пул не дёргали вовсе
+        # пул не дёргали вовсе: ни одной задачи в очередь не ушло
         assert get_manager.call_count == 0
+        assert manager._submit.call_count == 0
+        assert "pg not required" in report.components[0].detail
 
     def test_worker_error_is_reported_as_down(self, monkeypatch):
         """Ошибка воркера (БД недоступна) = DOWN с её текстом в detail."""
@@ -341,10 +403,15 @@ class TestRegisterReadinessChecks:
         assert report.status == "NOT_READY"
 
     def test_missing_session_manager_is_down(self, monkeypatch):
-        """Нет менеджера сессий = DOWN даже при живой БД."""
+        """Нет менеджера сессий = DOWN даже при живой БД, и пула не касаемся.
+
+        Подмена пула здесь не нужна для решения, но проверка, что в него НЕ
+        отправили задачу, документирует ранний выход: при живом пуле читатель
+        теста иначе решил бы, что DOWN вызван падением пинга.
+        """
         from lib.core.application_context import _register_readiness_checks
 
-        self._patch_pool(monkeypatch, mode="alive")
+        _get_manager, manager = self._patch_pool(monkeypatch, mode="alive")
         ctx = self._ctx()
         ctx.session_manager = None
         _register_readiness_checks(ctx)
@@ -352,6 +419,9 @@ class TestRegisterReadinessChecks:
         report = ctx.runtime_readiness.check()
         assert report.components[0].status == "DOWN"
         assert "no session_manager" in report.components[0].detail
+        assert manager._submit.call_count == 0, (
+            "менеджера сессий нет — проверка обязана выйти до отправки задачи"
+        )
 
 
 class TestApplicationContextIntegration:

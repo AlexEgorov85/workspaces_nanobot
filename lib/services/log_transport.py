@@ -58,6 +58,7 @@ from typing import Any, Protocol
 from lib.services.enterprise_mcp_client import (
     CallIdentity,
     EnterpriseMcpUnavailable,
+    EnterpriseOperationError,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,15 @@ class LoopCallRunner:
             raise LogWriteUnavailable(
                 f"вызов в loop не ответил за {self.timeout_sec:g}с"
             ) from exc
+        except EnterpriseOperationError:
+            # Доменный отказ платформы доезжает до сюда через ``future.result`` и
+            # НЕ является «отказом loop'а», хотя оба — ``RuntimeError``: сервер
+            # ответил, просто отказал. Раньше этот отказ переписывался в
+            # ``LogWriteUnavailable("event loop отказал: [code] ...")``, то есть
+            # отказ платформы выдавался за недоступность транспорта, а причина
+            # терялась среди «сервера нет». Поднимаем как есть: вызывающий сам
+            # решит, что с доменным отказом делать.
+            raise
         except RuntimeError as exc:
             # Тот же класс отказа с другой стороны: loop отвечает, но
             # корутину выполнить не смог (loop остановился между отправкой и
@@ -332,18 +342,26 @@ class McpLogWriter:
         )
         return WriteResult(accepted=sent)
 
-    def upsert_question_run(self, record: Any) -> None:
+    def upsert_question_run(self, record: Any) -> bool:
         """Записать контекст вопроса операцией ``upsert_question_run``.
 
         ``request_id`` в аргументы не попадает: операция берёт его из контекста
         вызова. Отдельная операция, а не событие журнала: контекст пишется один
         раз на оборот, и не должен оседать в батче событий.
+
+        Returns:
+            ``True`` — вызов ушёл платформе и она его приняла. ``False`` —
+            записи не было: подписать вызов нечем либо транспорт недоступен.
+            Различать эти два исхода обязан вызывающий: раньше метод возвращал
+            ``None`` на всех путях, и ``DbLoggingService`` увеличивал
+            ``question_runs`` даже после раннего ``return``, то есть статистика
+            показывала запись, которой не было.
         """
         if not record.request_id:
             logger.warning(
                 "upsert_question_run: запись без request_id пропущена"
             )
-            return
+            return False
         session_id = (record.session_id or "").strip()
         user_id = (record.user_id or "").strip()
         if not session_id or not user_id:
@@ -354,7 +372,7 @@ class McpLogWriter:
                 record.session_id,
                 record.user_id,
             )
-            return
+            return False
         identity = CallIdentity(
             session_id=session_id, user_id=user_id, request_id=record.request_id
         )
@@ -376,6 +394,8 @@ class McpLogWriter:
             self.run(self._invoke_question_run(identity, payload))
         except (LogWriteUnavailable, EnterpriseMcpUnavailable) as exc:
             logger.warning("upsert_question_run: контекст потерян: %s", exc)
+            return False
+        return True
 
     async def _invoke_question_run(
         self, identity: CallIdentity, payload: dict[str, Any]

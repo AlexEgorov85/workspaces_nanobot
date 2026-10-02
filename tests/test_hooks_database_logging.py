@@ -113,8 +113,16 @@ class TestDatabaseLoggingHook:
 
         asyncio.run(hook.before_iteration(MagicMock(session_key="cli:1")))
         asyncio.run(hook.after_run(ctx))
-        service.log_event.assert_called_once()
-        event = service.log_event.call_args[0][0]
+        # after_run пишет ДВА события: run_finished (текст ответа) и
+        # agent.completed (исход оборота с длительностью). Раньше исхода в
+        # журнале не было вовсе, и «успешен ли оборот и сколько занял»
+        # приходилось выводить вручную. Проверяем нужное событие по типу,
+        # а не «последний вызов».
+        events = [c.args[0] for c in service.log_event.call_args_list]
+        assert [e.event_type for e in events] == [
+            "llm.requested", "run_finished", "agent.completed",
+        ]
+        event = next(e for e in events if e.event_type == "run_finished")
         assert event.event_type == "run_finished"
         assert event.summary == "hello"
         assert event.payload["tools_used"] == ["read", "write"]

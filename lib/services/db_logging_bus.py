@@ -37,6 +37,7 @@ runner туда положил) — иначе None.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -44,6 +45,8 @@ from typing import Any
 from utils.media import serialize as media_serialize
 
 from lib.utils.outbound_meta import is_outbound_final, is_outbound_noise, msg_session_key
+
+logger = logging.getLogger(__name__)
 
 
 def make_inbound_logger(
@@ -62,15 +65,19 @@ def make_inbound_logger(
     чтобы все последующие события вопроса (tool/run/outbound) несли
     эти поля. ``agent_id`` — id агента, обрабатывающего шину (опционален).
 
-    Все ошибки глотаются — логгер не должен ломать публикацию сообщения,
-    иначе агент зависнет. Если нужна диагностика — смотрите ``service.get_stats()``.
+    Логгер не имеет права уронить публикацию сообщения (иначе агент
+    зависнет), поэтому отказ перехватывается — но не проглатывается: он
+    уходит в лог с трассировкой и в счётчик ``registration_failures``.
+    Диагностика: ``service.get_stats()``. Кто инициировал входящее (``actor``),
+    решает сам сервис: у сообщения из очереди на том конце producer, а не
+    человек (см. ``DbLoggingService.log_inbound``).
 
     Returns:
         Async-callable ``async def(msg) -> None`` для ``_create_bus``.
     """
     async def _log(msg: Any) -> None:
+        session_key = msg_session_key(msg)
         try:
-            session_key = msg_session_key(msg)
             channel = getattr(msg, "channel", "") or ""
             message_id = (getattr(msg, "metadata", {}) or {}).get("message_id")
             sender_id = getattr(msg, "sender_id", None) or None
@@ -85,13 +92,25 @@ def make_inbound_logger(
             # agent_question_runs). См. fix request_id-linkage.
             request_id = message_id or str(uuid.uuid4())
             if session_key:
-                service.register_request(
-                    session_key, request_id,
-                    user_id=sender_id, chat_id=chat_id, channel=channel,
-                    agent_id=agent_id,
-                    question=content,
-                    media=media or None,
-                )
+                # Отдельно от записи входящего: сбой регистрации убивает и
+                # request_id индекса, то есть ВСЕ события оборота остаются без
+                # связи с прогоном. Раньше это уходило в общий ``except`` и
+                # терялось целиком — теперь видно и в логе, и в счётчике.
+                try:
+                    service.register_request(
+                        session_key, request_id,
+                        user_id=sender_id, chat_id=chat_id, channel=channel,
+                        agent_id=agent_id,
+                        question=content,
+                        media=media or None,
+                    )
+                except Exception as exc:  # noqa: BLE001 - публикацию не роняем
+                    logger.warning(
+                        "входящее: контекст вопроса не зарегистрирован "
+                        "(session=%s request_id=%s): %s",
+                        session_key, request_id, exc, exc_info=True,
+                    )
+                    _note_registration_failure(service, exc)
             service.log_inbound(
                 session_id=session_key,
                 channel=channel,
@@ -102,9 +121,29 @@ def make_inbound_logger(
                 request_id=request_id,
                 media=media or None,
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - публикацию не роняем
+            # Логгер не имеет права уронить ход агента, но и терять след
+            # нельзя: раньше здесь стоял ``pass`` и падение записи входящего
+            # было неотличимо от «сообщения не было».
+            logger.warning(
+                "входящее не залогировано (session=%s): %s",
+                session_key, exc, exc_info=True,
+            )
     return _log
+
+
+def _note_registration_failure(service: Any, exc: Exception) -> None:
+    """Отметить потерю регистрации в статистике сервиса (если он её умеет).
+
+    Сервис-контракт расширяется свободно: чужой/заглушечный сервис без метода
+    просто ничего не получит, и это не повод ронять публикацию.
+    """
+    note = getattr(service, "record_registration_failure", None)
+    if callable(note):
+        try:
+            note(str(exc))
+        except Exception:  # noqa: BLE001 - счётчик не должен ломать публикацию
+            logger.warning("счётчик регистраций недоступен", exc_info=True)
 
 
 def make_outbound_logger(
@@ -131,7 +170,8 @@ def make_outbound_logger(
     (если ``_turn`` — dict; runner туда кладёт метрики). При отсутствии
     остаются ``None``.
 
-    Все ошибки глотаются (см. ``make_inbound_logger``).
+    Отказ перехватывается, чтобы не уронить публикацию, но и не теряется
+    молча (см. ``make_inbound_logger``).
     """
     async def _log(msg: Any) -> None:
         try:
@@ -161,6 +201,6 @@ def make_outbound_logger(
                 kind=kind,
                 media=media or None,
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - публикацию не роняем
+            logger.warning("исходящее не залогировано: %s", exc, exc_info=True)
     return _log

@@ -249,12 +249,77 @@ PG→DuckDB sync-путь пишет события (`sync_service_started`,
 
 - `db_logging_service.log_event(LogEvent(...))` — основной путь
   (асинхронный, через пул-воркер; `timestamp` проставляется на flush,
-  `flush_interval_sec=5`);
+  `flush_interval_sec=5`). `log_event` — **единственная точка входа**, и
+  именно она проставляет событию его собственное время (см. «Время события
+  и порядок» ниже);
 - `DbLoggingService.try_log_event(svc, log_event, *, producer, event_type)`
   — defensive helper для producer'ов (контракт WARNING при
   недоступности сервиса, no-op for business). Это контрактно
   единый уровень для всех producer'ов — никаких per-producer уровней
   или fallback-INSERT'ов.
+
+#### Время события и порядок
+
+`agent_gateway_logs.timestamp` — **момент ЗАПИСИ** строки: его ставит база
+(`DEFAULT CURRENT_TIMESTAMP`) в момент батч-сброса. Он честно отвечает на
+вопрос «когда строка легла», но **не отвечает на вопрос «когда событие
+произошло»**: весь батч получает одну метку, поэтому по этой колонке не
+считается длительность ни одного этапа.
+
+Поэтому событие получает собственное время в писателе — в момент, когда
+`DbLoggingService` его принимает, — и оно переживает батчирование, потому
+что едет вместе с событием в JSONB `metadata`:
+
+| Поле | Смысл | Читаемо как |
+|---|---|---|
+| `timestamp` | момент **записи** (сброс батча, ставит база) | `ORDER BY timestamp` |
+| `metadata->>'occurred_at'` | момент **события**, ISO-8601 UTC | `occurred_at::timestamptz` |
+| `metadata->>'seq'` | тот же момент в наносекундах — **ключ порядка** | `ORDER BY (metadata->>'seq')::bigint, id` |
+
+Ключ порядка выводится из системных часов, а не из локального счётчика
+процесса: журнал пишут **два** процесса — агент и отдельный subprocess
+`enterprise-mcp`, и только часы у них общие (плотный счётчик «1, 2, 3» на
+оборот потребовал бы разделяемого аллокатора — нового владельца состояния
+в горячем пути — и всё равно не покрыл бы события MCP-процесса). Внутри
+процесса порядок строго монотонен: пол `_SEQ_FLOOR` не даёт часам уйти
+назад (шаг NTP) перевернуть порядок двух событий.
+
+Момент пишется в `metadata`, а не в колонку `timestamp`, потому что обе
+колонки заполняют два писателя, а платформенная операция `log_events` пишет
+в `timestamp` `now()` в SQL
+(`mcp-platform/servers/enterprise/capabilities/data/service/main.py`).
+Если бы агент писал туда момент события, одна колонка означала бы разное в
+зависимости от того, кто её заполнил, и читатель не смог бы это отличить.
+`metadata` оба писателя передают как есть, поэтому **DDL-миграция для этой
+реализации не требуется**.
+
+**Это предварительный вариант, а не принятое решение.** Выбор между
+хранением в `metadata` и настоящими колонками ещё не измерен
+(`openspec/specs/logging-db/spec.md`, требование «Хранение момента события
+и идентификатора оборота выбрано замером плана запроса», блокер A). Пока
+выбран вариант (a):
+
+- каноническое выражение порядка объявлено **ровно в одном месте** —
+  `db_logging_service.TURN_ORDER_BY_SQL`; читатели переиспользуют его, а не
+  вписывают заново (любое переписывание молча превращает индексное чтение в
+  полный скан 784 МБ таблицы);
+- **индексы по выражениям и DDL-миграция НЕ созданы** — они следствие
+  решения, которое замер может отменить; при выборе колонок выражение и все
+  его читатели обновляются в том же change;
+- отсутствие ключа порядка **определено и не молчит**: строки без `seq`
+  (включая `metadata IS NULL`) не попадают в порядок, а считаются
+  отдельным счётчиком — `db_logging_service.order_turn_rows()`;
+- присутствие события признака источника: каждая строка агента несёт
+  `metadata.source = "nanobot"`.
+
+Оборот читается по `request_id`:
+
+```sql
+SELECT event_type, metadata->>'occurred_at', metadata->>'latency_ms'
+FROM agent_gateway_logs
+WHERE request_id = '<id>'
+ORDER BY (metadata->>'seq')::bigint, id;
+```
 
 **Прямой SQL INSERT в журнал запрещён** — это invariant архитектуры,
 защищён `tests/test_unified_event_logging_pipeline.py::TestNoProductionDirectWriters`
@@ -269,7 +334,16 @@ Producer'ы (с обязательным keyword-only DI через `db_logging_
 | `DuckDbCacheStore` | `sync_publish_ok`/`_failed`/`_empty`, `vector_preload_error`, `vector_index_build_failed` | kwarg `db_logging_service` |
 | `PreloadService` | `vector_index_preload_health` | kwarg `db_logging_service` |
 | `ApplicationContext._make_sync_services` | `sync_skipped_*` | inline `try_log_event` |
-| `DatabaseLoggingHook` (AgentLoop) | `tool_call`/`tool_result`/`llm_call`/`run_finished`/`turn_failed` | kwarg `db_logging_service` |
+| `DatabaseLoggingHook` (AgentLoop) | `agent.started`/`agent.completed`/`agent.failed`, `llm.requested`/`llm.completed`, `tool_call`/`tool_result`/`llm_call`/`run_finished`/`turn_failed` | kwarg `db_logging_service` |
+
+Имена `agent.*`/`llm.*` взяты из словаря платформы
+(`mcp-platform/libs/enterprise_common/eventing/types.py`): агент ходит к
+платформе по протоколу MCP и не импортирует её код, поэтому имена
+объявлены литералами в `database_logging_hook`, а соответствие словарю
+проверяет тест `tests/test_turn_observability_events.py::TestEventVocabulary`.
+Читатель платформы (`_observe_event_type`) такие имена принимает молча —
+они в словаре, поэтому ни предупреждения, ни счётчика «тип вне словаря» на
+них не возникает.
 
 DI поднимается через параметры composition root'ов — `run_repl(...)` в
 `lib/cli/console_loop.py` и сборку `ApplicationContext`; для события сжатия путь

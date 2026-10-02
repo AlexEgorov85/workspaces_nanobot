@@ -220,6 +220,17 @@ async def _connect_enterprise_mcp(ctx) -> None:
 
     try:
         operations = await client.list_operations()
+        console.print(
+            f"[green]✓[/green] enterprise-mcp: {len(operations)} операций, "
+            "процесс поднят"
+        )
+        await _report_enterprise_mcp_health(ctx, client)
+    except ConfigurationError as exc:
+        # Расхождение профиля: повтор не поможет, перезапуск лишь повторит
+        # ту же ошибку через backoff. Сообщение печатается целиком, потому
+        # что в логе иначе остаётся только «Gateway exited unexpectedly».
+        console.print(f"[red]✗ enterprise-mcp: КОНФИГУРАЦИЯ[/red] — {exc}")
+        raise
     except Exception as exc:
         # Именно этот вывод спасает при разборе инцидента: без него
         # ``GatewayRunner`` сообщает только «Gateway exited unexpectedly,
@@ -233,12 +244,6 @@ async def _connect_enterprise_mcp(ctx) -> None:
             "mcp-platform/.secrets.env, доступность python и БД[/red]"
         )
         raise
-
-    console.print(
-        f"[green]✓[/green] enterprise-mcp: {len(operations)} операций, "
-        "процесс поднят"
-    )
-    await _report_enterprise_mcp_health(ctx, client)
 
 
 async def _report_enterprise_mcp_health(ctx, client) -> None:
@@ -269,18 +274,97 @@ async def _report_enterprise_mcp_health(ctx, client) -> None:
         ("audit", "list_scripts", lambda d: _scripts_line(d)),
     )
 
+    platform_tables: list[str] | None = None
     for capability, operation, render in probes:
         try:
             raw = await asyncio.wait_for(
                 client.call(operation, arguments={}, identity=identity),
                 timeout=20.0,
             )
-            line = render(json.loads(raw))
+            payload = json.loads(raw)
+            line = render(payload)
+            if operation == "schema_check":
+                platform_tables = list(payload.get("tables") or [])
         except asyncio.TimeoutError:
             line = "[red]проба не ответила за 20 с[/red]"
         except Exception as exc:  # noqa: BLE001
             line = f"[red]{type(exc).__name__}: {exc}[/red]"
         console.print(f"    [dim]·[/dim] {capability:<8} {line}")
+
+    _verify_platform_table_alignment(ctx, platform_tables)
+
+
+def _verify_platform_table_alignment(ctx, platform_tables: list[str] | None) -> None:
+    """Сверить имена таблиц агента и платформы и упасть при расхождении.
+
+    Оверлей профиля объявлен в ДВУХ файлах: ``profiles/<mode>.jsonc`` агента и
+    ``mcp-platform/platform.json → profiles.<имя>``. Правка одного без другого
+    даёт ровно тот дефект, который профиль и чинит: агент опрашивает
+    ``agent_conversation_messages_test``, а платформа пишет в
+    ``agent_gateway_logs``, — и заметить это можно только по содержимому
+    боевого журнала.
+
+    Поэтому сверка обязана быть на старте, а не «когда-нибудь заметим».
+    Расхождение — ``ConfigurationError``: подниматься с профилем, который
+    пишет не туда, опаснее, чем не подняться.
+
+    Сверяются три таблицы, которыми владеет платформа. Таблицы сессий
+    (``messages_table``/``meta_table``) платформе не нужны — она ими не
+    пользуется, и в её списке их нет.
+
+    ``platform_tables is None`` — проба ``schema_check`` не ответила. Это уже
+    показано в сводке строкой выше, и добивать старт второй ошибкой из-за
+    той же причины незачем.
+    """
+    if platform_tables is None:
+        return
+
+    settings = getattr(ctx, "settings", None) or {}
+    pg = (settings.get("channels", {}) or {}).get("postgres", {}) or {}
+
+    # Имена журнальных таблиц берутся у ВЛАДЕЛЬЦА (``db_logging_service``),
+    # а не из SETTINGS: доступ к конфигурации журнальных таблиц вне owner'а
+    # запрещён (design D6.4, страж ``test_no_lookup_logging_db_table_name``) —
+    # и по существу, а не только по регламенту. Ведьмачий журнал пишет
+    # платформа, и схема проектируется так, чтобы агент её не знал; сверка не
+    # должна возвращать это знание в составной root. Таблица очереди — другое
+    # дело: ею владеет канал, и её раздел читать можно.
+    logging_service = getattr(ctx, "db_logging_service", None)
+
+    expected = {
+        "log_table": getattr(logging_service, "_table_name", None),
+        "question_runs_table": getattr(
+            logging_service, "_question_runs_table", None
+        ),
+        "task_table": pg.get("table_name"),
+    }
+
+    def _bare(name: object) -> str:
+        return str(name or "").split(".")[-1].strip()
+
+    platform_bare = {_bare(name) for name in platform_tables if _bare(name)}
+    missing = {
+        key: value
+        for key, value in expected.items()
+        if value and _bare(value) not in platform_bare
+    }
+    if not missing:
+        console.print(
+            "    [dim]·[/dim] tables   [green]профиль согласован[/green] "
+            f"({len(expected)} таблиц, profile={settings.get('profile', 'prod')})"
+        )
+        return
+
+    detail = "; ".join(f"{key}={value}" for key, value in sorted(missing.items()))
+    profile = settings.get("profile", "prod")
+    raise ConfigurationError(
+        f"профиль {profile!r}: имена таблиц агента и платформы расходятся — "
+        f"{detail}. Платформа пишет в {sorted(platform_bare)}, агент ждёт эти. "
+        f"Синхронизируйте profiles/{profile}.jsonc и "
+        f"mcp-platform/platform.json → profiles.{profile}: оверлей объявлен "
+        f"в двух файлах, и подниматься с расхождением нельзя — иначе журнал "
+        f"тестового контура окажется в боевых таблицах."
+    )
 
 
 def _indexes_line(data: dict) -> str:
@@ -329,6 +413,7 @@ async def _run(ctx) -> None:
     channel_factory = ChannelFactory(
         print_worker_activity=_gateway_print_worker_activity(),
         db_logging_service=ctx.db_logging_service,
+        enterprise_mcp=ctx.enterprise_mcp,
     )
     channels, messages = channel_factory.create_all(
         ctx.config, ctx.settings, ctx.bus, ctx.session_manager,
@@ -397,7 +482,15 @@ def script_dir_for_runtime() -> Path:
 
 
 def _configure_logging(settings) -> None:
-    """Настроить loguru из конфига (gateway.log_level)."""
+    """Настроить логирование из конфига (``gateway.log_level``).
+
+    Через общую шву ``lib.utils.logging_utils.configure_loguru``: она же
+    ставит мост stdlib ``logging`` → loguru, поэтому модули вроде
+    ``application_context`` и ``gateway_runner``, пишущие через
+    ``logging.getLogger``, подчиняются тому же уровню, что и loguru.
+    Раньше ``gateway.log_level`` управлял только loguru, и ``INFO`` из
+    stdlib-модулей не доходил до консоли вовсе.
+    """
     try:
         from lib.services.config_service import ConfigService
 

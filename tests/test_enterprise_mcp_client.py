@@ -231,6 +231,87 @@ class TestFromSettings:
         # Смешанные разделители из резолва ${VAR} нормализуются
         assert "\\" in client.describe()["cwd"] or "/" not in client.describe()["cwd"]
 
+    def _section(self) -> dict:
+        return {
+            "enterprise_mcp": {
+                "enabled": True,
+                "command": "python",
+                "args": ["-m", "servers.enterprise.server"],
+                "cwd": "root/mcp-platform",
+            }
+        }
+
+    def test_non_prod_profile_is_forwarded_as_a_name(self) -> None:
+        """Агент передаёт платформе имя контура, а не значения таблиц.
+
+        Значения остаются в platform.json → profiles.<имя>: значение,
+        присланное вызывающей стороной, сделало бы вход в данные агента
+        независимым от его конфигурации — ровно тот дефект, который чинили
+        в фазе 9 («окружение приоритетнее файла»).
+        """
+        settings = self._section()
+        settings["profile"] = "test"
+        client = client_from_settings(settings)
+        assert client is not None
+        assert client.describe()["args"][-2:] == ["--profile", "test"]
+
+    def test_prod_profile_adds_no_flag(self) -> None:
+        """Prod — это база платформы, отдельного флага ему не нужно."""
+        settings = self._section()
+        settings["profile"] = "prod"
+        client = client_from_settings(settings)
+        assert client is not None
+        assert "--profile" not in client.describe()["args"]
+
+    def test_absent_profile_adds_no_flag(self) -> None:
+        client = client_from_settings(self._section())
+        assert client is not None
+        assert "--profile" not in client.describe()["args"]
+
+    def test_profile_flag_never_carries_table_names(self) -> None:
+        """Страховка от регрессии: имена таблиц в args попадать не должны.
+
+        Здесь не нужно настоящее имя таблицы: проверяется, что в argv не
+        попадает НИКАКОЕ значение, похожее на имя. Сентинел выбран такой,
+        чтобы страж зашитых имён его тоже не считал обращением к данным.
+        """
+        sentinel = "SENTINEL_DO_NOT_FORWARD"
+        settings = self._section()
+        settings["profile"] = "test"
+        settings["logging"] = {"db": {"table_name": sentinel}}
+        client = client_from_settings(settings)
+        assert client is not None
+        args = client.describe()["args"]
+        assert not any(sentinel in str(a) for a in args)
+
+    def test_merged_settings_carry_the_profile(self) -> None:
+        """Проводка от merged SETTINGS до флага — обязана быть целой.
+
+        ``client_from_settings`` читает ``settings["profile"]``. Если merged
+        SETTINGS перестанет содержать этот ключ, флаг молча перестанет
+        дописываться: платформа поднимется с БОЕВЫМИ именами таблиц, а агент
+        с ``--profile test`` — с тестовыми. Прямая сверка на старте такой
+        случай поймает, но с опозданием и перезапуском; здесь он виден сразу.
+
+        Профиль не переключается: ``_initialize_settings`` допускает ровно один
+        вызов на процесс, и он уже сделан conftest'ом. Тест работает с тем
+        профилем, который реально разрешён окружением.
+        """
+        from config import SETTINGS
+
+        assert "profile" in SETTINGS, (
+            "в merged SETTINGS нет ключа 'profile' — платформа перестанет "
+            "получать имя контура и возьмёт боевые имена таблиц"
+        )
+        profile = SETTINGS["profile"]
+        client = client_from_settings(SETTINGS)
+        assert client is not None
+        args = client.describe()["args"]
+        if profile == "prod":
+            assert "--profile" not in args
+        else:
+            assert args[-2:] == ["--profile", profile]
+
     def test_description_carries_no_secret(self) -> None:
         """Описание попадает в баннер запуска — DSN там быть не должно."""
         client = client_from_settings(
