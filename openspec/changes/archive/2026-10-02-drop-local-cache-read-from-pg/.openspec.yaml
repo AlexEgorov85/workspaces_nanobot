@@ -1,0 +1,11 @@
+schema: spec-driven
+created: 2026-09-29
+# Дельты этого change'а НЕ применяются к активным спекам. Причина и
+# сверка — в tasks.md, раздел «Решение об архивации». Коротко: дельта
+# описывает подсистему кэша, снесённую фазой 5 миграции
+# enterprise-mcp-platform 2026-10-01 (CacheProvider / CacheIngestion /
+# CacheStore / DuckDbCacheStore / CacheLoadService / gateway.cache.local_path
+# / cache_load_done). Применение внесло бы в норму предписания снесённого
+# кода. Переписывание устаревших data/cache-provider и runtime/entrypoints —
+# задача сессии, ведущей enterprise-mcp-platform.
+skip_specs: true

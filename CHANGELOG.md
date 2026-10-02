@@ -20,6 +20,11 @@
   - Проверки: `tests/test_repeat_guard_hook.py` (31) и контрактный `tests/contract/test_repeat_guard_hook_contract.py` (8) — последний гоняет патч на **настоящих** `_execute_tool_call` / `execute_tool_calls` nanobot, потому что именно там вскрылось, что upstream вызывает их позиционно и `kwargs["hook"]` всегда был бы `None`.
   - Каталог патчей дополнен седьмой строкой с «Условием удаления» (`docs/architecture/runtime-patcher-inventory.md`); спека получила отдельное требование «Механизм перехвата отказа в режиме `block`» с проверенными на живом коде ссылками.
 
+### Known limitations / открытые вопросы
+
+- **Активные спеки `data/cache-provider` и `runtime/entrypoints` описывают снятую подсистему.** Change `drop-local-cache-read-from-pg` архивирован с `skip_specs: true` (2026-10-02): его дельты нормировали кластер `CacheProvider` / `CacheIngestion` / `CacheStore` / `DuckDbCacheStore` / `CacheLoadService` / `gateway.cache.local_path` / `cache_load_done`, снесённый фазой 5 миграции `enterprise-mcp-platform` 2026-10-01. Применение дельт внесло бы в нормативный текст предписания несуществующего кода, поэтому спеки остались в состоянии «до» этого change'а. Переписать их должна сессия, ведущая `enterprise-mcp-platform`: только она знает итоговый контракт capability `data` (`mcp-platform/libs/enterprise_data/snapshot/`). Полный разбор со сверкой по коду — в `tasks.md` архивированного change'а, раздел «Решение об архивации».
+- **Дельта `enterprise-mcp-platform → runtime/patch-to-hook` расходится с текущим каталогом патчей** (найдено 2026-10-02, не исправлено — файл в зоне соседней сессии). Она оперирует нумерацией 1–12 от каталога **до фазы 6** (`save_turn`, `async_save`, `session_content_cleanup`, `session_dir_watch`, `turn_delivery_fail`, `document_text_threshold` давно не в `RuntimePatcher.patch_specs()`) и не содержит `repeat_guard_block`, тогда как патчей сейчас **7**. Кроме того, её требование «Единственное, чего хук не может» описывает только подмену значения в `after_execute_tool`; случай `repeat_guard_block` — **отказ вызова до выполнения** — в него не попадает, хотя относится к тому же ограничению hook-API. Сводка — в `docs/PLAN-SPEC-COMPLETION.md`, раздел «Пересечение со зоной соседней сессии».
+
 ### Changed
 
 - **Ошибки startup-проверки схемы переведены на русский** (change `i18n-schema-validation-error`).

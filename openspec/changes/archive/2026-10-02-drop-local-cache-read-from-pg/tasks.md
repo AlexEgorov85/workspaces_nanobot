@@ -385,3 +385,66 @@
 items уменьшилось вместе с исчезнувшим change'ом, поэтому «8 passed» было бы
 неверно. Прогон `pytest tests/ -q --ignore=tests/integration` от удаления не
 зависит и остаётся зелёным: 3956 passed, 31 skipped, 1 xpassed.
+
+## Решение об архивации: дельты НЕ применяются (`skip_specs: true`)
+
+Решение принято при архивации 2026-10-02, в рамках доведения спеки до конца.
+
+### Что показала сверка дельты с активными спеками
+
+`openspec/specs/data/cache-provider/spec.md` и
+`openspec/specs/runtime/entrypoints/spec.md` **не содержат ни одного**
+требования из дельт этого change'а: все четыре `ADDED` отсутствуют, все
+`MODIFIED` расходятся, все `REMOVED` расходятся. То есть дельты никогда
+не применялись, и активные спеки до сих пор описывают состояние
+**до** этого change'а.
+
+### Почему применять нельзя
+
+Дельта описывает подсистему, которой в агенте больше нет. Проверено по коду,
+а не по догадке:
+
+| Символ из дельты | Состояние в `lib/` |
+|---|---|
+| `cache_provider.py` (`CacheProvider`, `CacheIngestion`, `CacheStore`, `open_cache_provider`) | удалён 2026-10-01, фаза 5; остался tombstone `_cache_provider.py` |
+| `duckdb_cache_store.py` (`DuckDbCacheStore`) | удалён; tombstone `_duckdb_cache_store.py` |
+| `cache_load_service.py` (`CacheLoadService`, `cache_load_done`) | удалён; tombstone `_cache_load_service.py` |
+| `vector_index_service.py` | удалён; tombstone `_vector_index_service.py` |
+| `cache_ownership.py`, `pg_duckdb_sync_service.py` | удалены этим же change'ом |
+
+Поиск по `lib/` даёт **два** вхождения `open_cache_provider|CacheIngestion|
+class CacheProvider|CacheOwnershipCoordinator|CacheSyncService|
+agent_cache_ownership|cache_load_done`, и оба — внутри текста tombstone'а
+`_cache_provider.py`, то есть ни одного живого вхождения.
+
+Владельцем снимка стала capability `data` платформы
+(`mcp-platform/libs/enterprise_data/snapshot/`). Применение дельты внесло бы
+в нормативный текст около десяти требований, предписывающих снесённый код:
+`CacheProvider` как рантайм-интерфейс, `gateway.cache.local_path` как shared
+resource, публикация `cache_load_done`, `ctx.cache_provider`,
+`CacheAccessMode` в `cache_provider.py`, `DuckDbCacheStore` как concrete
+adapter. Спека начала бы **требовать** то, чего в агенте нет, — это хуже
+нынешнего расхождения, потому что расхождение заметно, а требование
+выглядит как норма.
+
+Форма `MODIFIED` от этого не спасает: она заменяет требование целиком, то
+есть всё равно заставила бы дельту дословно повторять нормативный текст —
+вторая копия спецификации, расходящаяся с активной при каждой правке.
+
+### Что осталось нерешённым и кому это передано
+
+Активные `data/cache-provider` и `runtime/entrypoints` **остаются устаревшими**
+после архивации: они описывают `CacheOwnershipCoordinator`,
+`PgDuckDbSyncService`, `resolve_publish_path(role)`, `try_claim` и слой
+`CacheProvider` целиком. Это известная и зафиксированная находка; переписать
+их должна сессия, ведущая `enterprise-mcp-platform` (фаза 5), потому что
+только она знает итоговый контракт capability `data`. Правка отсюда была бы
+правкой чужой зоны по догадке.
+
+Что change всё же закрепил и что остаётся верным по сей день: PostgreSQL —
+единственный источник истины, кэш — снимок без инкрементального отслеживания,
+кэш не содержит данных ядра, координация владения не нужна (writer один и
+известен), и heartbeat координатора расходовал ресурс, ради экономии которого
+кэш существует. Всё это зафиксировано в `AGENTS.md` (описание снесённого
+кластера) и в `docs/ARCHITECTURE.md`; отдельная активная спека на снятую
+подсистему не нужна — живой контракт описывает платформа.
