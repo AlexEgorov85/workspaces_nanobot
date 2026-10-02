@@ -23,6 +23,7 @@ from typing import Any
 
 from ..eventing.models import (
     COMPONENT_TOOL_EXECUTION,
+    DIAGNOSTIC_LEVEL,
     SOURCE_ENTERPRISE_MCP,
     AgentEvent,
 )
@@ -284,12 +285,25 @@ class ExecutionLogger:
     def quality_checked(
         self, ctx: ToolExecutionContext, policy: ExecutionPolicy, report: QualityReport
     ) -> str:
+        # Уровень отражает тяжесть замечаний, а не сам факт проверки.
+        #
+        # Технический провал сюда не доходит: конвейер возвращает отказ раньше
+        # (``technical_failure``), поэтому любой оставшийся флаг — семантический,
+        # то есть «результат пригоден, но подозрителен». Это и есть определение
+        # WARN в требовании «Уровни логирования несут смысл»: оборот
+        # продолжается, но деградировал.
+        #
+        # Без замечаний уровень — диагностический. Замер: 46 из 48 строк
+        # ``quality.check`` несли ноль информации, и это 13 % таблицы; писать
+        # их как INFO было нечем. Теперь такие события не доходят до журнала
+        # при пороге по умолчанию, а отбрасывание видно в ``suppressed_noise``.
+        flags = report.flags
         return self._emit(
             AgentEvent(
                 event_type=QUALITY_CHECK,
-                level="INFO" if report.ok else "warn",
+                level="WARN" if flags else DIAGNOSTIC_LEVEL,
                 name=ctx.tool_name,
-                summary=f"качество: {report.policy} ({', '.join(report.flags) or 'без замечаний'})",
+                summary=f"качество: {report.policy} ({', '.join(flags) or 'без замечаний'})",
                 session_id=ctx.session_id,
                 user_id=ctx.user_id,
                 request_id=ctx.request_id,

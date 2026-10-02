@@ -62,6 +62,33 @@ EVENT_TYPES: frozenset[str] = frozenset(
 ALLOWED_PREFIXES: tuple[str, ...] = ("agent.", "llm.", "tool.", "artifact.", "quality.")
 
 
+#: Имена пробного характера. Ровно те, что перечислены в требовании
+#: «Пробные события не пишутся в продовую таблицу»: префиксы ``smoke.`` и
+#: ``probe_`` и имя ``live.db_probe``.
+#:
+#: Список объявлен здесь, а не у каждой проверки, потому что проверка одна:
+#: и писатель, и страж, и будущий запрет на пути ``log_events`` обязаны
+#: отвечать на один и тот же вопрос одинаково. Добавление сюда нового имени
+#: автоматически закрывает его на всех путях, а не в том модуле, где про него
+#: вспомнили.
+PROBE_EVENT_PREFIXES: tuple[str, ...] = ("smoke.", "probe_")
+PROBE_EVENT_NAMES: frozenset[str] = frozenset({"live.db_probe"})
+
+
+def is_probe_event_type(event_type: str) -> bool:
+    """Пробное ли это имя события.
+
+    Повторяет условие замера из требования — ``event_type LIKE 'smoke.%' OR
+    event_type LIKE 'probe_%' OR event_type = 'live.db_probe'``. Проверка по
+    регистру нечувствительна: имя приходит извне, и ``SMOKE.x`` отличается от
+    ``smoke.x`` только написанием, а в таблице это один и тот же мусор.
+    """
+    value = str(event_type or "").strip().lower()
+    if value in PROBE_EVENT_NAMES:
+        return True
+    return any(value.startswith(prefix) for prefix in PROBE_EVENT_PREFIXES)
+
+
 class UnknownEventType(ValueError):
     """Тип события вне словаря."""
 
@@ -70,6 +97,20 @@ class UnknownEventType(ValueError):
 
 def is_known(event_type: str) -> bool:
     return str(event_type or "") in EVENT_TYPES
+
+
+def is_declared_prefix(event_type: str) -> bool:
+    """Префикс имени объявлен в :data:`ALLOWED_PREFIXES`, а само имя — нет.
+
+    Список префиксов объявлен именно для такого вопроса: он отделяет опечатку
+    в последнем компоненте (``tool.complted`` — человек уже в правильном
+    соглашении, поправлять нужно одно имя) от чужой схемы имён целиком
+    (``tool_call`` — здесь нужно менять соглашение, а не слово). Поэтому он
+    используется на пути ``log_events`` (``DataService._observe_event_type``),
+    где имя приходит извне, иначе объявление осталось бы просто текстом.
+    """
+    value = str(event_type or "")
+    return any(value.startswith(prefix) for prefix in ALLOWED_PREFIXES)
 
 
 def require_known(event_type: str) -> str:

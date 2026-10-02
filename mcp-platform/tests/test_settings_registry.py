@@ -354,8 +354,14 @@ class TestPlatformFile:
         import json
 
         raw = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
-        from libs.enterprise_common.settings import _flatten
+        from libs.enterprise_common.settings import RESERVED_SECTIONS, _flatten
 
+        # ``profiles`` — не настройки, а оверлей имён таблиц: он разбирается
+        # отдельно (:func:`read_profile_overlay`) и проверяется своими
+        # тестами. Здесь он снимается, иначе любая правка профиля падала бы
+        # как «неизвестный ключ».
+        for section in RESERVED_SECTIONS:
+            raw.pop(section, None)
         for key in _flatten(raw):
             assert key in BY_FILE_KEY, (
                 f"{key!r} в platform.json не является настройкой платформы"

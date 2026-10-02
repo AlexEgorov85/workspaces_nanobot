@@ -38,7 +38,13 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         # означало бы, что модель может подменить оборот, записав контекст
         # чужого вопроса.
         data = container.get("data")
-        data.upsert_question_run(
+        # Исход записи — часть ответа, а не деталь реализации: «created» или
+        # «updated» означают, что строка в таблице ЕСТЬ. Сервис бросает
+        # ``InfrastructureError``, если не затронута ни одна строка, поэтому
+        # ``status: ok`` ниже недостижим без фактической записи — раньше он
+        # был единственным ответом операции при любом исходе, включая тот, где
+        # записи не было вовсе.
+        outcome = data.upsert_question_run(
             ctx.request_id,
             session_id=ctx.session_id,
             user_id=ctx.user_id,
@@ -57,7 +63,12 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
             audience=AUDIENCE_RUNTIME,
         )
         return json.dumps(
-            {"status": "ok", "request_id": ctx.request_id}, ensure_ascii=False
+            {
+                "status": "ok",
+                "request_id": ctx.request_id,
+                "outcome": str(outcome),
+            },
+            ensure_ascii=False,
         )
 
     description = (

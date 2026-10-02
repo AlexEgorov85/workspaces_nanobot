@@ -378,7 +378,15 @@ class _Worker(threading.Thread):
         self._drop_connection()
 
     def _activity_print(self, line: str) -> None:
-        """Напечатать строку активности db-worker, если флаг включён."""
+        """Напечатать строку активности db-worker, если флаг включён.
+
+        Вывод идёт в **stderr**, и это не выбор вкуса: процесс общается с
+        агентом по stdio, stdout — канал JSON-RPC. Любой человеческий текст
+        там ломает протокол целиком (агент читает не JSON и падает на
+        разборе), причём ломает молча, если флаг включён во время работы.
+        Объявление настройки ``pool.print_activity`` обещает stderr — теперь
+        код ему соответствует.
+        """
         if not self._print_activity:
             return
         # cp1251-консоль Windows не переваривает юникодные стрелки —
@@ -388,10 +396,10 @@ class _Worker(threading.Thread):
             try:
                 from rich.console import Console
 
-                Console().print(f"[db-worker] {line}",
-                                style="dim", markup=False)
+                Console(stderr=True).print(f"[db-worker] {line}",
+                                          style="dim", markup=False)
             except Exception:
-                print(f"[db-worker] {line}")
+                print(f"[db-worker] {line}", file=sys.stderr, flush=True)
 
     def _execute_job(self, job: _Job) -> None:
         t0 = time.monotonic()

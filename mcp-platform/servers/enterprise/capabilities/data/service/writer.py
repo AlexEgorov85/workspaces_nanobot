@@ -23,10 +23,32 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from libs.enterprise_common.settings import platform_settings
+
 logger = logging.getLogger(__name__)
 
 #: Событие не помещается — оно выбрасывается, счётчик растёт.
 DROPPED = "dropped"
+
+#: Как часто о потере событий говорится в лог. Счётчик в ``stats()`` растёт
+#: всегда, а строка — не на каждое событие: переполнение идёт лавиной, и
+#: по одной строке на запись лог превращается в шум, который никто не читает.
+_DROP_LOG_EVERY = 1000
+
+
+def batch_size_from_settings() -> int:
+    """Размер батча сброса — из ``platform.json`` (``data.log_batch_size``).
+
+    Раньше здесь стоял литерал ``256``, и вместе с ``data.log_flush_interval``
+    он был невидимым потолком устойчивой пропускной способности журнала:
+    сколько бы событий ни пришло, за окно сброса уходило не больше
+    ``256 / flush_interval`` записей, а всё вышестоящее копилось в буфере
+    до его переполнения. Литерал в коде нельзя было ни увидеть в конфигурации,
+    ни поднять, не правя чужой файл, поэтому размер объявлен настройкой —
+    единственным источником значения остаётся файл.
+    """
+    settings = platform_settings()
+    return max(1, int(settings.get("ENTERPRISE_LOG_BATCH_SIZE")))
 
 
 class EventBuffer:
@@ -43,13 +65,17 @@ class EventBuffer:
         *,
         maxlen: int = 2048,
         flush_interval: float = 5.0,
-        batch_size: int = 256,
+        batch_size: int | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
         self._flush = flush
         self._maxlen = max(1, int(maxlen))
         self._flush_interval = max(0.0, float(flush_interval))
-        self._batch_size = max(1, int(batch_size))
+        # ``None`` — не «взять дефолт писателя», а «взять из platform.json»:
+        # у буфера нет права завести собственное число рядом с объявленным.
+        self._batch_size = (
+            max(1, int(batch_size)) if batch_size is not None else batch_size_from_settings()
+        )
         self._clock = clock or time.monotonic
         self._queue: deque[dict[str, Any]] = deque()
         self._lock = threading.Lock()
@@ -72,8 +98,24 @@ class EventBuffer:
         with self._lock:
             if len(self._queue) >= self._maxlen:
                 self._dropped += 1
-                return DROPPED
-            self._queue.append(event)
+                dropped = self._dropped
+            else:
+                dropped = 0
+        if dropped:
+            # Потеря события обязана быть видна без опроса счётчика: очередь
+            # переполнилась — значит, сброс не поспевает за потоком, и это
+            # видно только здесь. Порог и период сброса — в data.log_*
+            # файла, а не в коде.
+            if dropped == 1 or dropped % _DROP_LOG_EVERY == 0:
+                logger.warning(
+                    "буфер журнала переполнен: потеряно событий %d (потолок %d, "
+                    "батч %d за %.1f с). Журнал теряет записи — поднимите "
+                    "data.log_buffer_maxlen / data.log_batch_size или уменьшите "
+                    "data.log_flush_interval",
+                    dropped, self._maxlen, self._batch_size, self._flush_interval,
+                )
+            return DROPPED
+        self._queue.append(event)
         self._wake.set()
         return None
 
@@ -144,4 +186,5 @@ class EventBuffer:
             "flush_errors": self._flush_errors,
             "written": self._written,
             "maxlen": self._maxlen,
+            "batch_size": self._batch_size,
         }

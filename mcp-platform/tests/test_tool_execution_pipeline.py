@@ -943,9 +943,12 @@ def test_full_call_produces_the_expected_events(tmp_path: Path) -> None:
         definition(lambda **kwargs: {"rows": ["z" * 200]}), {"query": "сколько"}, call_meta()
     )
     assert result.status == STATUS_OK
+    # ``quality.check`` в списке нет: политика ``default`` состоит из
+    # технических проверок, результат их прошёл, замечаний нет. Проверка без
+    # замечаний не пишется — по замеру 46 из 48 таких событий несли ноль
+    # информации. Проверка с замечаниями даёт ``WARN`` и попадает в журнал.
     assert sink.types() == [
         "tool.started",
-        "quality.check",
         "artifact.created",
         "tool.completed",
     ]

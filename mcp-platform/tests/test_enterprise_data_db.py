@@ -844,7 +844,12 @@ class TestPool:
         assert stats["connect_errors"] > 0
 
     def test_db_activity_flag_enables_printing(self, mock_psycopg2, capsys):
-        """print_activity включает вывод [db-worker] активности при выполнении job."""
+        """print_activity включает вывод [db-worker] активности при выполнении job.
+
+        Вывод идёт в **stderr**: процесс общается с агентом по stdio, а stdout —
+        канал JSON-RPC. Тест раньше смотрел в ``out`` и тем самым закреплял
+        поломку, которая ломала бы протокол целиком при включённом флаге.
+        """
         mock_psycopg2["set_pool_config"](
             _pool({"min_conn": 1, "max_conn": 1, "print_activity": True})
         )
@@ -852,7 +857,9 @@ class TestPool:
         mgr = mock_psycopg2["_db"]._get_manager()
         assert mgr._print_activity is True
         mock_psycopg2["fetchval"]("SELECT 1")
-        out = capsys.readouterr().out
+        captured = capsys.readouterr()
+        out = captured.err
+        assert captured.out == "", f"активность попала в stdout: {captured.out!r}"
         assert "[db-worker]" in out
         assert "взял job" in out
         # tag «кто» — вызывающая сторона: файл:строка (тест-файл)
@@ -866,7 +873,7 @@ class TestPool:
         mock_psycopg2["configure"]("dsn")
         with mock_psycopg2["transaction"]() as conn:
             conn.fetchval("SELECT 1")
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
         assert "[db-worker]" in out
         assert "[unknown]" not in out
         # begin/end + fetch — все job-ы несут метку вызывающей стороны

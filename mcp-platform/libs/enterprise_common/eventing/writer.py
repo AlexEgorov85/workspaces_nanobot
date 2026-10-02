@@ -22,8 +22,8 @@ from collections.abc import Callable
 from typing import Any
 
 from ..session.workspace import SessionWorkspace
-from .models import AgentEvent
-from .types import is_known
+from .models import DEFAULT_MIN_LEVEL, AgentEvent, is_at_least, normalize_level
+from .types import is_known, is_probe_event_type
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +36,11 @@ ACCEPTED = "accepted"
 DROPPED = "dropped"
 REJECTED = "rejected"
 NO_SINK = "no_sink"
+#: Событие не дошло до журнала **по правилу**, а не из-за отказа приёмника:
+#: пробное имя либо уровень ниже порога. Отдельная метка, потому что у
+#: ``DROPPED`` и ``REJECTED`` своя причина, и по одной строке «dropped» не
+#: отличить переполнение буфера от тихого вычищения шума.
+SUPPRESSED = "suppressed"
 
 
 class EventWriter:
@@ -47,20 +52,33 @@ class EventWriter:
         *,
         workspace: SessionWorkspace | None = None,
         persist_session_events: bool = False,
+        min_level: str = DEFAULT_MIN_LEVEL,
     ) -> None:
         self._sink = sink
         self._workspace = workspace
         self._persist = bool(persist_session_events and workspace is not None)
+        # Порог нормализуется один раз, на создании: сравнение на каждом
+        # событии с сырой строкой означало бы, что опечатка в пороге держится
+        # до первого события и падает уже в рантайме.
+        self._min_level = normalize_level(min_level)
         self._accepted = 0
         self._dropped = 0
         self._rejected = 0
+        self._suppressed_probe = 0
+        self._suppressed_noise = 0
         self._mirrored = 0
         self._mirror_failed = 0
         self._warned_no_sink = False
+        self._warned_probe = False
+        self._warned_noise = False
 
     @property
     def persists_session_events(self) -> bool:
         return self._persist
+
+    @property
+    def min_level(self) -> str:
+        return self._min_level
 
     def emit(self, event: AgentEvent) -> str:
         """Отправить событие. Исключений не бросает никогда.
@@ -70,6 +88,18 @@ class EventWriter:
         файл сессии не поднимаются наружу — они считаются и видны в
         :meth:`stats`.
         """
+        # Пробное имя проверяется **до** уровня: это нарушение контракта, а не
+        # решение о настройке, и оно не должно выглядеть так, будто событие
+        # отброшено порогом. В файл сессии оно тоже не попадает — иначе
+        # вычистка таблицы оставила бы тот же мусор в каталогах сессий.
+        if is_probe_event_type(event.event_type):
+            self._suppressed_probe += 1
+            self._warn_probe_once(event.event_type)
+            return SUPPRESSED
+        if not is_at_least(event.level, self._min_level):
+            self._suppressed_noise += 1
+            self._warn_noise_once(event.level)
+            return SUPPRESSED
         if not is_known(event.event_type):
             self._rejected += 1
             log.warning("событие отклонено: неизвестный тип %r", event.event_type)
@@ -99,6 +129,39 @@ class EventWriter:
         self._accepted += 1
         self._mirror(event)
         return ACCEPTED
+
+    def _warn_probe_once(self, event_type: str) -> None:
+        """Один раз сказать, что пробное имя в журнал не пишется.
+
+        Один раз, а не на каждое событие: иначе вычистка шума заменила бы
+        мусор в таблице мусором в operational-логе, и её объём не падал бы.
+        Молчать тоже нельзя — иначе выключенная вычистка выглядит как «таких
+        событий просто нет».
+        """
+        if self._warned_probe:
+            return
+        self._warned_probe = True
+        log.warning(
+            "событие %r не записано: пробное имя не пишется в продовую таблицу "
+            "журнала (счётчик suppressed_probe в stats())",
+            event_type,
+        )
+
+    def _warn_noise_once(self, level: str) -> None:
+        """Один раз сказать, что уровень ниже порога.
+
+        Событие не отбрасывается молча: порог виден в ``stats()`` как
+        ``min_level``, число отброшенных — как ``suppressed_noise``, и оба
+        значения попадают в ``execution.stats()``.
+        """
+        if self._warned_noise:
+            return
+        self._warned_noise = True
+        log.warning(
+            "события уровня %s не пишутся: порог журнала %s (счётчик suppressed_noise в stats())",
+            level,
+            self._min_level,
+        )
 
     def _warn_no_sink_once(self) -> None:
         """Один раз сказать, что журнала нет.
@@ -154,11 +217,17 @@ class EventWriter:
             return
         self._mirrored += 1
 
-    def stats(self) -> dict[str, int | bool]:
+    def stats(self) -> dict[str, int | bool | str]:
         return {
             "accepted": self._accepted,
             "dropped": self._dropped,
             "rejected": self._rejected,
+            # Отбрасывание по правилу — отдельные счётчики, а не общий
+            # ``dropped``: по общему не отличить переполнение буфера (транзиентно)
+            # от вычистки шума (постоянно), а различие и есть смысл счётчика.
+            "suppressed_probe": self._suppressed_probe,
+            "suppressed_noise": self._suppressed_noise,
+            "min_level": self._min_level,
             "mirrored": self._mirrored,
             "mirror_failed": self._mirror_failed,
             "persist_session_events": self._persist,
@@ -172,4 +241,5 @@ __all__ = [
     "EventWriter",
     "NO_SINK",
     "REJECTED",
+    "SUPPRESSED",
 ]

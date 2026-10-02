@@ -37,6 +37,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..errors import InfrastructureError
+from ..eventing.models import AgentEvent
+from ..eventing.types import TOOL_FAILED
 from ..session.artifact_store import Artifact, ArtifactStore
 from ..session.workspace import SessionWorkspace
 from .context import (
@@ -150,6 +152,7 @@ class ToolExecutionPipeline:
             )
         except IdentityMissingError as exc:
             failure = normalize_exception(exc)
+            self._report_identity_rejection(tool_name, capability, failure)
             return PipelineResult(
                 text=json.dumps(failure.to_json(), ensure_ascii=False),
                 is_error=True,
@@ -392,6 +395,60 @@ class ToolExecutionPipeline:
             "preview": preview,
         }
         return artifact, body, []
+
+    def _report_identity_rejection(
+        self,
+        tool_name: str,
+        capability: str,
+        failure: Failure,
+    ) -> None:
+        """Сделать отказ по идентичности видимым.
+
+        Отказ без следа — худший исход на границе безопасности: вызывающий
+        перестаёт присылать ``params._meta``, операции отдают чистый отказ,
+        в журнале не появляется ни строки, и причина находится только в коде
+        вызывающей стороны. Поэтому след оставляется здесь, а не «в журнале
+        шага 9»: до ``_logger.started`` дело не доходит, а сам журнал ведётся
+        по контексту вызова, который без ``_meta`` построить нельзя.
+
+        Личность при этом **не достраивается**: колонки ``session_id``,
+        ``user_id`` и ``request_id`` допускают ``NULL``, и пустая личность в
+        строке честнее выдуманной — иначе след в журнале указывал бы на
+        чужую сессию. Писателя может не быть (сервер без capability ``data``),
+        тогда остаётся строка в stderr: отказ на границе безопасности не
+        должен выглядеть как тишина.
+        """
+        log.warning(
+            "%s (%s): вызов отклонён — %s: %s. Идентичность не пришла в "
+            "params._meta, поэтому шаг «начало» не выполнился и событие "
+            "пишется в журнал без идентичности (достраивать её нельзя)",
+            tool_name,
+            capability,
+            failure.code,
+            failure.message,
+        )
+        writer = self._logger.writer
+        if writer is None:
+            return
+        writer.emit(
+            AgentEvent(
+                event_type=TOOL_FAILED,
+                level="error",
+                name=tool_name,
+                summary=(
+                    f"{tool_name}: отказ на границе идентичности "
+                    f"({failure.code}): {failure.message}"
+                ),
+                payload={
+                    "error_code": failure.code,
+                    "message": failure.message,
+                    "capability": capability,
+                    "identity_missing": True,
+                    "identity_source": None,
+                },
+                metadata={"logged_without_identity": True},
+            )
+        )
 
     def _refuse(
         self,

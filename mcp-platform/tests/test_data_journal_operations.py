@@ -47,7 +47,13 @@ class FakeCursor:
     def execute(self, sql: str, params: Any = None) -> None:
         self._log.append((sql, list(params or [])))
         head = sql.lstrip().split()[0].upper()
-        self.rowcount = self._rowcounts.get(head, 0)
+        # По умолчанию запись, которая что-то затронула, сообщает об этом:
+        # сервис обязан отличать запись от её отсутствия по ``rowcount``, и
+        # фейк, у которого UPDATE и INSERT всегда дают 0, проверял бы ровно
+        # тот мир, где операция врёт. ``DELETE`` остаётся нулём — эти тесты
+        # проверяют чистку, которой по умолчанию ничего не удаляет.
+        default = 1 if head in ("UPDATE", "INSERT") else 0
+        self.rowcount = self._rowcounts.get(head, default)
 
     def close(self) -> None:
         return None
@@ -200,6 +206,21 @@ class TestPurgeLogs:
         assert any("outbound_final" in s for s, _ in _statements(pool))
         assert counters["events"] == 0 and counters["question_runs"] == 0
 
+    def test_cleans_the_outbound_types_that_actually_exist(self) -> None:
+        """Чистка бьёт по тем типам, которые агент действительно пишет.
+
+        Регрессия: в списке стоял ``outbound_delta`` — типа, которого в базе
+        нет ни одной строки, то есть вечный no-op, — а ``outbound_intermediate``
+        (пустые чанки потока) не вычищался никогда. Проверка идёт по SQL, а не
+        по константе: иначе переименование обеих строк прошло бы молча.
+        """
+        pool = FakePool()
+        _service(pool).purge_logs(0)
+        delete = next(s for s, _ in _statements(pool) if "outbound" in s)
+        assert "'outbound_final'" in delete, delete
+        assert "'outbound_intermediate'" in delete, delete
+        assert "outbound_delta" not in delete, delete
+
     def test_empty_outbound_keeps_rows_with_media(self) -> None:
         """Реальная отправка файла с пустым текстом — не мусор.
 
@@ -234,7 +255,7 @@ class TestPurgeLogs:
     def test_can_skip_empty_outbound(self) -> None:
         pool = FakePool()
         _service(pool).purge_logs(0, remove_empty_outbound=False)
-        assert not any("outbound_final" in s for s, _ in _statements(pool))
+        assert not any("outbound" in s for s, _ in _statements(pool))
 
 
 class TestRetentionIsTheServersRule:
@@ -260,7 +281,7 @@ class TestRetentionIsTheServersRule:
     def test_no_argument_uses_configured_empty_outbound(self) -> None:
         pool = FakePool()
         self._configured(pool, log_retention_days=0, purge_empty_outbound=False).purge_logs()
-        assert not any("outbound_final" in s for s, _ in _statements(pool))
+        assert not any("outbound" in s for s, _ in _statements(pool))
 
     def test_argument_overrides_configuration(self) -> None:
         """Аргумент остаётся переопределением, иначе разовая чистка невозможна."""
