@@ -157,5 +157,9 @@
         "enabled": true
       }
     }
+  },
+  "legal_summarizer": {
+    "_about": "capability legal_summarizer в servers/enterprise/capabilities/legal_summarizer/. Отвечает на follow-up вопросы по уже разобранному юридическому документу, по его operation_id: сколько статей, какие разделы, что в чанке N. Документ заново не разбирается. Домен перенесён из агента (change enterprise-mcp-platform, фаза 11). Ключа enable нет потому, что настройка не объявлена в реестре: capability всегда поднимается вместе с остальными.",
+    "cache_root": "var/legal_summarizer"
   }
 }

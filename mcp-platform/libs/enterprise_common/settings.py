@@ -444,6 +444,19 @@ SETTINGS: tuple[Setting, ...] = (
        "агент его не экспортирует, и до появления ключа в файле действовал "
        "дефолт из кода, то есть значение никто не задавал",
        file_key="audit.row_ceiling"),
+    # -- capability legal_summarizer ---------------------------------------
+    #
+    # Владелец — платформа. До переноса корень состояния операции выводился
+    # из расположения модуля (``Path(__file__).parents[N]``), и якорь, верный
+    # в агенте, после переноса указал на каталог над репозиторием: кэш и
+    # follow-up запросы оказывались в домашнем каталоге пользователя. Значение
+    # обязано приходить из объявления, а не из расположения файла, поэтому
+    # ключ пустой, а не «выводить по умолчанию».
+    _s("ENTERPRISE_LEGAL_CACHE_ROOT", "str", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/capabilities/legal_summarizer/service/main.py",
+       "корень состояния операций legal_summarizer; пусто - каталог данных "
+       "платформы, а не каталог, выведенный из расположения модуля",
+       file_key="legal_summarizer.cache_root"),
     # -- capability vectors --------------------------------------------------
     #
     # Владелец — платформа. Снимок DuckDB, объявления индексов и подпись
@@ -799,6 +812,13 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
             "ENTERPRISE_EMBED_MODEL",
         ),
         summary="вызовы чата и эмбеддингов к внешнему провайдеру",
+    ),
+    CapabilitySettings(
+        name="legal_summarizer",
+        service="servers/enterprise/capabilities/legal_summarizer/service/main.py",
+        tools=("query_operation",),
+        settings=("ENTERPRISE_LEGAL_CACHE_ROOT",),
+        summary="follow-up вопросы по уже разобранному юридическому документу",
     ),
 )
 

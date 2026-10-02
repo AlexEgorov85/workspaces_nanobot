@@ -30,7 +30,11 @@ from libs.legal_summarizer.cache.manifest import skill_repo_root
 DOMAIN_ROOT = Path(__file__).resolve().parents[3] / "libs" / "legal_summarizer"
 
 #: Модули, где корень кэша - часть контракта модуля.
-ROOT_RESOLVERS = ("cache/document_cache.py", "cache/manifest.py")
+ROOT_RESOLVERS = (
+    "cache/document_cache.py",
+    "cache/manifest.py",
+    "cli_query.py",
+)
 
 
 def _parents_indices(path: Path) -> set[int]:
@@ -50,11 +54,14 @@ def _parents_indices(path: Path) -> set[int]:
 
 
 def test_domain_does_not_derive_a_root_from_module_location() -> None:
-    """Корень не выводится из ``parents[N]`` с индексом 5 и выше.
+    """Корень не выводится из ``parents[N]`` с индексом 4 и выше.
 
     Индексы 0-3 допустимы: ими модуль находит свои соседние каталоги внутри
     платформы (``libs/``, корень платформы). Верхние индексы - это выход за
     пределы репозитория, то есть ровно та ошибка, которую чиним.
+
+    Порог 4, а не 5: у ``cli_query.py`` в агенте модуль лежал на глубине
+    ``scripts/`` и якорь был ``parents[4]`` - на той же неверной глубине.
     """
     offenders: dict[str, set[int]] = {}
     for relative in ROOT_RESOLVERS:
@@ -62,7 +69,6 @@ def test_domain_does_not_derive_a_root_from_module_location() -> None:
         too_high = {i for i in _parents_indices(path) if i > 3}
         if too_high:
             offenders[relative] = too_high
-
     assert not offenders, (
         "корень кэша выводится из расположения модуля за пределами "
         f"платформы: {offenders}. Корень приходит из LegalConfig.cache_root "

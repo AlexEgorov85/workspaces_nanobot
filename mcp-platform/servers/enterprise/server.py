@@ -229,6 +229,15 @@ def _build_container(
     # и виден как ``configured: false`` в баннере ниже.
     set_gateway(LlmGateway(settings=settings))
     services: dict[str, Any] = {"llm": LlmService()}
+    # ``legal_summarizer`` не читает снимок и не ходит в БД: состояние
+    # операции лежит на диске и объявлено самим доменом. Поэтому сервис
+    # собирается здесь, до раннего возврата для capability без данных, -
+    # иначе ``--capabilities legal_summarizer`` поднимал бы пустой сервер.
+    from servers.enterprise.capabilities.legal_summarizer.service.main import (
+        LegalSummarizerService,
+    )
+
+    services["legal_summarizer"] = LegalSummarizerService(settings=settings)
     # Объявления собираются здесь и передаются сервисам в конструктор.
     # Контейнер их не хранит: у значения должен быть один владелец, и им
     # является тот, кто это значение использует.
@@ -280,7 +289,9 @@ def _build_container(
 
 #: Capability, которой не нужен доступ к данным. Полный набор — всё, что
 #: описано в ``servers/enterprise/capabilities``.
-_ALL_CAPABILITIES = frozenset({"audit", "data", "llm", "vectors"})
+_ALL_CAPABILITIES = frozenset(
+    {"audit", "data", "legal_summarizer", "llm", "vectors"}
+)
 #: Capability, читающие снимок или очередь. Их нельзя поднимать без ``data``.
 _DATA_CAPABILITIES = frozenset({"audit", "data", "vectors"})
 

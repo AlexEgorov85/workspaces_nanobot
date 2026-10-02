@@ -23,10 +23,16 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+from libs.legal_summarizer.cache import manifest
 from typing import Any
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+#: Корень платформы - в ``sys.path``, чтобы ``libs.legal_summarizer.*``
+#: резолвились при запуске файла как скрипта. Раньше здесь стоял ``parents[4]``,
+#: верный в агенте; на новом месте он указывал на каталог над репозиторием, то
+#: есть в ``sys.path`` попадал домашний каталог пользователя.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -80,11 +86,19 @@ def _emit(payload: dict) -> None:
 
 
 def _resolve_workspace_root(arg: str | None) -> Path:
-    """Кросс-платформенный путь к корню репо."""
+    """Корень, под которым лежит состояние операции.
+
+    Явный аргумент выигрывает. Иначе берётся объявленный владельцем корень
+    кэша - тот же источник, что и у ``cache.manifest``.
+
+    Раньше здесь стоял якорь ``parents[4]``, верный в агенте
+    (``<repo>/workspace/skills/legal_summarizer/scripts/cli_query.py``). На
+    новом месте он указывал на каталог над репозиторием, то есть состояние
+    операции искалось в домашнем каталоге пользователя (п. 11.5).
+    """
     if arg:
         return Path(arg).resolve()
-    # Стабильный якорь: <repo>/workspace/skills/legal_summarizer/scripts/cli_query.py
-    return Path(__file__).resolve().parents[4]
+    return manifest.skill_repo_root()
 
 
 _MANIFEST_ERROR_TYPES = {
@@ -92,6 +106,48 @@ _MANIFEST_ERROR_TYPES = {
     "corrupted": "manifest_corrupted",
     "unsupported_version": "manifest_unsupported_version",
 }
+
+
+class LegalQueryError(Exception):
+    """Ошибка follow-up запроса с готовым конвертом.
+
+    Payload - ровно тот же словарь, который печатал CLI: формат зафиксирован
+    в IPC-контракте и в ``openspec/specs/skills/legal-summarizer-query``.
+    Отдельный тип нужен, чтобы вызывающая сторона (operation capability)
+    получила конверт, а не пустой вывод подпроцесса: CLI печатает в stdout,
+    а библиотека бросает.
+    """
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(str(payload.get("message", "")))
+        self.payload = payload
+
+
+def _manifest_error_envelope(
+    operation_id: str,
+    workspace_root: Path,
+) -> dict[str, Any] | None:
+    """Конверт недоступности manifest либо ``None``, если он читается.
+
+    Выделено из :func:`_load_manifest_with_diagnosis`, который печатал
+    конверт сам. Разделение нужно, чтобы одна и та же диагностика обслуживала
+    и CLI (печать), и operation capability (исключение с тем же payload).
+    """
+    from libs.legal_summarizer.cache.manifest import diagnose_manifest
+
+    diag = diagnose_manifest(operation_id, workspace_root)
+    reason = diag["reason"]
+    if reason != "ok":
+        return {
+            "status": "error",
+            "error_type": _MANIFEST_ERROR_TYPES[reason],
+            "operation_id": operation_id,
+            "workspace_root": str(workspace_root),
+            "path": diag["path"],
+            "version_observed": diag["version_observed"],
+            "message": _manifest_error_message(reason, operation_id, diag),
+        }
+    return None
 
 
 def _load_manifest_with_diagnosis(
@@ -110,20 +166,8 @@ def _load_manifest_with_diagnosis(
     нормализованными данными если всё хорошо. Поле ``status`` в возврате
     НЕ проставлено — caller добавит ``"ok"``.
     """
-    from libs.legal_summarizer.cache.manifest import diagnose_manifest
-
-    diag = diagnose_manifest(operation_id, workspace_root)
-    reason = diag["reason"]
-    if reason != "ok":
-        envelope: dict[str, Any] = {
-            "status": "error",
-            "error_type": _MANIFEST_ERROR_TYPES[reason],
-            "operation_id": operation_id,
-            "workspace_root": str(workspace_root),
-            "path": diag["path"],
-            "version_observed": diag["version_observed"],
-            "message": _manifest_error_message(reason, operation_id, diag),
-        }
+    envelope = _manifest_error_envelope(operation_id, workspace_root)
+    if envelope is not None:
         _emit(envelope)
         return None
 
@@ -132,7 +176,10 @@ def _load_manifest_with_diagnosis(
     normalized = load_manifest(operation_id, workspace_root)
     if normalized is None:
         # Резерв: между диагностикой и нормализацией manifest мог исчезнуть.
-        envelope = {
+        from libs.legal_summarizer.cache.manifest import diagnose_manifest
+
+        diag = diagnose_manifest(operation_id, workspace_root)
+        _emit({
             "status": "error",
             "error_type": "manifest_not_found",
             "operation_id": operation_id,
@@ -142,8 +189,7 @@ def _load_manifest_with_diagnosis(
                 f"manifest.json для operation_id={operation_id!r} стал "
                 "недоступен между диагностикой и чтением."
             ),
-        }
-        _emit(envelope)
+        })
         return None
     return normalized.to_dict()
 
@@ -254,41 +300,78 @@ def _field_stats(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def main() -> int:
-    # Кросс-платформенная UTF-8 для собственного stdout/stderr argparse —
-    # на Windows гарантирует кириллицу без кракозябр в --help/ошибках.
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8")
-        except (AttributeError, ValueError):
-            pass
+def query_operation(
+    operation_id: str,
+    field: str = "stats",
+    *,
+    workspace_root: Path | str | None = None,
+    max_chunk_summary_chars: int = 1500,
+) -> dict[str, Any]:
+    """Собрать payload follow-up вопроса по сохранённой операции.
 
-    args = _build_parser().parse_args()
-    workspace_root = _resolve_workspace_root(args.workspace_root)
-    manifest = _load_manifest_with_diagnosis(args.operation_id, workspace_root)
-    if manifest is None:
-        # _load_manifest_with_diagnosis уже напечатал structured error envelope.
-        return 1
+    Публичная точка входа домена. CLI (:func:`main`) - оболочка над ней, а не
+    наоборот: иначе единственным способом спросить про документ остался бы
+    запуск подпроцесса, и capability пришлось бы платить за интерпретатор
+    на каждый короткий вопрос.
 
-    field = args.field
-    payload: dict[str, Any]
+    Args:
+        operation_id: идентификатор операции суммаризации.
+        field: что вернуть - ``stats`` / ``articles`` / ``chunks`` /
+            ``sections`` / ``tree`` / ``all``.
+        workspace_root: корень, под которым лежит состояние операции.
+            ``None`` - взять из конфигурации домена.
+        max_chunk_summary_chars: обрезка текста summary чанка.
+
+    Returns:
+        Словарь с ``status="ok"``.
+
+    Raises:
+        LegalQueryError: manifest недоступен. ``payload`` - тот же
+            конверт, который печатал CLI, поэтому формат ответа не изменился.
+    """
+    root = (
+        Path(workspace_root).resolve()
+        if workspace_root is not None
+        else _resolve_workspace_root(None)
+    )
+
+    envelope = _manifest_error_envelope(operation_id, root)
+    if envelope is not None:
+        raise LegalQueryError(envelope)
+
+    from libs.legal_summarizer.cache.manifest import load_manifest
+
+    normalized = load_manifest(operation_id, root)
+    if normalized is None:
+        raise LegalQueryError({
+            "status": "error",
+            "error_type": "manifest_not_found",
+            "operation_id": operation_id,
+            "workspace_root": str(root),
+            "message": (
+                f"manifest.json для operation_id={operation_id!r} стал "
+                "недоступен между диагностикой и чтением."
+            ),
+        })
+    manifest = normalized.to_dict()
+
     if field == "stats":
-        payload = {"status": "ok", "field": field, **_field_stats(manifest)}
-    elif field == "articles":
-        payload = {
+        return {"status": "ok", "field": field, **_field_stats(manifest)}
+    if field == "articles":
+        return {
             "status": "ok",
             "field": field,
             "operation_id": manifest.get("operation_id"),
             "article_count": manifest.get("article_count"),
         }
-    elif field == "sections":
-        payload = {
+    if field == "sections":
+        return {
             "status": "ok",
             "field": field,
             "operation_id": manifest.get("operation_id"),
             "sections": _build_sections_tree(manifest),
         }
-    elif field == "tree":
+    if field == "tree":
         # Псевдо-дерево: родитель → дети, по section_path.
         tree = manifest.get("sections") or {}
         nodes: list[dict[str, Any]] = []
@@ -300,27 +383,51 @@ def main() -> int:
                 "section_path": sec.get("section_path"),
                 "heading": sec.get("heading"),
             })
-        payload = {
+        return {
             "status": "ok",
             "field": field,
             "operation_id": manifest.get("operation_id"),
-            "sections": sorted(nodes, key=lambda x: str(x.get("section_path") or "")),
+            "sections": sorted(
+                nodes, key=lambda x: str(x.get("section_path") or "")
+            ),
         }
-    elif field == "chunks":
+    if field == "chunks":
         chunks = _load_chunk_summaries(
-            args.operation_id,
-            workspace_root,
-            max_summary_chars=args.max_chunk_summary_chars,
+            operation_id,
+            root,
+            max_summary_chars=max_chunk_summary_chars,
         )
-        payload = {
+        return {
             "status": "ok",
             "field": field,
             "operation_id": manifest.get("operation_id"),
             "chunk_count": len(chunks),
             "chunks": chunks,
         }
-    else:  # "all"
-        payload = {"status": "ok", "field": field, "manifest": manifest}
+    # "all"
+    return {"status": "ok", "field": field, "manifest": manifest}
+
+
+def main() -> int:
+    # Кросс-платформенная UTF-8 для собственного stdout/stderr argparse —
+    # на Windows гарантирует кириллицу без кракозябр в --help/ошибках.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
+    args = _build_parser().parse_args()
+    try:
+        payload = query_operation(
+            args.operation_id,
+            args.field,
+            workspace_root=args.workspace_root,
+            max_chunk_summary_chars=args.max_chunk_summary_chars,
+        )
+    except LegalQueryError as exc:
+        _emit(exc.payload)
+        return 1
 
     _emit(payload)
     return 0
