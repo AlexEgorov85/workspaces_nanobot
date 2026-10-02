@@ -26,7 +26,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from servers.enterprise.capabilities.audit.service.main import AuditService
 
 
@@ -112,12 +111,29 @@ class TestGenerateSqlFailsLoudly:
     def test_bad_schema_shape_is_reported_not_swallowed(self) -> None:
         """Метод вместо словаря — явная ошибка, а не «генератор не смог»."""
         from libs.audit.errors import QueryFailedError
-        from libs.audit.generated_sql import _schema_for_prompt
+        from libs.audit.generated_sql import _read_filtered_schema
 
         with pytest.raises(QueryFailedError) as exc:
-            _schema_for_prompt(
+            _read_filtered_schema(
                 lambda: (_FakeData().snapshot_schema),  # метод, не значение
                 ("oarb.audits",),
                 "main",
             )
         assert "ожидался словарь" in str(exc.value)
+
+    def test_empty_schema_for_whitelist_is_reported(self) -> None:
+        """Пустое описание — ошибка, а не запрос «на глаз».
+
+        Раньше снимок читался с фиксированной схемой и при несовпадении схем
+        описывал себя пустотой; модель получала вопрос без колонок и
+        выдумывала их вместе со значениями — получался правдоподобный и
+        заведомо неверный ответ.
+        """
+        from libs.audit.errors import QueryFailedError
+        from libs.audit.generated_sql import _read_filtered_schema
+
+        empty = {"schema": "oarb", "tables": {}}
+
+        with pytest.raises(QueryFailedError) as exc:
+            _read_filtered_schema(lambda: empty, ("oarb.audits",), "oarb")
+        assert "белого списка" in str(exc.value)

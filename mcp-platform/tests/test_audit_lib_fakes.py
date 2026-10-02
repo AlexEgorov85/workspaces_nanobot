@@ -225,8 +225,21 @@ class FakeSnapshot:
         return self.calls[-1][1]
 
     def data_calls(self) -> list[tuple[str, list[Any] | None]]:
-        """Вызовы, не относящиеся к реестру (то есть к данным)."""
-        return [call for call in self.calls if self.registry_match not in call[0]]
+        """Вызовы, не относящиеся ни к реестру, ни к каталогу значений.
+
+        Каталог — наше собственное чтение метаданных колонок, помеченное в
+        самом SQL. Он не является запросом модели, и проверка «запрос модели
+        не исполняется» не должна считать его нарушением: иначе любой
+        справочный обход колонок выглядел бы так же, как выполненный запрос.
+        """
+        from libs.audit.generated_sql import is_value_catalog_query
+
+        return [
+            call
+            for call in self.calls
+            if self.registry_match not in call[0]
+            and not is_value_catalog_query(call[0])
+        ]
 
 
 def default_schema() -> dict[str, Any]:

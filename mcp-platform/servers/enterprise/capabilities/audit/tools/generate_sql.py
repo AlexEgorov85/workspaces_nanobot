@@ -22,7 +22,7 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     service = container.get("audit")
 
     def generate_sql(query: str) -> str:
-        return json.dumps(service.generate_sql(query=query))
+        return service.dumps(service.generate_sql(query=query))
 
     description = (
         "Ответить на вопрос по данным аудита. Опиши задачу обычной фразой: "

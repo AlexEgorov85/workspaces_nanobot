@@ -24,7 +24,7 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     service = container.get("audit")
 
     def run_script(script: str, params: dict[str, Any] | None = None) -> str:
-        return json.dumps(service.run_script(script=script, params=params))
+        return service.dumps(service.run_script(script=script, params=params))
 
     description = (
         "Выполнить предопределённый скрипт аудита по имени из list_scripts. "

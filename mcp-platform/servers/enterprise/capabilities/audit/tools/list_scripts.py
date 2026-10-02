@@ -26,7 +26,7 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     service = container.get("audit")
 
     def list_scripts() -> str:
-        return json.dumps(service.list_scripts())
+        return service.dumps(service.list_scripts())
 
     description = (
         "Каталог предопределённых скриптов аудита: имя, краткое и подробное "
