@@ -58,6 +58,7 @@
     "_about": "capability data — servers/enterprise/capabilities/data/. Журнал, прогоны вопросов, очередь задач, чтение журнала, schema_check. Здесь же путь к снимку DuckDB: снимком владеет capability data (libs/enterprise_data/snapshot/), и объявлять его должен она, а не получать окружением агента — два владельца одного файла означали бы, что снимок читают не оттуда, откуда пишут. Путь здесь OPTIONAL, и это честно: пустое значение означает «снимок ненастроен» (сервер поднимается, операции со снимком отвечают snapshot_unavailable), а не «сервер не запустится» — capability data от снимка не зависит. schema_check проверяет собственные таблицы платформы (журнал, прогоны вопросов, таблицы аудита, реестр скриптов), а не runtime-таблицы агента: их список приезжал окружением и молча перебивал файл.",
     "log_table": "public.agent_gateway_logs",
     "question_runs_table": "public.agent_question_runs",
+    "task_table": "public.agent_conversation_messages",
     "snapshot_path": "~/.cache/nanobot/duckdb/cache.duckdb",
     "log_buffer_maxlen": 2048,
     "log_flush_interval": 5.0,

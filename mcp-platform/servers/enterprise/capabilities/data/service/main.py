@@ -104,11 +104,14 @@ class DataService:
         db: ModuleType | None = None,
         log_table: tuple[str, str] | None = None,
         question_runs_table: tuple[str, str] | None = None,
+        task_table: tuple[str, str] | None = None,
         expected_tables: tuple[str, ...] = (),
         statement_timeout_ms: int = 30_000,
         max_rows: int = 1000,
         buffer_maxlen: int = 2048,
         buffer_flush_interval: float = 5.0,
+        log_retention_days: int = 0,
+        purge_empty_outbound: bool = True,
         snapshot: Any | None = None,
     ) -> None:
         self._db = db
@@ -120,6 +123,10 @@ class DataService:
         self._question_runs_table = (
             tuple(question_runs_table) if question_runs_table else None
         )
+        # Таблица очереди задач — тоже из platform.json, тоже без дефолта.
+        # Дефолт здесь означал бы, что сервер поднимется и начнёт забирать
+        # задачи из таблицы, которую никто не объявлял.
+        self._task_table = tuple(task_table) if task_table else None
         self._expected_tables = tuple(expected_tables)
         self._statement_timeout_ms = int(statement_timeout_ms)
         self._max_rows = int(max_rows)
@@ -132,6 +139,12 @@ class DataService:
         # открывает и пути к нему не знает. Открывает его composition root
         # (server.py) через libs.enterprise_data.snapshot.open_snapshot_store.
         self._snapshot = snapshot
+        # Правило очистки журнала — платформенное, а не вызывающей стороны:
+        # агент больше не пишет в базу и не должен решать, сколько живёт
+        # запись. Значение приходит из platform.json и применяется, когда
+        # аргумент операции не задан.
+        self._log_retention_days = int(log_retention_days)
+        self._purge_empty_outbound = bool(purge_empty_outbound)
 
     def _require_log_table(self, operation: str) -> tuple[str, str]:
         """Таблица журнала — из настройки, иначе явная ошибка.
@@ -154,6 +167,19 @@ class DataService:
                 f"операция недоступна"
             )
         return self._question_runs_table
+
+    def _require_task_table(self, operation: str) -> tuple[str, str]:
+        """Таблица очереди задач — из настройки платформы, иначе отказ.
+
+        Пустое значение означает «операции очереди не настроены», а не
+        «искать таблицу по умолчанию».
+        """
+        if not self._task_table:
+            raise InfrastructureError(
+                f"{operation}: ENTERPRISE_TASK_TABLE не задан — "
+                f"операции очереди задач недоступны"
+            )
+        return self._task_table
 
     # -- снимок -------------------------------------------------------------
     #
@@ -604,13 +630,462 @@ class DataService:
     # Журнал и контекст оборота обслуживают канал агента, а не модель. Право на
     # них есть только у профиля ``runtime``: модель, дописавшая чужое событие в
     # журнал или подменившая контекст чужого оборота, сделала бы это вслепую.
-    # Очереди задач среди них не осталось — она целиком на стороне канала.
+    # Очередь задач — в той же категории: право на неё есть только у рантайма.
 
     def _require_runtime(self, audience: str, operation: str) -> None:
         if audience != AUDIENCE_RUNTIME:
             raise InvalidRequestError(
                 f"{operation} доступна только рантайму агента, профиль вызова: {audience}"
             )
+
+    # ------------------------------------------------------------------
+    # Очередь задач (change 2026-10-02-task-queue-into-mcp, отмена п. 2.18)
+    # ------------------------------------------------------------------
+    #
+    # Имя таблицы приходит из platform.json, а не из тела вызова: вызывающая
+    # сторона не выбирает, чьи данные трогать. Политика захвата (приоритет,
+    # «чат уже занят», откат по backoff) остаётся частью SQL — она и раньше
+    # жила в запросе, просто запрос был в агенте.
+
+    #: Колонки, которые канал забирает себе для обработки.
+    _TASK_RETURNING = (
+        "id, chat_id, user_id, content, media, metadata, created_at"
+    )
+
+    #: Статусы строки очереди. Список закрытый: опечатка в статусе, молча
+    #: ушедшая в базу, выглядит там как настоящее событие — и сообщение
+    #: «обработано» в состоянии, которого не бывает.
+    _TASK_STATUSES = frozenset(
+        {"pending", "processing", "error", "failed", "cancelled", "completed"}
+    )
+
+    def claim_task(
+        self,
+        *,
+        audience: str = AUDIENCE_RUNTIME,
+        error_retry_delay_sec: float = 5.0,
+        priority_contents: list[str] | tuple[str, ...] | None = None,
+        task_table: tuple[str, str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Атомарно захватить одну задачу очереди.
+
+        Захват — это ``UPDATE … SET status='processing' … RETURNING``: два
+        конкурирующих поллинга не могут взять одну строку, потому что в
+        внешнем ``WHERE`` повторяется то же условие отбора, что и в
+        подзапросе. Снятие этого повтора — тихая двойная обработка.
+
+        Отбор: ``role='user'``, статус ``pending`` либо ``error`` старше
+        ``error_retry_delay_sec``; ``cancelled`` исключён; и в том же чате не
+        должно быть уже ``processing``-сообщения. ``priority_contents`` —
+        список команд, которые должны пройти раньше очереди (priority-поллинг
+        канала); для обычного поллинга не передаётся.
+
+        Возвращает захваченную строку в доменном виде либо ``None``, если
+        задач нет. ``None`` — не ошибка: пустая очередь это нормальное
+        состояние, и оборачивать его в исключение заставило бы канал
+        отличать «нечего делать» от «сломалось» по тексту.
+        """
+        self._require_runtime(audience, "claim_task")
+        table = _qualified(task_table or self._require_task_table("claim_task"))
+
+        # Порядок параметров — это порядок плейсхолдеров в тексте: сначала
+        # backoff подзапроса, затем список priority, затем backoff внешнего
+        # WHERE. Перестановка не синтаксическая ошибка, а тихая подмена:
+        # backoff ушёл бы в ANY(%s), и priority-путь отсекался бы всегда.
+        priority_clause = ""
+        params: list[Any] = [error_retry_delay_sec]
+        if priority_contents is not None:
+            priority_clause = "  AND content = ANY(%s)\n"
+            params.append(list(priority_contents))
+        params.append(error_retry_delay_sec)
+
+        sql = f"""
+            UPDATE {table}
+            SET status = 'processing', updated_at = NOW()
+            WHERE id = (
+                SELECT id FROM {table}
+                WHERE role = 'user'
+                  AND (
+                      status = 'pending'
+                      OR (status = 'error'
+                          AND updated_at + interval '1 second' * %s < NOW())
+                  )
+                  AND status != 'cancelled'
+{priority_clause}                  AND NOT EXISTS (
+                      SELECT 1 FROM {table} m2
+                      WHERE m2.chat_id = {table}.chat_id
+                        AND m2.role = 'user'
+                        AND m2.status = 'processing'
+                  )
+                ORDER BY created_at ASC
+                LIMIT 1
+            )
+            AND (
+                status = 'pending'
+                OR (status = 'error'
+                    AND updated_at + interval '1 second' * %s < NOW())
+            )
+            AND status != 'cancelled'
+            RETURNING {self._TASK_RETURNING}
+        """
+
+        return self.submit(lambda conn: _fetchone_dict(conn, sql, params), audience=audience)
+
+    def update_task_status(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        role: str | None = None,
+        content: str | None = None,
+        media: list[Any] | None = None,
+        metadata_patch: dict[str, Any] | None = None,
+        error: str | None = None,
+        max_stuck_retries: int | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+        task_table: tuple[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Сменить статус задачи, опционально записав содержимое и метаданные.
+
+        Метаданные обновляются **внутри одного задания**, а не двумя
+        обращениями «прочитать → посчитать → записать»: счётчик ретраев живёт
+        в ``metadata``, и два конкурирующих обработчика одного чата, сделав
+        каждый по своей паре вызовов, записали бы одинаковый ``retry_count``
+        и задача получила бесконечные повторы.
+
+        Когда задан ``error``, статус выводится сервером, а не вызывающей
+        стороной: ``error`` пока попытки не исчерпаны (задача вернётся в пул
+        после ``error_retry_delay``), ``failed`` — исчерпаны. Выбор «кто
+        владеет счётчиком» и есть суть ошибки: раньше это решал канал, и
+        значит нужен был отдельный вызов на каждый шаг с сохранением
+        локального состояния.
+
+        В отсутствие ``error`` статус берётся аргументом как есть.
+
+        Возвращает итоговый статус, счётчик ретраев и признак, что строка
+        найдена: ``updated=false`` означает «задачи нет», а не «записалось».
+        """
+        self._require_runtime(audience, "update_task_status")
+        if not task_id or not str(task_id).strip():
+            raise InvalidRequestError("update_task_status: не задан task_id")
+        table = _qualified(task_table or self._require_task_table("update_task_status"))
+
+        if error is None and status not in self._TASK_STATUSES:
+            raise InvalidRequestError(
+                f"update_task_status: неизвестный статус {status!r}, "
+                f"допустимы: {sorted(self._TASK_STATUSES)}"
+            )
+        if error is not None and max_stuck_retries is None:
+            raise InvalidRequestError(
+                "update_task_status: при error обязателен max_stuck_retries — "
+                "иначе выбор между error и failed остаётся за вызывающей "
+                "стороной, а счётчик ретраев всё равно ведётся здесь"
+            )
+        if max_stuck_retries is not None and int(max_stuck_retries) < 1:
+            raise InvalidRequestError(
+                f"update_task_status: max_stuck_retries={max_stuck_retries} "
+                f"должен быть ≥ 1"
+            )
+
+        media_json = json.dumps(media, ensure_ascii=False) if media is not None else None
+
+        def _work(conn: Any) -> dict[str, Any]:
+            meta: dict[str, Any] = {}
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT metadata FROM {table} WHERE id = %s", (task_id,)
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    meta = decode_jsonb(row[0])
+                effective = status
+                if error is not None:
+                    meta["error"] = error
+                    retry_count = int(meta.get("retry_count") or 0) + 1
+                    meta["retry_count"] = retry_count
+                    effective = (
+                        "failed" if retry_count >= int(max_stuck_retries) else "error"
+                    )
+                if metadata_patch:
+                    meta.update(metadata_patch)
+
+                # Роль в WHERE, а не в SET: обновление чужой роли молча
+                # превратило бы ответ ассистента в ответ пользователя.
+                sql = (
+                    f"UPDATE {table} SET status = %s, "
+                    "content = COALESCE(%s, content), "
+                    "media = COALESCE(%s::jsonb, media), "
+                    "metadata = %s::jsonb, updated_at = NOW() "
+                    "WHERE id = %s AND (%s::text IS NULL OR role = %s) "
+                    "RETURNING status"
+                )
+                params: list[Any] = [
+                    effective,
+                    content,
+                    media_json,
+                    json.dumps(meta, ensure_ascii=False, default=str),
+                    task_id,
+                    role,
+                    role,
+                ]
+                cur.execute(sql, params)
+                updated = cur.fetchone() is not None
+            return {
+                "status": effective if updated else None,
+                "retry_count": meta.get("retry_count"),
+                "updated": updated,
+            }
+
+        return self.submit(_work, audience=audience)
+
+    def append_assistant_message(
+        self,
+        *,
+        chat_id: str,
+        reply_to: str,
+        content: str = "",
+        media: list[Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+        task_table: tuple[str, str] | None = None,
+    ) -> str:
+        """Создать assistant-заглушку и вернуть её идентификатор.
+
+        Заглушка нужна, чтобы веб-клиент начал опрашивать ответ **до** конца
+        генерации: как только агент закончит, ту же строку дополняет
+        ``update_task_status(status='completed', content=…)``.
+
+        ``reply_to`` связывает заглушку с задачей пользователя — по нему же
+        её потом находит возврат зависших задач. Связь ставится здесь, на
+        сервере: собирать её на стороне канала значило бы, что правило
+        «ответ принадлежит задаче» живёт в двух местах.
+        """
+        self._require_runtime(audience, "append_assistant_message")
+        if not chat_id or not str(chat_id).strip():
+            raise InvalidRequestError(
+                "append_assistant_message: не задан chat_id"
+            )
+        if not reply_to or not str(reply_to).strip():
+            raise InvalidRequestError(
+                "append_assistant_message: не задан reply_to"
+            )
+        table = _qualified(
+            task_table or self._require_task_table("append_assistant_message")
+        )
+        sql = (
+            f"INSERT INTO {table} "
+            "(chat_id, role, content, reply_to, status, metadata, "
+            "created_at, updated_at) "
+            "VALUES (%s, 'assistant', %s, %s, 'processing', %s::jsonb, NOW(), NOW()) "
+            "RETURNING id"
+        )
+        params: list[Any] = [
+            chat_id,
+            content or "",
+            reply_to,
+            json.dumps(metadata or {}, ensure_ascii=False, default=str),
+        ]
+
+        def _work(conn: Any) -> str:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            if row is None:
+                raise InfrastructureError(
+                    "append_assistant_message: вставка не вернула идентификатор"
+                )
+            return str(row[0])
+
+        return self.submit(_work, audience=audience)
+
+    def delete_assistant_message(
+        self,
+        task_id: str,
+        *,
+        role: str = "assistant",
+        audience: str = AUDIENCE_RUNTIME,
+        task_table: tuple[str, str] | None = None,
+    ) -> bool:
+        """Удалить строку ответа.
+
+        Используется при откате: задача уходит на повтор, а пользователь не
+        должен видеть ошибочный статус ответа, который уже не будет доставлен.
+
+        Роль в ``WHERE``, а не в ``SET``: удаление ограничено тем, что
+        помечено, — вызывающий не может снести запись пользователя, назвав
+        её своей.
+        """
+        self._require_runtime(audience, "delete_assistant_message")
+        if not task_id or not str(task_id).strip():
+            raise InvalidRequestError("delete_assistant_message: не задан task_id")
+        if role not in ("user", "assistant"):
+            raise InvalidRequestError(
+                f"delete_assistant_message: неизвестная роль {role!r}"
+            )
+        table = _qualified(
+            task_table or self._require_task_table("delete_assistant_message")
+        )
+        sql = f"DELETE FROM {table} WHERE id = %s AND role = %s"
+
+        def _work(conn: Any) -> bool:
+            with conn.cursor() as cur:
+                cur.execute(sql, [task_id, role])
+                return cur.rowcount > 0
+
+        return self.submit(_work, audience=audience)
+
+    def patch_message_metadata(
+        self,
+        task_id: str,
+        patch: dict[str, Any],
+        *,
+        role: str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+        task_table: tuple[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Дописать поля ``metadata`` строки и вернуть результат.
+
+        Служит для потоковых вещей — дельты рассуждений, окна контекста, —
+        которые пишутся часто и по одной. Чтение и запись идут в одном задании:
+        дельта рассуждений приходит из хода агента и может прийти в тот же
+        момент, что и финализация ответа, а две транзакции на одном
+        идентификаторе — это либо потерянная дельта, либо затертый ответ.
+
+        Патч мерджится **в глубину на один уровень**: без этого вложенный
+        объект (``context_window``) заменялся бы целиком, и соседний ключ
+        в нём пропадал бы. Ключ с ``None`` удаляется — так вызывающий снимает
+        поле, не выбирая между «удалить» и «записать null».
+        """
+        self._require_runtime(audience, "patch_message_metadata")
+        if not task_id or not str(task_id).strip():
+            raise InvalidRequestError("patch_message_metadata: не задан task_id")
+        if not isinstance(patch, dict):
+            raise InvalidRequestError("patch_message_metadata: patch должен быть объектом")
+        table = _qualified(
+            task_table or self._require_task_table("patch_message_metadata")
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT metadata FROM {table} WHERE id = %s", [task_id]
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return {"updated": False, "metadata": {}}
+                meta = dict(decode_jsonb(row[0]))
+                for key, value in patch.items():
+                    if value is None:
+                        meta.pop(key, None)
+                    elif isinstance(value, dict) and isinstance(meta.get(key), dict):
+                        merged = dict(meta[key])
+                        merged.update(value)
+                        meta[key] = merged
+                    else:
+                        meta[key] = value
+                cur.execute(
+                    f"UPDATE {table} SET metadata = %s::jsonb, updated_at = NOW() "
+                    "WHERE id = %s AND (%s::text IS NULL OR role = %s)",
+                    [
+                        json.dumps(meta, ensure_ascii=False, default=str),
+                        task_id,
+                        role,
+                        role,
+                    ],
+                )
+                updated = cur.rowcount > 0
+            return {"updated": updated, "metadata": meta}
+
+        return self.submit(_work, audience=audience)
+
+    def unstick_tasks(
+        self,
+        *,
+        processing_timeout_sec: float,
+        max_stuck_retries: int,
+        audience: str = AUDIENCE_RUNTIME,
+        task_table: tuple[str, str] | None = None,
+    ) -> list[str]:
+        """Вернуть зависшие в ``processing`` задачи в очередь.
+
+        Задача считается зависшей, если она в ``processing`` дольше
+        ``processing_timeout_sec``. Дальше два исхода:
+
+          * ``retry_count`` не исчерпан → ``pending`` (задача вернётся в
+            очередь), а её assistant-заглушка **удаляется**: пользователь не
+            должен видеть «отвечаю…» от ответа, который не будет доставлен;
+          * исчерпан → ``failed`` терминально, заглушка тоже помечается
+            ``failed``.
+
+        Счётчик и статус пишутся здесь, а не вызывающей стороной, по той же
+        причине, что и в ``update_task_status``: он живёт в ``metadata``, и
+        раздельные вызовы из двух разных воркеров дали бы одинаковый счётчик.
+
+        Возвращает идентификаторы фактически тронутых задач. Это не формальность:
+        вызывающий обязан по ним снять локальное состояние — «забытые»
+        воркером слоты иначе останутся занятыми, и polling перестанет брать
+        сообщения.
+        """
+        self._require_runtime(audience, "unstick_tasks")
+        if float(processing_timeout_sec) <= 0:
+            raise InvalidRequestError(
+                f"unstick_tasks: processing_timeout_sec={processing_timeout_sec} "
+                f"должен быть > 0"
+            )
+        if int(max_stuck_retries) < 1:
+            raise InvalidRequestError(
+                f"unstick_tasks: max_stuck_retries={max_stuck_retries} "
+                f"должен быть ≥ 1"
+            )
+        table = _qualified(task_table or self._require_task_table("unstick_tasks"))
+        timeout = float(processing_timeout_sec)
+        max_retries = int(max_stuck_retries)
+
+        select_sql = (
+            f"SELECT id, metadata FROM {table} "
+            "WHERE role = 'user' AND status = 'processing' "
+            "AND updated_at + interval '1 second' * %s < NOW()"
+        )
+        set_user_sql = (
+            f"UPDATE {table} SET status = %s, metadata = %s::jsonb, "
+            "updated_at = NOW() WHERE id = %s"
+        )
+        fail_reply_sql = (
+            f"UPDATE {table} SET status = 'failed', updated_at = NOW() "
+            "WHERE reply_to = %s AND role = 'assistant' AND status = 'processing'"
+        )
+        drop_reply_sql = (
+            f"DELETE FROM {table} WHERE reply_to = %s "
+            "AND role = 'assistant' AND status IN ('processing', 'failed')"
+        )
+
+        def _work(conn: Any) -> list[str]:
+            recovered: list[str] = []
+            with conn.cursor() as cur:
+                cur.execute(select_sql, [timeout])
+                columns = [d[0] for d in (cur.description or ())]
+                stuck = [dict(zip(columns, row)) for row in cur.fetchall()]
+                for entry in stuck:
+                    msg_id = str(entry["id"])
+                    meta = dict(decode_jsonb(entry.get("metadata")))
+                    retry_count = int(meta.get("retry_count") or 0) + 1
+                    meta["retry_count"] = retry_count
+                    terminal = retry_count >= max_retries
+                    cur.execute(
+                        set_user_sql,
+                        [
+                            "failed" if terminal else "pending",
+                            json.dumps(meta, ensure_ascii=False, default=str),
+                            msg_id,
+                        ],
+                    )
+                    cur.execute(
+                        fail_reply_sql if terminal else drop_reply_sql, [msg_id]
+                    )
+                    recovered.append(msg_id)
+            return recovered
+
+        return self.submit(_work, audience=audience)
 
     # ------------------------------------------------------------------
     # Контекст вопроса и очистка журнала (фаза 7)
@@ -717,9 +1192,9 @@ class DataService:
 
     def purge_logs(
         self,
-        retention_days: int = 0,
+        retention_days: int | None = None,
         *,
-        remove_empty_outbound: bool = True,
+        remove_empty_outbound: bool | None = None,
         log_table: tuple[str, str] | None = None,
         question_runs_table: tuple[str, str] | None = None,
         audience: str = AUDIENCE_RUNTIME,
@@ -730,10 +1205,14 @@ class DataService:
         ``make_interval``, которого нет в Greenplum 6.5.
 
         Args:
-            retention_days: Сколько дней хранить. ``0`` — старые записи не
-                трогаются; пустой outbound-мусор чистится всегда, потому что он
-                не несёт смысла ни в какой момент.
-            remove_empty_outbound: Удалять ли пустые stream-чанки.
+            retention_days: Сколько дней хранить. ``None`` — взять
+                платформенное значение (``data.log_retention_days``),
+                ``0`` — старые записи не трогаются. Аргумент остаётся
+                переопределением, а не источником правила: иначе у вызывающей
+                стороны было бы второе место, где живёт срок хранения, и
+                конфигурация расходилась бы с тем, что сервер делает.
+            remove_empty_outbound: Удалять ли пустые stream-чанки. ``None`` —
+                платформенное значение.
             log_table: Таблица журнала; ``None`` — заданная при сборке.
             question_runs_table: Таблица контекста; ``None`` — заданная при сборке.
 
@@ -741,6 +1220,10 @@ class DataService:
             Счётчики удаления по таблицам.
         """
         self._require_runtime(audience, "purge_logs")
+        if retention_days is None:
+            retention_days = self._log_retention_days
+        if remove_empty_outbound is None:
+            remove_empty_outbound = self._purge_empty_outbound
         try:
             days = int(retention_days)
         except (TypeError, ValueError) as exc:
@@ -816,3 +1299,21 @@ def _fetch(conn: Any, sql: str, params: list[Any]) -> list[tuple[Any, ...]]:
         if cur.description is None:
             return []
         return list(cur.fetchall())
+
+
+def _fetchone_dict(
+    conn: Any, sql: str, params: list[Any]
+) -> dict[str, Any] | None:
+    """Одна строка в доменном виде: словарь или ``None``, если строк нет.
+
+    Нужен там, где вызывающая сторона оперирует именами колонок, а не
+    позициями: у канала ``row["chat_id"]``, и перестановка ``RETURNING``
+    не должна была бы приводить к молчаливой подмене значения.
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        if row is None:
+            return None
+        names = [d[0] for d in (cur.description or ())]
+        return dict(zip(names, row))

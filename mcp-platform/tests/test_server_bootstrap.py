@@ -160,14 +160,42 @@ class TestHeavyImportWarmup:
     180 с вместо 0,2 с).
     """
 
-    def test_warmup_imports_packages(self) -> None:
-        for name in ("numpy", "pandas"):
-            sys.modules.pop(name, None)
+    def test_warmup_imports_packages(self, monkeypatch) -> None:
+        """Прогрев обязан **импортировать**, а не «модуль уже в sys.modules».
+
+        Раньше тест вычищал ``numpy``/``pandas`` из ``sys.modules`` перед
+        прогревом, чтобы доказать, что импорт был. Это разрушало сессию
+        целиком: в процессе оказывалось две копии ``numpy``, а FAISS, державший
+        первую, падал в ``RecursionError`` уже в другом тесте — посторонний
+        флейк, который этот тест и создавал. Контракт проверяется перехватом
+        ``__import__``: доказательство то же, глобальное состояние цело.
+        """
+        requested: list[str] = []
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def recording_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            requested.append(name)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", recording_import)
 
         enterprise_server._warm_heavy_imports()
 
         for name in ("numpy", "pandas"):
-            assert name in sys.modules, f"{name} не прогрет"
+            assert name in requested, f"{name} не прогрет: {requested}"
+
+    def test_warmup_keeps_one_copy_of_numpy(self) -> None:
+        """Страж на возврат дефекта: прогрев не пересоздаёт тяжёлые модули.
+
+        Если бы прогрев (или тест рядом) вычистил пакет из ``sys.modules``, в
+        процессе появилась бы вторая копия, и всё, что импортировало пакет
+        раньше — FAISS, DuckDB, — работало бы уже с двумя разными объектами.
+        """
+        enterprise_server._warm_heavy_imports()
+        before = dict(sys.modules)
+        enterprise_server._warm_heavy_imports()
+        for name in ("numpy", "pandas"):
+            assert sys.modules.get(name) is before.get(name), f"{name} пересоздан"
 
     def test_warmup_survives_missing_package(self, monkeypatch) -> None:
         """Отсутствие пакета не должно ронять старт: DuckDB работает и без
@@ -328,6 +356,23 @@ class TestBootstrap:
             # агент отправлял бы по одному MCP-вызову на каждое событие
             # оборота — круговой оборот на каждый чих вместо одного на пачку.
             "log_events",
+            # Change 2026-10-02-task-queue-into-mcp, отмена п. 2.18: очередь
+            # задач возвращена в capability data, но уже с другой схемой —
+            # имя таблицы объявляет platform.json (data.task_table), а не тело
+            # вызова. Раньше вызывающая сторона выбирала, чьи данные трогать.
+            #
+            # Захват и обновление статуса: чтение и запись metadata — в одном
+            # задании, потому что счётчик ретраев живёт в этой колонке, и пара
+            # вызовов из двух конкурирующих обработчиков записала бы
+            # одинаковый retry_count, то есть бесконечные повторы задачи.
+            "claim_task",
+            "update_task_status",
+            # Остальная часть оборота задачи: заглушка ответа, её откат,
+            # потоковые патчи метаданных и возврат зависших задач.
+            "append_assistant_message",
+            "delete_assistant_message",
+            "patch_message_metadata",
+            "unstick_tasks",
         }
 
     def test_every_capability_has_a_registered_service(self) -> None:

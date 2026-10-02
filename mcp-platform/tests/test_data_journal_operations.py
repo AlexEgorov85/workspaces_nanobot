@@ -237,6 +237,48 @@ class TestPurgeLogs:
         assert not any("outbound_final" in s for s, _ in _statements(pool))
 
 
+class TestRetentionIsTheServersRule:
+    """Срок хранения объявлен в ``platform.json`` и обязан применяться сервером.
+
+    Раньше обе настройки читались реестром, но не читались кодом: очистка
+    получала срок аргументом, а ``data.log_retention_days = 90`` был
+    декорацией. Агент свою копию журнала больше не ведёт, поэтому «кто задаёт
+    срок» больше не вопрос двух владельцев — это платформа.
+    """
+
+    def _configured(self, pool: FakePool, **kw: Any) -> DataService:
+        return DataService(
+            db=pool, log_table=LOGS, question_runs_table=RUNS, **kw
+        )
+
+    def test_no_argument_uses_configured_retention(self) -> None:
+        pool = FakePool()
+        self._configured(pool, log_retention_days=90).purge_logs()
+        deletes = [s for s, _ in _statements(pool) if s.lstrip().upper().startswith("DELETE")]
+        assert any('"public"."agent_question_runs"' in s for s in deletes), deletes
+
+    def test_no_argument_uses_configured_empty_outbound(self) -> None:
+        pool = FakePool()
+        self._configured(pool, log_retention_days=0, purge_empty_outbound=False).purge_logs()
+        assert not any("outbound_final" in s for s, _ in _statements(pool))
+
+    def test_argument_overrides_configuration(self) -> None:
+        """Аргумент остаётся переопределением, иначе разовая чистка невозможна."""
+        pool = FakePool()
+        self._configured(pool, log_retention_days=90).purge_logs(0)
+        counters_stmts = _statements(pool)
+        assert not any(
+            '"public"."agent_question_runs"' in s for s, _ in counters_stmts
+        ), counters_stmts
+
+    def test_defaults_need_no_configuration(self) -> None:
+        """Сервис без настроек не падает и по умолчанию ничего не вычищает."""
+        pool = FakePool()
+        counters = _service(pool).purge_logs()
+        assert counters == {"empty_outbound": 0, "events": 0, "question_runs": 0}
+
+
+
 class TestOperationsAreNotModelFacing:
     """Обе операции служебные: модель не должна ни писать в журнал, ни удалять."""
 

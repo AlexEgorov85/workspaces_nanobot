@@ -178,6 +178,24 @@ def _question_runs_table(settings: Settings) -> tuple[str, str]:
     )
 
 
+def _task_table(settings: Settings) -> tuple[str, str] | None:
+    """Таблица очереди задач — из ``data.task_table``, без дефолта.
+
+    Имя объявляет платформа, а не вызывающая сторона: операции очереди
+    возвращены в capability ``data`` (change 2026-10-02-task-queue-into-mcp)
+    именно с этим условием. Раньше ``claim_task`` и ``update_task_status``
+    принимали имя таблицы в теле вызова — то есть вход в данные агента шёл
+    мимо его конфигурации, и это было причиной их удаления (пункт 2.18).
+
+    Пустое значение — не «искать таблицу по умолчанию», а «операции очереди
+    не настроены»: ровно как с таблицей журнала.
+    """
+    raw = settings.get("ENTERPRISE_TASK_TABLE")
+    if not raw or not str(raw).strip():
+        return None
+    return _split_table(str(raw), "ENTERPRISE_TASK_TABLE")
+
+
 def _declared_tables(settings: Settings) -> tuple[str, ...]:
     """Таблицы, которые платформа сама объявила в ``platform.json``.
 
@@ -257,11 +275,16 @@ def _build_container(
     data = DataService(
         log_table=_log_table(settings),
         question_runs_table=_question_runs_table(settings),
+        task_table=_task_table(settings),
         expected_tables=_declared_tables(settings),
         statement_timeout_ms=statement_timeout_ms,
         max_rows=max_rows,
         buffer_maxlen=int(settings.get("ENTERPRISE_LOG_BUFFER_MAXLEN")),
         buffer_flush_interval=float(settings.get("ENTERPRISE_LOG_FLUSH_INTERVAL")),
+        # Правило очистки журнала — платформенное: агент свою копию журнала
+        # больше не ведёт, и решение «сколько живёт запись» принимает сервер.
+        log_retention_days=int(settings.get("ENTERPRISE_LOG_RETENTION_DAYS")),
+        purge_empty_outbound=bool(settings.get("ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND")),
         snapshot=_snapshot(settings),
     )
     services["data"] = data

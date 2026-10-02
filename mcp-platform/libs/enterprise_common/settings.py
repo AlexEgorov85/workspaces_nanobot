@@ -592,6 +592,14 @@ SETTINGS: tuple[Setting, ...] = (
        "файле, поэтому сервис получал пустое значение и операции по прогонам "
        "вопросов отвечали ошибкой",
        file_key="data.question_runs_table"),
+    _s("ENTERPRISE_TASK_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_task_table",
+       "таблица очереди задач агента; имя объявляет платформа, а не "
+       "вызывающая сторона — иначе вход в данные агента шёл бы мимо его "
+       "конфигурации (та же причина, по которой ушли claim_task и "
+       "update_task_status в решении 2.18; отменено change "
+       "2026-10-02-task-queue-into-mcp)",
+       file_key="data.task_table"),
     _s("ENTERPRISE_LOG_BUFFER_MAXLEN", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "потолок буфера журнала; переполнение теряет события, а не растёт",
@@ -605,11 +613,11 @@ SETTINGS: tuple[Setting, ...] = (
     # был вторым владельцем правила, из-за чего конфигурация расходилась с
     # тем, что сервер применяет на самом деле.
     _s("ENTERPRISE_LOG_RETENTION_DAYS", "int", FROM_FILE, OWNER_PLATFORM,
-       "servers/enterprise/capabilities/data/tools/purge_logs.py",
+       "servers/enterprise/server.py:_build_container",
        "сколько дней хранится запись журнала; 0 — не вычищать по сроку",
        file_key="data.log_retention_days"),
     _s("ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND", "bool", FROM_FILE, OWNER_PLATFORM,
-       "servers/enterprise/capabilities/data/tools/purge_logs.py",
+       "servers/enterprise/server.py:_build_container",
        "вычищать ли записи с пустым outbound (stream-чанки) независимо "
        "от срока хранения",
        file_key="data.log_purge_empty_outbound"),
@@ -766,16 +774,23 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
         name="data",
         service="servers/enterprise/capabilities/data/service/main.py",
         tools=(
+            "append_assistant_message",
+            "claim_task",
+            "delete_assistant_message",
             "history_search",
             "log_event",
             "log_events",
+            "patch_message_metadata",
             "purge_logs",
             "schema_check",
+            "unstick_tasks",
+            "update_task_status",
             "upsert_question_run",
         ),
         settings=(
             "ENTERPRISE_LOG_TABLE",
             "ENTERPRISE_LOG_QUESTION_RUNS_TABLE",
+            "ENTERPRISE_TASK_TABLE",
             "ENTERPRISE_LOG_BUFFER_MAXLEN",
             "ENTERPRISE_LOG_FLUSH_INTERVAL",
             "ENTERPRISE_LOG_RETENTION_DAYS",
