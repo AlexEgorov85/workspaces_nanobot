@@ -373,6 +373,21 @@ class TestBootstrap:
             "delete_assistant_message",
             "patch_message_metadata",
             "unstick_tasks",
+            # Остаток оборота, который в агенте был транзакциями. Пока они
+            # не были операциями, канал держал пул PostgreSQL и переписывал
+            # по частям: обрыв между вызовами оставлял задачу в processing
+            # навсегда. Каждая — одна транзакция над обеими строками
+            # оборота, а не набор вызовов по одной.
+            "finalize_turn",
+            "fail_task",
+            "merge_tool_delivery",
+            "release_claimed_tasks",
+            # Чтения, без которых канал всё равно держит пул: статус задачи
+            # после захвата и размер очереди для вывода активности. Операции,
+            # а не «SQL навылет» — иначе граница «платформа владеет данными»
+            # дырявится ровно на чтениях.
+            "get_message",
+            "queue_stats",
         }
 
     def test_every_capability_has_a_registered_service(self) -> None:

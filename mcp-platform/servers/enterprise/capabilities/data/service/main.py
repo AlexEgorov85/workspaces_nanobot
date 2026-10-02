@@ -36,7 +36,6 @@ from typing import Any
 
 from libs.enterprise_common.errors import InfrastructureError, InvalidRequestError
 from libs.enterprise_data.jsonb import decode_jsonb
-
 from servers.enterprise.capabilities.data.service.writer import EventBuffer
 
 logger = logging.getLogger(__name__)
@@ -57,6 +56,66 @@ AUDIENCE_RUNTIME = "runtime"
 from libs.enterprise_common.eventing.models import (  # noqa: E402
     normalize_level as _normalize_level,
 )
+from libs.enterprise_common.eventing.types import (  # noqa: E402
+    is_declared_prefix,
+    is_known,
+)
+from libs.enterprise_common.settings import platform_settings  # noqa: E402
+
+#: Что делать с типом события, которого нет в объявленном словаре.
+#:
+#: ``soft`` (по умолчанию) — записать событие, посчитать имя и один раз
+#: назвать его в лог. «Мягко» здесь не значит «молча»: словарь соблюдается
+#: платформой, а расхождение с вызывающей стороной измеряется — иначе оно
+#: остаётся невидимым до первого инцидента.
+#:
+#: ``strict`` — отклонить вызов. По умолчанию выключен **сознательно**: агент
+#: шлёт свои snake_case-имена (``tool_call``, ``outbound_final``, ``inbound``, …),
+#: которых в словаре нет, и строгий режим уронил бы весь журнал агента.
+#: Включает его отдельный заход — после того, как имена приведены к
+#: объявленным с обеих сторон.
+EVENT_TYPE_POLICY_SOFT = "soft"
+EVENT_TYPE_POLICY_STRICT = "strict"
+EVENT_TYPE_POLICIES = (EVENT_TYPE_POLICY_SOFT, EVENT_TYPE_POLICY_STRICT)
+
+#: Типы исходящих сообщений, которые пишет агент
+#: (``lib/services/db_logging_bus.py``): финальный ответ и промежуточные
+#: сообщения потока. Раньше в чистке стоял ``outbound_delta`` — типа, которого
+#: в базе нет ни одной строки, то есть половина чистки была вечным no-op, а
+#: ``outbound_intermediate`` (сотни строк пустых чанков) не вычищалась никогда.
+#: Имена — по факту живых данных, а не по догадке: проверяется тестом.
+EMPTY_OUTBOUND_EVENT_TYPES: tuple[str, ...] = (
+    "outbound_final",
+    "outbound_intermediate",
+)
+
+#: Исход записи контекста прогона, который операция возвращает вызывающей
+#: стороне. Раньше она возвращала ``True`` безусловно, то есть «запись
+#: выполнена» было объявлено до того, как это известно; теперь значение
+#: называет, каким из двух шагов двухшагового upsert затронута строка.
+RUN_CREATED = "created"
+RUN_UPDATED = "updated"
+
+
+def _unknown_event_type_policy(value: str | None) -> str:
+    """Политика проверки объявленного словаря типов.
+
+    Значение приходит из ``platform.json`` (``data.log_unknown_event_type_policy``):
+    ``soft`` — записать и показать расхождение, ``strict`` — отказать.
+    Неизвестное значение — ошибка конфигурации, а не откат к ``soft``: тихая
+    подстановка сделала бы переключатель декоративным, и оператор думал бы,
+    что включил отказ, а получал бы отчёт.
+    """
+    if value is not None:
+        policy = str(value).strip().lower()
+        if policy not in EVENT_TYPE_POLICIES:
+            raise InfrastructureError(
+                f"data.log_unknown_event_type_policy={value!r}: допустимо "
+                + " или ".join(repr(name) for name in EVENT_TYPE_POLICIES)
+            )
+        return policy
+    settings = platform_settings()
+    return _unknown_event_type_policy(settings.get("ENTERPRISE_LOG_UNKNOWN_EVENT_TYPE_POLICY"))
 
 
 def normalize_level(value: str | None) -> str:
@@ -110,8 +169,10 @@ class DataService:
         max_rows: int = 1000,
         buffer_maxlen: int = 2048,
         buffer_flush_interval: float = 5.0,
+        buffer_batch_size: int | None = None,
         log_retention_days: int = 0,
         purge_empty_outbound: bool = True,
+        unknown_event_type_policy: str | None = None,
         snapshot: Any | None = None,
     ) -> None:
         self._db = db
@@ -134,7 +195,16 @@ class DataService:
             self._write_events,
             maxlen=buffer_maxlen,
             flush_interval=buffer_flush_interval,
+            batch_size=buffer_batch_size,
         )
+        # Тип события приходит извне (агент, модель), а объявленный словарь
+        # живёт здесь, в платформе. Расхождение между ними обязано быть
+        # измеримым, иначе опечатка становится новым постоянным типом в базе.
+        self._unknown_event_type_policy = _unknown_event_type_policy(
+            unknown_event_type_policy
+        )
+        self._unknown_event_types: dict[str, int] = {}
+        self._reported_event_types: set[str] = set()
         # Владелец снимка (DuckDB) передаётся снаружи: сам сервис файл не
         # открывает и пути к нему не знает. Открывает его composition root
         # (server.py) через libs.enterprise_data.snapshot.open_snapshot_store.
@@ -316,7 +386,53 @@ class DataService:
         self._buffer.stop()
 
     def stats(self) -> dict[str, Any]:
-        return {"event_buffer": self._buffer.stats(), "max_rows": self._max_rows}
+        return {
+            "event_buffer": self._buffer.stats(),
+            "max_rows": self._max_rows,
+            # Расхождение с объявленным словарём типов обязано быть видно
+            # оператору без запроса к базе: счётчик — это и есть «сколько имён
+            # ещё предстоит унифицировать с агентом».
+            "unknown_event_type_policy": self._unknown_event_type_policy,
+            "unknown_event_types": dict(self._unknown_event_types),
+        }
+
+    def _observe_event_type(self, event_type: str, *, where: str) -> None:
+        """Учесть тип события: объявлен он в словаре или нет.
+
+        Политика по умолчанию — ``soft`` (см. ``_unknown_event_type_policy``):
+        событие записывается, но расхождение считается по имени и один раз
+        называется в лог. Строка не на каждое событие — иначе одно опечатанное
+        имя даёт строку на каждое событие оборота, и лог перестаёт читаться.
+        Префикс из словаря (``ALLOWED_PREFIXES``) в сообщении назван отдельно:
+        он отличает опечатку в имени (``tool.complted``) от чужой схемы имён
+        целиком (``tool_call``) — чинить их по-разному.
+        """
+        if is_known(event_type):
+            return
+        count = self._unknown_event_types[event_type] = (
+            self._unknown_event_types.get(event_type, 0) + 1
+        )
+        if event_type in self._reported_event_types:
+            return
+        self._reported_event_types.add(event_type)
+        if self._unknown_event_type_policy == EVENT_TYPE_POLICY_STRICT:
+            return  # отказ произойдёт в log_events; здесь только учёт
+        logger.warning(
+            "%s: тип события %r вне объявленного словаря типов "
+            "(libs/enterprise_common/eventing/types.py), записей: %d. %s. "
+            "Политика: %s — событие записано, имя приведено к словарю "
+            "отдельным заходом; включается отказ настройкой "
+            "data.log_unknown_event_type_policy=strict",
+            where,
+            event_type,
+            count,
+            (
+                "Префикс в словаре объявлен — вероятно опечатка в имени"
+                if is_declared_prefix(event_type)
+                else "Префикс в словаре не объявлен — это не соглашение словаря"
+            ),
+            self._unknown_event_type_policy,
+        )
 
     # -- запись журнала -----------------------------------------------------
 
@@ -407,6 +523,16 @@ class DataService:
         del audience  # логирование не пишет в журнал входа в журнал
         if not event_type.strip():
             raise InvalidRequestError("event_type не должен быть пустым")
+        self._observe_event_type(event_type, where="log_event")
+        if (
+            self._unknown_event_type_policy == EVENT_TYPE_POLICY_STRICT
+            and not is_known(event_type)
+        ):
+            raise InvalidRequestError(
+                f"event_type={event_type!r} вне объявленного словаря типов, а "
+                "data.log_unknown_event_type_policy=strict. Список имён: "
+                "libs/enterprise_common/eventing/types.py"
+            )
         result = self.accept(
             {
                 "id": event_id or str(uuid.uuid4()),
@@ -478,6 +604,22 @@ class DataService:
             if not isinstance(event_type, str) or not event_type.strip():
                 raise InvalidRequestError(
                     f"events[{position}].event_type не должен быть пустым"
+                )
+            # Имя извне: сначала учёт, потом решение политики. В strict счётчик
+            # остаётся наполненным — иначе «какие имена агент ещё шлёт» искать
+            # было бы негде. Отказ — до приёма (fail-fast, как и остальная
+            # валидация): принять часть батча и сказать «принято 99 из 100»
+            # здесь нельзя.
+            self._observe_event_type(event_type, where=f"log_events[{position}]")
+            if (
+                self._unknown_event_type_policy == EVENT_TYPE_POLICY_STRICT
+                and not is_known(event_type)
+            ):
+                raise InvalidRequestError(
+                    f"events[{position}].event_type={event_type!r} вне "
+                    "объявленного словаря типов, а "
+                    "data.log_unknown_event_type_policy=strict. Список имён: "
+                    "libs/enterprise_common/eventing/types.py"
                 )
             prepared.append(
                 {
@@ -623,6 +765,11 @@ class DataService:
             "found": len(found),
             "missing": missing,
             "ok": not missing,
+            # Список имён, которые проверялись. Без него ``expected: 8``
+            # нечитаем: агент сверяет по нему свои профильные имена с
+            # именами платформы, и расхождение (перекрыли в одном файле, а
+            # не в другом) иначе видно только по содержимому журнала.
+            "tables": list(wanted),
         }
 
     # -- операции только рантайма -------------------------------------------
@@ -1058,13 +1205,26 @@ class DataService:
             f"DELETE FROM {table} WHERE reply_to = %s "
             "AND role = 'assistant' AND status IN ('processing', 'failed')"
         )
+        # Ответ, чья user-пара уже не в processing: вернуть его в 'pending'
+        # некому, и он навсегда остался бы в состоянии «отвечаю…».
+        # Порядок обязателен — сначала разбираемся с живыми пользователями,
+        # иначе свежезависшая пара попала бы под зачистку сирот и потеряла бы
+        # шанс на нормальную обработку.
+        orphan_reply_sql = (
+            f"UPDATE {table} SET status = 'failed', updated_at = NOW() "
+            "WHERE role = 'assistant' AND status = 'processing' "
+            "AND updated_at + interval '1 second' * %s < NOW()"
+        )
 
         def _work(conn: Any) -> list[str]:
             recovered: list[str] = []
             with conn.cursor() as cur:
                 cur.execute(select_sql, [timeout])
                 columns = [d[0] for d in (cur.description or ())]
-                stuck = [dict(zip(columns, row)) for row in cur.fetchall()]
+                stuck = [
+                    dict(zip(columns, row, strict=True))
+                    for row in cur.fetchall()
+                ]
                 for entry in stuck:
                     msg_id = str(entry["id"])
                     meta = dict(decode_jsonb(entry.get("metadata")))
@@ -1083,7 +1243,450 @@ class DataService:
                         fail_reply_sql if terminal else drop_reply_sql, [msg_id]
                     )
                     recovered.append(msg_id)
+                cur.execute(orphan_reply_sql, [timeout])
             return recovered
+
+        return self.submit(_work, audience=audience)
+
+    # ------------------------------------------------------------------
+    # Чтения очереди
+    # ------------------------------------------------------------------
+    #
+    # Два чтения, а не «SQL навылет». Канал вправе узнать статус задачи и
+    # размер очереди; он не вправе выбирать, какую колонку и с каким
+    # предикатом достать. Операция отдаёт фиксированный набор полей строки,
+    # поэтому её нельзя превратить в произвольный запрос к таблице.
+
+    def get_message(
+        self,
+        task_id: str,
+        *,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any] | None:
+        """Прочитать одну строку очереди.
+
+        Нужна в двух местах канала: перепроверка статуса сразу после захвата
+        (AW мог пометить задачу отменённой между ``SELECT`` подзапроса и
+        ``UPDATE`` захвата) и обратный поиск user-сообщения по ``reply_to``
+        ответа.
+
+        ``None`` означает «строки нет» — это не ошибка: сообщение могли уже
+        удалить, и вызывающий обязан это различать с «прочиталась».
+        """
+        self._require_runtime(audience, "get_message")
+        if not task_id or not str(task_id).strip():
+            raise InvalidRequestError("get_message: не задан task_id")
+        table = _qualified(task_table or self._require_task_table("get_message"))
+        sql = (
+            f"SELECT id, role, status, reply_to, chat_id FROM {table} "
+            "WHERE id = %s"
+        )
+
+        def _work(conn: Any) -> dict[str, Any] | None:
+            with conn.cursor() as cur:
+                cur.execute(sql, [task_id])
+                row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": str(row[0]),
+                "role": row[1],
+                "status": row[2],
+                "reply_to": str(row[3]) if row[3] else None,
+                "chat_id": row[4],
+            }
+
+        return self.submit(_work, audience=audience)
+
+    def queue_stats(
+        self,
+        *,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, int]:
+        """Сколько задач ждут обработки и сколько ждут повтора.
+
+        Только для вывода в терминал воркера. Считаются лишь user-строки:
+        assistant-заглушки в этих числах не имеют смысла и завышали бы
+        очередь вдвое на каждой задаче в полёте.
+        """
+        self._require_runtime(audience, "queue_stats")
+        table = _qualified(task_table or self._require_task_table("queue_stats"))
+        sql = (
+            f"SELECT count(*) FILTER (WHERE status = 'pending') AS pending, "
+            f"count(*) FILTER (WHERE status = 'error') AS error "
+            f"FROM {table} WHERE role = 'user'"
+        )
+
+        def _work(conn: Any) -> dict[str, int]:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+            return {
+                "pending": int((row[0] if row else 0) or 0),
+                "error": int((row[1] if row else 0) or 0),
+            }
+
+        return self.submit(_work, audience=audience)
+
+    # ------------------------------------------------------------------
+    # Оборот целиком: откат захватов, ошибка, доставка tool'а, финализация
+    # ------------------------------------------------------------------
+    #
+    # Четыре операции, которые в агенте были транзакциями. Разбивать их на
+    # несколько вызовов нельзя: счётчик попыток, assistant-placeholder и
+    # статус задачи обязаны меняться вместе. Обрыв между вызовами оставляет
+    # задачу в 'processing' навсегда, а это ровно то состояние, ради которого
+    # существует ``unstick_tasks`` — то есть «чинится» только по таймеру.
+    #
+    # Внутри платформы остаются только строки задачи. Слоты воркера,
+    # локальный контекст и буферы рассуждений живут в процессе агента, и
+    # переносить их сюда нельзя: платформа не владеет ни памятью агента, ни
+    # его файлами сессии.
+
+    def release_claimed_tasks(
+        self,
+        task_ids: list[str],
+        *,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Вернуть незавершённые задачи в очередь при остановке worker'а.
+
+        Счётчик попыток НЕ растёт: задача не провалилась, её не успели
+        обработать. Иначе остановка gateway'а выглядела бы как серия ошибок
+        и исчерпала лимит повторов на задачах, которые даже не начинали.
+
+        Условие ``status = 'processing'`` в UPDATE обязательно: задача могла
+        завершиться между решением об остановке и этой транзакцией, а вернуть
+        в пул уже закрытую задачу — значит обработать её повторно.
+        """
+        self._require_runtime(audience, "release_claimed_tasks")
+        table = _qualified(
+            task_table or self._require_task_table("release_claimed_tasks")
+        )
+        # Порядок задач сохраняем, дубли схлопываем: повторная отправка
+        # одного и того же id не должна удваивать DELETE. Пустые строки
+        # отбрасываем — иначе откат без задач всё равно открыл бы транзакцию.
+        ids = [str(t).strip() for t in dict.fromkeys(task_ids or []) if t and str(t).strip()]
+        if not ids:
+            return {"released": 0, "placeholders_deleted": 0}
+
+        release_sql = (
+            f"UPDATE {table} SET status = 'pending', updated_at = NOW() "
+            "WHERE id = %s AND status = 'processing'"
+        )
+        drop_placeholder_sql = (
+            f"DELETE FROM {table} WHERE reply_to = %s "
+            "AND role = 'assistant' AND status = 'processing'"
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            released = 0
+            dropped = 0
+            with conn.cursor() as cur:
+                for task_id in ids:
+                    cur.execute(release_sql, [task_id])
+                    released += int(cur.rowcount or 0)
+                for task_id in ids:
+                    cur.execute(drop_placeholder_sql, [task_id])
+                    dropped += int(cur.rowcount or 0)
+            return {"released": released, "placeholders_deleted": dropped}
+
+        return self.submit(_work, audience=audience)
+
+    def fail_task(
+        self,
+        user_msg_id: str,
+        assistant_msg_id: str | None,
+        reason: str,
+        max_stuck_retries: int,
+        *,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Пометить оборот ошибочным, увеличив счётчик попыток.
+
+        Read-modify-write ``metadata.retry_count`` обязан быть в одной
+        транзакции с правкой статуса: разрыв между ними оставил бы задачу с
+        увеличенным счётчиком и старым статусом, и она «исчерпала» бы лимит
+        повторов, ни разу не будучи обработана.
+
+        Ветвление по ``retry_count`` против ``max_stuck_retries`` и правка
+        assistant-placeholder — тоже одна транзакция. Пока повтор ещё есть,
+        placeholder удаляется (пользователь не должен видеть ошибочный статус
+        до следующей обработки); на терминальной попытке вместо этого
+        записывается текст ошибки. Это ровно два разных исхода на одну и ту же
+        попытку, и развести их по времени — значит показать пользователю одно,
+        а записать другое.
+        """
+        self._require_runtime(audience, "fail_task")
+        if not user_msg_id or not str(user_msg_id).strip():
+            raise InvalidRequestError("fail_task: не задан user_msg_id")
+        table = _qualified(task_table or self._require_task_table("fail_task"))
+        limit = int(max_stuck_retries)
+
+        select_user_sql = f"SELECT metadata FROM {table} WHERE id = %s"
+        set_user_error_sql = (
+            f"UPDATE {table} SET status = 'error', metadata = %s::jsonb, "
+            "updated_at = NOW() WHERE id = %s"
+        )
+        set_user_failed_sql = (
+            f"UPDATE {table} SET status = 'failed', metadata = %s::jsonb, "
+            "updated_at = NOW() WHERE id = %s"
+        )
+        drop_placeholder_sql = (
+            f"DELETE FROM {table} WHERE id = %s AND role = 'assistant'"
+        )
+        fail_placeholder_sql = (
+            f"UPDATE {table} SET content = %s, metadata = %s::jsonb, "
+            "status = 'failed', updated_at = NOW() "
+            "WHERE id = %s AND role = 'assistant'"
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(select_user_sql, [user_msg_id])
+                row = cur.fetchone()
+                meta = dict(decode_jsonb(row[0] if row else None))
+                try:
+                    retry_count = int(meta.get("retry_count") or 0) + 1
+                except (TypeError, ValueError):
+                    # Счётчик, записанный не числом, обязан считаться
+                    # нулём, а не ронять оборот: иначе один испорченный
+                    # счётчик делает задачу необрабатываемой навсегда.
+                    retry_count = 1
+                meta["retry_count"] = retry_count
+                meta["error"] = reason
+                meta_json = json.dumps(meta, ensure_ascii=False, default=str)
+
+                terminal = retry_count >= limit
+                placeholder = 0
+                if assistant_msg_id:
+                    if terminal:
+                        cur.execute(
+                            fail_placeholder_sql,
+                            [
+                                f"Internal error: {reason}",
+                                json.dumps({"error": reason}, ensure_ascii=False),
+                                assistant_msg_id,
+                            ],
+                        )
+                    else:
+                        cur.execute(drop_placeholder_sql, [assistant_msg_id])
+                    placeholder = int(cur.rowcount or 0)
+
+                cur.execute(
+                    set_user_failed_sql if terminal else set_user_error_sql,
+                    [meta_json, user_msg_id],
+                )
+                user_updated = int(cur.rowcount or 0)
+
+            return {
+                "status": "failed" if terminal else "error",
+                "retry_count": retry_count,
+                "user_updated": user_updated,
+                "placeholder_touched": placeholder,
+            }
+
+        return self.submit(_work, audience=audience)
+
+    def merge_tool_delivery(
+        self,
+        assistant_msg_id: str,
+        *,
+        content: str = "",
+        metadata_patch: dict[str, Any] | None = None,
+        buttons: list[Any] | None = None,
+        media: list[Any] | None = None,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Дописать промежуточную доставку в ещё не финализированный ответ.
+
+        Накопление содержимого, слияние ``media`` без дублей и обновление
+        ``metadata`` — это read-modify-write по строке, и оно должно быть
+        одним вызовом: два конкурирующих merge'а иначе теряют правку
+        одного из них молча, потому что обе читают одно и то же старое
+        значение.
+
+        ``status`` здесь намеренно не трогается — ответ ещё ``processing``,
+        закрывает его ``finalize_turn``.
+        """
+        self._require_runtime(audience, "merge_tool_delivery")
+        if not assistant_msg_id or not str(assistant_msg_id).strip():
+            raise InvalidRequestError("merge_tool_delivery: не задан assistant_msg_id")
+        if metadata_patch is not None and not isinstance(metadata_patch, dict):
+            raise InvalidRequestError(
+                "merge_tool_delivery: metadata_patch должен быть объектом"
+            )
+        table = _qualified(
+            task_table or self._require_task_table("merge_tool_delivery")
+        )
+
+        select_sql = f"SELECT metadata, media, content FROM {table} WHERE id = %s"
+        update_sql = (
+            f"UPDATE {table} SET content = %s, metadata = %s::jsonb, "
+            f"buttons = %s::jsonb, media = %s::jsonb, updated_at = NOW() "
+            "WHERE id = %s AND role = 'assistant'"
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(select_sql, [assistant_msg_id])
+                row = cur.fetchone()
+                meta = dict(decode_jsonb(row[0] if row else None))
+                if metadata_patch:
+                    meta.update(metadata_patch)
+
+                existing_media = _as_list(row[1] if row else None)
+                merged_media = list(existing_media)
+                for item in media or []:
+                    if item not in merged_media:
+                        merged_media.append(item)
+
+                merged_content = row[2] if row else ""
+                if not isinstance(merged_content, str):
+                    merged_content = ""
+                # Повтор того же самого текста не дописывается: стрим
+                # присылает его и как дельту, и как финальный блок, и без
+                # этой проверки ответ удваивался бы на каждом tool-результате.
+                if content and content != merged_content:
+                    merged_content = (
+                        f"{merged_content}\n\n{content}"
+                        if merged_content
+                        else content
+                    )
+
+                cur.execute(
+                    update_sql,
+                    [
+                        merged_content,
+                        json.dumps(meta, ensure_ascii=False, default=str),
+                        json.dumps(buttons or [], ensure_ascii=False, default=str),
+                        json.dumps(merged_media, ensure_ascii=False, default=str),
+                        assistant_msg_id,
+                    ],
+                )
+                updated = int(cur.rowcount or 0)
+
+            return {"updated": bool(updated), "content_length": len(merged_content)}
+
+        return self.submit(_work, audience=audience)
+
+    def finalize_turn(
+        self,
+        user_msg_id: str,
+        assistant_msg_id: str,
+        *,
+        content: str = "",
+        metadata_patch: dict[str, Any] | None = None,
+        buttons: list[Any] | None = None,
+        media: list[Any] | None = None,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Закрыть оборот: записать ответ и снять ``processing`` с задачи.
+
+        Две строки меняются в одной транзакции по назначению: закрыть задачу
+        можно только вместе с её ответом. Разрыв оставлял бы ``completed`` на
+        задаче без ответа, что читается как «обработано» — и это молча.
+
+        Проверка отмены пользователем сделана частью той же транзакции, а не
+        отдельным чтением перед ней. Отдельное чтение оставляло окно, в
+        котором отмена успевала прийти, а ответ всё равно записывался: между
+        ``SELECT status`` и ``UPDATE`` проходит вся транзакция, а при
+        длинном ответе — ещё и время на сборку текста.
+
+        Возвращает ``outcome``:
+
+        * ``completed`` — ответ записан, обе строки закрыты;
+        * ``cancelled_drop`` — задачу отменили, placeholder удалён, а строка
+          задачи не тронута: её закрыл тот, кто отменил.
+        """
+        self._require_runtime(audience, "finalize_turn")
+        if not user_msg_id or not str(user_msg_id).strip():
+            raise InvalidRequestError("finalize_turn: не задан user_msg_id")
+        if not assistant_msg_id or not str(assistant_msg_id).strip():
+            raise InvalidRequestError("finalize_turn: не задан assistant_msg_id")
+        if metadata_patch is not None and not isinstance(metadata_patch, dict):
+            raise InvalidRequestError(
+                "finalize_turn: metadata_patch должен быть объектом"
+            )
+        table = _qualified(task_table or self._require_task_table("finalize_turn"))
+
+        user_status_sql = f"SELECT status FROM {table} WHERE id = %s"
+        select_assistant_sql = (
+            f"SELECT metadata, media, content FROM {table} WHERE id = %s"
+        )
+        drop_placeholder_sql = (
+            f"DELETE FROM {table} WHERE id = %s AND role = 'assistant'"
+        )
+        finish_assistant_sql = (
+            f"UPDATE {table} SET content = %s, metadata = %s::jsonb, "
+            f"buttons = %s::jsonb, media = %s::jsonb, status = 'completed', "
+            "updated_at = NOW() WHERE id = %s AND role = 'assistant'"
+        )
+        finish_user_sql = (
+            f"UPDATE {table} SET status = 'completed', updated_at = NOW() "
+            "WHERE id = %s AND role = 'user'"
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                # Отмена проверяется первым и в той же транзакции: иначе
+                # ответ лёг бы поверх отменённой задачи.
+                cur.execute(user_status_sql, [user_msg_id])
+                status_row = cur.fetchone()
+                if status_row and str(status_row[0]) == "cancelled":
+                    cur.execute(drop_placeholder_sql, [assistant_msg_id])
+                    return {
+                        "outcome": "cancelled_drop",
+                        "placeholder_deleted": int(cur.rowcount or 0),
+                    }
+
+                cur.execute(select_assistant_sql, [assistant_msg_id])
+                row = cur.fetchone()
+                meta = dict(decode_jsonb(row[0] if row else None))
+                if metadata_patch:
+                    meta.update(metadata_patch)
+
+                existing_media = _as_list(row[1] if row else None)
+                # Здесь media ЗАМЕНЯЕТСЯ, а не сливается, в отличие от
+                # merge_tool_delivery: к моменту финализации перечень
+                # вложений известен целиком. Слияние оставило бы вложения
+                # предыдущих итераций, которых в финальном ответе нет.
+                final_media = list(media) if media else existing_media
+
+                existing_content = row[2] if row else ""
+                if not isinstance(existing_content, str):
+                    existing_content = ""
+                # Пустой content (синтетический финальный вызов после
+                # message(...)) означает «взять накопленное merge'ом».
+                final_content = content if content else existing_content
+
+                cur.execute(
+                    finish_assistant_sql,
+                    [
+                        final_content,
+                        json.dumps(meta, ensure_ascii=False, default=str),
+                        json.dumps(buttons or [], ensure_ascii=False, default=str),
+                        json.dumps(final_media, ensure_ascii=False, default=str),
+                        assistant_msg_id,
+                    ],
+                )
+                assistant_updated = int(cur.rowcount or 0)
+
+                cur.execute(finish_user_sql, [user_msg_id])
+                user_updated = int(cur.rowcount or 0)
+
+            return {
+                "outcome": "completed",
+                "assistant_updated": bool(assistant_updated),
+                "user_updated": bool(user_updated),
+                "content_length": len(final_content),
+            }
 
         return self.submit(_work, audience=audience)
 
@@ -1111,7 +1714,7 @@ class DataService:
         update_only: bool = False,
         question_runs_table: tuple[str, str] | None = None,
         audience: str = AUDIENCE_RUNTIME,
-    ) -> bool:
+    ) -> str:
         """Upsert контекста вопроса в ``agent_question_runs``.
 
         Без ``ON CONFLICT``: Greenplum 6.5 (PostgreSQL 9.4) его не умеет, а
@@ -1132,7 +1735,17 @@ class DataService:
                 задана при сборке сервера.
 
         Returns:
-            ``True`` — запись выполнена.
+            ``RUN_UPDATED`` — строка прогона была и обновлена, ``RUN_CREATED``
+            — её не было и она вставлена. Значение означает, что строка в
+            таблице **есть**, и приходит вызывающей стороне в ответе операции.
+
+        Raises:
+            InfrastructureError: ни UPDATE, ни INSERT не затронули ни одной
+                строки. СУБД такие заявления принимает без ошибки (политика
+                RLS, ``BEFORE INSERT`` с ``RETURN NULL``, правило), и раньше
+                это заканчивалось ``True`` — то есть «ok» при отсутствии
+                строки. Отказ здесь и есть требование: вызывающая сторона
+                обязана отличить запись от её отсутствия.
         """
         self._require_runtime(audience, "upsert_question_run")
         if not request_id or not str(request_id).strip():
@@ -1182,13 +1795,26 @@ class DataService:
                 question, media_json, request_id,
             ]
 
-        def _work(conn: Any) -> None:
+        def _work(conn: Any) -> dict[str, int]:
             with conn.cursor() as cur:
                 cur.execute(update_sql, update_params)
+                updated = int(cur.rowcount or 0)
                 cur.execute(insert_sql, insert_params)
+                inserted = int(cur.rowcount or 0)
+            return {"updated": updated, "inserted": inserted}
 
-        self.submit(_work, audience=audience)
-        return True
+        counters = dict(self.submit(_work, audience=audience) or {})
+        # Ноль и по UPDATE, и по INSERT означает, что строки нет — при нуле
+        # ошибок от СУБД. Так ведут себя политики RLS, ``BEFORE INSERT`` с
+        # ``RETURN NULL`` и правила: заявление принимается и не делает
+        # ничего. Раньше здесь стоял безусловный ``return True``, и вызывающая
+        # сторона получала «запись выполнена» без единой строки в таблице.
+        if not counters.get("updated") and not counters.get("inserted"):
+            raise InfrastructureError(
+                f"upsert_question_run: строка прогона {request_id!r} не записана — "
+                f"UPDATE и INSERT не затронули ни одной строки в {table}"
+            )
+        return RUN_CREATED
 
     def purge_logs(
         self,
@@ -1253,9 +1879,17 @@ class DataService:
                 if remove_empty_outbound:
                     # Реальные доставки файлов с пустым текстом сохраняются:
                     # у них есть media, и удаление стёрло бы сам факт отправки.
+                    # Список типов — ``EMPTY_OUTBOUND_EVENT_TYPES``, то есть те
+                    # имена, которые агент действительно пишет. Раньше здесь
+                    # стоял ``outbound_delta``: типа, которого в базе нет ни
+                    # одной строки, а ``outbound_intermediate`` (пустые чанки
+                    # потока) не вычищался никогда.
+                    outbound_types = ", ".join(
+                        f"'{name}'" for name in EMPTY_OUTBOUND_EVENT_TYPES
+                    )
                     cur.execute(
                         f"DELETE FROM {logs} "
-                        "WHERE event_type IN ('outbound_final', 'outbound_delta') "
+                        f"WHERE event_type IN ({outbound_types}) "
                         "AND coalesce(btrim(payload->>'content'), '') = '' "
                         "AND (payload->'media') IS NULL"
                     )
@@ -1274,6 +1908,27 @@ class DataService:
             return result
 
         return dict(self.submit(_work, audience=audience) or counters)
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Привести значение колонки ``media`` к списку.
+
+    Колонка текстовая: одна и та же строка приходит и JSON-массивом, и
+    одиночным объектом, и пустой строкой — в зависимости от того, кто и
+    каким драйвером её писал. Молчаливое ``[]`` на мусоре стёрло бы у ответа
+    вложения, поэтому не-строки и не-списки отбрасываются явно.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        return list(parsed) if isinstance(parsed, list) else []
+    return []
 
 
 def _qualified(table: tuple[str, str] | str) -> str:
@@ -1316,4 +1971,4 @@ def _fetchone_dict(
         if row is None:
             return None
         names = [d[0] for d in (cur.description or ())]
-        return dict(zip(names, row))
+        return dict(zip(names, row, strict=True))

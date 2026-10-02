@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -88,6 +89,28 @@ class ScriptedCursor:
             self.description = [("id",), ("metadata",)]
             self._rows = self._conn.stuck_rows
             return
+        if upper.startswith("SELECT ID, ROLE, STATUS, REPLY_TO, CHAT_ID"):
+            # Полное чтение строки для get_message.
+            self.description = [
+                ("id",), ("role",), ("status",), ("reply_to",), ("chat_id",)
+            ]
+            self._rows = self._conn.message_rows
+            return
+        if upper.startswith("SELECT COUNT(*)"):
+            self.description = [("pending",), ("error",)]
+            self._rows = self._conn.stats_rows
+            return
+        if upper.startswith("SELECT METADATA, MEDIA, CONTENT"):
+            # Строка assistant-ответа для merge/finalize: нужны все три
+            # колонки, потому что ответ переписывается целиком.
+            self.description = [("metadata",), ("media",), ("content",)]
+            self._rows = self._conn.assistant_rows
+            return
+        if upper.startswith("SELECT STATUS"):
+            # Проверка отмены пользователем перед финализацией.
+            self.description = [("status",)]
+            self._rows = self._conn.status_rows
+            return
         if upper.startswith("SELECT METADATA"):
             self.description = [("metadata",)]
             self._rows = self._conn.select_rows
@@ -135,6 +158,10 @@ class ScriptedConn:
         insert_rows: list[tuple[object, ...]] | None = None,
         stuck_rows: list[tuple[object, ...]] | None = None,
         delete_rowcount: int = 1,
+        assistant_rows: list[tuple[object, ...]] | None = None,
+        status_rows: list[tuple[object, ...]] | None = None,
+        message_rows: list[tuple[object, ...]] | None = None,
+        stats_rows: list[tuple[object, ...]] | None = None,
     ) -> None:
         self.select_rows = list(select_rows or [])
         self.claim_rows = list(claim_rows or [])
@@ -142,7 +169,15 @@ class ScriptedConn:
         self.insert_rows = list(insert_rows or [])
         self.stuck_rows = list(stuck_rows or [])
         self.delete_rowcount = int(delete_rowcount)
+        self.assistant_rows = list(assistant_rows or [])
+        self.status_rows = list(status_rows or [])
+        self.message_rows = list(message_rows or [])
+        self.stats_rows = list(stats_rows or [])
         self.statements: list[tuple[str, object]] = []
+        #: Сколько раз брали задание у пула. Одна задача — одна транзакция;
+        #: операции оборота обязаны укладываться ровно в одну, иначе обрыв
+        #: между вызовами оставит задачу в processing.
+        self.jobs: list[object] = []
 
     def cursor(self) -> ScriptedCursor:
         return ScriptedCursor(self)
@@ -156,6 +191,10 @@ def _service(
     insert_rows: list[tuple[object, ...]] | None = None,
     stuck_rows: list[tuple[object, ...]] | None = None,
     delete_rowcount: int = 1,
+    assistant_rows: list[tuple[object, ...]] | None = None,
+    status_rows: list[tuple[object, ...]] | None = None,
+    message_rows: list[tuple[object, ...]] | None = None,
+    stats_rows: list[tuple[object, ...]] | None = None,
     **kwargs: object,
 ) -> tuple[DataService, ScriptedConn]:
     conn = ScriptedConn(
@@ -165,10 +204,19 @@ def _service(
         insert_rows=insert_rows,
         stuck_rows=stuck_rows,
         delete_rowcount=delete_rowcount,
+        assistant_rows=assistant_rows,
+        status_rows=status_rows,
+        message_rows=message_rows,
+        stats_rows=stats_rows,
     )
     module = ModuleType("fake_db")
     module.conn = conn  # type: ignore[attr-defined]
-    module.run = lambda job: job(conn)  # type: ignore[attr-defined]
+
+    def _run(job: object) -> object:
+        conn.jobs.append(job)
+        return job(conn)  # type: ignore[operator]
+
+    module.run = _run  # type: ignore[attr-defined]
     service = DataService(
         db=module, task_table=TASK_TABLE, **kwargs  # type: ignore[arg-type]
     )
@@ -503,7 +551,9 @@ class TestUnstickTasks:
     def test_placeholder_is_failed_on_terminal(self) -> None:
         service, conn = _service(stuck_rows=[("msg-1", {"retry_count": 5})])
         service.unstick_tasks(processing_timeout_sec=60.0, max_stuck_retries=3)
-        sql, _params = _stmt(conn, "UPDATE")
+        # Игла по «UPDATE» брала бы и зачистку сиротских ответов, которая
+        # выполняется последней. Нужна именно правка ответа по reply_to.
+        sql, _params = _stmt(conn, "WHERE REPLY_TO = %S")
         assert "SET status = 'failed'" in sql
         assert "reply_to = %s" in sql
 
@@ -697,3 +747,387 @@ class TestUpdateTaskStatusValidation:
             service.update_task_status(
                 "msg-1", status="completed", audience=AUDIENCE_MODEL
             )
+
+
+# ===================================================================
+# Остаток оборота: то, что в агенте было транзакциями
+# ===================================================================
+#
+# Общая проверка всех четырёх операций — **одна** транзакция. Каждая из них
+# правит две строки оборота, и разбиение на вызовы означало бы состояние,
+# которого не бывает: счётчик попыток, записанный без смены статуса;
+# ``completed`` на задаче без ответа; заглушка ответа, пережившая откат.
+# Ни один из этих дефектов не падает — он выглядит как «обработано».
+
+
+def _index_of(conn: ScriptedConn, needle: str) -> int:
+    """Индекс первого запроса, содержащего ``needle``."""
+    upper = needle.upper()
+    for i, (sql, _params) in enumerate(conn.statements):
+        if upper in sql.upper():
+            return i
+    raise AssertionError(f"запрос с {needle!r} не выполнен: {conn.statements!r}")
+
+
+class TestReleaseClaimedTasks:
+    def test_empty_list_does_not_touch_the_database(self) -> None:
+        service, conn = _service()
+        result = service.release_claimed_tasks(task_ids=[])
+        assert result == {"released": 0, "placeholders_deleted": 0}
+        assert conn.jobs == [], "пустой откат не должен открывать транзакцию"
+
+    def test_blank_ids_are_filtered_out(self) -> None:
+        service, conn = _service()
+        service.release_claimed_tasks(task_ids=["", None, "  "])
+        assert conn.jobs == []
+
+    def test_everything_happens_in_one_transaction(self) -> None:
+        service, conn = _service()
+        service.release_claimed_tasks(task_ids=["a", "b", "c"])
+        assert len(conn.jobs) == 1, (
+            "откат захватов должен быть одной транзакцией: между вызовами "
+            "процесс можно убить, и часть задач осталась бы в processing"
+        )
+
+    def test_duplicate_ids_are_collapsed(self) -> None:
+        service, conn = _service()
+        service.release_claimed_tasks(task_ids=["a", "a", "b"])
+        updates = [s for s, _ in conn.statements if "SET STATUS = 'PENDING'" in s.upper()]
+        assert len(updates) == 2, "повторный id удваивает UPDATE и DELETE"
+
+    def test_release_guards_on_processing(self) -> None:
+        """Вернуть в пул уже закрытую задачу — значит обработать её повторно."""
+        service, conn = _service()
+        service.release_claimed_tasks(task_ids=["a"])
+        sql, _ = _stmt(conn, "SET STATUS = 'PENDING'")
+        assert "status = 'processing'" in sql, (
+            "снятие условия вернёт в очередь задачу, которая уже завершилась"
+        )
+
+    def test_placeholder_deleted_by_reply_to_and_role(self) -> None:
+        service, conn = _service()
+        service.release_claimed_tasks(task_ids=["a"])
+        sql, params = _stmt(conn, "DELETE")
+        assert "reply_to = %s" in sql
+        assert "role = 'assistant'" in sql
+        assert "status = 'processing'" in sql
+        assert params == ["a"]
+
+    def test_model_audience_is_denied(self) -> None:
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError):
+            service.release_claimed_tasks(
+                task_ids=["a"], audience=AUDIENCE_MODEL
+            )
+
+
+class TestFailTask:
+    def test_retryable_error_removes_the_placeholder(self) -> None:
+        service, conn = _service(select_rows=[({"retry_count": 0},)])
+        result = service.fail_task(
+            "user-1", "assistant-1", reason="timeout", max_stuck_retries=3
+        )
+        assert result["status"] == "error"
+        assert result["retry_count"] == 1
+        assert len(conn.jobs) == 1
+        # Пока повтор есть, заглушка удаляется: пользователь не должен видеть
+        # ошибочный статус до следующей обработки.
+        sql, _ = _stmt(conn, "DELETE")
+        assert "role = 'assistant'" in sql
+        sql, _ = _stmt(conn, "SET STATUS = 'ERROR'")
+        assert sql, "user-строка обязана получить status=error"
+
+    def test_terminal_error_writes_the_reason_into_the_answer(self) -> None:
+        service, conn = _service(select_rows=[({"retry_count": 2},)])
+        result = service.fail_task(
+            "user-1", "assistant-1", reason="boom", max_stuck_retries=2
+        )
+        assert result["status"] == "failed"
+        assert result["retry_count"] == 3
+        assert len(conn.jobs) == 1
+        sql, params = _stmt(conn, "SET CONTENT = %S")
+        assert "status = 'failed'" in sql
+        assert params[0] == "Internal error: boom"
+        assert json.loads(params[1]) == {"error": "boom"}
+        # Заглушка на терминальной попытке не удаляется, а помечается.
+        assert not any(
+            "DELETE" in s.upper() for s, _ in conn.statements
+        ), "терминальная попытка удаляет заглушку вместо текста ошибки"
+
+    def test_retry_count_is_incremented_not_replaced(self) -> None:
+        service, conn = _service(select_rows=[({"retry_count": 4},)])
+        service.fail_task("user-1", None, reason="x", max_stuck_retries=9)
+        sql, params = _stmt(conn, "SET STATUS = 'ERROR'")
+        meta = json.loads(params[0])
+        assert meta["retry_count"] == 5
+        assert meta["error"] == "x"
+
+    def test_broken_retry_count_counts_as_zero(self) -> None:
+        """Счётчик, записанный не числом, обязан считаться нулём.
+
+        Иначе один испорченный счётчик делает задачу необрабатываемой
+        навсегда: ``int()`` бросил бы прямо в обработчике оборота.
+        """
+        service, conn = _service(select_rows=[({"retry_count": "много"},)])
+        result = service.fail_task("user-1", None, reason="x", max_stuck_retries=3)
+        assert result["retry_count"] == 1
+        assert result["status"] == "error"
+
+    def test_without_assistant_row_there_is_no_placeholder_statement(self) -> None:
+        service, conn = _service(select_rows=[({"retry_count": 0},)])
+        service.fail_task("user-1", None, reason="x", max_stuck_retries=3)
+        assert not any("role = 'assistant'" in s for s, _ in conn.statements)
+
+    def test_read_and_write_share_one_transaction(self) -> None:
+        service, conn = _service(select_rows=[({"retry_count": 0},)])
+        service.fail_task("user-1", "assistant-1", reason="x", max_stuck_retries=3)
+        assert len(conn.jobs) == 1
+        # Чтение счётчика обязано предшествовать записи, иначе инкремент
+        # считает не с чего.
+        assert _index_of(conn, "SELECT METADATA") < _index_of(conn, "SET STATUS = 'ERROR'")
+
+    def test_empty_user_id_is_rejected(self) -> None:
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError):
+            service.fail_task("  ", None, reason="x", max_stuck_retries=3)
+
+    def test_model_audience_is_denied(self) -> None:
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError):
+            service.fail_task("user-1", None, reason="x", max_stuck_retries=3,
+                              audience=AUDIENCE_MODEL)
+
+
+class TestMergeToolDelivery:
+    def test_content_is_appended(self) -> None:
+        service, conn = _service(assistant_rows=[({}, [], "первое")])
+        service.merge_tool_delivery("assistant-1", content="второе")
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert params[0] == "первое\n\nвторое"
+
+    def test_repeated_same_content_is_not_duplicated(self) -> None:
+        """Стрим присылает один и тот же блок и дельтой, и финалом."""
+        service, conn = _service(assistant_rows=[({}, [], "текст")])
+        service.merge_tool_delivery("assistant-1", content="текст")
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert params[0] == "текст"
+
+    def test_empty_content_keeps_what_was_accumulated(self) -> None:
+        service, conn = _service(assistant_rows=[({}, [], "накоплено")])
+        service.merge_tool_delivery("assistant-1", content="")
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert params[0] == "накоплено"
+
+    def test_media_merges_without_duplicates(self) -> None:
+        service, conn = _service(assistant_rows=[({}, ["a", "b"], "")])
+        service.merge_tool_delivery("assistant-1", media=["b", "c"])
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert json.loads(params[3]) == ["a", "b", "c"]
+
+    def test_media_stored_as_json_text_is_parsed(self) -> None:
+        service, conn = _service(assistant_rows=[({}, '["a"]', "")])
+        service.merge_tool_delivery("assistant-1", media=["b"])
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert json.loads(params[3]) == ["a", "b"]
+
+    def test_metadata_patch_is_applied(self) -> None:
+        service, conn = _service(assistant_rows=[({"keep": 1}, [], "")])
+        service.merge_tool_delivery("assistant-1", metadata_patch={"tool": "x"})
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        meta = json.loads(params[1])
+        assert meta == {"keep": 1, "tool": "x"}
+
+    def test_status_is_not_touched(self) -> None:
+        """Ответ ещё processing — закрывает его finalize_turn."""
+        service, conn = _service(assistant_rows=[({}, [], "")])
+        service.merge_tool_delivery("assistant-1", content="x")
+        sql, _ = _stmt(conn, "SET CONTENT = %S")
+        assert "status" not in sql.lower(), (
+            "merge закрывает ответ раньше времени: стрим ещё не доставлен"
+        )
+
+    def test_role_is_guarded_in_where(self) -> None:
+        service, conn = _service(assistant_rows=[({}, [], "")])
+        service.merge_tool_delivery("assistant-1", content="x")
+        sql, _ = _stmt(conn, "SET CONTENT = %S")
+        assert "role = 'assistant'" in sql, (
+            "правка без проверки роли переписала бы строку user-сообщения"
+        )
+
+    def test_non_dict_patch_is_rejected(self) -> None:
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError):
+            service.merge_tool_delivery("assistant-1", metadata_patch=["x"])  # type: ignore[arg-type]
+
+    def test_model_audience_is_denied(self) -> None:
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError):
+            service.merge_tool_delivery("assistant-1", audience=AUDIENCE_MODEL)
+
+
+class TestFinalizeTurn:
+    def test_both_rows_close_in_one_transaction(self) -> None:
+        service, conn = _service(
+            status_rows=[("processing",)], assistant_rows=[({}, [], "ответ")]
+        )
+        result = service.finalize_turn("user-1", "assistant-1", content="ответ")
+        assert result["outcome"] == "completed"
+        assert len(conn.jobs) == 1
+        sql, _ = _stmt(conn, "SET STATUS = 'COMPLETED'")
+        assert "updated_at = NOW()" in sql
+        # Роль в WHERE, а не в SET: обновление чужой роли молча превратило бы
+        # ответ ассистента в ответ пользователя. Соглашение платформы, а не
+        # украшение — тот же id может прийти не с того конца.
+        assert _stmt(conn, "WHERE ID = %S AND ROLE = 'ASSISTANT'")[1] == [
+            "ответ",
+            "{}",
+            "[]",
+            "[]",
+            "assistant-1",
+        ]
+        assert _stmt(conn, "WHERE ID = %S AND ROLE = 'USER'")[1] == ["user-1"]
+
+    def test_cancelled_task_drops_the_answer(self) -> None:
+        service, conn = _service(
+            status_rows=[("cancelled",)], assistant_rows=[({}, [], "поздний ответ")]
+        )
+        result = service.finalize_turn("user-1", "assistant-1", content="поздний ответ")
+        assert result["outcome"] == "cancelled_drop"
+        assert result["placeholder_deleted"] == 1
+        assert not any("SET STATUS = 'COMPLETED'" in s.upper() for s, _ in conn.statements), (
+            "ответ записан поверх отменённой задачи"
+        )
+
+    def test_cancellation_is_checked_before_any_write(self) -> None:
+        """Проверка отмены обязана быть в той же транзакции, что и запись.
+
+        Отдельное чтение оставляет окно: отмена успевает прийти между
+        ``SELECT`` и ``UPDATE``, и ответ всё равно ложится на задачу, которую
+        пользователь отменил.
+        """
+        service, conn = _service(
+            status_rows=[("processing",)], assistant_rows=[({}, [], "x")]
+        )
+        service.finalize_turn("user-1", "assistant-1", content="x")
+        assert _index_of(conn, "SELECT STATUS") < _index_of(conn, "SET STATUS = 'COMPLETED'")
+
+    def test_empty_content_falls_back_to_accumulated(self) -> None:
+        service, conn = _service(
+            status_rows=[("processing",)], assistant_rows=[({}, [], "накоплено")]
+        )
+        service.finalize_turn("user-1", "assistant-1", content="")
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert params[0] == "накоплено"
+
+    def test_media_replaces_instead_of_merging(self) -> None:
+        """В отличие от merge_tool_delivery: перечень вложений известен целиком."""
+        service, conn = _service(
+            status_rows=[("processing",)], assistant_rows=[({}, ["старое"], "x")]
+        )
+        service.finalize_turn("user-1", "assistant-1", media=["новое"])
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert json.loads(params[3]) == ["новое"]
+
+    def test_metadata_patch_is_applied(self) -> None:
+        service, conn = _service(
+            status_rows=[("processing",)], assistant_rows=[({"a": 1}, [], "x")]
+        )
+        service.finalize_turn(
+            "user-1", "assistant-1", metadata_patch={"b": 2}
+        )
+        _, params = _stmt(conn, "SET CONTENT = %S")
+        assert json.loads(params[1]) == {"a": 1, "b": 2}
+
+    def test_missing_assistant_id_is_rejected(self) -> None:
+        service, _ = _service(status_rows=[("processing",)])
+        with pytest.raises(InvalidRequestError):
+            service.finalize_turn("user-1", "", content="x")
+
+    def test_model_audience_is_denied(self) -> None:
+        service, _ = _service(status_rows=[("processing",)])
+        with pytest.raises(InvalidRequestError):
+            service.finalize_turn("user-1", "assistant-1", audience=AUDIENCE_MODEL)
+
+
+class TestGetMessage:
+    def test_reads_a_row(self) -> None:
+        service, _ = _service(
+            message_rows=[("a1", "user", "processing", None, "chat-1")]
+        )
+        assert service.get_message("a1") == {
+            "id": "a1",
+            "role": "user",
+            "status": "processing",
+            "reply_to": None,
+            "chat_id": "chat-1",
+        }
+
+    def test_missing_row_is_none_not_an_error(self) -> None:
+        """Отсутствие строки и её чтение ведут себя по-разному."""
+        service, _ = _service(message_rows=[])
+        assert service.get_message("a1") is None
+
+    def test_reply_to_is_stringified(self) -> None:
+        service, _ = _service(
+            message_rows=[("a2", "assistant", "processing", 77, "chat-1")]
+        )
+        assert service.get_message("a2")["reply_to"] == "77"
+
+    def test_null_reply_to_stays_none(self) -> None:
+        service, _ = _service(
+            message_rows=[("a3", "user", "pending", None, None)]
+        )
+        assert service.get_message("a3")["reply_to"] is None
+
+    def test_blank_id_is_rejected(self) -> None:
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError):
+            service.get_message("   ")
+
+    def test_model_audience_is_denied(self) -> None:
+        service, _ = _service(message_rows=[])
+        with pytest.raises(InvalidRequestError):
+            service.get_message("a1", audience=AUDIENCE_MODEL)
+
+
+class TestQueueStats:
+    def test_counts_are_returned_as_ints(self) -> None:
+        service, _ = _service(stats_rows=[(3, 1)])
+        assert service.queue_stats() == {"pending": 3, "error": 1}
+
+    def test_empty_queue_is_zeros_not_none(self) -> None:
+        service, _ = _service(stats_rows=[])
+        assert service.queue_stats() == {"pending": 0, "error": 0}
+
+    def test_counts_only_user_rows(self) -> None:
+        """Заглушки ответа завышали бы очередь вдвое на каждой задаче в полёте."""
+        service, conn = _service(stats_rows=[(2, 0)])
+        service.queue_stats()
+        sql, _ = _stmt(conn, "COUNT(*)")
+        assert "role = 'user'" in sql
+
+    def test_model_audience_is_denied(self) -> None:
+        service, _ = _service(stats_rows=[(0, 0)])
+        with pytest.raises(InvalidRequestError):
+            service.queue_stats(audience=AUDIENCE_MODEL)
+
+
+class TestUnstickOrphanedReplies:
+    def test_orphaned_assistant_rows_are_failed(self) -> None:
+        """Ответ без живой user-пары иначе остался бы «отвечаю…» навсегда."""
+        service, conn = _service(stuck_rows=[])
+        service.unstick_tasks(processing_timeout_sec=900, max_stuck_retries=3)
+        # Отбор зависших содержит ту же связку role/status, поэтому игла
+        # берёт пару целиком — она есть только в зачистке.
+        sql, _ = _stmt(conn, "ROLE = 'ASSISTANT' AND STATUS = 'PROCESSING'")
+        assert "status = 'failed'" in sql, (
+            "зачистка сиротских ответов не выполняется: ответ зависнет навсегда"
+        )
+
+    def test_orphan_sweep_runs_after_the_recovery_pass(self) -> None:
+        """Иначе свежезависшая пара попадёт под зачистку и потеряет шанс."""
+        service, conn = _service(stuck_rows=[])
+        service.unstick_tasks(processing_timeout_sec=900, max_stuck_retries=3)
+        assert _index_of(conn, "SELECT ID, METADATA") < _index_of(
+            conn, "ROLE = 'ASSISTANT' AND STATUS = 'PROCESSING'"
+        )

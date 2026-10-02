@@ -593,11 +593,23 @@ SQL написан руками, никакой генерации. Порядо
 | `append_assistant_message` | `data:append_assistant_message` | Вставка сообщения ассистента по `chat_id`/`reply_to`; возвращает id вставленной строки |
 | `delete_assistant_message` | `data:delete_assistant_message` | Удаление сообщения по `task_id` и `role` (по умолчанию `assistant`) |
 | `patch_message_metadata` | `data:patch_message_metadata` | Слияние `patch` в `metadata` сообщения; возвращает `{updated, metadata}` |
+| `merge_tool_delivery` | `data:merge_tool_delivery` | Дописывает текст, вложения и `metadata_patch` в ещё не закрытый ответ; статус остаётся `processing` |
+| `finalize_turn` | `data:finalize_turn` | Записывает финальный ответ и переводит задачу в `completed` одной транзакцией; при отмене возвращает `outcome=cancelled_drop` |
+| `fail_task` | `data:fail_task` | Помечает оборот ошибочным, увеличив `metadata.retry_count`; `error` до лимита повторов, `failed` — после |
+| `release_claimed_tasks` | `data:release_claimed_tasks` | Возврат захваченных задач в `pending` при остановке worker'а, с удалением assistant-заглушек |
+| `get_message` | `data:get_message` | Чтение одной строки очереди: `id`, `role`, `status`, `reply_to`, `chat_id`; `found=false` — строки нет |
+| `queue_stats` | `data:queue_stats` | Число задач `pending` и `error` среди user-строк — для вывода активности воркера |
 
-Все девять объявлены как runtime (`AUDIENCE_RUNTIME`): журналирование не должно
-попадать в `history_search`, который сам пишет в журнал. Модель получает в
-capability `data` только `history_search` и `schema_check` — обе помечены
-`AUDIENCE_MODEL`.
+Все пятнадцать объявлены как runtime (`AUDIENCE_RUNTIME`): журналирование не
+должно попадать в `history_search`, который сам пишет в журнал, а очередь
+задач обслуживает канал, а не модель. Модель получает в capability `data`
+только `history_search` и `schema_check` — обе помечены `AUDIENCE_MODEL`.
+
+Четыре последних закрывают то, что в агенте было транзакциями. Пока они
+были вызовами «по одной операции на строку», обрыв между ними оставлял
+состояния, которых не бывает: счётчик попыток без смены статуса, `completed`
+на задаче без ответа, заглушка, пережившая откат. Ни один из этих дефектов не
+падает — он выглядит как «обработано».
 
 **Очередь задач — в составе capability, а не на стороне канала.** `claim_task`
 и `update_task_status` не удалены: обе лежат в

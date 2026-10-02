@@ -126,10 +126,11 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 #: Плохой файл настройки — это проблема развёртывания, а не плохой запрос
 #: вызывающей стороны, поэтому InfrastructureError, а не InvalidRequestError.
@@ -608,6 +609,17 @@ SETTINGS: tuple[Setting, ...] = (
        "servers/enterprise/server.py:_build_container",
        "период сброса буфера журнала в базу, сек",
        file_key="data.log_flush_interval"),
+    # Размер батча раньше был литералом 256 в писателе, и при интервале сброса
+    # 5 сек это невидимый потолок ~51 запись/сек: сколько бы операций ни
+    # пришло, всё выше этого уходило в очередь и ждало следующего окна. Литерал
+    # в коде сделал бы конфигурацию декоративной, поэтому размер — объявленная
+    # настройка, как и потолок буфера.
+    _s("ENTERPRISE_LOG_BATCH_SIZE", "int", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/capabilities/data/service/writer.py:EventBuffer",
+       "сколько строк журнала уходит в базу за один сброс; вместе с "
+       "data.log_flush_interval задаёт устойчивую пропускную способность "
+       "журнала (строк/сек ≈ log_batch_size / log_flush_interval)",
+       file_key="data.log_batch_size"),
     # Срок жизни журнала и чистка мусора — ручки платформы, а не агента:
     # очистка журнала пишет в ту же базу, и агентский ``retention_days``
     # был вторым владельцем правила, из-за чего конфигурация расходилась с
@@ -621,6 +633,21 @@ SETTINGS: tuple[Setting, ...] = (
        "вычищать ли записи с пустым outbound (stream-чанки) независимо "
        "от срока хранения",
        file_key="data.log_purge_empty_outbound"),
+    # Словарь типов событий объявлен (libs/enterprise_common/eventing/types.py),
+    # но на пути ``log_events`` он долго не проверялся: в базу попадала любая
+    # непустая строка, и опечатка становилась новым постоянным типом. Строгий
+    # режим по умолчанию выключен сознательно — агент шлёт свои snake_case-имена
+    # (``tool_call``, ``outbound_final``, …), их в словаре нет, и отказ уронил бы
+    # весь журнал агента. Поэтому по умолчанию ``soft``: событие записывается,
+    # но расхождение считается и один раз на имя называется в лог, а счётчик
+    # виден в ``DataService.stats()``. ``strict`` включает отдельный заход —
+    # после того, как имена приведены к объявленным с обеих сторон.
+    _s("ENTERPRISE_LOG_UNKNOWN_EVENT_TYPE_POLICY", "str", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/capabilities/data/service/main.py:DataService",
+       "как проверяется объявленный словарь типов на пути log_events: soft — "
+       "записать и показать расхождение, strict — отклонить вызов (включать "
+       "только после унификации имён с агентом)",
+       file_key="data.log_unknown_event_type_policy"),
     _s("ENTERPRISE_STATEMENT_TIMEOUT_MS", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "SET statement_timeout для запросов capability data, мс",
@@ -777,11 +804,17 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
             "append_assistant_message",
             "claim_task",
             "delete_assistant_message",
+            "fail_task",
+            "finalize_turn",
+            "get_message",
             "history_search",
             "log_event",
             "log_events",
+            "merge_tool_delivery",
             "patch_message_metadata",
             "purge_logs",
+            "queue_stats",
+            "release_claimed_tasks",
             "schema_check",
             "unstick_tasks",
             "update_task_status",
@@ -793,8 +826,10 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
             "ENTERPRISE_TASK_TABLE",
             "ENTERPRISE_LOG_BUFFER_MAXLEN",
             "ENTERPRISE_LOG_FLUSH_INTERVAL",
+            "ENTERPRISE_LOG_BATCH_SIZE",
             "ENTERPRISE_LOG_RETENTION_DAYS",
             "ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND",
+            "ENTERPRISE_LOG_UNKNOWN_EVENT_TYPE_POLICY",
             "ENTERPRISE_STATEMENT_TIMEOUT_MS",
             "ENTERPRISE_MAX_ROWS",
         ),
@@ -888,7 +923,12 @@ SHARED_SETTINGS: tuple[str, ...] = (
 #: они принадлежат общему коду платформы. Объявлены явно, потому что страж
 #: сверяет с ними файл — секция, не принадлежащая ни capability, ни этому
 #: списку, выглядела бы как «настройка прочитана».
-SHARED_SECTIONS: tuple[str, ...] = ("db", "pool", "execution")
+#:
+#: ``profiles`` — оверлей имён таблиц для не-продовых контуров. Значением
+#: настройки не является и в реестре не значится: это подстановка к файлу, а не
+#: ещё одна переменная окружения. В списке он по той же причине, что и ``pool``
+#: — пересекает сразу несколько capability, ни одной из них не принадлежит.
+SHARED_SECTIONS: tuple[str, ...] = ("db", "pool", "execution", "profiles")
 
 #: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуется
 #: :func:`pool_config`: иначе второй список ключей разошёлся бы с первым, и
@@ -907,7 +947,7 @@ POOL_SETTING_KEYS: dict[str, str] = {
 }
 
 
-def pool_config(settings: "Settings") -> dict[str, Any]:
+def pool_config(settings: Settings) -> dict[str, Any]:
     """Разрешённые значения пула в форме ``set_pool_config``."""
     return {key: settings.get(name) for key, name in POOL_SETTING_KEYS.items()}
 
@@ -1014,6 +1054,81 @@ def _flatten(raw: dict[str, Any], opaque: frozenset[str] = frozenset()) -> dict[
     return flat
 
 
+#: Ключи, которые допускается перекрывать per-profile оверлеем в
+#: ``platform.json → profiles.<имя>``. Список закрытый и совпадает по смыслу с
+#: ``PROFILE_OWNED_RUNTIME_KEYS`` агента: журнал, прогоны вопросов и очередь
+#: задач — те, что платформа пишет сама. Всё остальное (пул, LLM, эмбеддинги,
+#: снимок, индексы) профилем не разделяется намеренно: это shared runtime
+#: resources, и так же объявлен кэш-файл у агента
+#: (``gateway.cache.local_path`` MUST NOT быть profile-owned).
+PROFILE_OWNED_KEYS = frozenset({
+    "data.log_table",
+    "data.question_runs_table",
+    "data.task_table",
+})
+
+#: Секции верхнего уровня ``platform.json``, которые НЕ являются настройками и
+#: потому не проходят проверку «ключ известен». Из них берётся только ``profiles``
+#: — оверлей имён таблиц (см. ``read_profile_overlay``).
+RESERVED_SECTIONS = frozenset({"profiles"})
+
+
+def read_profile_overlay(profile: str, path: Path | None = None) -> dict[str, str]:
+    """Per-profile перекрытие имён таблиц из ``platform.json → profiles``.
+
+    Возвращает плоский ``{file_key: значение}`` — ровно те ключи из
+    ``PROFILE_OWNED_KEYS``, которые профиль объявил. Пустой результат означает
+    «профиль нечего перекрывать», и это законно: профиль может разделять,
+    например, только журнал.
+
+    Профиль, которого в файле нет, — ошибка, а не пустой оверлей. Молчаливый
+    возврат к базовым именам означал бы ровно то расхождение, ради которого
+    профиль и заводится: агент с ``--profile test`` опрашивает
+    ``agent_conversation_messages_test``, а платформа продолжает писать в
+    ``agent_gateway_logs`` — и это видно только по содержимому боевого журнала.
+
+    Raises:
+        InfrastructureError: профиль не объявлен или объявляет чужой ключ.
+    """
+    target = path or PLATFORM_CONFIG_PATH
+    if not target.exists():
+        raise InfrastructureError(
+            f"{target.name}: профиль {profile!r} запрошен, а файла нет"
+        )
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InfrastructureError(f"{target.name}: не читается ({exc})") from exc
+    if not isinstance(raw, dict):
+        raise InfrastructureError(f"{target.name}: ожидался объект")
+
+    declared = raw.get("profiles")
+    if declared is None:
+        raise InfrastructureError(
+            f"{target.name}: профиль {profile!r} запрошен, а секции "
+            f"'profiles' в файле нет. Объявите её: "
+            f"platform.json → profiles.{profile}"
+        )
+    if not isinstance(declared, dict) or profile not in declared:
+        known = ", ".join(sorted(k for k in declared if not k.startswith("_"))) or "—"
+        raise InfrastructureError(
+            f"{target.name}: профиль {profile!r} не объявлен (известные: {known}). "
+            f"Базовые имена таблиц применены бы не были — платформа писала бы "
+            f"в боевые таблицы под тестовым профилем."
+        )
+
+    overlay = _flatten(declared[profile])
+    unknown = sorted(set(overlay) - PROFILE_OWNED_KEYS)
+    if unknown:
+        raise InfrastructureError(
+            f"{target.name}: профиль {profile!r} перекрывает "
+            f"{', '.join(repr(k) for k in unknown)} — перекрывать можно только "
+            f"{', '.join(sorted(PROFILE_OWNED_KEYS))}. Остальное — shared "
+            f"runtime resources, они профилем не разделяются."
+        )
+    return {key: str(value) for key, value in overlay.items()}
+
+
 def read_platform_file(path: Path | None = None) -> dict[str, Any]:
     """Прочитать ``platform.json`` в вид ``имя переменной -> значение``.
 
@@ -1035,6 +1150,12 @@ def read_platform_file(path: Path | None = None) -> dict[str, Any]:
         raise InfrastructureError(f"{target.name}: не читается ({exc})") from exc
     if not isinstance(raw, dict):
         raise InfrastructureError(f"{target.name}: ожидался объект")
+
+    # ``profiles`` — не настройка, а секция оверлея: её читает
+    # ``read_profile_overlay``. Здесь она снимается до развёртки, иначе её
+    # ключи попали бы под проверку «ключ известен» и упали бы как опечатка.
+    for reserved in RESERVED_SECTIONS:
+        raw.pop(reserved, None)
 
     allowed = {s.key for s in settings_owned_by(OWNER_PLATFORM)}
     structured = frozenset(
@@ -1074,6 +1195,7 @@ class Settings:
         file_path: Path | None = None,
         secrets_path: Path | None = None,
         secrets: Mapping[str, str] | None = None,
+        profile: str | None = None,
     ) -> None:
         """
         Args:
@@ -1087,12 +1209,34 @@ class Settings:
                 полную изоляцию, а локальный ``.secrets.env`` разработчика
                 подставился бы в него и сделал бы результат зависимым от
                 машины.
+            profile: имя профиля из ``platform.json → profiles``. Применяет
+                оверлей имён таблиц (:func:`read_profile_overlay`). ``None`` —
+                база, то есть prod. Имя приходит от агента, но **значения не
+                приходят**: агент сообщает, какой контур, а что в нём писать —
+                объявление платформы.
         """
         self._env: Mapping[str, str] = os.environ if env is None else env
         self._secrets: dict[str, str] = (
             dict(secrets) if secrets is not None else read_secrets(secrets_path)
         )
         self._file: dict[str, Any] = read_platform_file(file_path)
+        self._profile = (profile or "").strip() or None
+        self._overlay: dict[str, str] = {}
+        if self._profile is not None:
+            # Оверлей накладывается на БАЗОВЫЙ плоский словарь до резолюции,
+            # поэтому действует ровно как ещё одна запись в platform.json —
+            # с тем же приоритетом файла над окружением и с тем же
+            # разворачиванием ${ПЕРЕМЕННАЯ}.
+            #
+            # Ключи приходят именами файла (``data.log_table``), а ``_file``
+            # хранится именами переменных (``ENTERPRISE_LOG_TABLE``):
+            # ``read_platform_file`` переименовывает их на последнем шаге, и
+            # оверлей обязан лечь в тот же алфавит, иначе он просто не
+            # попадёт в резолюцию.
+            for key, value in read_profile_overlay(
+                self._profile, file_path
+            ).items():
+                self._file[BY_FILE_KEY[key].name] = value
         self._values: dict[str, Any] = {}
         self._sources: dict[str, str] = {}
         for setting in SETTINGS:
@@ -1316,3 +1460,26 @@ class Settings:
             for s in SETTINGS
             if s.required and not self._values.get(s.name)
         )
+
+
+#: Разобранные настройки процесса. См. :func:`platform_settings`.
+_PLATFORM_SETTINGS: Settings | None = None
+
+
+def platform_settings() -> Settings:
+    """Настройки платформы, разобранные один раз на процесс.
+
+    Composition root (``.build()`` в ``servers/enterprise/server.py``) собирает
+    :class:`Settings` сам и передаёт объявленные значения сервисам явно. Этот
+    помощник нужен тем потребителям, которые собираются **вне** того места
+    (писатель буфера журнала, проверки приёма событий) и всё равно обязаны
+    брать значение из ``platform.json``, а не из литерала в коде.
+
+    Смысл кэша: реестр читает с диска ``platform.json`` и ``.secrets.env``, а
+    настройки в процессе не меняются. Файл читает и подменяет только сам
+    реестр — второй владелец разбора у него появиться не должен.
+    """
+    global _PLATFORM_SETTINGS
+    if _PLATFORM_SETTINGS is None:
+        _PLATFORM_SETTINGS = Settings()
+    return _PLATFORM_SETTINGS
