@@ -40,7 +40,7 @@
 ```text
 ApplicationContext          → компонент
 ConfigService               → компонент
-PGSessionManager            → компонент
+SessionColdSyncService      → компонент
 MessageBus                  → компонент
 PostgresChannel             → компонент
 RedisChannel                → компонент

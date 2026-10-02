@@ -4,7 +4,7 @@
 Определяет нормативный контракт гибридной модели хранения сессий:
 горячее хранилище (upstream JSONL через `nanobot.session.manager.SessionManager`)
 обслуживает hot path операций `get_or_create` / `save` / `list_sessions`,
-холодное хранилище (PostgreSQL через наш `PGSessionManager`-as-mirror)
+холодное хранилище (PostgreSQL через `SessionColdSyncService`-as-mirror)
 обслуживает multi-instance, observability и durability. Цель —
 предотвратить "расползание" session data по сторам и обеспечить
 чёткие границы владения каждым слоем.
@@ -364,8 +364,8 @@ observability для диагностики сломанного sync.
 
 Сессионное состояние (history, checkpoints, provider state)
 MUST иметь ровно один hot-path writer — upstream
-`SessionManager`. `PGSessionManager` (или его
-наследник/переименование) SHALL быть cold-storage mirror,
+`SessionManager`. Холодное зеркало SHALL писать
+`SessionColdSyncService`,
 NOT отдельным primary writer. Никаких "двойных записей"
 hot-path данных в JSONL и PG одновременно — upstream JSONL
 SHALL всегда писаться первым; PG SHALL обновляться

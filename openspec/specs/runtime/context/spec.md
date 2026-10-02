@@ -91,12 +91,12 @@ Deprecated kwargs через `**kwargs` MUST быть удалены в MINOR р
 
 ### Requirement: Состояние сессии вне ApplicationContext
 
-Система ДОЛЖНА хранить состояние сессии (сообщения, метаданные, per-turn deltas) в `PGSessionManager` или канальном слое, но НЕ в `ApplicationContext`.
+Система ДОЛЖНА хранить состояние сессии (сообщения, метаданные, per-turn deltas) в менеджере сессий (`SessionManager` поверх `SanitizingSessionStore`) или канальном слое, но НЕ в `ApplicationContext`.
 
 #### Scenario: Поиск сессии
 
 - **КОГДА** требуются метаданные сессии
-- **ТОГДА** система ДОЛЖНА прочитать их из `PGSessionManager`, а не из атрибутов `ApplicationContext`
+- **ТОГДА** система ДОЛЖНА прочитать их из менеджера сессий, а не из атрибутов `ApplicationContext`
 
 ### Requirement: Детерминированный жизненный цикл
 

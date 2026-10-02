@@ -5,8 +5,40 @@ Lets the runtime safely recover sessions whose JSONL source is older than the Po
 
 ## Scope
 
-`agent` — по замыслу агентская подсистема, но **реализации нет ни в одном дереве** — см. примечание в `OWNERSHIP.md`
-Реализация: не найдена — спека описывает то, чего пока нет
+`agent` — подсистема **частично реализована**: из семи требований закрыто одно.
+
+Реализовано (как инфраструктура `SessionColdSyncService`,
+`lib/services/session_cold_sync_service.py`):
+- «Reverse sync lag produces a logged event» — порог
+  `sync_lag_threshold_seconds` (дефолт 3600), событие
+  `sync_lag_exceeded`, счётчик `sync_lag_exceeded_total`;
+- смежный stale-detection: `stale_tolerance_seconds` (дефолт 120), событие
+  `session_stale_detected`, счётчики `stale_detected_total` и
+  `stale_sync_skipped_total`. В самой спеке это требование не выделено, но
+  детект — фундамент всех остальных.
+
+Не реализовано ни в одном дереве:
+- три режима восстановления (`detect-only`, `read-only-fallback`,
+  `backup-and-restore`) — в `config.json` нет ни одного из них;
+- read-only маркер сессии и запрет `save()` по нему;
+- backup-and-restore с атомарным swap и copy-and-unlink на разных ФС;
+- ограничение размера восстановления (100 МБ) и ротация бэкапов;
+- `tools/recover_stale_sessions.py` — файла нет.
+
+То есть спека описывает несуществующий **слой действий** поверх уже
+работающего слоя **детектов**.
+
+**Как это произошло.** Change `2026-09-27-session-recovery` лежит в
+`openspec/changes/archive/` со всеми задачами, отмеченными `[x]`, включая
+«Написать admin tool `tools/recover_stale_sessions.py`» и «`SessionRecoveryService`
+создан в `ApplicationContext.create()`». Ни того, ни другого в репозитории нет:
+`git log --all -- tools/recover_stale_sessions.py` пуст — файл не был
+закоммичен ни разу, то есть change заархивирован как выполненный без кода.
+
+Следствие для читателя спеки: не считать её требования действующими. До
+появления реализации (отдельный change-каталог) это нормативное описание
+намерения, у которого нет ни одной точки исполнения, кроме перечисленного
+выше детекта.
 
 ## Requirements
 

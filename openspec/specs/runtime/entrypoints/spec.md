@@ -160,7 +160,7 @@ Production application entrypoints MUST NOT передавать `profile` в
 |---|---|---|
 | `AgentLoop` (hooks, runtime patches, skills, tools, memory) | ✅ | ✅ |
 | `DbLoggingService` (если `gateway.enable_db_logging=True`) | ✅ | ✅ |
-| `SessionManager` / `PGSessionManager` | ✅ | ✅ |
+| `SessionManager` (поверх `SanitizingSessionStore`) | ✅ | ✅ |
 | `RuntimeEventsSubscriber` | ✅ | ✅ |
 | `RuntimePatcher.apply_all()` | ✅ | ✅ |
 | `CacheProvider` (если `gateway.cache` настроен) | ✅ | ✅ |
