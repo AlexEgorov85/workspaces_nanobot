@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from config import AGENT_SECTIONS as _AGENT_SECTIONS  # noqa: F401
 from config import (
     AttrDict,
     _deep_merge,
@@ -361,3 +362,63 @@ class TestSettingsModule:
             "DATABASE_URL должен быть в os.environ после import config "
             "(экспорт через _export_secrets_to_env внутри Resolver)."
         )
+
+
+class TestLiftAgentSections:
+    """``config.json`` — один файл, но корневые секции агента живут под
+    ``gateway.agent``: схема nanobot отвергает неизвестный ключ в корне и
+    молча игнорирует его внутри ``gateway``. ``_lift_agent_sections``
+    возвращает ``SETTINGS``-пути на место; копии правила больше нигде нет.
+    """
+
+    def test_sections_lifted_and_namespace_consumed(self):
+        from config import _lift_agent_sections
+
+        table = runtime_table("gateway_logs", "prod")
+        cfg = {
+            "gateway": {
+                "host": "127.0.0.1",
+                "agent": {
+                    "cli": {"max_iterations": 200},
+                    "logging": {"db": {"table_name": table}},
+                },
+            },
+        }
+        _lift_agent_sections(cfg)
+
+        assert cfg["cli"] == {"max_iterations": 200}
+        assert cfg["logging"] == {"db": {"table_name": table}}
+        assert "agent" not in cfg["gateway"]
+        assert cfg["gateway"] == {"host": "127.0.0.1"}
+
+    @pytest.mark.parametrize("section", sorted(_AGENT_SECTIONS))
+    def test_every_declared_section_is_liftable(self, section):
+        from config import _lift_agent_sections
+
+        cfg = {"gateway": {"agent": {section: {"k": 1}}}}
+        _lift_agent_sections(cfg)
+        assert cfg[section] == {"k": 1}
+
+    def test_unknown_section_fails_loudly(self):
+        """Опечатка в имени секции не должна молча игнорироваться —
+        настройка «объявлена, но не действует» это ровно тот класс
+        дефекта, который ликвидация второго файла устраняет."""
+        from config import ConfigurationError, _lift_agent_sections
+
+        cfg = {"gateway": {"agent": {"logs": {"table_name": "x"}}}}
+        with pytest.raises(ConfigurationError, match="logs"):
+            _lift_agent_sections(cfg)
+
+    def test_section_declared_twice_fails_loudly(self):
+        from config import ConfigurationError, _lift_agent_sections
+
+        cfg = {"logging": {"db": {}}, "gateway": {"agent": {"logging": {"db": {}}}}}
+        with pytest.raises(ConfigurationError, match="дважды"):
+            _lift_agent_sections(cfg)
+
+    def test_no_gateway_is_noop(self):
+        from config import _lift_agent_sections
+
+        cfg = {"channels": {"postgres": {"table_name": "t"}}}
+        _lift_agent_sections(cfg)
+        assert cfg == {"channels": {"postgres": {"table_name": "t"}}}

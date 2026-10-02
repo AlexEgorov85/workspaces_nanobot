@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -122,12 +123,18 @@ def _declared_names() -> set[str]:
     for tables in EXPECTED_RUNTIME_TABLE_NAMES.values():
         names.update(t for t in tables.values() if _is_table_name(t))
 
-    project = load_config_json(str(ROOT / "project.json"))
-    pg = project.get("channels", {}).get("postgres", {})
+    # Имена таблиц канала и журнала объявлены в ``config.json``:
+    # ``channels.postgres.*`` лежит плоско (это настройка библиотеки), а
+    # ``logging`` — под ``gateway.agent``, потому что корневой объект
+    # ``config.json`` разбирает схема nanobot и неизвестный верхний ключ
+    # отвергает. Бывший ``project.json`` больше не читается.
+    raw = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    agent = raw.get("gateway", {}).get("agent", {})
+    pg = raw.get("channels", {}).get("postgres", {})
     for key in ("table_name", "messages_table", "meta_table"):
         if pg.get(key) and _is_table_name(str(pg[key])):
             names.add(str(pg[key]))
-    logging_db = project.get("logging", {}).get("db", {})
+    logging_db = agent.get("logging", {}).get("db", {})
     for key in ("table_name", "question_runs_table"):
         if logging_db.get(key) and _is_table_name(str(logging_db[key])):
             names.add(str(logging_db[key]))
@@ -138,7 +145,6 @@ def _declared_names() -> set[str]:
     # читает из настрочек при старте.
     platform_file = PLATFORM / "platform.json"
     if platform_file.exists():
-        import json
 
         def walk(node):
             if isinstance(node, str):

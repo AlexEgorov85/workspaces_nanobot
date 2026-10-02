@@ -2,7 +2,7 @@
 
 Отвечает за:
   * доступ к глобальным ``SETTINGS`` (собираются в ``config.py``:
-    project.json → config.json → .secrets.env, резолв ``${VAR}``);
+    config.json → session_manager.json → .secrets.env, резолв ``${VAR}``);
   * загрузку runtime-конфига nanobot (``_load_runtime_config``) и
     синхронизацию шаблонов workspace;
   * инъекцию API-ключей провайдеров из ``SETTINGS.providers`` в runtime-конфиг;

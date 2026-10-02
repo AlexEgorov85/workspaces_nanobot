@@ -1,7 +1,7 @@
 """ProjectSettings — типизированная валидация проектных настроек (pydantic).
 
 Fail-fast граница конфигурации: неправильный тип или недопустимое значение
-ключа ``project.json`` ловится на старте приложения (``ApplicationContext.
+ключа ``config.json`` ловится на старте приложения (``ApplicationContext.
 create``), а не в рантайме канала/сервиса.
 
 Принципы:
@@ -14,7 +14,7 @@ create``), а не в рантайме канала/сервиса.
   - внутри ``skills.<name>`` неизвестные ключи ЗАПРЕЩЕНЫ (extra="forbid")
     — fail-fast на опечатках (например, ``tablse`` вместо ``tables``);
   - единственный источник правды — SETTINGS после мержа
-    project.json → config.json → .secrets.env.
+    config.json → session_manager.json → .secrets.env.
 """
 
 from __future__ import annotations
@@ -148,7 +148,7 @@ class VectorIndexSettings(_StrictOptional):
     это единственный источник (раньше был PG-реестр
     ``public.agent_vector_index_config``).
 
-    Путь в ``project.json``: ``gateway.vector.index.*`` (см.
+    Путь в ``config.json``: ``gateway.vector.index.*`` (см.
     ``VectorInfrastructureSettings``). Раньше жил в ``gateway.vector_index.*`` —
     устаревший путь удалён, обратной совместимости нет (fail-fast).
 
@@ -158,9 +158,8 @@ class VectorIndexSettings(_StrictOptional):
             ``"data_store/vectors"``. Путь к индексу = ``<root>/<name>``.
         backend: runtime-бэкенд (``"faiss"``, ``"pgvector"``, ``"qdrant"``).
         storage_table: единая PG-таблица-хранилище сырых эмбеддингов.
-            Регистрируется в ``TableRegistry`` через ``register_infra``.
-            Чтением и загрузкой снимка владеет capability ``data``
-            платформы.
+            Чтением и загрузкой владеет capability ``vectors`` платформы;
+            реестр ресурсов, который раньше его объявлял, удалён.
         indexes: полный конфиг vector-индексов ``{имя: VectorIndexConfig}``
             (какие индексы строить, из каких source-таблиц, content_cols,
             embedding_cols, chunk-параметры, metric). Единственный источник
@@ -264,7 +263,7 @@ class GatewaySettings(_StrictOptional):
                 problems.append(f"  gateway.{legacy_key}: {hint}")
         if problems:
             raise _LegacyGatewaySectionsError(
-                "Некорректная конфигурация project.json (legacy-секции gateway.*):\n"
+                "Некорректная конфигурация config.json (legacy-секции gateway.*):\n"
                 + "\n".join(problems)
             )
         return data
@@ -278,7 +277,7 @@ class GatewayRepeatGuardSettings(_StrictOptional):
     Существующие throttles nanobot покрывают только web-fetch/web-search и
     workspace-bypass; этот — общий случай.
 
-    Дефолт ``mode = "off"``: деплой без правок ``project.json`` ведёт себя
+    Дефолт ``mode = "off"``: деплой без правок ``config.json`` ведёт себя
     ровно как раньше.
 
     Объявлен ПОСЛЕ ``GatewaySettings``, хотя используется в его поле
@@ -389,9 +388,9 @@ class EnterpriseMcpSettings(_StrictOptional):
 
 # ---------------------------------------------------------------------------
 # skills.<name> — универсальная декларация навыка (см. PHASE «унификация»).
-# Каждый skill объявляется в project.json одной JSON-секцией; ApplicationContext
-# авто-регистрирует ресурсы в table_registry при старте gateway. Никакого
-# register.py не требуется.
+# Каждый skill объявляется в config.json одной JSON-секцией. Реестр ресурсов,
+# который их принимал, удалён вместе со своими читателями; состав снимка
+# объявляет ``mcp-platform/platform.json``.
 # ---------------------------------------------------------------------------
 
 
@@ -404,24 +403,18 @@ class TableEntry(BaseModel):
     игнорирует (``label``), либо читает (``tracking_column``, ``type``).
 
     Attributes:
-        name: имя таблицы в формате ``schema.table`` (контракт
-            ``TableResource.__post_init__``).
-        type: ``"table"`` (по умолчанию) или ``"vector"``. Определяет,
-            какой ``Resource`` создаёт ``_auto_register_skills``: обычный
-            ``TableResource`` или ``VectorResource``. Не влияет на то,
-            попадает ли таблица в DuckDB — это определяется автоматически
-            по ``VectorResource``.
-        label: opaque-метка. Если задана, таблица НЕ попадает в описание
-            схемы для LLM (см. ``skill_config.get_db_tables()``) и доступна
-            только через ``TableRegistry.resources_by_label(label)``.
-            Типичный кейс: реестр метаданных
-            (``public.agent_predefined_scripts`` с
-            ``label="scripts_registry"``). Runtime-sync игнорирует.
+        name: имя таблицы в формате ``schema.table``.
+        type: ``"table"`` (по умолчанию) или ``"vector"``. Определяет, за
+            таблицей или за векторным индексом стоит объявление.
+        label: opaque-метка. Если задана, таблица не попадает в описание
+            схемы для LLM. Реестр, который по ней искал
+            (``TableRegistry.resources_by_label``), удалён; метка осталась
+            только как признак «внутренняя таблица».
         tracking_column: колонка для инкрементального поллинга. Дефолт
             ``updated_at`` для обычных, ``id`` для vector.
 
     Unknown keys запрещены (``extra="forbid"``) — fail-fast на опечатках
-    в ``project.json``.
+    в ``config.json``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -474,7 +467,7 @@ class VectorIndexConfig(BaseModel):
     Раньше это жило в PG-реестре ``public.agent_vector_index_config``
     (``sql/vectors/create_vector_index_config.sql`` + seed) и читалось
     ``cache_provider_impl.read_vector_index_config``. Теперь — это
-    настройка в ``project.json``, а читает её capability ``vectors``
+    настройка в ``config.json``, а читает её capability ``vectors``
     платформы: ``mcp-platform/libs/vectors/config.py``.
 
     Attributes:
@@ -493,7 +486,7 @@ class VectorIndexConfig(BaseModel):
         enabled: включён ли индекс (дефолт ``True``).
 
     Unknown keys запрещены (``extra="forbid"``) — fail-fast на опечатках
-    в ``project.json``.
+    в ``config.json``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -611,11 +604,12 @@ class SkillExecutionSettings(_StrictOptional):
 
 
 class SkillSettings(BaseModel):
-    """Универсальная декларация навыка в ``project.json::skills.<name>``.
+    """Универсальная декларация навыка в ``skills.<name>`` (config.json).
 
-    Это **единственный источник истины** для регистрации skill'а:
-    ApplicationContext читает эту секцию и создаёт ресурсы в
-    ``table_registry`` без всякого ``register.py``.
+    Это **единственный источник истины** для объявления skill'а: секцию
+    читает capability платформы, сопоставляющая объявление с составом
+    снимка. Реестр ресурсов на стороне агента, который эти секции принимал,
+    удалён вместе со своими читателями.
 
     Секции:
 
@@ -635,10 +629,10 @@ class SkillSettings(BaseModel):
     см. ``gateway.duckdb``, ``gateway.vector.index.*``, ``gateway.sync``.
 
     Граница: ``model_config = ConfigDict(extra="forbid")`` — fail-fast
-    на опечатках в ``project.json`` (например, ``tablse`` вместо
+    на опечатках в ``config.json`` (например, ``tablse`` вместо
     ``tables`` сразу поднимет ``ConfigurationError`` на старте gateway,
     а не тихо пройдёт валидацию). Имя skill'а остаётся динамическим —
-    добавляется простым добавлением секции в ``project.json``; форма
+    добавляется простым добавлением секции в ``config.json``; форма
     самой секции строго типизирована.
 
     Корневой ``enabled`` отключает skill без удаления секции.
@@ -662,7 +656,7 @@ class SkillsSettings(_StrictOptional):
     Имя skill'а — произвольное (forward-compat), но **форма** секции
     строго типизирована через ``SkillSettings`` (``extra="forbid"``).
     Любой новый skill добавляется простым добавлением секции в
-    ``project.json``; опечатки внутри секции (``tablse``, ``embedding``,
+    ``config.json``; опечатки внутри секции (``tablse``, ``embedding``,
     ``cache`` и т.п.) ловятся на старте через ``_validate_skill_sections``.
 
     Универсальное правило (TARGET_ARCHITECTURE §skills.* boundary):
@@ -708,7 +702,7 @@ class SkillsSettings(_StrictOptional):
                     p = ".".join(str(x) for x in err.get("loc", ()))
                     problems.append(f"  skills.{name}.{p}: {err.get('msg', 'invalid')}")
                 raise ConfigurationError(
-                    "Некорректная конфигурация project.json (skills."
+                    "Некорректная конфигурация config.json (skills."
                     f"{name}):\n" + "\n".join(problems)
                 ) from exc
             normalized[name] = validated.model_dump(exclude_none=True)
@@ -716,9 +710,9 @@ class SkillsSettings(_StrictOptional):
 
 
 class ProjectMetadataSettings(_StrictOptional):
-    """Метаданные проекта (``project.json::project.*``).
+    """Метаданные проекта (``project.*``; в файле — ``gateway.agent.project``).
 
-    Канонический источник project metadata: ``project.json`` секция
+    Канонический источник project metadata: ``config.json`` секция
     ``project``. Содержит релизные данные, читаемые runtime'ом через
     ``lib.utils.project_version.project_version()`` (для баннера
     ``gateway.py``) и как fallback-источник версии.
@@ -807,5 +801,5 @@ def validate_project_settings(settings: Any) -> ProjectSettings:
             input_val = repr(err.get("input"))[:80]
             problems.append(f"  {path}: {msg} (получено: {input_val})")
         raise ConfigurationError(
-            "Некорректная конфигурация project.json:\n" + "\n".join(problems)
+            "Некорректная конфигурация config.json:\n" + "\n".join(problems)
         ) from exc

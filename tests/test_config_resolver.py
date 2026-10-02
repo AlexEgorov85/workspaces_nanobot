@@ -35,7 +35,6 @@ def _write_raw(path: Path, content: str) -> None:
 @pytest.fixture
 def isolated_project(monkeypatch, tmp_path: Path):
     """Подменить пути config.py на временный каталог."""
-    monkeypatch.setattr(config_mod, "_PROJECT_FILE", tmp_path / "project.json")
     monkeypatch.setattr(config_mod, "_CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(config_mod, "_SECRETS_FILE", None)
     monkeypatch.setattr(
@@ -200,8 +199,8 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
     runtime-таблицы prod-именами, profile overlay (последний) должен
     оставить test-имена."""
     tmp_path = isolated_project
-    # project.json с prod-именами (база)
-    _write(tmp_path / "project.json", {
+    # config.json — база с prod-именами
+    _write(tmp_path / "config.json", {
         "channels": {"postgres": {
             "dsn": "${DATABASE_URL}",
             "table_name":     "agent_conversation_messages",
@@ -216,12 +215,6 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
     # session_manager.json пытается поставить PROD-имена
     _write(tmp_path / "session_manager.json", {
         "messages_table": "agent_session_messages",  # PROD-попытка
-    })
-    # config.json пытается поставить PROD-имена
-    _write(tmp_path / "config.json", {
-        "channels": {"postgres": {
-            "messages_table": "agent_session_messages",  # PROD-попытка
-        }},
     })
     # profiles/test.jsonc ставит TEST-имена (полный оверлей)
     _write(tmp_path / "profiles" / "test.jsonc", {
@@ -251,7 +244,7 @@ def test_profile_wins_when_session_manager_uses_test_but_config_uses_prod(
     """Даже если session_manager.json уже содержит test-имя, config.json
     с prod-именем не должен сломать изоляцию."""
     tmp_path = isolated_project
-    _write(tmp_path / "project.json", {
+    _write(tmp_path / "config.json", {
         "channels": {"postgres": {
             "dsn": "${DATABASE_URL}",
             "table_name":     "agent_conversation_messages",
@@ -265,11 +258,6 @@ def test_profile_wins_when_session_manager_uses_test_but_config_uses_prod(
     })
     _write(tmp_path / "session_manager.json", {
         "messages_table": "agent_session_messages_test",  # уже test
-    })
-    _write(tmp_path / "config.json", {
-        "channels": {"postgres": {
-            "messages_table": "agent_session_messages",  # пытается prod
-        }},
     })
     _write(tmp_path / "profiles" / "test.jsonc", {
         "channels": {"postgres": {
@@ -293,7 +281,7 @@ def test_session_manager_can_override_pool_but_not_runtime_tables(
     """session_manager.json (per-deploy override) сохраняет роль для pool,
     но НЕ может сломать profile-owned runtime-таблицы (профиль идёт позже)."""
     tmp_path = isolated_project
-    _write(tmp_path / "project.json", {
+    _write(tmp_path / "config.json", {
         "channels": {"postgres": {
             "dsn": "${DATABASE_URL}",
             "table_name":     "agent_conversation_messages",
@@ -330,10 +318,10 @@ def test_session_manager_can_override_pool_but_not_runtime_tables(
     assert cfg["channels"]["postgres"]["messages_table"] == "agent_session_messages_test"
 
 
-def test_prod_profile_uses_pure_project_json(isolated_project):
-    """Для prod profiles/<mode>.jsonc не нужен — берётся чистый project.json."""
+def test_prod_profile_uses_pure_config_json(isolated_project):
+    """Для prod profiles/<mode>.jsonc не нужен — берётся чистый config.json."""
     tmp_path = isolated_project
-    _write(tmp_path / "project.json", {
+    _write(tmp_path / "config.json", {
         "channels": {"postgres": {
             "dsn": "${DATABASE_URL}",
             "table_name":     "agent_conversation_messages",
@@ -363,7 +351,7 @@ def test_prod_profile_uses_pure_project_json(isolated_project):
 def test_test_mode_without_overlay_fails(isolated_project):
     """Без profiles/test.jsonc в test-режиме процесс не стартует."""
     tmp_path = isolated_project
-    _write(tmp_path / "project.json", {
+    _write(tmp_path / "config.json", {
         "channels": {"postgres": {
             "dsn": "${DATABASE_URL}",
             "table_name":     "agent_conversation_messages",

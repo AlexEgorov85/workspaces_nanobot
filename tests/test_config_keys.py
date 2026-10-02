@@ -4,16 +4,29 @@ import json
 from pathlib import Path
 
 import pytest
-from config import runtime_table  # noqa: F401
+from config import AGENT_SECTIONS, runtime_table  # noqa: F401
 
-PROJECT_JSON = Path(__file__).resolve().parent.parent / "project.json"
+CONFIG_JSON = Path(__file__).resolve().parent.parent / "config.json"
 
 
-def _load_project_keys() -> dict:
-    """Загрузить project.json (с поддержкой JSONC-комментариев из config.py)."""
-    from config import _strip_jsonc_comments
-    raw = PROJECT_JSON.read_text(encoding="utf-8")
-    return json.loads(_strip_jsonc_comments(raw))
+def _read_config_json() -> dict:
+    """Сырой ``config.json`` — как его видит потребитель файла."""
+    return json.loads(CONFIG_JSON.read_text(encoding="utf-8"))
+
+
+def _load_config_keys() -> dict:
+    """Загрузить config.json в виде, который реально видит код.
+
+    ``gateway.agent.*`` поднимается в корень тем же
+    ``config._lift_agent_sections``, что и в
+    ``resolve_application_config``, поэтому обязательные ключи
+    проверяются по путям из ``SETTINGS`` (``logging.db.*`` и т.п.), а не
+    по физическому расположению в файле.
+    """
+    from config import _lift_agent_sections, _strip_jsonc_comments
+    data = json.loads(_strip_jsonc_comments(CONFIG_JSON.read_text(encoding="utf-8")))
+    _lift_agent_sections(data)
+    return data
 
 
 def _walk(node, prefix=()):
@@ -30,7 +43,7 @@ def _walk(node, prefix=()):
 
 
 def _required_keys():
-    """Обязательные ключи, которые должны быть объявлены в project.json.
+    """Обязательные ключи, которые должны быть объявлены в config.json.
 
     Источник: Фазы 2-4 рефакторинга hardcoded-значений.
     Дополняется по мере добавления новых настроек.
@@ -58,13 +71,7 @@ def _required_keys():
         ("channels.postgres.pool.min_conn", 1),
         ("channels.postgres.pool.max_conn", 4),
         ("channels.postgres.pool.pool_timeout", 5.0),
-        # channels.redis
-        ("channels.redis.poll_timeout", 5.0),
-        ("channels.redis.max_concurrent", 1),
-        ("channels.redis.allow_from", ["*"]),
-        ("channels.redis.error_backoff_sec", 1.0),
-        ("channels.redis.reply_to_max_size", 10000),
-        ("channels.redis.reply_to_trim_to", 5000),
+        # channels.redis удалён вместе с каналом: каналов один — PostgreSQL.
         # skills.audit_analyzer
         # Новая модель (Phase 7): tables[] + vector_indexes[] вместо db.* + vector_index.*
         ("skills.audit_analyzer.tables", [
@@ -146,6 +153,17 @@ def _required_keys():
         ("logging.db.connect_backoff_sec", 1.0),
         ("logging.db.connect_backoff_max_sec", 60.0),
         ("logging.db.summary_max_chars", 200),
+        # enterprise_mcp — объявление ЕДИНСТВЕННОГО MCP-процесса платформы.
+        # Секция ``tools.mcpServers`` в config.json намеренно пуста: вторая
+        # копия процесса = второй владелец пула PostgreSQL, а штатный
+        # провайдер MCP не умеет передавать ``_meta``
+        # (ENTERPRISE_EXEC_REQUIRE_CALL_META). Пути конкретной машины нет —
+        # только подстановки из os.environ (_export_runtime_env).
+        ("enterprise_mcp.enabled", True),
+        ("enterprise_mcp.command", "${NANOBOT_PYTHON}"),
+        ("enterprise_mcp.args", ["-m", "servers.enterprise.server"]),
+        ("enterprise_mcp.cwd", "${NANOBOT_PROJECT_ROOT}/mcp-platform"),
+        ("enterprise_mcp.tool_timeout_sec", 30.0),
     ]
 
 
@@ -200,18 +218,18 @@ class TestRequireSetting:
             del SETTINGS["test_req_section"]
 
 
-class TestProjectJsonShape:
-    """project.json должен содержать все обязательные ключи с правильными дефолтами."""
+class TestConfigFileShape:
+    """config.json должен содержать все обязательные ключи с правильными дефолтами."""
 
     @classmethod
     def setup_class(cls):
-        cls.data = _load_project_keys()
+        cls.data = _load_config_keys()
         cls.flat = dict(_walk(cls.data))
 
     @pytest.mark.parametrize("key_path,expected_default", _required_keys())
     def test_required_key_present_with_default(self, key_path, expected_default):
         assert key_path in self.flat, (
-            f"Обязательный ключ {key_path!r} отсутствует в project.json"
+            f"Обязательный ключ {key_path!r} отсутствует в config.json"
         )
         actual = self.flat[key_path]
         assert actual == expected_default, (
@@ -220,10 +238,49 @@ class TestProjectJsonShape:
         )
 
 
-class TestJsoncParsable:
-    def test_jsonc_valid(self):
-        data = _load_project_keys()
-        assert isinstance(data, dict)
+class TestConfigJsonIsStrictJson:
+    """config.json — строгий JSON, а не JSONC.
+
+    Его читает штатный ``json.loads`` (``ConfigService._pre_resolve_env_refs``)
+    и pydantic-схема nanobot, поэтому комментарии в нём недопустимы.
+    Объяснения к секциям живут в docstring ``config.py``.
+    """
+
+    def test_strict_json_valid(self):
+        assert isinstance(_read_config_json(), dict)
+
+    def test_accepted_by_nanobot_schema(self):
+        """Корень ``config.json`` разбирает схема nanobot: она отвергает
+        любой неизвестный ключ верхнего уровня (``ConfigLoadError``), то
+        есть опечатка на верхнем уровне ломает старт gateway/CLI."""
+        from nanobot.config.loader import load_config
+
+        assert load_config(CONFIG_JSON) is not None
+
+    @pytest.mark.parametrize("section", sorted(AGENT_SECTIONS))
+    def test_agent_section_lives_under_gateway_agent(self, section):
+        """Секции без места в корне схемы объявлены ровно один раз —
+        под ``gateway.agent`` и подняты в корень при merge."""
+        raw = _read_config_json()
+        assert section in raw["gateway"]["agent"], (
+            f"{section!r} должен быть объявлен в gateway.agent "
+            f"(config.py:AGENT_SECTIONS)"
+        )
+        assert section not in raw, (
+            f"{section!r} в корне config.json: схема nanobot его отвергнет"
+        )
+        assert section in _load_config_keys()
+
+    def test_namespace_is_consumed_by_resolver(self):
+        """``gateway.agent`` не протекает в SETTINGS."""
+        assert "agent" not in _load_config_keys()["gateway"]
+
+    def test_project_version_matches_module_reader(self):
+        """``lib.utils.project_version`` читает ту же секцию через тот же
+        lift — второго пути к значению быть не должно."""
+        from lib.utils.project_version import project_version
+
+        assert _load_config_keys()["project"]["version"] == project_version()
 
 
 class TestLoggingDbFlushIntervalValidation:

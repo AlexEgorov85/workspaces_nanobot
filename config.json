@@ -221,6 +221,33 @@
       "bridgeToken": "",
       "allowFrom": [],
       "groupPolicy": "open"
+    },
+    "document_text_threshold": 20000,
+    "postgres": {
+      "enabled": true,
+      "dsn": "${DATABASE_URL}",
+      "schema": "public",
+      "messages_table": "agent_session_messages",
+      "meta_table": "agent_session_meta",
+      "table_name": "agent_conversation_messages",
+      "poll_interval": 10.0,
+      "flush_interval": 5.0,
+      "max_concurrent": 2,
+      "processing_timeout": 600,
+      "unstick_interval": 120.0,
+      "max_stuck_retries": 3,
+      "msg_ctx_max_size": 100,
+      "worker_id": "",
+      "error_retry_delay": 60.0,
+      "media_cache_dir": "data_store/cache/sessions",
+      "allow_from": [
+        "*"
+      ],
+      "pool": {
+        "min_conn": 1,
+        "max_conn": 4,
+        "pool_timeout": 5.0
+      }
     }
   },
   "transcription": {
@@ -652,13 +679,210 @@
     "apiKey": ""
   },
   "gateway": {
-    "host": "127.0.0.1",
-    "port": 18790,
     "restartMode": "auto",
     "heartbeat": {
       "enabled": true,
       "intervalS": 1800,
       "keepRecentMessages": 8
+    },
+    "storage": "file",
+    "persist_threshold": 50000,
+    "persist_max_files": 100,
+    "persist_max_age_hours": 0,
+    "tool_result_limits": {
+      "exec_max_output_chars": 500000,
+      "exec_default_output_chars": 100000,
+      "read_file_max_chars": 512000,
+      "grep_head_limit": 500,
+      "grep_file_head_limit": 400,
+      "grep_max_file_bytes": 20000000,
+      "list_dir_max_entries": 500
+    },
+    "llm_timeout": 300,
+    "exec_timeout": 0,
+    "exec_timeout_cap_sec": 3600,
+    "log_level": "INFO",
+    "print_llm_calls": true,
+    "print_worker_activity": false,
+    "print_db_activity": false,
+    "print_tools": false,
+    "restart_initial_delay_sec": 1.0,
+    "restart_max_delay_sec": 30.0,
+    "compact": {
+      "enabled": true,
+      "notify_in_history": true,
+      "print_to_terminal": false
+    },
+    "usage_store": {
+      "enabled": true
+    },
+    "session_cold_sync": {
+      "enabled": true,
+      "sync_interval_sec": 30.0,
+      "batch_size": 50,
+      "stale_tolerance_seconds": 120,
+      "sync_lag_threshold_seconds": 3600
+    },
+    "vector": {
+      "index": {
+        "enable": true,
+        "storage_table": "oarb.audit_vectors",
+        "default_root": "data_store/vectors",
+        "backend": "faiss",
+        "indexes": {
+          "audits_index": {
+            "table": "oarb.audits",
+            "pk": "id",
+            "source_table": "audits",
+            "content_columns": [
+              "title",
+              "audit_type",
+              "auditee_entity",
+              "status"
+            ],
+            "embedding_columns": [
+              "title",
+              "audit_type",
+              "auditee_entity",
+              "status"
+            ],
+            "track_column": "updated_at",
+            "chunk_size": 500,
+            "chunk_overlap": 80,
+            "metric": "cosine",
+            "enabled": true
+          },
+          "violations_index": {
+            "table": "oarb.violations",
+            "pk": "id",
+            "source_table": "violations",
+            "content_columns": [
+              "description",
+              "recommendation",
+              "violation_code",
+              "severity"
+            ],
+            "embedding_columns": [
+              {
+                "column": "description",
+                "chunk": true,
+                "chunk_size": 500,
+                "chunk_overlap": 80
+              },
+              "violation_code"
+            ],
+            "track_column": "updated_at",
+            "chunk_size": 500,
+            "chunk_overlap": 80,
+            "metric": "cosine",
+            "enabled": true
+          },
+          "audit_reports_index": {
+            "table": "oarb.audit_reports",
+            "pk": "id",
+            "source_table": "audit_reports",
+            "content_columns": [
+              "full_text",
+              "title",
+              "report_number",
+              "report_date"
+            ],
+            "embedding_columns": [
+              {
+                "column": "full_text",
+                "chunk": true,
+                "chunk_size": 500,
+                "chunk_overlap": 80
+              },
+              "title"
+            ],
+            "track_column": "updated_at",
+            "chunk_size": 500,
+            "chunk_overlap": 80,
+            "metric": "cosine",
+            "enabled": true
+          }
+        }
+      }
+    },
+    "agent": {
+      "project": {
+        "version": "2.5.2"
+      },
+      "cli": {
+        "show_reasoning": true,
+        "show_tool_calls": true,
+        "show_tool_results": true,
+        "show_tool_params": true,
+        "show_progress": true,
+        "show_context_window": true,
+        "typewriter_speed": 0.01,
+        "llm_timeout": 300,
+        "exec_timeout": 60,
+        "max_iterations": 200,
+        "log_level": "WARNING",
+        "repl_idle_timeout_sec": 1.0
+      },
+      "skills": {
+        "audit_analyzer": {
+          "enabled": true,
+          "tables": [
+            {
+              "name": "oarb.audit_reports"
+            },
+            {
+              "name": "oarb.audits"
+            },
+            {
+              "name": "oarb.report_items"
+            },
+            {
+              "name": "oarb.violations"
+            },
+            {
+              "name": "public.agent_predefined_scripts",
+              "label": "scripts_registry"
+            }
+          ],
+          "vector_indexes": [
+            {
+              "name": "audits_index"
+            },
+            {
+              "name": "violations_index"
+            },
+            {
+              "name": "audit_reports_index"
+            }
+          ]
+        }
+      },
+      "logging": {
+        "db": {
+          "enabled": true,
+          "table_name": "agent_gateway_logs",
+          "question_runs_table": "agent_question_runs",
+          "schema": "public",
+          "flush_interval_sec": 5.0,
+          "batch_size": 100,
+          "queue_maxsize": 10000,
+          "min_level": "INFO",
+          "dialect": "postgres",
+          "connect_backoff_sec": 1.0,
+          "connect_backoff_max_sec": 60.0,
+          "summary_max_chars": 200
+        }
+      },
+      "enterprise_mcp": {
+        "enabled": true,
+        "command": "${NANOBOT_PYTHON}",
+        "args": [
+          "-m",
+          "servers.enterprise.server"
+        ],
+        "cwd": "${NANOBOT_PROJECT_ROOT}/mcp-platform",
+        "tool_timeout_sec": 30.0
+      }
     }
   },
   "tools": {

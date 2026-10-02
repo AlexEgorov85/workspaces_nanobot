@@ -1,3 +1,200 @@
+"""Единая точка конфигурации агента.
+
+Файл настроек ОДИН: ``config.json`` (строгий JSON — читается и штатным
+``json.loads`` в ``ConfigService._pre_resolve_env_refs``, и схемой
+nanobot). Бывший второй файл ``project.json`` (JSONC с комментариями)
+ликвидирован; его секции переехали сюда, а его комментарии — сюда же, в
+этот docstring: JSON без комментариев, объяснения живут в коде.
+
+    Читается config.py и мержится в SETTINGS в порядке
+    (поздний перекрывает ранний):
+
+        config.json → session_manager.json → .secrets.env
+                    → profiles/<mode>.jsonc → ${VAR} → hard-fail
+
+    Значения вида ``${VAR}`` подставляются из ``os.environ``
+    (секреты — из ``.secrets.env``, факты о запуске — из
+    ``_export_runtime_env``).
+
+    Правило добавления новой настройки:
+      1. Объявить ключ в ``config.json`` (с дефолтом).
+      2. В коде читать через ``get_setting(*keys, default=...)`` или
+         ``SETTINGS.*``.
+      3. Добавить запись в ``_required_keys()`` в
+         ``tests/test_config_keys.py``.
+
+ГДЕ ЛЕЖИТ СЕКЦИЯ
+================
+
+Схема nanobot (``nanobot.config.schema.Config``) отвергает неизвестные
+ключи в КОРНЕ ``config.json``, но молча игнорирует их внутри ``channels``
+и ``gateway``. Отсюда раскладка:
+
+* ``agents``/``providers``/``api``/``transcription``/``tools``/
+  ``modelPresets`` — нативные настройки nanobot, без изменений.
+* ``channels.*`` — каналы связи (Postgres, Redis, пулы). Плюс общий для
+  всех каналов ``document_text_threshold``: при превышении в
+  user-промпт кладётся маркер
+  ``[File: <basename> — text omitted (len=… > threshold=…); read at <path>]``
+  вместо полного текста документа (защита от раздува контекста).
+* ``gateway.*`` — сервер, перезапуск, subprocess'ы, память, compact,
+  usage_store, session_cold_sync, vector, print_*.
+  Ключей ``host``/``port`` здесь нет и быть не должно: gateway не поднимает
+  HTTP-сервер. Health/Readiness — не эндпойнт, а вычисляемое по запросу
+  состояние (``ctx.runtime_health`` / ``ctx.runtime_readiness``), см.
+  ``lib/services/runtime_health.py``. Порт websocket-канала задаёт сам канал.
+* ``gateway.agent.{project,cli,skills,logging,enterprise_mcp}`` — пять
+  секций, которым в корне места нет (см. ``AGENT_SECTIONS``).
+  ``_lift_agent_sections`` поднимает их в корень **до** всех остальных
+  шагов merge, поэтому ``profiles/<mode>.jsonc`` и ``session_manager.json``
+  видят обычный плоский вид и ничего не знают про namespace.
+
+``channels.postgres``
+---------------------
+
+* ``unstick_interval`` — фоновая петля возврата зависших задач в
+  ``processing`` в исходный статус. По дефолту
+  ``max(60, processing_timeout/5)`` = 120 сек. Уменьшает нагрузку на БД
+  на пустом столе (вместо SELECT+UPDATE каждые ``poll_interval``).
+  ВНИМАНИЕ: ветка повтора в ``_claim_one`` недостижима — внешний
+  ``AND status='pending'`` отсекает ``status='error'``. Настройка
+  сохранена как контракт ``_mark_failed`` (см. CHANGELOG).
+* Ветка захвата задачи: ``UPDATE ... RETURNING`` с внешним
+  ``AND status = 'pending'`` — состояние захвата в самой строке задачи,
+  отдельного lease-протокола нет.
+
+``gateway.agent.skills.*``
+--------------------------
+
+Каждый skill объявляется одной JSON-секцией со стандартным набором
+полей (``lib/core/project_settings.py::SkillSettings``). Никакого
+``register.py`` не требуется: ``ApplicationContext`` читает секцию при
+старте и автоматически создаёт ``TableResource``/``VectorResource`` в
+``table_registry``. Чтобы добавить новый skill:
+
+  1. Добавить секцию ``skills.<name>`` с массивом ``tables``.
+  2. Если нужны векторные индексы — добавить ``vector_indexes``.
+  3. Готово: skill подхватится на старте gateway без правок кода.
+
+Секции (все OPTIONAL): ``enabled`` (default: true), ``tables``,
+``vector_indexes``, ``cli.*`` (параметры CLI навыка), ``llm.*``
+(execution policy). Выбор модели/провайдера — в настройках nanobot,
+вне ``skills.*``.
+
+ГРАНИЦА ``skills.*``: только то, что меняется при смене ДОМЕНА skill'а.
+Общая runtime-инфраструктура — снаружи: FAISS backend/storage/root →
+``gateway.vector.index.*``; storage-таблицы индексов — там же. Правило
+описано в TARGET_ARCHITECTURE §skills.* boundary.
+
+Структура ``tables`` (``project_settings.py::TableEntry``):
+
+* ``name`` — ОБЯЗАТЕЛЬНО, формат ``"schema.table"`` (контракт
+  ``TableResource.__post_init__``).
+* ``type`` — ``"table"`` (по умолчанию) | ``"vector"``; определяет,
+  ``TableResource`` или ``VectorResource`` создаёт авторегистрация.
+* ``label`` — OPTIONAL opaque-метка. Таблица с label НЕ попадает в
+  описание схемы для LLM (``get_db_tables()`` её не возвращает);
+  доступ — через ``TableRegistry.resources_by_label(label)``. Типичный
+  кейс: реестры метаданных из других схем (``public.agent_predefined_scripts``
+  с ``label="scripts_registry"``). Runtime-sync игнорирует.
+* ``tracking_column`` — OPTIONAL колонка для инкрементального поллинга;
+  дефолт ``updated_at`` для ``type="table"``, ``id`` для ``type="vector"``.
+* Элемент может быть строкой ``"schema.table"`` или объектом с полями
+  выше. Неизвестные ключи в объекте запрещены (``extra="forbid"``) —
+  fail-fast на опечатках.
+
+ВНИМАНИЕ: ``skills.<name>`` имеет ``extra="forbid"``. Любой неизвестный
+ключ в skill-секции вызовет ``ConfigurationError`` на старте gateway
+(опечатка ``tablse`` или оставшийся от старой версии ``embedding``) —
+сознательное ужесточение контракта.
+
+Секции ``gateway.sync.*`` (поллинг, очередь записей, reconnect-бэкофф)
+УДАЛЕНЫ: фоновой синхронизации больше нет, загрузка кэша — разовая
+операция при старте процесса.
+
+``skills.<name>.vector_indexes[*]``: ``name`` — логическое имя индекса
+(как его видит tool ``vector_search``). Source-таблица хранится в
+``public.agent_vector_index_config`` (runtime-БД, инфраструктурная
+декларация), backend и путь хранения — ``gateway.vector.index.*``.
+
+``skills.audit_analyzer``: навык tool-only (никакого CLI), поэтому
+секции ``cli.*``/``llm.*`` ему не нужны. ``legal_summarizer`` — секция
+удалена 2026-10-02 (фаза 11, п. 11.6): навык уехал в домен платформы
+(``mcp-platform/libs/legal_summarizer``), агент ходит в него операцией
+``query_operation`` через tool
+``workspace/tools/legal_summarizer_query.py``, настройки домена живут в
+``mcp-platform/platform.json`` → ``legal_summarizer``.
+
+``gateway.*``
+-------------
+
+* ``storage`` — ``auto`` (``PGSessionManager`` при наличии dsn, иначе
+  JSONL) | ``postgres`` (только ``PGSessionManager``, без dsn — ошибка) |
+  ``file`` (только JSONL, dsn игнорируется).
+* ``tool_result_limits.*`` — потолки вывода инструментов
+  (``runtime_patcher.py``); все ключи опциональны.
+* ``compact.*`` — ручное сжатие контекста сессии
+  (``lib/services/context_compaction.py``,
+  ``workspace/tools/compact_context.py``).
+* ``usage_store.*`` — upstream ``LLMUsageStore`` (metadata-only usage);
+  дефолтный путь ``<get_runtime_subdir("usage")>/usage.db``,
+  ``enabled=false`` отключает observer (graceful degradation).
+* ``repeat_guard.*`` (``lib/hooks/repeat_guard_hook.py``) — защитник от
+  вырожденных циклов одинаковых tool-вызовов, секция полностью
+  опциональна: без неё хук работает в ``mode="off"``. Ключи:
+  ``mode`` (off|warn|block), ``window_size``,
+  ``max_repeats_in_window``, ``exempt_tools`` (ТОЧНЫЕ имена, без * и ?).
+  ``mode=block`` поднимает ``RepeatGuardBlocked``, которую перехватывает
+  патч ``repeat_guard_block`` и превращает в обычный синтетический
+  tool-результат — оборот при этом не падает
+  (``openspec/specs/runtime/anti-loop/spec.md``).
+* ``session_cold_sync.*`` — фоновый mirror upstream JSONL → PG;
+  ``enabled=false`` отключает sync (escape hatch для multi-instance).
+* ``error_messages.*`` — заготовленные ответы при internal-ошибке
+  ``AgentLoop._process_message``
+  (``openspec/specs/runtime/error-fallback``): ``internal_error`` — текст
+  вместо upstream-литерала "Sorry, I encountered an error." (детали
+  исключения в content НЕ попадают, только в ``agent_gateway_logs``),
+  ``log_to_db`` — писать ли ``event_type="turn_failed"`` (default: true).
+  Дефолты — ``ErrorMessagesSettings`` и ``_DEFAULT_INTERNAL_ERROR_TEXT``
+  в ``lib/services/runtime_patcher.py``.
+* ``vector.*`` — общая runtime-инфраструктура эмбеддингов и индексов.
+  PG-реестр ``public.agent_vector_index_config`` больше НЕ читается
+  кодом. Параметры подключения к эмбеддеру (Ollama ``/api/embed``,
+  ``EMBED_TOKEN`` в ``.secrets.env``) — константы capability ``llm`` на
+  платформе, прямые значения в конфиге не нужны.
+  ``index.storage_table`` — единая PG-таблица-хранилище сырых
+  эмбеддингов (``register_infra``). ``index.default_root`` —
+  DEPRECATED (FAISS собирается в памяти из снапшота storage_table).
+  ``index.signature_table`` УДАЛЁН (change
+  ``remove-vector-index-store``). Ключи опциональны; дефолты — в
+  ``VectorIndexSettings``/``VectorIndexConfig``.
+  УСТАРЕВШИЙ ПУТЬ ``gateway.vector_index.*`` УДАЛЁН — используйте
+  ``gateway.vector.index.*`` (единственный канонический путь).
+
+``gateway.agent.logging.db`` — структурированный журнал агента
+(``DbLoggingService``); таблицы — profile-owned (см.
+``PROFILE_OWNED_RUNTIME_KEYS``).
+
+``gateway.agent.enterprise_mcp``
+--------------------------------
+
+Объявление ОДНО: его читает клиент агента
+(``lib/services/enterprise_mcp_client.py``). В ``config.json`` секция
+``tools.mcpServers`` намеренно пуста: штатный провайдер MCP вызывает
+``session.call_tool(name, arguments=kwargs)`` и не умеет передавать
+``_meta``, а платформа требует его
+(``ENTERPRISE_EXEC_REQUIRE_CALL_META``) и умеет ``list_operations()``,
+а не только tools. Вторая копия процесса означала бы второго владельца
+пула PostgreSQL, а у разделяемого ресурса владелец один.
+
+``${NANOBOT_PYTHON}`` и ``${NANOBOT_PROJECT_ROOT}`` подставляются из
+``os.environ`` (``_export_runtime_env``): в конфиге нет ни одного пути
+конкретной машины, и сервер поднимается тем же Python, в котором
+установлены его зависимости. Сервер получает ``DATABASE_URL`` из
+окружения агента — отдельно он его не знает и без него не поднимается.
+"""
+
 import json
 import os
 import re
@@ -5,11 +202,41 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_CONFIG_FILE = Path(__file__).parent / "config.json"
-_PROJECT_FILE = Path(__file__).parent / "project.json"
-_SECRETS_FILE = Path(__file__).parent / ".secrets.env"
-_SESSION_MANAGER_FILE = _PROJECT_FILE.parent / "session_manager.json"
-_PROFILES_DIR = _PROJECT_FILE.parent / "profiles"
+_ROOT_DIR = Path(__file__).parent
+#: ЕДИНСТВЕННЫЙ файл настроек агента: и настройки nanobot, и агентские
+#: секции. Отдельного ``project.json`` больше нет (см. модульный docstring).
+_CONFIG_FILE = _ROOT_DIR / "config.json"
+_SECRETS_FILE = _ROOT_DIR / ".secrets.env"
+_SESSION_MANAGER_FILE = _ROOT_DIR / "session_manager.json"
+_PROFILES_DIR = _ROOT_DIR / "profiles"
+
+#: Секции агента, которым в корне ``config.json`` места нет.
+#:
+#: Корневой объект ``config.json`` разбирает СХЕМА nanobot
+#: (``nanobot.config.loader.load_config``), и она отвергает любой
+#: неизвестный ключ верхнего уровня. Проверено на 0.3.5: ``logging``,
+#: ``cli``, ``skills``, ``project``, ``enterprise_mcp`` в корне дают
+#: ``ConfigLoadError: Unknown setting``, то есть ломают
+#: ``ConfigService.load()`` (а значит и старт gateway/CLI). Агенту нужна
+#: ровно одна копия каждой секции, поэтому эти пять живут в файле под
+#: ``gateway.agent.*`` — неизвестные ключи ВНУТРИ ``gateway`` схема
+#: игнорирует молча (extra="ignore" у ``nanobot.config_base.Base``) — и
+#: поднимаются обратно в корень функцией :func:`_lift_agent_sections`.
+#:
+#: Пути в ``SETTINGS`` при этом не меняются (``SETTINGS["cli"]``,
+#: ``SETTINGS["logging"]``, ``SETTINGS["skills"]``,
+#: ``SETTINGS["project"]``, ``SETTINGS["enterprise_mcp"]``), поэтому ни
+#: один потребитель кроме самого ``config.py`` не правится.
+AGENT_SECTIONS: frozenset[str] = frozenset({
+    "project",
+    "cli",
+    "skills",
+    "logging",
+    "enterprise_mcp",
+})
+
+#: Путь внутри ``config.json``, где физически лежат ``AGENT_SECTIONS``.
+AGENT_SECTIONS_PATH: tuple[str, ...] = ("gateway", "agent")
 
 
 _SUPPORTED_PROFILES = frozenset({"prod", "test"})
@@ -142,8 +369,10 @@ def _strip_jsonc_comments(text: str) -> str:
 def load_config_json(path: str | Path | None = None) -> AttrDict:
     """Загрузить JSON/JSONC-файл в AttrDict; несуществующий/битый файл → пустой AttrDict.
 
-    Поддерживает комментарии ``//`` и ``/* */`` (JSONC) — проект использует их
-    в project.json. Стандартный JSON (config.json) парсится как и раньше.
+    Поддерживает комментарии ``//`` и ``/* */`` (JSONC) — их используют
+    ``profiles/<mode>.jsonc``. ``config.json`` — строгий JSON (его же
+    читает штатный ``json.loads`` в ``ConfigService``), но парсится тем
+    же кодом.
     """
     config_file = Path(path or _CONFIG_FILE)
     if not config_file.exists():
@@ -158,6 +387,44 @@ def load_config_json(path: str | Path | None = None) -> AttrDict:
     except json.JSONDecodeError:
         return AttrDict()
     return AttrDict(data) if isinstance(data, dict) else AttrDict()
+
+
+def _lift_agent_sections(cfg: dict) -> None:
+    """Поднять ``gateway.agent.*`` из ``config.json`` в корень ``cfg``.
+
+    Вызывается сразу после загрузки ``config.json`` и ДО остальных шагов
+    merge, поэтому ``session_manager.json``, ``.secrets.env`` и
+    ``profiles/<mode>.jsonc`` видят обычный плоский вид и ничего не знают
+    про namespace.
+
+    Неизвестная секция внутри ``gateway.agent`` — ``ConfigurationError``:
+    иначе опечатка в имени секции молча игнорировалась бы, а это ровно
+    тот класс дефекта (настройка объявлена, но не действует), который
+    ликвидация второго файла и устраняет.
+    """
+    node: Any = cfg
+    for part in AGENT_SECTIONS_PATH[:-1]:
+        node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return
+    agent = node.pop(AGENT_SECTIONS_PATH[-1], None)
+    if not isinstance(agent, dict):
+        return
+    unknown = sorted(set(agent) - AGENT_SECTIONS)
+    if unknown:
+        raise ConfigurationError(
+            f"{'.'.join(AGENT_SECTIONS_PATH)} в config.json содержит "
+            f"неизвестные секции: {unknown}. Разрешены только "
+            f"{sorted(AGENT_SECTIONS)}."
+        )
+    for name, value in agent.items():
+        if name in cfg:
+            raise ConfigurationError(
+                f"config.json объявляет секцию {name!r} дважды: в корне и "
+                f"под {'.'.join(AGENT_SECTIONS_PATH)}. Копия настроек "
+                f"должна быть ровно одна."
+            )
+        cfg[name] = value
 
 
 def _deep_merge(base: dict, override: dict) -> None:
@@ -180,18 +447,18 @@ def _deep_merge(base: dict, override: dict) -> None:
 # дефолтов и module-level ``SETTINGS = ...``.
 #
 # Порядок merge (поздний перекрывает ранний):
-#   1. project.json                    — база
+#   1. config.json                     — база (и настройки nanobot,
+#                                         и агентские секции)
 #   2. session_manager.json (если есть) — per-deploy override (pool/timeouts)
-#   3. config.json                     — nanobot-настройки
+#   3. .secrets.env (${VAR})           — секреты
 #   4. profiles/<mode>.jsonc           — профиль (если mode != prod)
-#   5. .secrets.env (${VAR})           — резолв env refs
-#   6. validate_runtime_isolation()    — hard-fail
+#   5. validate_runtime_isolation()    — hard-fail
 #
 # Ключевое: profile overlay идёт ПОСЛЕДНИМ, поэтому profile-owned runtime-ключи
 # (channels.postgres.{table_name,messages_table,meta_table} и
 # logging.db.{table_name,question_runs_table}) — immutable после применения
-# профиля. Даже если session_manager.json или config.json содержат prod-имена,
-# profile их перетирает.
+# профиля. Даже если session_manager.json содержит prod-имена, профиль их
+# перетирает.
 # ---------------------------------------------------------------------------
 
 PROFILE_OWNED_RUNTIME_KEYS = frozenset({
@@ -326,13 +593,13 @@ def _export_runtime_env() -> None:
     интерпретатор может быть указан осознанно.
     """
     os.environ.setdefault("NANOBOT_PYTHON", sys.executable)
-    os.environ.setdefault("NANOBOT_PROJECT_ROOT", str(_PROJECT_FILE.parent))
+    os.environ.setdefault("NANOBOT_PROJECT_ROOT", str(_ROOT_DIR))
 
 
 def _merge_profile_overlay(cfg: dict, mode: str) -> None:
     """Применить profiles/<mode>.jsonc как ПОСЛЕДНИЙ шаг перед валидацией.
 
-    Для prod — no-op (prod это чистый project.json).
+    Для prod — no-op (prod это чистый config.json).
     Для test — требуется файл profiles/test.jsonc.
     """
     if mode == "prod":
@@ -482,29 +749,28 @@ def resolve_application_config(profile: str) -> AttrDict:
     частью runtime.
 
     Порядок merge (поздний перекрывает ранний):
-      1. project.json                    — база
+      1. config.json                     — база: и настройки nanobot,
+                                          и агентские секции; поднимается
+                                          ``gateway.agent.*`` в корень
+                                          (``_lift_agent_sections``)
       2. session_manager.json (если есть) — per-deploy override
-      3. config.json                     — nanobot-настройки
-      4. .secrets.env                     — секреты (``DATABASE_URL``,
+      3. .secrets.env                     — секреты (``DATABASE_URL``,
                                           провайдерские ``api_key``)
-      5. profiles/<mode>.jsonc           — профиль (если mode != prod)
-      6. ${VAR} резолв через os.environ
-      7. validate_runtime_isolation()    — hard-fail
+      4. profiles/<mode>.jsonc           — профиль (если mode != prod)
+      5. ${VAR} резолв через os.environ
+      6. validate_runtime_isolation()    — hard-fail
     """
     cfg: dict = {}
-    if _PROJECT_FILE.exists():
-        project_data = load_config_json(_PROJECT_FILE)
-        if isinstance(project_data, AttrDict):
-            project_data = dict(project_data)
-        _deep_merge(cfg, project_data)
-
-    _deep_merge(cfg, _load_session_manager_override())
-
     if _CONFIG_FILE.exists():
         config_data = load_config_json(_CONFIG_FILE)
         if isinstance(config_data, AttrDict):
             config_data = dict(config_data)
         _deep_merge(cfg, config_data)
+        # Секции без места в корне схемы nanobot — наверх, до всех
+        # остальных шагов merge (см. AGENT_SECTIONS).
+        _lift_agent_sections(cfg)
+
+    _deep_merge(cfg, _load_session_manager_override())
 
     # Секреты из .secrets.env после config.json (чтобы могли перекрыть
     # то, что в config.json, при необходимости). До профиля (профиль —
@@ -512,7 +778,7 @@ def resolve_application_config(profile: str) -> AttrDict:
     _deep_merge(cfg, _load_secrets_override())
 
     # Экспорт secrets в os.environ ДО _resolve_env_refs — чтобы ${VAR}
-    # в project.json/config.json нашли свои значения.
+    # в config.json нашли свои значения.
     _export_secrets_to_env(cfg)
 
     # Факты о запуске — тоже до резолва: ими заполняются ${NANOBOT_PYTHON}
@@ -683,7 +949,7 @@ def _initialize_settings(profile: str) -> None:
 
     cfg = resolve_application_config(profile)
     # Профиль должен быть доступен в SETTINGS как ``SETTINGS["profile"]``
-    # (canonical API) независимо от того, что лежит в project.json.
+    # (canonical API) независимо от того, что лежит в config.json.
     if isinstance(cfg, dict):
         cfg["profile"] = profile
     settings._inner_dict = cfg
@@ -753,7 +1019,7 @@ def get_setting(*keys: str, default=None):
 
 
 def require_setting(*keys: str):
-    """Строгий доступ к ключам SETTINGS (единственный источник правды — project.json).
+    """Строгий доступ к ключам SETTINGS (единственный источник правды — config.json).
 
     Возвращает значение по пути ``keys`` или поднимает ``ConfigurationError``,
     если ключ (на любом уровне) отсутствует. Не возвращает fallback-литерал:

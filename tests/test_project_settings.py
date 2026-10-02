@@ -277,7 +277,7 @@ class TestSkillSettingsExtraForbid:
         assert s.llm is None
 
     def test_project_settings_skills_audit_analyzer_parsed(self) -> None:
-        """Полная валидация project.json::skills.audit_analyzer проходит."""
+        """Полная валидация ``skills.audit_analyzer`` (config.json) проходит."""
         result = validate_project_settings({
             "skills": {
                 "audit_analyzer": {
@@ -337,7 +337,7 @@ class TestSkillSettingsExtraForbid:
 class TestSkillBriefContextSettings:
     """Секция ``skills.<name>.brief_context`` — параметры BriefContextBuilder.
 
-    Введена коммитом brief-refactor (``project.json`` + runtime читает через
+    Введена коммитом brief-refactor (``config.json`` + runtime читает через
     ``lib.core.skill_config.get_brief_context_config``), но долго отсутствовала
     в pydantic-схеме — валидация с ``extra="forbid"`` валила старт gateway
     на легитимном ключе. Это regression-guard на синхронизацию схемы.
@@ -361,7 +361,7 @@ class TestSkillBriefContextSettings:
 
         Имя навыка здесь произвольное: ``SkillsSettings`` — контейнер
         ``skills.<name>``, а не описание конкретного навыка (суммаризатор
-        legal уехал на платформу, секция вырезана из project.json).
+        legal уехал на платформу, секция вырезана из конфига агента).
         """
         result = validate_project_settings({
             "skills": {
@@ -563,67 +563,11 @@ class TestGatewayVectorIndexConfig:
         })
         assert result.gateway.vector.index.storage_table == TEST_VECTOR_TABLE
 
-    def test_legacy_vector_index_ignored_by_runtime(self) -> None:
-        """Legacy ``gateway.vector_index.*`` runtime-mute (ни один consumer не читает).
-
-        Pydantic не падает (через ``_StrictOptional.extra="allow"`` для
-        forward-compat), но ``register_vector_storage`` в
-        ``lib/core/infra_registration.py`` НЕ смотрит на этот путь.
-        Это явный fail-fast через runtime-проверку: оставивший legacy
-        ``vector_index`` увидит, что ``vector_names()`` пустой, и
-        синхронизация PG → DuckDB не работает.
-        """
-        from unittest.mock import patch
-        from lib.core.infra_registration import register_vector_storage
-        from lib.services.table_registry import table_registry
-
-        # Изоляция: явно снимаем vector.storage, чтобы verify именно
-        # поведение legacy-пути (``registered = False``), а не возврат
-        # из-за ранее зарегистрированного storage.
-        table_registry.unregister_infra("vector.storage")
-        try:
-            legacy_only = {
-                "gateway": {
-                    "vector_index": {"storage_table": TEST_VECTOR_TABLE},
-                },
-            }
-            with patch("config.SETTINGS", legacy_only):
-                registered = register_vector_storage()
-            assert registered is False
-        finally:
-            table_registry.unregister_infra("vector.storage")
-
-    def test_runtime_prefers_canonical_vector_index_path(self) -> None:
-        """Канонический путь ``gateway.vector.index.*`` регистрирует storage."""
-        from unittest.mock import patch
-        from lib.core.infra_registration import register_vector_storage
-        from lib.services.table_registry import table_registry
-
-        # Изоляция: ``table_registry`` — глобальный singleton; снимаем
-        # vector.storage перед тестом (другие тесты в сессии могли его
-        # зарегистрировать), и очищаем после, чтобы не загрязнять дальше.
-        # ``register_vector_storage`` сам по себе идемпотентен (не
-        # перезатирает уже зарегистрированное), поэтому без очистки
-        # возврат был бы ``False`` и ассерт провалился.
-        table_registry.unregister_infra("vector.storage")
-        try:
-            canonical = {
-                "gateway": {
-                    "vector": {"index": {"storage_table": TEST_VECTOR_TABLE}},
-                },
-            }
-            with patch("config.SETTINGS", canonical):
-                registered = register_vector_storage()
-            assert registered is True
-        finally:
-            table_registry.unregister_infra("vector.storage")
-
-
 class TestProjectMetadataSettings:
-    """``project.json::project.*`` — канонический namespace для project metadata.
+    """``project.*`` — канонический namespace для project metadata.
 
     Раньше ``ProjectSettings.version`` (top-level) был мёртвым кодом —
-    никто не читал, а реальный источник ``project.json::project.version``
+    никто не читал, а реальный источник ``config.json::project.version``
     читался напрямую через ``lib.utils.project_version``. Этот коммит
     вводит ``ProjectMetadataSettings`` и связывает его с реальным
     каноническим namespace.
