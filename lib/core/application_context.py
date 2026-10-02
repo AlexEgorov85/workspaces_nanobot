@@ -526,6 +526,79 @@ class ApplicationContext:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _attach_log_transport(self) -> None:
+        """Перевести запись журнала на ``enterprise-mcp`` (change
+        ``enterprise-mcp-platform``, фаза 7).
+
+        Без этого шага сервис молча шёл бы прежней дорогой: писал ``INSERT``
+        сам, пул записи в PostgreSQL оставался в руках агента, и фаза выглядела
+        бы сделанной по тестам, не будучи сделанной в проде. Поэтому неудача
+        здесь громкая, а не тихая: нет клиента - понятно, нет живого loop -
+        тоже понятно, и обе причины попадают в лог.
+
+        Локальный fallback подключается всегда, независимо от клиента: он
+        нужен именно тогда, когда писать некуда.
+        """
+        service = self.db_logging_service
+        if service is None:
+            return
+        from lib.services.log_transport import LocalFallbackSink
+
+        data_dir = getattr(self, "data_dir", None) or getattr(
+            self, "workspace_dir", None
+        )
+        try:
+            # Рядом с остальным состоянием оборота, а не рядом с workspace:
+            # workspace читает человек, ``data_store`` - runtime.
+            fallback = LocalFallbackSink(
+                str(
+                    Path(data_dir or ".")
+                    / "data_store"
+                    / "logs"
+                    / "gateway-events-fallback.jsonl"
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - лог не должен ронять старт
+            logger.warning("local fallback для журнала не создан: %s", exc)
+            fallback = None
+
+        client = getattr(self, "enterprise_mcp", None)
+        if client is None:
+            if fallback is not None:
+                service.attach_transport(mcp_writer=None, fallback_sink=fallback)
+            logger.info(
+                "enterprise-mcp не объявлен: журнал пишется напрямую в БД, "
+                "локальный fallback подключён"
+            )
+            return
+
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            if fallback is not None:
+                service.attach_transport(mcp_writer=None, fallback_sink=fallback)
+            logger.warning(
+                "нет живого event loop: журнал пишется напрямую в БД, "
+                "операция log_events не используется"
+            )
+            return
+
+        from lib.services.log_transport import LoopCallRunner, McpLogWriter
+
+        try:
+            writer = McpLogWriter(call=client.call, run=LoopCallRunner(loop=loop))
+            service.attach_transport(mcp_writer=writer, fallback_sink=fallback)
+        except Exception as exc:  # noqa: BLE001 - лог не должен ронять старт
+            logger.warning("транспорт журнала через MCP не подключён: %s", exc)
+            if fallback is not None:
+                service.attach_transport(mcp_writer=None, fallback_sink=fallback)
+            return
+        logger.info("журнал агента пишется через enterprise-mcp (log_events)")
+
     def start(self) -> None:
         """Запустить фоновые сервисы (БД-логирование, аудит)."""
         if self._started:
@@ -590,6 +663,7 @@ class ApplicationContext:
         if self.db_logging_service is not None:
             self.db_logging_service.start()
             self._shutdown.register("db_logging_service", self.db_logging_service)
+            self._attach_log_transport()
 
         # Загрузка кэша уже выполнена в composition root
         # (``_init_cache_runtime``): это разовая синхронная операция, у неё

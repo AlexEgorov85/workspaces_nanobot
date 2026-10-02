@@ -186,7 +186,7 @@ class TestUnidentifiedEvents:
         captured: list[Any] = []
         client = RecordingClient()
         writer = McpLogWriter(
-            call=client.call, run=SyncRunner(), on_unidentified=captured.extend
+            call=client.call, run=SyncRunner(), on_fallback=captured.extend
         )
 
         writer.write_events([_event(session_id=None, user_id=None)])
@@ -198,7 +198,7 @@ class TestUnidentifiedEvents:
         captured: list[Any] = []
         client = RecordingClient()
         writer = McpLogWriter(
-            call=client.call, run=SyncRunner(), on_unidentified=captured.extend
+            call=client.call, run=SyncRunner(), on_fallback=captured.extend
         )
 
         writer.write_events([_event()])
@@ -304,6 +304,28 @@ class TestUnavailablePlatform:
 
         with pytest.raises(ValueError):
             writer.write_events([_event()])
+
+    def test_unavailable_transport_reaches_fallback_too(self) -> None:
+        """Приёмка 7.3: отказ транспорта обязан оставить локальный след.
+
+        Счётчик потерь без файла умирает вместе с процессом: расследование
+        отказа начинается ровно с того, чего не случилось.
+        """
+        client = RecordingClient()
+        client.fail_with = EnterpriseMcpUnavailable("сервер не поднялся")
+        seen: list[list[Any]] = []
+        writer = McpLogWriter(
+            call=client.call,
+            run=SyncRunner(),
+            on_fallback=lambda events: seen.append(list(events)),
+        )
+
+        result = writer.write_events([_event(), _event()])
+
+        assert result.dropped == 2, "до журнала платформы не дошло — потеря считается"
+        assert len(seen) == 1 and len(seen[0]) == 2, (
+            "но след остаётся: файл должен пережить перезапуск процесса"
+        )
 
 
 class TestLoopCallRunner:
@@ -479,6 +501,29 @@ class TestServiceWiring:
             if path.exists():
                 path.unlink()
 
+    def test_unavailable_server_still_leaves_a_local_trail(self, tmp_path: Path) -> None:
+        """Приёмка 7.3: остановленный сервер пишет файл, а не только счётчик."""
+        path = tmp_path / "fallback.jsonl"
+        sink = LocalFallbackSink(str(path))
+        client = RecordingClient()
+        client.fail_with = EnterpriseMcpUnavailable("остановлен")
+        writer = McpLogWriter(call=client.call, run=SyncRunner())
+        service = self._service(writer, sink)
+
+        service._flush_batch([_event(), _event(), _event()])
+
+        stats = service.get_stats()
+        assert stats["dropped"] == 3, "потери считаются независимо от следа"
+        assert stats["fallback_written"] == 3, "и след остаётся независимо от потерь"
+        assert stats["written"] == 0
+        lines = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert len(lines) == 3, "файл непуст — отправная точка расследования есть"
+        assert {line["event_type"] for line in lines} == {"tool_call"}
+
     def test_question_run_goes_through_its_own_operation(self) -> None:
         """Контекст вопроса пишется не событием журнала, а отдельной операцией."""
         client = RecordingClient()
@@ -506,3 +551,135 @@ class TestServiceWiring:
         service._handle_question_run(record)
 
         assert client.calls == [], "подписать вызов нечем — выдумывать нельзя"
+
+
+class SlowFailingClient:
+    """Клиент, который и падает, и делает это не мгновенно.
+
+    Нужен для проверки границы «источник не ждёт транспорт»: пока вызов висит,
+    очередь наполняется и должна обрезаться дропом, а не блокировать продюсера.
+    """
+
+    def __init__(self, delay: float = 0.5) -> None:
+        self.delay = delay
+        self.calls = 0
+
+    async def call(self, operation, arguments=None, *, identity=None):
+        self.calls += 1
+        time.sleep(self.delay)
+        raise EnterpriseMcpUnavailable("остановлен")
+
+
+class TestBatchedAsyncFlush:
+    """Приёмка 7.2: батчевый асинхронный flush в ``log_events``."""
+
+    def test_batch_leaves_in_one_call_and_producer_does_not_wait(self) -> None:
+        client = RecordingClient()
+        writer = McpLogWriter(call=client.call, run=SyncRunner())
+        # ``flush_interval_sec`` намеренно велик: флаш может случиться только
+        # на стопе, поэтому утверждения ниже не зависят от гонки с таймером.
+        service = DbLoggingService(
+            dsn="",
+            table_name="journal_events",
+            question_runs_table="journal_runs",
+            mcp_writer=writer,
+            flush_interval_sec=30.0,
+            batch_size=100,
+        )
+        service.start()
+        try:
+            for _ in range(5):
+                assert service.log_event(_event()) is True
+            assert client.calls == [], (
+                "log_event кладёт событие в очередь и возвращает: ход агента "
+                "не ждёт сети"
+            )
+        finally:
+            service.stop(timeout_sec=5)
+
+        assert len(client.calls) == 1, "батч уходит одним вызовом, а не пятью"
+        assert len(client.calls[0][1]["events"]) == 5
+        assert service.get_stats()["written"] == 5
+
+    def test_event_survives_a_restart_of_the_transport(self) -> None:
+        """Первый вызов падает, второй проходит: событие не теряется молча."""
+        state = {"fail": True}
+
+        async def call(operation, arguments=None, *, identity=None):
+            if state["fail"]:
+                raise EnterpriseMcpUnavailable("остановлен")
+            count = len((arguments or {}).get("events", []))
+            return json.dumps({"status": "ok", "accepted": count, "dropped": 0})
+
+        writer = McpLogWriter(call=call, run=SyncRunner())
+
+        lost = writer.write_events([_event()])
+        state["fail"] = False
+        ok = writer.write_events([_event()])
+
+        assert lost.dropped == 1 and lost.accepted == 0
+        assert ok.accepted == 1 and ok.dropped == 0
+
+
+class TestPlatformOutage:
+    """Приёмки 7.1 и 7.6: буфер ограничен, а ход агтора не блокируется."""
+
+    def _service(self, client: Any, sink: Any = None, **kwargs: Any) -> DbLoggingService:
+        return DbLoggingService(
+            dsn="",
+            table_name="journal_events",
+            question_runs_table="journal_runs",
+            mcp_writer=McpLogWriter(call=client.call, run=SyncRunner()),
+            fallback_sink=sink,
+            purge_interval_sec=0.0,
+            **kwargs,
+        )
+
+    def test_buffer_drops_instead_of_blocking_the_turn(self) -> None:
+        """7.1: очередь ограничена, переполнение считается, продюсер жив."""
+        service = self._service(
+            SlowFailingClient(delay=0.5), batch_size=1, queue_maxsize=2
+        )
+        service.start()
+        try:
+            accepted = [service.log_event(_event()) for _ in range(10)]
+        finally:
+            service.stop(timeout_sec=10)
+
+        assert accepted.count(False) > 0, "переполненная очередь обязана отказывать"
+        stats = service.get_stats()
+        assert stats["queue_full"] == accepted.count(False), "дроп измерим"
+        assert stats["running"] is False, "остановка не ждёт сети"
+
+    def test_outage_leaves_a_trail_that_outlives_the_process(self, tmp_path: Path) -> None:
+        """7.3 + 7.6: недоступность платформы не блокирует ход и не стирает след."""
+        path = tmp_path / "trail.jsonl"
+        client = RecordingClient()
+        client.fail_with = EnterpriseMcpUnavailable("остановлен")
+        service = self._service(
+            client, LocalFallbackSink(str(path)), flush_interval_sec=0.05
+        )
+        service.start()
+        try:
+            for _ in range(5):
+                assert service.log_event(_event()) is True
+        finally:
+            service.stop(timeout_sec=10)
+
+        stats = service.get_stats()
+        assert stats["written"] == 0
+        assert stats["dropped"] == 5
+        assert stats["fallback_written"] == 5
+
+        # След лежит в файле, а не в памяти процесса: его читает кто угодно
+        # после перезапуска, и новый sink на том же пути дописывает, а не
+        # затирает.
+        restarted = LocalFallbackSink(str(path))
+        restarted.write([_event()])
+        lines = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert len(lines) == 6, "новый процесс дописывает след, а не затирает его"
+        assert [line["request_id"] for line in lines] == ["r1"] * 6

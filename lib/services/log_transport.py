@@ -28,6 +28,14 @@
 MCP-ленты нет, события уходят в файл и в счётчик ``dropped``: потеря видна
 и измерима, но пул записи остаётся один.
 
+Fallback срабатывает в двух случаях, и оба — про то, что журнал переживает
+отказ платформы: событие **нечем подписать** (``session_id``/``user_id``
+пусты) и транспорт **недоступен** (сервер не поднялся, loop не ответил). Второй
+случай обязателен: иначе отказ платформы стирал бы журнал целиком — счётчик
+``dropped`` умирает вместе с процессом и виден только тому, кто уже смотрит,
+а след самого отказа не остаётся нигде, и расследование начинается с того,
+чего не случилось.
+
 Синхронность. ``DbLoggingService`` работает в отдельном потоке, а клиент
 ``enterprise-mcp`` — асинхронный и привязан к event loop агента. Отсюда
 мост :class:`LoopCallRunner`: корутина ставится в чужой loop через
@@ -238,11 +246,11 @@ class McpLogWriter:
 
     call: Callable[..., Any]
     run: CallRunner
-    #: Куда уходят события, которые нечем подписать. По умолчанию ``None`` —
+    #: Куда уходят события, которые в журнал не попали. По умолчанию ``None`` —
     #: они только считаются потерянными. ``DbLoggingService`` подставляет
     #: сюда запись в локальный fallback-файл, потому что он владеет
     #: счётчиками статистики.
-    on_unidentified: Callable[[Sequence[Any]], None] | None = None
+    on_fallback: Callable[[Sequence[Any]], None] | None = None
 
     def write_events(self, batch: Sequence[Any]) -> WriteResult:
         """Отправить батч, разбив его по личности вызова.
@@ -260,11 +268,15 @@ class McpLogWriter:
                 # Нет ``session_id``/``user_id`` — вызова, который можно
                 # подписать, не существует. Событие не теряется молча.
                 result = result.merge(WriteResult(dropped=len(group.events)))
-                if self.on_unidentified is not None:
-                    self.on_unidentified(group.events)
+                self._to_fallback(group.events)
                 continue
             result = result.merge(self._write_group(group))
         return result
+
+    def _to_fallback(self, events: Sequence[Any]) -> None:
+        """Отдать события локальному следу, если он заведён."""
+        if self.on_fallback is not None:
+            self.on_fallback(events)
 
     def _write_group(self, group: IdentityGroup) -> WriteResult:
         """Отправить одну группу событий одним вызовом ``log_events``."""
@@ -279,12 +291,16 @@ class McpLogWriter:
         try:
             text = self.run(self._invoke(identity, payload))
         except (EnterpriseMcpUnavailable, LogWriteUnavailable) as exc:
-            # Недоступность транспорта — потеря батча со счётчиком, а не молчание.
+            # Отказ транспорта не отменяет локальный след: без него отказ
+            # платформы неотличим от тишины — счётчик пережил бы только процесс,
+            # который и так уже мёртв к моменту расследования. Событие уходит и
+            # в файл, и в счётчик потерь: до журнала платформы оно не дошло.
             logger.warning(
                 "log_events: транспорт недоступен, событий потеряно %d: %s",
                 len(group.events),
                 exc,
             )
+            self._to_fallback(group.events)
             return WriteResult(dropped=len(group.events))
         return self._counters(text, len(group.events))
 
