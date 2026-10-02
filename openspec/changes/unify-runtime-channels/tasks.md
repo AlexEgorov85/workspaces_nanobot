@@ -1,3 +1,23 @@
+> ## ⚠️ NEEDS-REWORK (2026-10-02) — не начат (3/48)
+>
+> Разбор и список того, что обязательно пере-decide, — в шапке
+> `proposal.md`; обоснование по дизайну — в шапке `design.md`. Коротко:
+> технические факты change'а проверены и держатся, направление стало не
+> устаревшим, а более дорогим (CLI поднимает вторую сессию `enterprise-mcp`),
+> поэтому **удалять нельзя**.
+>
+> **Про `file:line` в этом файле.** Привязки проверены 2026-10-02 и поправлены
+> там, где они протухли; оставшиеся разошлись на единицы строк из-за сноса
+> кластера кэша и помечены «проверить по месту». Первым делом при
+> реализации перепроверить номера строк, а не доверять им.
+>
+> **Про разделы 2–4.** Схлопываются в один: `cli_channel.py` не создан, и всё
+> в разделах 2–4 — это его содержимое плюс перевод `console_loop` на клиент.
+> Порядок: 5 (снять `role` и cron из composition) → 2+3 (клиент) → 4 (убрать
+> composition root из `cli_agent.py`). Начинать с 2, как в текущей нумерации,
+> нельзя: пока CLI поднимает свой `ApplicationContext`, снос `role` ломает
+> входные точки.
+
 ## 1. Contract (Phase 1 — DONE)
 
 - [x] 1.1 Новая capability `runtime/cli-client`: `specs/runtime/cli-client/spec.md`
@@ -73,26 +93,31 @@
 
 ## 5. Удаление role и cron-флага из composition (Decision 1, 6)
 
-- [ ] 5.1 `ApplicationContext.create` (`:193`) без `role`; удалить поле
-      `ctx.role` (`:156,250`)
-- [ ] 5.2 Удалить чтение `ctx.role` в cron-гейте (`:385`)
-- [ ] 5.3 `enable_cron` убрать из composition (`:159,253`); cron создаётся
-      Gateway по `gateway.enable_cron`
-- [ ] 5.4 `return_file_manager=not ctx.enable_cron` (`:315`) заменить на
-      решение по режиму хранилища
-- [ ] 5.5 Исправить docstring `_make_cron_service` (`:1727`) — он противоречит
-      фактическому гейту
+- [ ] 5.1 `ApplicationContext.create` (`:194`, проверить по месту) без `role`;
+      удалить поле `ctx.role` (`:154`, чтения `:251`, `:378` — проверить)
+- [ ] 5.2 Удалить чтение `ctx.role` в cron-гейте (`:378`; было указано `:385` —
+      строка уехала при сносе кластера кэша, `ctx.role` читается здесь)
+- [ ] 5.3 `enable_cron` убрать из composition (`:157,254`; было `:159,253` —
+      проверить); cron создаётся Gateway по `gateway.enable_cron`
+- [ ] 5.4 `return_file_manager=not ctx.enable_cron` (`:316`; было `:315`) заменить
+      на решение по режиму хранилища
+- [ ] 5.5 Исправить docstring `_make_cron_service` (`:379`; **было `:1727` — ссылка
+      протухла**: файл сократился с ~1730 до 1502 строк после сноса кластера
+      кэша, определение переехало) — он противоречит фактическому гейту
 - [ ] 5.6 Исправить `lib/services/session_storage.py:13-17` (docstring
-      перепутывает порядок возврата; фактически `(mode, manager)`)
-- [ ] 5.7 Обновить все вызовы `create(...)` вне CLI: `gateway.py:121`
-      (`role='gateway'` убрать), `benchmarks/runner.py:596`, тесты
+      перепутывает порядок возврата; фактически `(mode, manager)`) — привязка
+      проверена 2026-10-02, совпадает
+- [ ] 5.7 Обновить все вызовы `create(...)` вне CLI: `gateway.py:122`
+      (`role='gateway'` убрать; было указано `:121`), `benchmarks/runner.py`
+      (проверить по месту), тесты
       (`tests/test_application_context_single_application_point.py`,
       `tests/test_application_context_logging.py`,
       `tests/test_application_context.py`,
       `tests/test_gateway_live_media_e2e.py`, `tests/test_gateway.py`,
       `tests/test_profile_lifecycle.py`). `streamlit_app.py` — НЕ caller
       (`create()` отсутствует, только `config._initialize_settings:95`) —
-      правок не требует
+      правок не требует. **Поправка 2026-10-02:** `streamlit_app.py` снят
+      2026-10-02 (`docs+chore` da06830), пункт про него больше неактуален.
 - [ ] 5.8 `tests/test_application_context_role.py` →
       `tests/test_application_context_composition.py`: нет параметра `role`,
       нет поля `ctx.role`, нет cron в composition CLI
