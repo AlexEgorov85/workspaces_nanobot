@@ -151,13 +151,14 @@ class VectorIndexSettings(_StrictOptional):
             ``"data_store/vectors"``. Путь к индексу = ``<root>/<name>``.
         backend: runtime-бэкенд (``"faiss"``, ``"pgvector"``, ``"qdrant"``).
         storage_table: единая PG-таблица-хранилище сырых эмбеддингов.
-            Регистрируется в ``TableRegistry`` через ``register_infra``
-            и попадает в DuckDB-кэш через ``CacheLoadService``.
+            Регистрируется в ``TableRegistry`` через ``register_infra``.
+            Чтением и загрузкой снимка владеет capability ``data``
+            платформы.
         indexes: полный конфиг vector-индексов ``{имя: VectorIndexConfig}``
             (какие индексы строить, из каких source-таблиц, content_cols,
             embedding_cols, chunk-параметры, metric). Единственный источник
-            для ``cache_provider_impl.read_vector_index_config`` и
-            ``tools/build_vectors.py``.
+            для ``mcp-platform/libs/vectors/config.py`` и сборки индексов
+            на платформе.
     """
 
     enable: bool | None = None
@@ -172,8 +173,8 @@ class VectorInfrastructureSettings(_StrictOptional):
 
     Содержит ``index`` — ``VectorIndexSettings`` (конфиг индексов,
     storage-таблица). Параметры подключения к эмбеддеру больше не
-    настраиваются: они захардкожены в ``cache_provider_impl.get_embedding()``
-    (модульные константы + ``EMBED_TOKEN`` из окружения OS).
+    настраиваются: они принадлежат capability ``vectors`` платформы
+    (``mcp-platform/libs/vectors/embedding.py``) и читаются там.
     Каноническое место для **общей** vector-инфраструктуры.
     """
 
@@ -405,7 +406,8 @@ class VectorIndexConfig(BaseModel):
     Раньше это жило в PG-реестре ``public.agent_vector_index_config``
     (``sql/vectors/create_vector_index_config.sql`` + seed) и читалось
     ``cache_provider_impl.read_vector_index_config``. Теперь — это
-    настройка, переносится в ``project.json``.
+    настройка в ``project.json``, а читает её capability ``vectors``
+    платформы: ``mcp-platform/libs/vectors/config.py``.
 
     Attributes:
         table: исходная таблица для эмбеддинга (``schema.table``).

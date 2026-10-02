@@ -1,9 +1,61 @@
 # ADR-004: Граница ответственности `audit_analyzer` (Skill ↔ runtime-сервисы)
 
 **Дата:** 2026-09-29
-**Статус:** Accepted
+**Статус:** Accepted (решение сохранено) · **Superseded 2026-10-01 частично**
 **Контекст:** Phase 0 ревизии архитектуры `audit_analyzer`; восстановление
 baseline по Git history перед любыми изменениями кода.
+
+---
+
+## ⚠ Приписка 2026-10-02: документ описывает состояние, которого больше нет
+
+ADR сохранён как история ревзии, но **читать его как описание текущего
+кода нельзя**: почти все названные в нём символы снесены. Проверено
+поиском по репозиторию — ни один из перечисленных ниже модулей больше не
+существует.
+
+| Символ / модуль из этого ADR | Что с ним стало |
+|---|---|
+| `class DuckDbCacheStore` (`duckdb_cache_store.py`) | удалён, change `drop-local-cache-read-from-pg` |
+| `PostgresDuckDbProvider` (`cache_provider_impl.py`) | удалён, `drop-local-cache-read-from-pg` |
+| `lib/services/cache_provider.py` (ABC `CacheProvider`, `CacheIngestion`, `CacheStore`, `open_cache_provider`) | перенесён в capability `data` платформы, фаза 5 `enterprise-mcp-platform` |
+| `CacheOwnershipCoordinator`, fencing, `agent_cache_ownership` | сняты целиком, `drop-local-cache-read-from-pg` |
+| `CacheLoadService`, `PgDuckDbSyncService` | сняты, фаза 5 `enterprise-mcp-platform` |
+| `preload_service.py`, `vector_index_service.py`, `cache_provider_impl.py`, `duckdb_query.py`, `table_utils.py`, `sql_safety.py` | сняты, фазы 5 и 9 |
+| `resolve_publish_path` (`application_context.py`) | снят вместе с кэш-обвязкой |
+| `publish()` — копирование файла сам на себя | метода нет: снимок вообще не публикуется, файл не удерживается между операциями |
+| `gateway.cache.local_path` | настройки больше нет; путь снимка объявляет `mcp-platform/platform.json → data.snapshot_path` |
+| `workspace/skills/audit_analyzer/scripts/cli.py` | удалён, фаза 9 `enterprise-mcp-platform`: навык перестал владеть данными |
+| `benchmarks/runner.py` | удалён, фаза 1.5 |
+| `build_cache_provider`, `get_in_memory_cache_path`, `get_vector_index_path` из `lib/core/skill_config.py` | сняты, фаза 5 |
+
+**Раздел «Проверка соответствия» ниже описывает тесты, которых больше
+нет.** Таблица приведена в соответствие с фактом; историческая часть
+(«Контекст», «Baseline», «Хронология», «Модель доступа») остаётся как
+запись о том, какой была подсистема и почему её снесли.
+
+### Что изменилось по существу
+
+1. **Граница Skill ↔ runtime перестала быть актуальным предметом.** Доступ к
+   данным у навыка теперь принадлежит capability `audit` платформы
+   (`mcp-platform/servers/enterprise/capabilities/audit`). Skill не владеет
+   ни провайдером, ни файлом снимка, ни FAISS-индексами — ему остались
+   инструкции и вызовы инструментов.
+2. **Инвариант «кэш — process-exclusive ресурс» сохранился, но сменился
+   механизм.** Вместо координации открытия между процессами файл снимка
+   вообще не удерживается: каждый read-метод открывает соединение на время
+   вызова и закрывает сразу после, а единственный writer — стадия загрузки,
+   завершающаяся до начала чтения. Гонки за файл не существует, потому что
+   нечего захватывать.
+3. **Навык запускается отдельным процессом и говорит с платформой по MCP**,
+   а не открывает DuckDB сам. `mcp-platform/libs/enterprise_client/` —
+   единственный клиент, доступный процессу навыка.
+
+Нормативное описание текущего состояния — `AGENTS.md` (секции Project
+Layout и Configuration), `openspec/specs/` и
+`docs/architecture/runtime-patcher-inventory.md`.
+
+---
 
 ## Контекст
 
@@ -282,20 +334,40 @@ claim, запрашивает `READ_ONLY`, сам выполняет попыт�
 для skill'а (снятие `hasattr(open_cache)`, отказ от конструируемого
 «cache not found») — `fix-cache-process-boundary` §1 и §4.
 
-## Проверка соответствия
+## Проверка соответствия (состояние на 2026-10-02)
 
-| Проверка | Тест |
+Таблица ниже приведена в соответствие с фактическим деревом: часть тестов
+из неё снесена вместе с кэш-обвязкой, поэтому оставлена помеченной, а не
+выдаётся за действующую проверку.
+
+| Проверка | Тест | Состояние |
+|---|---|---|
+| Tool не импортирует Skill | `tests/test_skill_tool_independence.py::test_tools_do_not_import_skills` | действует |
+| Skill не импортирует Tool | `tests/test_skill_tool_independence.py::test_skills_do_not_import_tools` | действует |
+| Skill не открывает DuckDB/FAISS сам | `tests/test_single_cache_interface.py` | **файл снят** (переименован в `tests/_test_single_cache_interface.py` tombstone) |
+| `duckdb.connect` отсутствует в `lib/services` вне фабрики | тот же guard | **снят вместе с ним** |
+| Ровно одна реализация `CacheProvider` | тот же guard | **снят** |
+| Никто вне слоя реализации не называет конкретный класс хранилища | тот же guard | **снят** |
+| У каждой сущности один `open` | `cache-architecture-alignment` §5.9 | **снят** (сам change разрешён в пользу `drop-local-cache-read-from-pg`) |
+
+**Чем инварианты проверяются теперь.** Требования «skill не владеет
+хранилищем» и «второй реализации нет» проверяются другими стражями, потому
+что предмет изменился:
+
+| Требование | Чем проверяется сейчас |
 |---|---|
-| Tool не импортирует Skill | `tests/test_skill_tool_independence.py::test_tools_do_not_import_skills` |
-| Skill не импортирует Tool | `tests/test_skill_tool_independence.py::test_skills_do_not_import_tools` |
-| Skill не открывает DuckDB/FAISS сам | `tests/test_single_cache_interface.py` (новый, `fix-cache-process-boundary` §5.2) |
-| `duckdb.connect` отсутствует в `lib/services` вне фабрики | тот же guard |
-| **Ровно одна реализация `CacheProvider`** | тот же guard |
-| **Никто вне слоя реализации не называет конкретный класс хранилища** | тот же guard (`fix-cache-process-boundary` §1.4) |
-| **У каждой сущности один `open`** | `cache-architecture-alignment` §5.9 |
+| Навык не импортирует слои хранения агента | `tests/test_skill_tool_independence.py`, архитектурные стражи платформы |
+| Навык ходит к данным только через capability `audit` | `mcp-platform/tests/test_audit_tables_ownership.py` |
+| Скиллы не ходят к БД напрямую | `tests/test_storage_hybridization.py`, стражи платформы |
+| Имена таблиц не зашиты в код | `tests/test_no_hardcoded_table_names.py` |
 
 ## Связанные документы
 
 - `docs/skill-tool-architecture.md` — нормативный контракт Skill ↔ Tool.
 - `docs/skill-tool-inventory.md` — текущее состояние skill/tool.
-- `workspace/skills/audit_analyzer/SKILL.md` — контракт трёх режимов.
+- `AGENTS.md` — нормативное описание текущего состояния агента.
+- `openspec/specs/` — нормативные контракты.
+- `workspace/skills/audit_analyzer/SKILL.md` — инструкции навыка.
+  *Замечание: § «CLI-only трёх режимов» этого файла описывал состояние до
+  фазы 9 `enterprise-mcp-platform`; навык больше не имеет Python-слоя с
+  собственным CLI.*

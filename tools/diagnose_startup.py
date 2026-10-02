@@ -112,18 +112,27 @@ def parse_startup_log(text: str) -> StartupFacts:
             continue
 
         if in_patches_block:
-            m = PATCH_APPLIED_RE.match(line.strip())
+            stripped = line.strip()
+            m = PATCH_APPLIED_RE.match(stripped)
             if m:
                 facts.runtime_patches_applied.append(m.group(1))
                 continue
-            m = PATCH_SKIPPED_RE.match(line.strip())
+            m = PATCH_SKIPPED_RE.match(stripped)
             if m:
                 facts.runtime_patches_skipped.append((m.group(1), m.group(2)))
                 continue
-            m = PATCH_FAILED_RE.match(line.strip())
+            m = PATCH_FAILED_RE.match(stripped)
             if m:
                 facts.runtime_patches_failed.append((m.group(1), m.group(2)))
                 continue
+            # Продолжение записи патча — его назначение в скобках.
+            if stripped.startswith("("):
+                continue
+            # Строка не относится к блоку патчей, значит блок закончился.
+            # Без этой проверки следующие за блоком статусные строки старта
+            # («✓ DB pool», «✓ PostgreSQL channel enabled», …) засчитывались
+            # как патчи и давали ложный DRIFT «UNEXPECTED APPLIED».
+            in_patches_block = False
 
         m = HOOKS_LINE_RE.search(line)
         if m:

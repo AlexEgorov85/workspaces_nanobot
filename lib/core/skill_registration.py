@@ -77,10 +77,9 @@ def register_skill_from_config(skill_name: str, cfg: dict, registry=None) -> Ski
     Note:
         Embedding-конфиг (``base_url``, ``model``, ``dimension``) больше
         НЕ берётся из ``cfg["embedding"]``: параметры подключения к
-        эмбеддеру захардкожены в ``cache_provider_impl.get_embedding()`` /
-        ``read_embedding_config()`` (``_EMBED_*``-константы; ``auth_token``
-        — из ``os.environ['EMBED_TOKEN']``). Секция ``skills.<name>.embedding``
-        удалена.
+        эмбеддеру принадлежат capability ``vectors`` платформы
+        (``mcp-platform/libs/vectors/embedding.py``). Секция
+        ``skills.<name>.embedding`` удалена.
     """
     if not isinstance(cfg, dict):
         return None

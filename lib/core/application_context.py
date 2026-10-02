@@ -474,10 +474,16 @@ class ApplicationContext:
             session_manager=ctx.session_manager,
         )
         ctx.runtime_patch_report = patch_report
-        logger.info(
-            "Runtime patches:\n%s",
-            patch_report.render(specs=RuntimePatcher.patch_specs()),
-        )
+        # Баннер идёт в stdout тем же путём, что и «Hooks connected», а не
+        # через ``logger.info``: эффективный уровень логгера
+        # ``lib.core.application_context`` — WARNING, поэтому INFO там
+        # отбрасывался молча, и ``tools/diagnose_startup.py`` сообщал
+        # «CRITICAL MISSING REQUIRED» по патчам на здоровом старте.
+        _print_startup_block(patch_report.render(specs=RuntimePatcher.patch_specs()))
+        # Пустая строка отделяет блок от статусных строк старта: иначе
+        # читатель лога (в том числе diagnose_startup) не может отличить
+        # «конец блока» от «следующая строка вывода».
+        _print_startup_block("")
         if patch_report.failed:
             logger.warning(
                 "%d runtime patch(es) failed: %s",
@@ -746,6 +752,23 @@ class ApplicationContext:
 # ----------------------------------------------------------------------
 
 
+def _print_startup_block(text: str) -> None:
+    """Вывести блок startup-инвентаря в stdout без переносов строк.
+
+    Диагностический лог читает ``tools/diagnose_startup.py``, поэтому текст
+    обязан оставаться машинно-читаемым: rich по умолчанию переносит длинные
+    строки по ширине консоли, и парсер видит только начало блока.
+
+    Fallback на ``print`` — для старых Windows-консолей без rich.
+    """
+    try:
+        from rich.console import Console
+
+        Console(soft_wrap=True).print(text, markup=False, highlight=False)
+    except Exception:
+        print(text)
+
+
 def _log_connected_hooks(ctx: ApplicationContext) -> None:
     """Однократно вывести полный список подключённых хуков.
 
@@ -761,7 +784,11 @@ def _log_connected_hooks(ctx: ApplicationContext) -> None:
     try:
         from rich.console import Console
 
-        Console().print(f"[green]\u2713[/green] Hooks connected: {label}")
+        # soft_wrap=True обязателен: без него rich переносит список по ширине
+        # консоли, и ``tools/diagnose_startup.py`` читает только первую
+        # физическую строку. Инструмент докладывал «MISSING REQUIRED» по
+        # подключённым хукам — на полностью здоровом старте.
+        Console(soft_wrap=True).print(f"[green]\u2713[/green] Hooks connected: {label}")
     except Exception:
         # Старые Windows-консоли (cp1251) не умеют ✓ (U+2713) — выводим
         # тот же список обычным print, чтобы информация не пропадала.

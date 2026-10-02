@@ -19,10 +19,10 @@ runtime-снапшот ``workspace/data_store/duckdb/cache.duckdb``.
   и делает её доступной только через ``TableRegistry.resources_by_label()``.
   Runtime-sync ``label`` игнорирует.
 * ``VectorResource`` — описание одной PG-таблицы сырых эмбеддингов. FAISS
-  строится поверх неё в памяти из DuckDB-снапшота (декларация индекса —
+  строится поверх неё в памяти из файла снимка (декларация индекса —
   ``gateway.vector.index.indexes``, таблица эмбеддингов —
   ``gateway.vector.index.storage_table``); параметры model/dimension
-  захардкожены в ``cache_provider_impl``, не в ресурсе.
+  принадлежат capability ``vectors`` платформы, а не ресурсу.
 * ``SkillRegistration.resources`` — единый набор ресурсов skill'а.
 """
 

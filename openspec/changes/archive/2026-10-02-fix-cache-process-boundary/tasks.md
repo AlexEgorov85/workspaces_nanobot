@@ -80,7 +80,7 @@ runtime, — через ту же точку создания провайдер
 - [x] 2.5 Docstring (`:128-153`) привести в соответствие с кодом: сейчас
       обещает «DuckDB-коннекшен из `DuckDbCacheStore` через
       `cache_provider.PooledDuckDbConnection`», чего в коде нет
-- [ ] 2.6 ~~Сохранить `fetch_fn` как injection-шов~~ → **переформулировано при
+- [x] 2.6 ~~Сохранить `fetch_fn` как injection-шов~~ → **переформулировано при
       реализации.** Исходная формулировка требовала передавать *соединение*,
       но у `CacheProvider` нет способа отдать соединение наружу — поэтому
       либо соединение leaks наружу, либо (как сделано) чтение идёт через
@@ -89,26 +89,35 @@ runtime, — через ту же точку создания провайдер
       `tools/check_indexes.py` открывает провайдера сам (`mode=READ_ONLY`)
       и инициализирует `SETTINGS`; `python tools/check_indexes.py` даёт
       exit 0. Открытая часть: три call-site'а обязаны передавать
-      `provider=` — это закрыто guard'ом
+      `provider=` — это было закрыто guard'ом
       `TestDiscoveryRequiresProvider::test_every_call_site_passes_provider`
       (пункт 5.2).
-
+      **ИТОГ 2026-10-02:** guard и сам `cache_provider_impl` снесены фазами 5
+      и 9, функция живёт как `mcp-platform/libs/vectors/runtime.py`. Требование
+      перенесено дословно и теперь защищено стражем платформы
+      `test_architecture_boundaries.py:82` — `duckdb.connect` запрещён везде,
+      кроме владельца файла снимка. Регрессия 2.1/2.2 закрыта тестом
+      `mcp-platform/tests/test_vectors_signature.py:264`.
 ## 3. Skill перестаёт импортировать модуль реализации
 
-Четыре места, где skill знает про конкретную storage-реализацию.
+Четыре места, где skill знал про конкретную storage-реализацию.
 
-- [ ] 3.1 `cli.py:89` `from lib.services.cache_provider_impl import read_vector_index_config`
+- [x] 3.1 `cli.py:89` `from lib.services.cache_provider_impl import read_vector_index_config`
       → брать из интерфейсного/конфиг-слоя; verify grep по
-      `workspace/skills/audit_analyzer/**` на `cache_provider_impl` даёт 0 hit
-      **ОСТАЛОСЬ:** skill по-прежнему импортирует конфиг-хелперы дискавери
-      (`read_vector_index_config`, `list_runtime_vector_indexes`) из
-      `cache_provider_impl`. Это модуль общих помощников, а не storage-реализация
-      (открытия файла там больше нет), но формально verify не выполнен.
-- [ ] 3.2 `cli.py:330` `list_runtime_vector_indexes` → вызывать через
+      `workspace/skills/audit_analyzer/**` на `cache_provider_impl` даёт 0 hit.
+      **ПРОВЕРЕНО 2026-10-02:** grep даёт 0 hit. Сам `cli.py` удалён фазой 9
+      `enterprise-mcp-platform`, импортировать больше нечего. Навык перестал
+      владеть данными; чтение конфигурации индексов живёт в
+      `mcp-platform/libs/vectors/config.py:69`. Прежняя пометка
+      «skill по-прежнему импортирует конфиг-хелперы» снята как неактуальная.
+- [x] 3.2 `cli.py:330` `list_runtime_vector_indexes` → вызывать через
       провайдера, а не импортом из impl-модуля
       **ЧАСТИЧНО:** провайдер передаётся (`provider=db`), собственного
       соединения нет; остаётся перенести саму функцию из `impl`-модуля
       в конфиг/дискавери-слой (см. 3.1).
+      **ЗАКРЫТО 2026-10-02:** перенос выполнен — функция живёт в
+      `mcp-platform/libs/vectors/runtime.py:28` и по контракту **не**
+      открывает файл снимка сама (см. docstring там же).
 - [x] 3.3 `cli.py:245` `if hasattr(provider, "open_cache")` — убрать `hasattr`:
       duck-typing по методу, которого нет в интерфейсе, и есть признак
       протечки. Ошибка MUST NOT конструироваться вручную из булева
@@ -165,16 +174,64 @@ runtime, — через ту же точку создания провайдер
 
 ## 6. Документация и проверки
 
-- [ ] 6.1 `docs/architecture/decisions/audit-analyzer-runtime-boundary.md` —
-      сверить с фактическим состоянием после выполнения
-- [ ] 6.2 `workspace/skills/audit_analyzer/SKILL.md` § «Runtime boundary» —
-      убрать формулировки, привязывающие skill к DuckDB
-- [ ] 6.3 `docs/skill-tool-architecture.md` §2 — пример импорта
+- [x] 6.1 `docs/architecture/decisions/audit-analyzer-runtime-boundary.md` —
+      сверить с фактическим состоянием после выполнения.
+      **ВЫПОЛНЕНО 2026-10-02:** ADR получил приписку о снятых символах
+      (таблица «что с ним стало»), таблица «Проверка соответствия» приведена
+      к факту, а несуществующие сторожа помечены снятыми. Исторические
+      разделы («Контекст», «Baseline», «Хронология») сохранены как запись о
+      том, какой была подсистема и почему её снесли — ADR переписывать нельзя.
+- [x] 6.2 `workspace/skills/audit_analyzer/SKILL.md` § «Runtime boundary» —
+      убрать формулировки, привязывающие skill к DuckDB.
+      **ВЫПОЛНЕНО 2026-10-02:** grep по SKILL.md на `DuckDB`/`duckdb` даёт
+      0 hit. Раздел «Граница навыка» явно перечисляет, чем навык **не**
+      владеет и что всё это — платформа. Сделано фазой 9
+      `enterprise-mcp-platform`; страж
+      `tests/test_audit_analyzer_skill_doc.py` проверяет это на каждом
+      прогоне (211 тестов в связке с `test_skill_tool_independence.py`).
+- [x] 6.3 `docs/skill-tool-architecture.md` §2 — пример импорта
       `from lib.services.cache_provider_impl import build_cache_provider`
-      заменить на интерфейсный вызов
+      заменить на интерфейсный вызов.
+      **ВЫПОЛНЕНО 2026-10-02:** пример переписан на клиент платформы; рядом
+      оставлена заметка о прежней форме и о том, куда уехали оба модуля.
+      Попутно сняты ещё две ссылки того же рода: `CacheProvider.query_sql`
+      в описании шага конвейера и перечисление снесённых модулей в правиле
+      про `label`.
 - [x] 6.4 `python tools/architecture_guard.py` — без новых нарушений (exit 0)
-- [ ] 6.5 `python tools/diagnose_startup.py` — OK
-- [ ] 6.6 Запись в `CHANGELOG.md` `[Unreleased]`
+- [x] 6.5 `python tools/diagnose_startup.py` — OK
+      **ВЫПОЛНЕНО 2026-10-02 по логу реального старта** (`gateway.py
+      --profile=test`, реальный PostgreSQL, реальный `enterprise-mcp`).
+      Первый прогон дал **exit 1 и девять ложных CRITICAL/DRIFT** на
+      полностью здоровом старте. Три причины найдены и устранены:
+
+      1. **Баннер патчей не доходил до лога вовсе.**
+         `application_context.py` печатал его через stdlib `logging` на
+         уровне INFO, а эффективный уровень логгера
+         `lib.core.application_context` — WARNING. Сообщение отбрасывалось
+         молча, и инструмент читал старт как «патчи не применялись»
+         (`CRITICAL MISSING REQUIRED: ['context_governor', 'assemble_outbound',
+         'subagent_logging']`). Баннер выведен в stdout тем же путём, что и
+         «Hooks connected».
+      2. **Список хуков переносился по ширине консоли.** `rich` печатал
+         семь хуков в трёх физических строках, а парсер — построчно —
+         видел два и рапортовал `MISSING REQUIRED` по трём хукам и по
+         hook factory. Включён `soft_wrap=True`: диагностический лог обязан
+         оставаться машинно-читаемым.
+      3. **Блок патчей не имел терминатора** и ждал пустой строки, которой в
+         реальном выводе нет. Статусные строки старта (`✓ DB pool`,
+         `✓ PostgreSQL channel enabled`, `✓ Channels enabled`,
+         `✓ enterprise-mcp:`) засчитывались как патчи — ложный
+         `DRIFT UNEXPECTED APPLIED`. Парсер теперь закрывает блок по первой
+         непохожей строке, а эмиттер печатает пустую строку-разделитель.
+
+      Итоговый прогон: **OK** по всем четырём разделам (хуки, built-in
+      tools, project tools, runtime patches), **exit 0**. Регрессионные
+      тесты на фикстуре реальной формы лога добавлены в
+      `tests/test_diagnose_startup.py` (три новых кейса).
+- [x] 6.6 Запись в `CHANGELOG.md` `[Unreleased]`.
+      **ВЫПОЛНЕНО 2026-10-02:** две записи — про ложные CRITICAL
+      `diagnose_startup.py` (с тремя причинами) и про правку документации,
+      описывавшей снесённую подсистему.
 
 ## Вне scope этого change
 

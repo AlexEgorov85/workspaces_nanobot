@@ -54,6 +54,35 @@ Some unrelated text
 """
 
 
+#: Форма настоящего startup-лога gateway, а не синтетики: блок патчей печатает
+#: rich, и сразу за ним идут статусные строки старта — тоже с «✓». Блока,
+#: закрытого пустой строкой, в реальном выводе нет, поэтому парсер обязан
+#: сам определять конец блока по первой непохожей строке. Иначе «✓ DB pool»
+#: и «✓ PostgreSQL channel enabled» засчитывались как патчи.
+REAL_SHAPED_LOG = (
+    "✓ Hooks connected: StreamDiagnosisHook, RecentFilesHook, "
+    "SessionFileRedirectHook, ToolResultArchiveHook, ToolAuditHook, "
+    "TerminalToolPrintHook, 1 hook factory (per-turn)\n"
+    "Registered 22 tools: ['apply_patch', 'exec', 'read_file']\n"
+    "Custom (project) tools: 5 project tools registered: audit_analyzer_query, "
+    "compact_context, document_read, history_search, legal_summarizer_query "
+    "— workspace=...\\workspace\n"
+    "Runtime patches\n"
+    "----------------\n"
+    "✓ context_governor\n"
+    "    (управлять окном контекста)\n"
+    "✓ assemble_outbound\n"
+    "    (внедрить tool_audit и recent_files в финальный outbound)\n"
+    "✓ subagent_logging\n"
+    "🐈 Starting nanobot gateway · project v2.5.2 (nanobot 0.3.5) · profile=test...\n"
+    "✓ DB pool: workers 3/1 (max 4), connected 2\n"
+    "Redis channel disabled\n"
+    "✓ PostgreSQL channel enabled\n"
+    "✓ Channels enabled: websocket, postgres\n"
+    "✓ enterprise-mcp: 14 операций, процесс поднят\n"
+)
+
+
 def _run(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     import os
     env = os.environ.copy()
@@ -98,6 +127,50 @@ class TestParser:
         facts = parse_startup_log(EMPTY_LOG)
         assert facts.parse_errors
         assert facts.is_empty
+
+    def test_patches_block_ends_at_first_foreign_line(self) -> None:
+        """Статусные строки старта не должны попадать в патчи.
+
+        Реальный лог печатает блок патчей через rich и сразу продолжает
+        статусными строками — тоже с «✓». Парсер обязан останавливать блок
+        по первой непохожей строке, а не ждать пустой.
+        """
+        from tools.diagnose_startup import parse_startup_log
+
+        facts = parse_startup_log(REAL_SHAPED_LOG)
+        assert facts.runtime_patches_applied == [
+            "context_governor",
+            "assemble_outbound",
+            "subagent_logging",
+        ], (
+            "в патчи попали строки старта: "
+            f"{facts.runtime_patches_applied}"
+        )
+
+    def test_purpose_lines_are_not_patches(self) -> None:
+        """Строка «(назначение патча)» — продолжение записи, не новый патч."""
+        from tools.diagnose_startup import parse_startup_log
+
+        facts = parse_startup_log(REAL_SHAPED_LOG)
+        assert not any(
+            name.startswith("(") or "управлять" in name
+            for name in facts.runtime_patches_applied
+        )
+
+    def test_hooks_are_read_without_wrapping_dependency(self) -> None:
+        """Список хуков читается целиком, даже если одна строка.
+
+        Раньше баннер печатался rich'ем с переносом по ширине консоли, и
+        парсер видел только первую физическую строку — «MISSING REQUIRED»
+        на здоровом старте.
+        """
+        from tools.diagnose_startup import parse_startup_log
+
+        facts = parse_startup_log(REAL_SHAPED_LOG)
+        assert len(facts.hook_names) == 6
+        assert "ToolAuditHook" in facts.hook_names
+        assert facts.hook_factory_count == 1
+
 
 
 class TestCli:

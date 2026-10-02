@@ -50,21 +50,32 @@ Tool **не импортирует** Skill.
 ## 2. Что разрешено
 
 ```python
-# Skill
-from lib.services.cache_provider import CacheProvider   # интерфейс
-from lib.utils.sql_safety import validate_sql
-from lib.core import skill_config as _lib                # runtime API
+# Skill — процесс навыка, своего MCP-клиента у него нет.
+# К данным ходит через клиент платформы; адрес платформы он не знает.
+from libs.enterprise_client.llm import LlmClient            # операция complete
+# к данным — операции capability audit / data платформы
 
-# Tool
-from lib.services.cache_provider import CacheProvider   # тот же интерфейс
-from lib.utils.sql_safety import validate_sql
+# Агент (gateway / CLI) — композиционный корень
+from lib.core import skill_config as _lib                    # runtime API для skill'ов
 ```
 
-Skill и Tool могут использовать **общую инфраструктуру** (`lib/utils`, `lib/services`, `lib/core`).
+Skill и Tool могут использовать **общую инфраструктуру** (`lib/utils`,
+`lib/services`, `lib/core`) — то, что ещё не уехало в платформу.
 
-Skill обращается к инфраструктуре **напрямую** — через существующий
-runtime/application interface, а не через Tool. Наличие callable-функции в
-`lib/` не превращает её ни в Tool, ни в обязанность Skill'а искать Tool.
+Skill обращается к данным **напрямую**, но не к слоям хранения агента: в
+агента их больше нет. Открытие файла снимка, чтение и генерация SQL
+принадлежат capability `data`/`audit` платформы; навык вызывает операции.
+Наличие callable-функции в `lib/` не превращает её ни в Tool, ни в
+обязанность Skill'а искать Tool.
+
+> **История этого раздела.** До 2026-10-01 пример был таким:
+> `from lib.services.cache_provider import CacheProvider` плюс
+> `from lib.utils.sql_safety import validate_sql`. Оба модуля удалены —
+> интерфейс `CacheProvider` переехал в capability `data` платформы, а
+> SQL-guard переехал в `mcp-platform/libs/audit/guard.py` и
+> `libs/enterprise_data/snapshot/sql_guard.py`. Приводить пример в порядок
+> было поздно: он учил импортировать несуществующие модули.
+> См. `docs/architecture/decisions/audit-analyzer-runtime-boundary.md`.
 
 ---
 
@@ -172,7 +183,7 @@ python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
 
 ```text
 Step 1: запрос соответствует predefined из `SKILL.md` (каталог скриптов)
-        → выполнение SQL через `CacheProvider.query_sql`.
+        → операция capability `audit` платформы (выполнение SQL над снимком).
 Step 2: запрос не соответствует ни одному predefined → сообщить пользователю
         (прямой доступ к свободному SQL и vector search у агента нет).
 Step 3: (operator/benchmark) NL→SQL и семантический поиск — внутренние
@@ -323,8 +334,10 @@ Skill может объявить свою метку и находить соо
 | `tests/test_auto_register_skills.py::TestAutoRegisterPredefinedScriptsTable` | интеграционные тесты через `_auto_register_skills` (label ставится для `predefined_scripts_table`) |
 | `tests/test_skill_config_api.py::TestPredefinedScripts::test_lookup_from_table_registry` | end-to-end через `skill_config.get_predefined_scripts_table()` (lookup через registry) |
 
-Любое использование `label` в `lib/services/runtime`-слое (`cache_provider_impl.py`,
-`duckdb_cache_store.py`, `cache_load_service.py`) — архитектурная регрессия.
+Любое использование `label` в слое, который работает с данными
+(`mcp-platform/libs/vectors/`, `libs/enterprise_data/`) — архитектурная
+регрессия: навык и capability решают, что проверять, по объявлению
+ресурса, а не разбирают реестр по имени.
 
 ---
 

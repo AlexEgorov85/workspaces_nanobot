@@ -1,0 +1,17 @@
+﻿schema: spec-driven
+created: 2026-09-29
+
+# Дельты этого change'а НЕ применяются при архивации — и на это две разные
+# причины (разбор в design.md, «Дополнение 2026-10-02»):
+#
+# 1. `skills/audit-analyzer-query` — дельта отменяет требование в capability,
+#    спеки которой не существует и не должна. Отмена ничего не удаляет.
+#
+# 2. `data/cache-provider` — активная спека описывает снесённую подсистему
+#    (CacheProvider, CacheOwnershipCoordinator, query_sql,
+#    gateway.cache.local_path), а дельта в тот же capability вернула бы
+#    CacheProvider в норму как единственный путь доступа. Переписывать эту
+#    спеку должен change enterprise-mcp-platform: снимок теперь принадлежит
+#    capability data платформы, и две правки одной спеки из двух писателей
+#    дали бы расхождение.
+skip_specs: true
