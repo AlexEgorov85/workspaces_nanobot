@@ -3,9 +3,9 @@
 
 Архитектура — «одна очередь + пул соединений» (вместо connect-per-op):
 
-  * все подсистемы (PostgresChannel, PGSessionManager, DbLoggingService,
-    PgDuckDbSyncService, web-UI, инструменты) шлют задачи в ОДНУ общую
-    job-очередь;
+  * все подсистемы (``DbLoggingService``, ``SessionColdSyncService``,
+    ``ContextCompactionService``, ``SchemaValidationService``, ``session_storage``
+    и канал PostgreSQL) шлют задачи в ОДНУ общую job-очередь;
   * пул воркеров (1..N, по умолчанию 1) разбирает очередь; каждый воркер
     владеет единственным psycopg2-соединением и выполняет задачи
     последовательно;

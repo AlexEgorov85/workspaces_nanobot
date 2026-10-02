@@ -152,6 +152,15 @@ class VectorIndexSettings(_StrictOptional):
     ``VectorInfrastructureSettings``). Раньше жил в ``gateway.vector_index.*`` —
     устаревший путь удалён, обратной совместимости нет (fail-fast).
 
+    ⚠️ **Секция валидируется, но никем не читается.** С 2026-10-01 сборку и
+    владение индексами забрала capability ``vectors``, и она читает
+    ``mcp-platform/platform.json → vectors.indexes`` (и ``vectors.storage_table``).
+    В дереве агента потребителей ``gateway.vector.index.*`` нет: grep по
+    ``lib/``, ``workspace/``, ``tools/``, ``gateway.py`` и ``cli_agent.py`` даёт
+    только эту модель. Правка ``config.json`` здесь не изменит ни сборку, ни
+    поиск — объявление продублировано в двух файлах, и какое из них отживает
+    своё, решает владелец. См. ``docs/MIGRATION.md`` и ``docs/VECTOR_INDEXES.md``.
+
     Attributes:
         enable: включён ли vector-indexing слой. ``None`` → дефолт ``True``.
         default_root: корневая папка FAISS-индексов. Дефолт

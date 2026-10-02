@@ -68,11 +68,12 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
 
 Каждый skill объявляется одной JSON-секцией со стандартным набором
 полей (``lib/core/project_settings.py::SkillSettings``). Никакого
-``register.py`` не требуется: ``ApplicationContext`` читает секцию при
-старте и автоматически создаёт ``TableResource``/``VectorResource`` в
-``table_registry``. Чтобы добавить новый skill:
+``register.py`` и реестра ресурсов не требуется: снятый ``table_registry``
+был владельцем этих объектов, а состав снимка и индексов объявляет платформа
+(``mcp-platform/platform.json`` → ``audit.tables`` и ``vectors.indexes``).
+Чтобы добавить новый skill:
 
-  1. Добавить секцию ``skills.<name>`` с массивом ``tables``.
+  1. Добавить секцию ``gateway.agent.skills.<name>`` с массивом ``tables``.
   2. Если нужны векторные индексы — добавить ``vector_indexes``.
   3. Готово: skill подхватится на старте gateway без правок кода.
 
@@ -88,15 +89,15 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
 
 Структура ``tables`` (``project_settings.py::TableEntry``):
 
-* ``name`` — ОБЯЗАТЕЛЬНО, формат ``"schema.table"`` (контракт
-  ``TableResource.__post_init__``).
-* ``type`` — ``"table"`` (по умолчанию) | ``"vector"``; определяет,
-  ``TableResource`` или ``VectorResource`` создаёт авторегистрация.
+* ``name`` — ОБЯЗАТЕЛЬНО, формат ``"schema.table"``.
+* ``type`` — ``"table"`` (по умолчанию) | ``"vector"``.
 * ``label`` — OPTIONAL opaque-метка. Таблица с label НЕ попадает в
-  описание схемы для LLM (``get_db_tables()`` её не возвращает);
-  доступ — через ``TableRegistry.resources_by_label(label)``. Типичный
-  кейс: реестры метаданных из других схем (``public.agent_predefined_scripts``
-  с ``label="scripts_registry"``). Runtime-sync игнорирует.
+  описание схемы для LLM. Типичный кейс — реестры метаданных из других схем
+  (``public.agent_predefined_scripts`` с ``label="scripts_registry"``). В
+  агенте метку больше никто не читает: разбор объявления делает платформа,
+  ``mcp-platform/servers/enterprise/server.py::_audit_config``, и запись с
+  меткой уходит в каталог скриптов, а не в доменные таблицы. Runtime-sync
+  игнорирует.
 * ``tracking_column`` — OPTIONAL колонка для инкрементального поллинга;
   дефолт ``updated_at`` для ``type="table"``, ``id`` для ``type="vector"``.
 * Элемент может быть строкой ``"schema.table"`` или объектом с полями

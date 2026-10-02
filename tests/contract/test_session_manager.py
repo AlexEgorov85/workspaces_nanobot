@@ -1,4 +1,4 @@
-"""SessionManager/Session: файловое хранилище сессий (база PGSessionManager)."""
+"""SessionManager/Session: файловое хранилище сессий (база ``SanitizingSessionStore``)."""
 
 from __future__ import annotations
 
