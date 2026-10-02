@@ -12,11 +12,11 @@ Single LLM boundary: каждый вызов ``llm.chat`` в этом модул
 """
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
-from libs.legal_summarizer.llm import client as llm
 from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.structure import DocumentStructure
+from libs.legal_summarizer.llm import client as llm
 from libs.legal_summarizer.llm.prompts import (
     build_batch_user_message,
     parse_batch_response,
@@ -26,7 +26,6 @@ from libs.legal_summarizer.llm.prompts_runtime import (
     system_instruction,
 )
 from libs.legal_summarizer.llm.single_flight import (
-    LLM_FLIGHT_LOCK,
     guarded_chat,
 )
 

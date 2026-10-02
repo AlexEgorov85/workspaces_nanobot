@@ -22,7 +22,7 @@ Legacy ``SectionTree`` / ``DocumentSection`` / ``HeadingCandidate``
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -191,7 +191,7 @@ class StructureNode:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "StructureNode":
+    def from_dict(cls, data: dict[str, Any]) -> StructureNode:
         """Обратная сериализация для ``to_dict``.
 
         Используется при восстановлении ``DocumentStructure`` из
@@ -341,7 +341,7 @@ class DocumentStructure:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DocumentStructure":
+    def from_dict(cls, data: dict[str, Any]) -> DocumentStructure:
         """Обратная сериализация для ``to_dict``.
 
         Используется при восстановлении ``DocumentAnalysis`` из

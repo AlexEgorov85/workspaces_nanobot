@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import libs.legal_summarizer.llm.config as _llm_config_mod
 from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.structure import DocumentStructure
 from libs.legal_summarizer.execution.config import (
@@ -18,9 +19,7 @@ from libs.legal_summarizer.execution.config import (
     MID_REDUCE_GROUP_SIZE,
 )
 from libs.legal_summarizer.llm.config import get_chunking_config
-import libs.legal_summarizer.llm.config as _llm_config_mod
 from libs.legal_summarizer.planning.plan import ExecutionPlan
-
 
 _QUICK_SAMPLE_PAGES = 10
 _CHARS_OVERESTIMATE = 1.3

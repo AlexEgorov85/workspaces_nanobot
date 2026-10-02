@@ -27,20 +27,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from libs.legal_summarizer.chunking.packing import (
-    AdjacentPackingConfig,
-    pack_chunks_with_adjacent,
-)
-from libs.legal_summarizer.planning.plan import (
-    ExecutionPlan,
-)
 from libs.legal_summarizer.application.pipeline_structure import (
     PipelineResult,
     run_canonical_pipeline,
 )
+from libs.legal_summarizer.chunking.packing import (
+    AdjacentPackingConfig,
+    pack_chunks_with_adjacent,
+)
 from libs.legal_summarizer.llm.tokens import (
     TokenEstimator,
     TokenEstimatorConfig,
+)
+from libs.legal_summarizer.planning.plan import (
+    ExecutionPlan,
 )
 from libs.legal_summarizer.planning.strategy import (
     ExecutionPolicy,
@@ -157,13 +157,6 @@ def inspect_canonical(
         workspace_root=workspace_root,
     )
     strategy = strategy_from_pipeline(pipeline_result)
-
-    estimator = TokenEstimator(
-        TokenEstimatorConfig(chars_per_token=3.5),
-    )
-    total_tokens = estimator.estimate_many(
-        [c.text for c in pipeline_result.chunks],
-    )
 
     if strategy == "direct":
         estimated = 1

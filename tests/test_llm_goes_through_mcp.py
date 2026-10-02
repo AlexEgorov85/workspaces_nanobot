@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SKILLS_DIR = REPO_ROOT / "workspace" / "skills"
 LIB_LLM_MODULES = (
     REPO_ROOT / "lib" / "services" / "llm_client.py",
     REPO_ROOT / "lib" / "services" / "llm_config.py",
@@ -39,8 +40,8 @@ LIB_LLM_MODULES = (
 SKILL_LLM_MODULES: tuple[Path, ...] = tuple(sorted(
     path
     for path in (
-        *(REPO_ROOT / "workspace" / "skills").glob("*/scripts/llm.py"),
-        *(REPO_ROOT / "workspace" / "skills").glob("*/scripts/llm/client.py"),
+        *SKILLS_DIR.glob("*/scripts/llm.py"),
+        *SKILLS_DIR.glob("*/scripts/llm/client.py"),
     )
     if not any(part.startswith("_") for part in path.relative_to(REPO_ROOT).parts)
 ))
@@ -128,7 +129,11 @@ def test_runtime_api_does_not_expose_llm_config() -> None:
     offenders: list[str] = []
     for path in lib.rglob("*.py"):
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # utf-8-sig, а не utf-8: файл с BOM начинается с U+FEFF, и
+            # ast.parse на нём падает. ``except SyntaxError: continue``
+            # ниже проглатывал это молча, и модуль с BOM выпадал из-под
+            # стража, оставаясь зелёным.
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
         except SyntaxError:  # pragma: no cover — битый файл ловит pytest
             continue
         for node in ast.walk(tree):
@@ -156,6 +161,14 @@ def test_skill_llm_modules_are_actually_discovered() -> None:
         "в навыках появился собственный LLM-модуль: "
         f"{[str(p.relative_to(REPO_ROOT)) for p in SKILL_LLM_MODULES]} — "
         "общение с моделью принадлежит capability llm (mcp-platform/libs/llm)"
+    )
+    # Перебор выше идёт по glob'у. Если исчезнет сам каталог навыков, glob
+    # вернёт пусто — и проверка выше станет зелёной вхолостую, то есть будет
+    # охранять уже ничто. Поэтому пустой результат принимается только пока
+    # каталог, в котором он искался, на месте.
+    assert SKILLS_DIR.is_dir(), (
+        f"каталог навыков не найден: {SKILLS_DIR} — перебор "
+        "*/scripts/llm.py вернул пусто не потому, что модулей нет"
     )
 
 

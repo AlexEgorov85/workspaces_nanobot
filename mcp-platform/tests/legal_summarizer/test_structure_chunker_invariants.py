@@ -283,12 +283,23 @@ def test_i9_section_ids_dedup_preserves_order():
     chunks = chunk_from_structure(doc, struct, config=_cfg(max_chars=100000))
     # Если все 3 articles объединились в один chunk — section_ids должен
     # содержать все 3 в document order.
+    # Предусловие проверяется явно: invariant I9 имеет смысл только для
+    # chunk'ов, объединивших несколько блоков. Если merge-политика
+    # изменится и multi станет пустым, тест обязан упасть, а не пройти
+    # молча, не проверив ни одного чанка.
     multi = [c for c in chunks if len(c.block_indices) > 1]
-    if multi:
-        for c in multi:
-            assert len(c.section_ids) == len(set(c.section_ids)), (
-                f"section_ids не дедуплицирован: {c.section_ids}"
-            )
+    assert multi, (
+        "I9 требует хотя бы один chunk с несколькими block_indices — "
+        f"получено {len(chunks)} chunk'ов, все одно-блочные: "
+        f"{[(list(c.block_indices), list(c.section_ids)) for c in chunks]}"
+    )
+    for c in multi:
+        assert len(c.section_ids) == len(set(c.section_ids)), (
+            f"section_ids не дедуплицирован: {c.section_ids}"
+        )
+        assert list(c.section_ids) == sorted(c.section_ids), (
+            f"section_ids не в document order: {c.section_ids}"
+        )
 
 
 # --- I10: target soft, max hard --------------------------------------------

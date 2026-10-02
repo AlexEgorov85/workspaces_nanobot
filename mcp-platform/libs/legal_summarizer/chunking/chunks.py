@@ -17,14 +17,13 @@ Body (paragraphs) chunk'ятся per-section через ``lib.services.text_spli
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from libs.legal_summarizer.document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
-
 
 _SPLIT_SEPARATORS = ("\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", "")
 
@@ -182,7 +181,7 @@ class Chunk:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Chunk":
+    def from_dict(cls, data: dict[str, Any]) -> Chunk:
         """Обратная сериализация для ``to_dict``.
 
         Используется при восстановлении ``DocumentAnalysis`` из

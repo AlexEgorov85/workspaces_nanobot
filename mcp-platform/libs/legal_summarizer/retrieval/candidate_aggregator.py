@@ -22,8 +22,8 @@ pipelines (StructureTreeBuilder). Сейчас он
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from libs.legal_summarizer.document.heading import (
     HeadingCandidate,

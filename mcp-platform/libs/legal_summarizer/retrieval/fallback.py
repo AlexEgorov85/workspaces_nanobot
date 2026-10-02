@@ -17,9 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from libs.legal_summarizer.chunking.chunks import Chunk
-from libs.legal_summarizer.llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
-)
+from libs.legal_summarizer.llm.tokens import TokenEstimator
 
 
 @dataclass(frozen=True)
@@ -44,9 +42,13 @@ def full_document_fallback(
     * first N chunks (preamble + start of document);
     * last N chunks (conclusion);
     * preserves order.
+
+    Отбор чисто счётный (по ``cfg.max_chunks``), токенной логики в нём нет.
+    Параметр ``estimator`` поэтому ни на что не влияет и оставлен как есть:
+    он в публичной сигнатуре, и убирать его — решение владельца API, а не
+    побочный эффект линта.
     """
     cfg = config or FullDocFallbackConfig()
-    est = estimator or TokenEstimator(TokenEstimatorConfig())
 
     if not chunks or cfg.max_chunks <= 0:
         return ()

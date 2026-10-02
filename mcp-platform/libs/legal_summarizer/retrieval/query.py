@@ -26,8 +26,8 @@ first-match + full-document fallback. Это **слишком просто**.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from libs.legal_summarizer.chunking.chunks import Chunk
 

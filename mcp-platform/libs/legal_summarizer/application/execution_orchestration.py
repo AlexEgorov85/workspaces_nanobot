@@ -32,11 +32,10 @@ from libs.legal_summarizer.cache.manifest import (
     save_manifest,
     write_result,
 )
-from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.chunking._text_helpers import (
     fit_input,
-    progress,
 )
+from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.analysis import DocumentAnalysis
 from libs.legal_summarizer.document.section_helpers import (
     count_meaningful_sections_canonical,
@@ -291,6 +290,8 @@ def run_map_reduce(
 
     from libs.legal_summarizer.cache.manifest import (
         load_cached_partials as _load_cached_partials,
+    )
+    from libs.legal_summarizer.cache.manifest import (
         write_chunk_result as _write_chunk_result,
     )
     from libs.legal_summarizer.execution.pipeline import run_one_batch_async as _run_one_batch_async

@@ -70,7 +70,11 @@ def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
     def _collect_imports(path: Path) -> set[str]:
         """Вернуть имена (последний компонент импорта), которые файл импортирует."""
         try:
-            src = path.read_text(encoding="utf-8", errors="replace")
+            # utf-8-sig, а не utf-8: файл с BOM начинается с U+FEFF, и
+            # _ast.parse на нём падает. ``errors="replace"`` тут не спасает -
+            # BOM не ошибка декодирования, поэтому SyntaxError уходил в
+            # ``except`` и модуль молча выпадал из-под стража.
+            src = path.read_text(encoding="utf-8-sig", errors="replace")
             tree = _ast.parse(src)
         except (SyntaxError, FileNotFoundError):
             return set()
@@ -103,7 +107,7 @@ def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
             for short in cur_names & forbidden_short:
                 transitive_forbidden.add(f"{current.name}::{short}")
             # follow local relative imports (within scripts/)
-            for node in _ast.walk(_ast.parse(current.read_text(encoding="utf-8", errors="replace"))):
+            for node in _ast.walk(_ast.parse(current.read_text(encoding="utf-8-sig", errors="replace"))):  # см. _collect_imports
                 if isinstance(node, _ast.ImportFrom) and node.level and node.module:
                     base = current.parent
                     for _ in range(node.level - 1):

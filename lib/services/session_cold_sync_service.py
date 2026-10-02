@@ -48,8 +48,9 @@ from typing import TYPE_CHECKING, Any
 from lib.services.db_logging_service import LogEvent, try_log_event
 
 if TYPE_CHECKING:
-    from lib.services.db_logging_service import DbLoggingService
     from nanobot.session.manager import SessionManager
+
+    from lib.services.db_logging_service import DbLoggingService
 
 
 _ADVISORY_LOCK_KEY = "storage_hybridization_session_cold_sync"
@@ -75,7 +76,7 @@ class SessionColdSyncService:
 
     def __init__(
         self,
-        session_manager: "SessionManager",
+        session_manager: SessionManager,
         pg_dsn: str,
         *,
         meta_table: str,
@@ -84,7 +85,7 @@ class SessionColdSyncService:
         sync_interval_sec: float = 30.0,
         batch_size: int = 50,
         enabled: bool = True,
-        db_logging_service: "DbLoggingService | None" = None,
+        db_logging_service: DbLoggingService | None = None,
         pool_acquire_timeout_sec: float = 10.0,
         stale_tolerance_seconds: int = 120,
         sync_lag_threshold_seconds: int = 3600,

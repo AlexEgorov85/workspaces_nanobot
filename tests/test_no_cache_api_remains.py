@@ -78,7 +78,11 @@ class TestNoCacheApiRemains:
         offenders: list[str] = []
         for path in _lib_modules():
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
+                # utf-8-sig, а не utf-8: файл с BOM начинается с U+FEFF, и
+                # ast.parse на нём падает. ``except SyntaxError: continue``
+                # ниже проглатывал это молча, и модуль с BOM выпадал из-под
+                # стража, оставаясь зелёным.
+                tree = ast.parse(path.read_text(encoding="utf-8-sig"))
             except SyntaxError:  # pragma: no cover — битый файл ловит pytest
                 continue
             for node in tree.body:
@@ -100,7 +104,7 @@ class TestNoCacheApiRemains:
         offenders: list[str] = []
         for path in _lib_modules():
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
+                tree = ast.parse(path.read_text(encoding="utf-8-sig"))  # см. выше: BOM роняет ast.parse
             except SyntaxError:  # pragma: no cover
                 continue
             for node in ast.walk(tree):
@@ -140,7 +144,7 @@ class TestNoCacheApiRemains:
         if not path.is_file():
             return  # tombstone уже удалён — состояние достигнуто
 
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))  # BOM роняет ast.parse
         definitions = [
             n
             for n in tree.body

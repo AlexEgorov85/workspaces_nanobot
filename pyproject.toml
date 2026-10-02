@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "workspace/skills/audit_analyzer/tests"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 pythonpath = [
     ".",
@@ -19,9 +19,27 @@ markers = [
     "live: live e2e (real gateway / live DB / live LLM); needs NANOBOT_LIVE_E2E=1",
     "integration: worker pool on real DB; needs NANOBOT_INTEGRATION=1 (+ DATABASE_URL)",
     "contract: nanobot-ai compatibility checks; runs in CI always (not gated)",
-    "unit: fast unit tests; default",
     "benchmark: offline baseline benchmark (synthetic fixtures); opt-in via -m benchmark",
 ]
+# Верхняя граница времени ОДНОГО теста. Объявлена в обоих корнях одинаково:
+# наборы — две кодовые базы, правило безопасного прогона должно быть одно.
+# До этого границы не было НИ ОДНОЙ — ни опции здесь, ни pytest-timeout в
+# зависимостях, ни timeout-minutes в CI: прогон, который должен занять
+# десятки секунд, мог висеть бесконечно, накапливая память, и остановить его
+# было нечем. Замерено на машине разработчика: норма 157 МБ / 26 с против
+# 1.5 ГБ → 3.4 ГБ за ~6 минут, после чего свободная память машины
+# (15.7 ГБ всего, 0.4 ГБ осталось) была исчерпана.
+# Почему 300, а не 10: в наборах есть намеренно долгие тесты — живой
+# stdio-контракт (~11 с), нагрузочные интеграционные, тяжёлые импорты, и 10 с
+# рубили бы их ложно. Но тест, держащий процесс 6+ минут при норме в десятки
+# секунд, — это дефект: он должен падать с диагностикой, а не висеть. 300 с —
+# заведомо выше любого штатного теста и заведомо ниже «зависшего намертво».
+# timeout_method = "thread": прерывание не убивает сам процесс pytest
+# (в отличие от signal), поэтому подвисшие потоки и сервисы теста не тянут за
+# собой весь прогон. Работает плагином pytest-timeout: БЕЗ него опция timeout
+# молча игнорируется (pytest печатает "Unknown config option: timeout").
+timeout = 300
+timeout_method = "thread"
 
 [tool.coverage.run]
 source = ["config.py", "lib", "workspace"]

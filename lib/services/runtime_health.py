@@ -26,7 +26,7 @@ gateway admin-route). Используется:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 HealthStatus = Literal["ALIVE", "DEAD"]

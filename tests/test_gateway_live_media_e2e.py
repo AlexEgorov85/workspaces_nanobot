@@ -46,6 +46,14 @@ from typing import Any
 import psycopg2
 import pytest
 
+#: Модуль целиком помечен ``live``: поднимается реальный gateway, живые
+#: Postgres и LLM. Маркер нужен, чтобы набор отбирался фильтром ``-m`` наравне
+#: с платформенным stdio-контрактом, иначе CI прогоняет его и получает лишь
+#: skip. Существующий env-гейт (``NANOBOT_LIVE_E2E=1`` в фикстуре ``live_env``)
+#: не тронут: маркер отбирает тесты, а запускает их по-прежнему env-переменная —
+#: отбор фильтром и готовность контура остаются разными решениями.
+pytestmark = pytest.mark.live
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _WORKSPACE = _PROJECT_ROOT / "workspace"
 for _p in (str(_PROJECT_ROOT), str(_WORKSPACE)):

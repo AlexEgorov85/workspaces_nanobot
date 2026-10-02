@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+import libs.legal_summarizer.llm.calls as _llm_calls_mod
 from libs.legal_summarizer.chunking._text_helpers import (
     fit_input,
     format_chunk_block,
@@ -43,14 +45,12 @@ from libs.legal_summarizer.execution.hierarchical import (
     HierarchicalReducerConfig,
     reduce_chunks_hierarchical,
 )
-import libs.legal_summarizer.llm.calls as _llm_calls_mod
 from libs.legal_summarizer.llm.config import mr_trace_enabled
 from libs.legal_summarizer.llm.sanitize import (
     extract_subject,
     strip_think_blocks,
 )
 from libs.legal_summarizer.planning.plan import ExecutionPlan
-
 
 DOCUMENT_REDUCE_INPUT_BUDGET_CHARS = 60_000
 _SECTION_SUMMARY_MAX_CHARS = 12_000
@@ -177,7 +177,7 @@ def _persist_batch_results(
 
     for (batch_id, batch_chunks, _pending_count), (
         status, batch_meta, chunk_results, last_error,
-    ) in zip(queued, gather_results):
+    ) in zip(queued, gather_results, strict=True):
         if status == "ok":
             assert batch_meta is not None
             assert chunk_results is not None

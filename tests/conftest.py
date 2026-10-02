@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import site
 import sys
 
-# nanobot installed in user site-packages, not in .venv
-_user_site = r"C:\Users\Алексей\AppData\Roaming\Python\Python314\site-packages"
+# nanobot installed in the user site-packages of the interpreter that
+# runs the tests, not in .venv. Resolved instead of hardcoded: the
+# absolute path embedded the login name and the Python minor version,
+# so it broke on any other machine and on every interpreter upgrade.
+_user_site = site.getusersitepackages()
 if _user_site not in sys.path:
     sys.path.insert(0, _user_site)
 
@@ -69,42 +73,11 @@ def _bootstrap_config_lifecycle():
     yield
 
 
-# ---------------------------------------------------------------------------
-# Repo-root resolution (Phase 8 — was hardcoded ``Path("workspace/...")``
-# в 3 аудит-тест-файлах, ломался при запуске pytest не из cwd репо).
-# ---------------------------------------------------------------------------
-
-
-def _find_repo_root(start: Path) -> Path:
-    """Подняться от ``start`` вверх до корня репозитория.
-
-    Ищем ``workspace/skills/audit_analyzer/SKILL.md`` вверх по дереву.
-    Используется для абсолютного пути к skill'у без зависимости от cwd.
-    """
-    cur = start.resolve()
-    for _ in range(8):
-        if (cur / "workspace" / "skills" / "audit_analyzer" / "SKILL.md").is_file():
-            return cur
-        if cur.parent == cur:
-            break
-        cur = cur.parent
-    raise RuntimeError(
-        f"Cannot find repo root from {start}: "
-        "workspace/skills/audit_analyzer/SKILL.md not found"
-    )
-
-
-REPO_ROOT = _find_repo_root(Path(__file__).parent)
-AUDIT_SKILL_DIR = REPO_ROOT / "workspace" / "skills" / "audit_analyzer"
-AUDIT_SKILL_MD = AUDIT_SKILL_DIR / "SKILL.md"
-AUDIT_CLI_PATH = AUDIT_SKILL_DIR / "scripts" / "cli.py"
-
-
 # =============================================================================
 # Generic table-name fixtures (placeholder values for hermetic tests).
 #
-# Тесты инфраструктуры (cache_store, registry, sync, skill_config) не должны
-# зависеть от доменных имён (`oarb.audits`, `oarb.audit_vectors`). Это
+# Тесты инфраструктуры не должны зависеть от доменных имён
+# (`oarb.audits`, `oarb.audit_vectors`). Это
 # обеспечивает portability проекта: при переносе на другой домен
 # (другие таблицы) generic-тесты продолжают работать без правок.
 #
@@ -112,14 +85,12 @@ AUDIT_CLI_PATH = AUDIT_SKILL_DIR / "scripts" / "cli.py"
 # реальные доменные имена через свои собственные фикстуры.
 #
 # Конвенция: префикс ``TEST_`` чётко маркирует «это тестовая заглушка».
-# Формат ``schema.table`` обязателен для VectorResource (см.
-# ``table_registry.VectorResource.__post_init__``) — используем
-# схему ``test``.
+# Формат ``schema.table`` обязателен для настроек навыка —
+# используем схему ``test``.
 # =============================================================================
 
 TEST_TABLE = "test.audits"
 TEST_TABLE_2 = "test.violations"
 TEST_VECTOR_TABLE = "test.audit_vectors"
-TEST_VECTOR_INDEX_NAME = "test_index"
 
 

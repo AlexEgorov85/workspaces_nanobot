@@ -14,21 +14,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from libs.legal_summarizer.chunking.chunks import Chunk
-from libs.legal_summarizer.document.structure import (
-    DocumentStructure,
-)
 from libs.legal_summarizer.document.physical import (
     PhysicalDocument,
+)
+from libs.legal_summarizer.document.structure import (
+    DocumentStructure,
 )
 from libs.legal_summarizer.retrieval.normalizer import (
     tokenize_normalized,
 )
 from libs.legal_summarizer.retrieval.query import (
-    RetrievalHit, RetrievalConfig, score_chunk,
+    RetrievalConfig,
+    RetrievalHit,
+    score_chunk,
 )
 
 
@@ -83,7 +86,7 @@ class RetrievalIndex:
         structure: DocumentStructure,
         physical: PhysicalDocument | None = None,
         document_id: str = "doc",
-    ) -> "RetrievalIndex":
+    ) -> RetrievalIndex:
         """Построить inverted index из chunks.
 
         ``L3`` строится один раз — повторные вызовы ``retrieve``

@@ -21,14 +21,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from libs.legal_summarizer.planning.plan import (
-    ExecutionPlan,
-)
 from libs.legal_summarizer.document.structure import (
     DocumentStructure,
 )
 from libs.legal_summarizer.llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
+    TokenEstimator,
+    TokenEstimatorConfig,
+)
+from libs.legal_summarizer.planning.plan import (
+    ExecutionPlan,
 )
 
 
@@ -127,12 +128,13 @@ def build_execution_plan(
     strategy selection и adjacent packing. ``AdjacentPackingConfig``
     формируется **из** ``ExecutionPolicy``; никаких скрытых defaults.
     """
-    from libs.legal_summarizer.planning.plan import (
-        build_direct_plan, build_map_plan,
-    )
     from libs.legal_summarizer.chunking.packing import (
         AdjacentPackingConfig,
         pack_chunks_with_adjacent,
+    )
+    from libs.legal_summarizer.planning.plan import (
+        build_direct_plan,
+        build_map_plan,
     )
 
     cfg = policy or ExecutionPolicy()

@@ -13,6 +13,7 @@ from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition
 from servers.enterprise.capabilities.vectors.service.main import VectorsService
 
+
 #: Сервис замыкается обработчиком: модульная глобальная переменная зависела бы
 #: от порядка регистрации операций.
 def create_tool(registry_container: ToolContainer) -> ToolDefinition:

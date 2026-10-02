@@ -19,7 +19,9 @@ Legacy API в ``cache.manifest`` (``write_document_snapshot``,
 
 Scope:
 
-* Производственные модули ``scripts/`` (исключая ``cache/``).
+* Производственные модули ``libs/legal_summarizer/`` (слои из
+  :data:`_PRODUCTION_DIRS`, ``cache/`` исключён — это сам владелец
+  document-level API).
 * Импорты **operation-level** API из ``cache.manifest``
   (``load_manifest``, ``save_manifest``, ``write_chunk_result``,
   ``read_chunk_result``, ``write_result``, ``read_result``,
@@ -30,6 +32,16 @@ Scope:
 
 Любые новые ссылки на document-level symbols в production — это
 regression, и этот тест должен упасть явно.
+
+История стража: модуль жил в ``workspace/skills/legal_summarizer/scripts/``,
+и путь к production-коду выводился как ``parents[2] / "scripts"``. Домен
+переехал в платформу (коммит ``84c1c3c``), но путь остался: ``parents[2]``
+от нового места — это ``mcp-platform/tests``, а ``tests/scripts`` не
+существует. Коллектор молча возвращал **пустой** список, и все шесть тестов
+зелёные проверяли ноль файлов. Худший вид мёртвого теста — зелёный сигнал
+без проверки. Поэтому рядом с перенаправлением стоит
+``test_production_tree_is_actually_collected``: пустой обход обязан валить
+страж явно, чтобы следующий переезд снова не прошёл вхолостую.
 """
 
 from __future__ import annotations
@@ -39,9 +51,13 @@ from pathlib import Path
 
 import pytest
 
-_SKILL_ROOT = Path(__file__).resolve().parents[2]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-_CACHE_DIR = _SCRIPTS_DIR / "cache"
+# Файл лежит в ``<platform>/tests/legal_summarizer/architecture/``, домен - в
+# ``<platform>/libs/legal_summarizer/``. Раньше здесь стоял Skill агента и путь
+# выводился как ``parents[2] / "scripts"``; после переноса в платформу тот путь
+# указывал на несуществующий ``tests/scripts``.
+_PLATFORM_ROOT = Path(__file__).resolve().parents[3]
+_LIB_DIR = _PLATFORM_ROOT / "libs" / "legal_summarizer"
+_CACHE_DIR = _LIB_DIR / "cache"
 _PRODUCTION_DIRS = (
     "application",
     "execution",
@@ -53,6 +69,22 @@ _PRODUCTION_DIRS = (
     "llm",
 )
 _TOP_LEVEL_PRODUCTION = ("cli.py", "cli_query.py")
+
+#: Минимальный размер обхода. Девять слоёв + два входа дают ~77 модулей;
+#: число заведомо меньше реального и служит как «обход не сломался».
+_MIN_PRODUCTION_FILES = 30
+
+
+def _read_source(path: Path) -> str:
+    """Прочитать исходник для ``ast.parse``.
+
+    ``utf-8-sig``, а не ``utf-8``: файл с BOM начинается с U+FEFF, и
+    ``ast.parse`` на нём падает с SyntaxError. В этом страже такое падение
+    либо роняет прогон, либо (в соседних файлах) проглатывается как
+    ``except SyntaxError: continue`` - то есть файл молча выпадает из-под
+    охраны, оставаясь зелёным.
+    """
+    return path.read_text(encoding="utf-8-sig")
 
 
 # Document-level symbols, которые должны жить ТОЛЬКО в cache/document_cache.py
@@ -111,7 +143,7 @@ def _collect_production_files() -> list[Path]:
     """Собрать все production-модули вне ``cache/`` и ``__pycache__``."""
     files: list[Path] = []
     for sub in _PRODUCTION_DIRS:
-        sub_path = _SCRIPTS_DIR / sub
+        sub_path = _LIB_DIR / sub
         if not sub_path.is_dir():
             continue
         for p in sub_path.rglob("*.py"):
@@ -119,19 +151,19 @@ def _collect_production_files() -> list[Path]:
                 continue
             files.append(p)
     for top in _TOP_LEVEL_PRODUCTION:
-        p = _SCRIPTS_DIR / top
+        p = _LIB_DIR / top
         if p.is_file():
             files.append(p)
     return files
 
 
 def _rel(p: Path) -> str:
-    """Относительный путь от ``_SCRIPTS_DIR`` с forward slash separator.
+    """Относительный путь от ``_LIB_DIR`` с forward slash separator.
 
     Используем forward slash, чтобы match с whitelist строками
     (которые заданы в POSIX-стиле) работал на Windows.
     """
-    rel = p.relative_to(_SCRIPTS_DIR)
+    rel = p.relative_to(_LIB_DIR)
     return str(rel).replace("\\", "/")
 
 
@@ -226,6 +258,28 @@ def _attr_access_in_strings(
 # ============================================================================
 
 
+def test_production_tree_is_actually_collected():
+    """Страж не должен зеленеть вхолостую.
+
+    Остальные пять тестов этого модуля обходят результат
+    :func:`_collect_production_files`. Если каталог домена переедет ещё раз
+    или слой переименуют, обход вернёт пустой список - и все проверки станут
+    зелёными, не прочитав ни одного файла. Именно так этот страж и умер
+    однажды: ``parents[2] / "scripts"`` перестал существовать после переноса
+    домена в платформу, и шесть тестов молча ничего не проверяли.
+
+    Поэтому пустой (или подозрительно малый) обход - это падение, а не
+    «нечего проверять».
+    """
+    collected = _collect_production_files()
+    assert len(collected) >= _MIN_PRODUCTION_FILES, (
+        f"обход {_LIB_DIR} нашёл всего {len(collected)} модулей "
+        f"(ожидается не меньше {_MIN_PRODUCTION_FILES}) — страж проверяет "
+        "ничто. Проверь путь к домену в _LIB_DIR / _PRODUCTION_DIRS."
+    )
+    assert _LIB_DIR.is_dir(), f"каталог домена не найден: {_LIB_DIR}"
+
+
 def test_no_legacy_document_level_imports_in_production():
     """Production-модули не должны импортировать document-level symbols
     из ``cache.manifest``.
@@ -233,7 +287,7 @@ def test_no_legacy_document_level_imports_in_production():
     offenders: list[tuple[str, str, int]] = []
     for path in _collect_production_files():
         rel = _rel(path)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = ast.parse(_read_source(path), filename=str(path))
         for name, module, lineno in _scan_imports(tree):
             if name == "*":
                 offenders.append((rel, "import cache.manifest", lineno))
@@ -276,7 +330,7 @@ def test_no_document_level_attribute_access_in_production():
     offenders: list[tuple[str, str, int]] = []
     for path in _collect_production_files():
         rel = _rel(path)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = ast.parse(_read_source(path), filename=str(path))
         for attr, lineno in _scan_attribute_access(tree, forbidden_attrs):
             offenders.append((rel, attr, lineno))
     assert offenders == [], (
@@ -291,8 +345,8 @@ def test_no_document_filesystem_literals_in_production():
     offenders: list[tuple[str, str, int, str]] = []
     for path in _collect_production_files():
         rel = _rel(path)
-        src = path.read_text(encoding="utf-8")
-        tree = ast.parse(src)
+        src = _read_source(path)
+        tree = ast.parse(src, filename=str(path))
         docstrings = _scan_string_literals(tree)
 
         # Collect only string literals NOT in docstrings
@@ -382,7 +436,7 @@ def test_operation_level_manifest_whitelist_enforced():
 
     for path in _collect_production_files():
         rel = _rel(path)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = ast.parse(_read_source(path), filename=str(path))
         for name, module, lineno in _scan_imports(tree):
             # ``import cache.manifest`` или ``import cache`` + ``manifest``
             # — запрещены вне whitelist.
@@ -419,7 +473,8 @@ def test_operation_level_manifest_whitelist_enforced():
         + (
             "\n\nЕсли этот модуль реально нуждается в operation-level "
             "API, добавьте его в _LEGACY_MANIFEST_ALLOWED_MODULES в "
-            "tests/architecture/test_document_cache_boundaries.py "
+            "tests/legal_summarizer/architecture/"
+            "test_document_cache_boundaries.py "
             "(явное решение, не implicit)."
         )
     )

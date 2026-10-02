@@ -35,7 +35,7 @@ def local_structure_label(text: str) -> str:
     return m.group(0).strip()[:120] if m else ""
 
 
-def chunk_structure_label(chunk: "Chunk") -> str:
+def chunk_structure_label(chunk: Chunk) -> str:
     """Структурная метка чанка: global heading, иначе локальная из текста."""
     heading = getattr(chunk, "section_heading", "") or ""
     if heading:
@@ -43,7 +43,7 @@ def chunk_structure_label(chunk: "Chunk") -> str:
     return local_structure_label(getattr(chunk, "text", "") or "")
 
 
-def format_chunk_block(chunk: "Chunk", summary: str) -> str:
+def format_chunk_block(chunk: Chunk, summary: str) -> str:
     """Подписать блок чанка его структурной меткой при сборке ответа."""
     label = chunk_structure_label(chunk)
     if label:

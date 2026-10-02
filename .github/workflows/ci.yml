@@ -14,6 +14,15 @@ jobs:
   fast-tests:
     name: Fast tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Верхняя граница самой джобы, отдельная от границы теста
+    # (timeout = 300 в [tool.pytest.ini_options]). Агентский набор замерян в
+    # ~2.5 минуты на нормальном коде; 20 минут — запас на медленные раннеры,
+    # на pip install -r requirements.txt (nanobot/faiss/duckdb) и на 3.13,
+    # который обычно медленнее. Матрица лимит не умножает: таймаут
+    # применяется к каждому job-leg отдельно. Выше 30 поднимать незачем —
+    # джоба, висящая десятки минут при норме в минуты, означает зависший
+    # тест, и его должен ловить timeout=300, а не таймаут джобы.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -29,13 +38,24 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        # pytest-timeout ОБЯЗАТЕЛЕН, а не опционален: без установленного
+        # плагина опции timeout / timeout_method в [tool.pytest.ini_options]
+        # МОЛЧА игнорируются (pytest печатает "Unknown config option:
+        # timeout" и идёт дальше) — то есть верхняя граница теста не
+        # включается, и зависший прогон снова упирается в память машины.
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov ruff coverage
+          pip install pytest pytest-asyncio pytest-timeout pytest-cov ruff coverage
 
       - name: Lint with ruff
-        run: ruff check lib workspace tests tools
+        # Только lib и workspace. tests/ и tools/ исключены в корневом
+        # pyproject.toml ([tool.ruff].extend-exclude) намеренно: это фикстуры и
+        # утилиты с длинными литералами и намеренными нарушениями стиля, их чинить
+        # массово нельзя. Явный путь в команде exclusion НЕ отсекает (для этого
+        # есть --force-exclude), поэтому передавать их сюда означало бы включить
+        # линтер ровно на то, что проект решил не линтовать.
+        run: ruff check lib workspace
 
       - name: Run fast tests (no live, no integration)
         env:
@@ -46,6 +66,12 @@ jobs:
   coverage:
     name: Coverage report
     runs-on: ubuntu-latest
+    # Тот же агентский набор (~2.5 минуты), но под coverage run, который
+    # заметно удорожает исполнение, плюс coverage report/xml и загрузка в
+    # Codecov. 25 минут — запас на медленный раннер и на тройной счёт
+    # времени. needs: fast-tests означает, что в эти минуты не входит
+    # ожидание соседней джобы.
+    timeout-minutes: 25
     needs: fast-tests
 
     steps:
@@ -61,7 +87,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov coverage
+          # pytest-timeout обязателен — без него опция timeout в
+          # [tool.pytest.ini_options] молча игнорируется (см. комментарий
+          # в fast-tests: "Install dependencies").
+          pip install pytest pytest-asyncio pytest-timeout pytest-cov coverage
 
       - name: Run coverage
         env:
@@ -83,6 +112,12 @@ jobs:
   upgrade-readiness:
     name: Upgrade readiness (contract tests)
     runs-on: ubuntu-latest
+    # Одна версия Python, только tests/contract/ (подмножество агентского
+    # набора), без линта. Сама работа — меньше минуты, но pip install
+    # -r requirements.txt общий и тяжёлый. 15 минут — с запасом на медленный
+    # раннер и холодный кеш pip, при этом джоба всё равно не может висеть
+    # бесконечно.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -97,10 +132,87 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          # pytest-timeout обязателен — без него опция timeout в
+          # [tool.pytest.ini_options] молча игнорируется (см. комментарий
+          # в fast-tests: "Install dependencies").
+          pip install pytest pytest-asyncio pytest-timeout
 
       - name: Run contract tests
         env:
           NANOBOT_LIVE_E2E: "0"
           NANOBOT_INTEGRATION: "0"
         run: pytest tests/contract/ -v --tb=short
+
+  # Платформа — независимая кодовая база: свой requirements.txt, свой
+  # pyproject.toml, ~4.7k тестов. Не в needs: — не зависит от агентских
+  # джобов и идёт параллельно. Гейтить не нужно: БД/LLM не требуются.
+  # Линт платформы ([tool.ruff] в mcp-platform/pyproject.toml) включается
+  # вместе с зачисткой кода: до неё платформа была единственной кодовой
+  # базой без шага линта, и «одинаковые правила на обе кодовые базы»
+  # оставалось только заявленным в корневом pyproject.toml. Правила
+  # объявлены те же (E,F,W,I,B,UP), так что джоба теперь ведёт себя так же,
+  # как fast-tests, — только по своему поддереву.
+  platform-tests:
+    name: Platform tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Платформенный набор замерян в ~1.2 минуты, плюс отдельный шаг живого
+    # stdio-контракта (поднимает настоящий подпроцесс) и линт. Те же 20
+    # минут, что и в fast-tests: платформенный requirements.txt не легче
+    # агентского (duckdb / faiss-cpu / pyarrow / psycopg2-binary), поэтому
+    # запас задаёт установка, а не тесты. Матрица 3.11/3.12/3.13 лимит не
+    # умножает — таймаут у каждого job-leg свой.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: mcp-platform/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r mcp-platform/requirements.txt
+          # pytest-timeout обязателен — без него опция timeout в
+          # mcp-platform/pyproject.toml молча игнорируется (см. комментарий
+          # в fast-tests: "Install dependencies").
+          pip install pytest pytest-asyncio pytest-timeout coverage ruff
+
+      - name: Lint with ruff
+        working-directory: mcp-platform
+        # Те же правила, что и в fast-tests (E,F,W,I,B,UP) — объявлены
+        # отдельно в каждом pyproject.toml, потому что платформа не должна
+        # зависеть от того, где запущен ruff.
+        # Пути именно servers/libs: tests и benchmarks остаются в
+        # extend-exclude ([tool.ruff] в mcp-platform/pyproject.toml) по той
+        # же осознанной причине, что и в корне — это фикстуры с длинными
+        # литералами и намеренными нарушениями стиля. Явный путь exclusion
+        # не отсекает (для этого есть --force-exclude), поэтому передавать
+        # tests сюда означало бы включить линтер ровно на то, что проект
+        # решил не линтовать.
+        run: python -m ruff check servers libs
+
+      - name: Run platform tests (no live, no integration)
+        working-directory: mcp-platform
+        # Тот же фильтр маркеров, что в fast-tests: словарь маркеров объявлен
+        # одинаково в обоих pyproject.toml, значит и отбор должен быть одинаковым.
+        # Отсекаются 8 тестов tests/test_live_stdio_contract.py.
+        run: python -m pytest tests -q --tb=short -m "not live and not integration"
+
+      # Исключение из фильтра выше — сознательное. Живой stdio-контракт
+      # поднимает настоящий подпроцесс, но эталонный сервер не требует ни БД,
+      # ни модели, ни снимка: маркер `live` выставлен ради единообразия отбора,
+      # а не ради дороговизны (комментарий в самом тесте). Контракт пересечения
+      # границы процесса не проверяется никаким другим набором, поэтому он
+      # остаётся гейтом — отдельным шагом и под своим именем.
+      - name: Run live stdio contract (cheap, no DB/LLM)
+        working-directory: mcp-platform
+        run: python -m pytest tests/test_live_stdio_contract.py -q --tb=short

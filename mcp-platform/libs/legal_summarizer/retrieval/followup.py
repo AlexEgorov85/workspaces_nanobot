@@ -31,14 +31,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from libs.legal_summarizer.retrieval.context_expansion import (
-    ContextExpansionConfig, expand_context,
-)
 from libs.legal_summarizer.document.analysis import (
     DocumentAnalysis,
 )
+from libs.legal_summarizer.retrieval.context_expansion import (
+    ContextExpansionConfig,
+    expand_context,
+)
 from libs.legal_summarizer.retrieval.fallback import (
-    FullDocFallbackConfig, decide_retrieval, full_document_fallback,
+    FullDocFallbackConfig,
+    decide_retrieval,
+    full_document_fallback,
 )
 from libs.legal_summarizer.retrieval.query import (
     RetrievalConfig,

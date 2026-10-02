@@ -23,10 +23,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
-
-from libs.legal_summarizer.cache import manifest
 from typing import Any
 
+from libs.legal_summarizer.cache import manifest
 
 #: Корень платформы - в ``sys.path``, чтобы ``libs.legal_summarizer.*``
 #: резолвились при запуске файла как скрипта. Раньше здесь стоял ``parents[4]``,

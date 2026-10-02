@@ -212,11 +212,17 @@ class AgentFactory:
             )
             if factory is not None:
                 hook_factories.append(factory)
-                # _populate_agent_box вызывается ПОСЛЕ ``from_config``,
-                # чтобы closure увидел agent.
-                _populate_box = lambda built: _agent_box.append(built)
-            else:
-                _populate_box = lambda built: None
+
+            # ``_populate_box`` вызывается ПОСЛЕ ``from_config``, чтобы
+            # closure увидел agent. Если фабрика не собралась — бокс
+            # заполнять незачем: ``get_model`` тогда никто не читает
+            # (прежняя ветка с no-op лямбдой того же эффекта не давала).
+            # Ни ``_agent_box``, ни ``factory`` ниже не переприсваиваются,
+            # поэтому closure читает актуальное значение — def здесь
+            # эквивалентен прежним лямбдам.
+            def _populate_box(built: Any) -> None:
+                if factory is not None:
+                    _agent_box.append(built)
 
         kwargs: dict = {
             "session_manager": session_manager,

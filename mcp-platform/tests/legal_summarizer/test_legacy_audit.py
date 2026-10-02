@@ -6,7 +6,6 @@ from pathlib import Path
 
 _PLATFORM_ROOT = Path(__file__).resolve().parents[2]
 _LIB_DIR = _PLATFORM_ROOT / "libs" / "legal_summarizer"
-_SKILL_DIR = _LIB_DIR / "skill"
 # Раньше скилл лежал в агенте и подключал себя в sys.path; в платформе
 # корень и так на месте (mcp-platform/tests/conftest.py).
 
@@ -29,9 +28,8 @@ FORBIDDEN_FILES = [
 
 FORBIDDEN_DIRS = [
     # Phase: filesystem migration к scripts/ (§ 18 плана)
-    "legal_summarizer",
+    "legal_summarizer",  # scripts/legal_summarizer/ — вложенный пакет
     "src",
-    "legal_summarizer",  # scripts/legal_summarizer/ (nested package)
 ]
 
 def test_forbidden_files_do_not_exist():

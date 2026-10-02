@@ -146,7 +146,6 @@ def main(
         open_snapshot_store,
         resolve_snapshot_setting,
     )
-
     from servers.enterprise.server import _apply_pool_settings, _configure_dsn
 
     if settings is None:

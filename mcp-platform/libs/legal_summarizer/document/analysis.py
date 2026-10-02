@@ -21,18 +21,26 @@ DocumentAnalysis — не перепарсивают документ.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.identity import (
     DocumentIdentity,
 )
-from libs.legal_summarizer.document.structure import (
-    DocumentStructure,
-)
 from libs.legal_summarizer.document.physical import (
     PhysicalDocument,
 )
+from libs.legal_summarizer.document.structure import (
+    DocumentStructure,
+)
+
+if TYPE_CHECKING:
+    # Обе сущности живут в ``retrieval``, который импортирует
+    # ``document.structure``/``physical``, но не этот модуль, так что цикла
+    # нет. Импортируются только под TYPE_CHECKING: ссылки на них есть лишь в
+    # аннотациях, а ``from __future__ import annotations`` делает их ленивыми.
+    from libs.legal_summarizer.retrieval.index import RetrievalIndex
+    from libs.legal_summarizer.retrieval.records import SemanticRecord
 
 
 @dataclass(frozen=True)
@@ -91,7 +99,7 @@ class DocumentAnalysis:
         semantic_records: dict[str, SemanticRecord] | None = None,
         include_retrieval_index: bool = True,
         created_at: str = "",
-    ) -> "DocumentAnalysis":
+    ) -> DocumentAnalysis:
         """Построить DocumentAnalysis из ингредиентов.
 
         Это **canonical** сборка. ``DocumentAnalysis`` —
@@ -153,9 +161,6 @@ class DocumentAnalysis:
         Возвращает список ``RetrievalHit``.
         """
         if self.retrieval_index is None:
-            from libs.legal_summarizer.retrieval.query import (
-                retrieve_chunks,
-            )
             from libs.legal_summarizer.retrieval.query import (
                 retrieve_chunks,
             )

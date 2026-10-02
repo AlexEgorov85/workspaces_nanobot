@@ -24,7 +24,6 @@ LLM-trace (``--llm-trace`` или ``LEGAL_SUMMARIZER_LLM_TRACE=1``) —
 """
 
 
-import os
 import sys
 import time as _time
 from pathlib import Path
@@ -45,7 +44,6 @@ from libs.enterprise_client import (  # noqa: E402
 from libs.enterprise_common.execution.context import (  # noqa: E402
     McpCallContext as _McpCallContext,
 )
-
 
 __all__ = ["chat", "LlmOperationError", "LlmUnavailable"]
 
@@ -170,7 +168,7 @@ def chat(
         duration=f"{_time.monotonic() - start:.2f}s",
         response=response_chars,
     )
-    if _LLM_TRACE_ENABLED and response_chars == 0:
+    if _trace_enabled() and response_chars == 0:
         sys.stderr.write(
             f"[llm-trace WARNING] LLM returned EMPTY response "
             f"(user_chars={user_chars})\n"

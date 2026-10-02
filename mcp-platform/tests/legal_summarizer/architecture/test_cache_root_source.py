@@ -39,7 +39,10 @@ ROOT_RESOLVERS = (
 
 def _parents_indices(path: Path) -> set[int]:
     """Индексы ``parents[N]``, встречающиеся в модуле."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # utf-8-sig, а не utf-8: файл с BOM начинается с U+FEFF, и ast.parse
+    # на нём падает. Здесь падение громкое (без ``except``), но ложное -
+    # страж валил бы на BOM вместо настоящего нарушения.
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     found: set[int] = set()
     for node in ast.walk(tree):
         if (

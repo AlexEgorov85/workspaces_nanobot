@@ -305,7 +305,7 @@ class LlmClient:
         )
         try:
             return future.result(timeout=self._call_timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self.close()
             raise LlmUnavailable(
                 f"операция {operation!r} не ответила за {self._call_timeout:g}с"
@@ -355,7 +355,7 @@ class LlmClient:
             return self._session
         from contextlib import AsyncExitStack
 
-        from mcp import ClientSession, StdioServerParameters
+        from mcp import ClientSession
         from mcp.client.stdio import stdio_client
 
         stack = AsyncExitStack()

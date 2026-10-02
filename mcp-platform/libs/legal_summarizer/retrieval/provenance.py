@@ -22,11 +22,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from libs.legal_summarizer.chunking.chunks import Chunk
-from libs.legal_summarizer.document.structure import (
-    DocumentStructure,
-)
 from libs.legal_summarizer.document.physical import (
     PhysicalDocument,
+)
+from libs.legal_summarizer.document.structure import (
+    DocumentStructure,
 )
 
 

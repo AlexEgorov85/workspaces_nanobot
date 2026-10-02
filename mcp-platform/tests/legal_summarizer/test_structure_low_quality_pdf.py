@@ -26,9 +26,15 @@ def test_unparseable_heading_has_low_confidence():
     """Если heading невозможно распарсить, ``confidence`` низкий."""
     text = "???@@@@@!!!abc"
     candidates = detect_heading_candidates((_b(0, text),), pdf_path=None)
-    if candidates:
-        for c in candidates:
-            assert c.score < 0.7
+    # Ассерт не под условием: вопрос invariant'а — «ни один кандидат не
+    # получает высокую confidence», а не «кандидаты вообще есть».
+    # Раньше стоял ``if candidates:`` — на этом тексте кандидатов 0,
+    # поэтому тело с ассертом не выполнялось ни разу.
+    high_conf = [c for c in candidates if c.score >= 0.7]
+    assert not high_conf, (
+        f"неразбираемый текст не должен давать heading с score >= 0.7: "
+        f"{[(c.score, c.text) for c in high_conf]}"
+    )
 
 def test_no_headings_returns_low_confidence():
     """Только body без headings → очень низкая confidence."""

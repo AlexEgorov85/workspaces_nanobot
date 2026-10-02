@@ -21,13 +21,8 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
@@ -73,27 +68,52 @@ def test_flat_invariant_selected_planned_processed(tmp_path):
     assert tuple(sorted(actual_ids)) == tuple(sorted(selected_ids))
 
 def test_question_invariant_selected_planned_processed(tmp_path):
-    """Question case: selected_ids == planned_ids == processed_ids."""
+    """Question case: selected_ids == planned_ids == processed_ids.
+
+    Выборку строит САМА question-ветка ``build_execution_context``
+    (``select_chunks_for_mode(question=...)``), а не внешний
+    ``selected_chunks``.
+
+    Раньше тест передавал ``selected_chunks=`` и аргумент ``question=``
+    не передавался вовсе. ``build_execution_context`` при заданном
+    ``selected_chunks`` вопрос не учитывает вообще
+    (``context_builder.py``: ветка ``if selected_chunks is not None``
+    идёт до ``select_chunks_for_mode``), поэтому имя и docstring
+    обещали question-кейс, а проверяли произвольную подвыборку
+    ``chunks[1:4]``. Теперь ветка реально исполняется — вместе с
+    retrieval / lexical fallback внутри ``select_chunks_for_mode``.
+    """
     import libs.legal_summarizer.application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
 
-    selected = tuple(insp.chunks[i] for i in (1, 3))
-    selected_ids = tuple(c.chunk_id for c in selected)
-
+    # Вопрос идёт в selection, selection — единственный источник ctx.chunks.
     ctx = summarizer.build_execution_context(
-        insp, selected_chunks=list(selected),
+        insp, question="Текст",
+    )
+
+    # Предусловие проверяется явно: при одном chunk'е стратегия
+    # вырождается в direct и план не строится — проверять нечего,
+    # а тест обязан упасть, а не пройти молча.
+    assert len(ctx.chunks) > 1, (
+        "question-ветка обязана выбрать >1 chunk, иначе стратегия "
+        f"выродится в direct без плана: выбрано {len(ctx.chunks)}"
     )
     assert ctx.strategy in ("map_flat", "map_hierarchical")
     assert ctx.plan is not None
 
+    selected_ids = tuple(c.chunk_id for c in ctx.chunks)
+
     planned_ids = tuple(
         cid for batch in ctx.plan.batches for cid in batch.chunk_ids
     )
-    assert tuple(sorted(planned_ids)) == tuple(sorted(selected_ids))
+    assert tuple(sorted(planned_ids)) == tuple(sorted(selected_ids)), (
+        f"planned set != question-selected set: "
+        f"planned={planned_ids}, selected={selected_ids}"
+    )
 
-    actual = summarizer.map_plan_to_chunk_batches(ctx.plan, list(selected))
+    actual = summarizer.map_plan_to_chunk_batches(ctx.plan, list(ctx.chunks))
     actual_ids = tuple(c.chunk_id for batch in actual for c in batch)
     assert tuple(sorted(actual_ids)) == tuple(sorted(selected_ids))
 

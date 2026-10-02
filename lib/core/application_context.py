@@ -691,11 +691,8 @@ class ApplicationContext:
             # обязан видеть, КАКОЙ компонент DOWN и ПОЧЕМУ, а не только
             # факт ``NOT_READY``.
             breakdown = "; ".join(
-                "%s=%s%s" % (
-                    c.name,
-                    "UP" if c.status == "UP" else "DOWN",
-                    (" (%s)" % c.detail) if c.detail else "",
-                )
+                f"{c.name}={'UP' if c.status == 'UP' else 'DOWN'}"
+                + (f" ({c.detail})" if c.detail else "")
                 for c in report.components
             ) or "no components"
             if report.status == "NOT_READY":
@@ -806,6 +803,7 @@ class ApplicationContext:
             return
         try:
             from utils.db import fetch_with_timeout as _db_fetch
+
             from lib.services.schema_validation import SchemaValidationService
         except Exception as exc:
             # Если зависимости не загрузились — это серьёзная проблема,
@@ -1158,7 +1156,7 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
     _pg_required = _pg_channel_on or getattr(ctx, "storage_mode", "") == "postgres"
 
     def _detail(extra: str = "") -> str:
-        parts = ["storage_mode=%s" % getattr(ctx, "storage_mode", "?")]
+        parts = [f"storage_mode={getattr(ctx, 'storage_mode', '?')}"]
         if extra:
             parts.append(extra)
         return ", ".join(parts)

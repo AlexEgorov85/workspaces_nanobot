@@ -44,13 +44,21 @@ outline даёт очень высокую confidence (0.95).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from libs.legal_summarizer.document.physical import (
-    DocumentBlock,
     PhysicalDocument,
 )
+
+if TYPE_CHECKING:
+    # ``HeadingCandidate`` объявлен в ``heading``, а ``heading`` импортирует
+    # этот модуль на уровне модуля (``map_pdf_outline``,
+    # ``mapped_to_heading_candidates``), поэтому сверху импортировать нельзя:
+    # получится цикл. Аннотации закрываются TYPE_CHECKING'ом, а реальная
+    # конструкция — отложенным импортом внутри функции (тот же приём, что
+    # в ``mapped_to_heading_candidates``).
+    from libs.legal_summarizer.document.heading import HeadingCandidate
 
 
 _log = logging.getLogger(__name__)
@@ -101,6 +109,10 @@ class MappedOutlineCandidate:
 
         Возвращает ``None`` если mapping провалился (нет anchor).
         """
+        from libs.legal_summarizer.document.heading import (
+            HeadingCandidate,
+        )
+
         if self.anchor is None:
             return None
         return HeadingCandidate(
@@ -333,7 +345,7 @@ def map_pdf_outline(
 
 def mapped_to_heading_candidates(
     mapped: list[MappedOutlineCandidate],
-) -> list["HeadingCandidate"]:
+) -> list[HeadingCandidate]:
     """Преобразовать успешно mapped кандидатов в ``HeadingCandidate``.
 
     Провалившие (с ``block_index = -1``) **отбрасываются** —

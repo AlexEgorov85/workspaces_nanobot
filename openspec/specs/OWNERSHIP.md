@@ -38,6 +38,7 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | `configuration/profiles/spec.md` | `profiles/test.jsonc`, `config.json` | `platform.json → profiles.test`, `PROFILE_OWNED_KEYS` |
 | `logging-db/spec.md` | `lib/services/db_logging_service.py`, `log_transport.py` | операции `log_events`, `log_event`, `purge_logs` |
 | `tools-history-search/spec.md` | `workspace/tools/history_search_tool.py` решает область поиска | SQL и изоляция по `session_id` в `history_search` |
+| `testing/unified-test-contract/spec.md` | `tests/`, `pyproject.toml`, `.github/workflows/ci.yml` | `mcp-platform/tests/`, `mcp-platform/pyproject.toml` |
 
 ## `agent` — предмет реализован в агенте
 

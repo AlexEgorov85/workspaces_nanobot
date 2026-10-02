@@ -32,7 +32,6 @@ import sys
 import traceback
 from pathlib import Path
 
-
 # CLI запускается как ``python -m libs.legal_summarizer.cli`` или абсолютным
 # путём к файлу. В первом случае Python кладёт в ``sys.path`` корень
 # платформы, во втором — только каталог пакета, поэтому sibling-модули
@@ -265,6 +264,8 @@ def main() -> None:
         from libs.legal_summarizer.application.estimation import estimate_for_run
         from libs.legal_summarizer.application.service import (
             inspect as _inspect,
+        )
+        from libs.legal_summarizer.application.service import (
             load_text,
             needs_confirmation,
             quick_estimate,

@@ -106,7 +106,7 @@ class DocumentIdentity:
         }
 
     @classmethod
-    def from_path(cls, path: str | Path) -> "DocumentIdentity":
+    def from_path(cls, path: str | Path) -> DocumentIdentity:
         """Identity по контент-хешу файла.
 
         Стоимость: читается **весь** файл. SHA-256 через OpenSSL идёт

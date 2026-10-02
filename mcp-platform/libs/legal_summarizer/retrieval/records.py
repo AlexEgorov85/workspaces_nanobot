@@ -25,7 +25,7 @@ JSON. Опциональные поля можно опускать (через 
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -106,7 +106,7 @@ class SemanticRecord:
         *,
         provenance: Provenance | None = None,
         confidence: float = 0.5,
-    ) -> "SemanticRecord":
+    ) -> SemanticRecord:
         """Создать минимальный record — только summary.
 
         Полезно для малых моделей или старых prompt'ов, которые

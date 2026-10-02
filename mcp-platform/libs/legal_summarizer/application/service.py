@@ -24,13 +24,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import libs.legal_summarizer.application.chunk_selection as _chunk_selection_mod
 import libs.legal_summarizer.application.context_builder as _ctx_builder_mod
 import libs.legal_summarizer.application.estimation as _estimation_mod
-import libs.legal_summarizer.application.execution_orchestration as _exec_orchestration_mod
 import libs.legal_summarizer.application.inspection as _inspection_mod
-import libs.legal_summarizer.application.operation_id as _operation_id_mod
-import libs.legal_summarizer.application.pipeline_structure as _pipeline_structure_mod
+import libs.legal_summarizer.llm.calls as _llm_calls_mod
+import libs.legal_summarizer.llm.config as _llm_config_mod
+import libs.legal_summarizer.llm.sanitize as _llm_sanitize_mod
 from libs.legal_summarizer.application.chunk_selection import (
     relaxed_lexical_fallback,
     select_chunks_for_mode,
@@ -55,8 +54,15 @@ from libs.legal_summarizer.application.inspection import Inspection, inspect
 from libs.legal_summarizer.application.operation_id import (
     make_operation_id,
 )
+
+# Re-export: ``run_canonical_pipeline`` не вызывается этим модулем (идёт
+# через ``inspection``), но остаётся атрибутом ``service`` намеренно —
+# на нём подменяют функцию тесты инварианта «pipeline вызывается ровно
+# один раз» (``monkeypatch.setattr(service, "run_canonical_pipeline", ...)``).
+# Redundant-alias форма помечает имя как явный реэкспорт, поэтому линтер
+# не считает его неиспользуемым импортом. Убирать атрибут нельзя.
 from libs.legal_summarizer.application.pipeline_structure import (
-    run_canonical_pipeline,
+    run_canonical_pipeline as run_canonical_pipeline,
 )
 from libs.legal_summarizer.application.question_context import build_question_context
 from libs.legal_summarizer.cache.document_cache import DocumentCache
@@ -64,11 +70,8 @@ from libs.legal_summarizer.cache.manifest import (
     load_manifest,
     read_result,
 )
-from libs.legal_summarizer.document.structure import DocumentStructure
 from libs.legal_summarizer.document.analysis import DocumentAnalysis
-import libs.legal_summarizer.llm.config as _llm_config_mod
-import libs.legal_summarizer.llm.calls as _llm_calls_mod
-import libs.legal_summarizer.llm.sanitize as _llm_sanitize_mod
+from libs.legal_summarizer.document.structure import DocumentStructure
 from libs.legal_summarizer.llm.prompts_runtime import LENGTH_INSTRUCTIONS
 from libs.legal_summarizer.planning.strategy import (
     build_execution_plan,

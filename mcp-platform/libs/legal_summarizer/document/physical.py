@@ -47,7 +47,6 @@ from libs.legal_summarizer.document.identity import (
     DocumentIdentity,
 )
 
-
 SUPPORTED_FORMATS: frozenset[str] = frozenset({"pdf", "docx", "txt"})
 
 
@@ -110,12 +109,12 @@ class PhysicalDocument:
     size_bytes: int
     blocks: tuple[DocumentBlock, ...]
     page_count: int
-    _blocks_by_ord_cache: dict[int, "DocumentBlock"] | None = field(
+    _blocks_by_ord_cache: dict[int, DocumentBlock] | None = field(
         default=None, repr=False, compare=False,
     )
 
     @property
-    def blocks_by_ord(self) -> dict[int, "DocumentBlock"]:
+    def blocks_by_ord(self) -> dict[int, DocumentBlock]:
         """Lookup ``DocumentBlock`` по ``ordinal`` (identity, не position).
 
         Invariant в текущей реализации: ``blocks[i].ordinal == i``. Этот
@@ -143,7 +142,7 @@ class PhysicalDocument:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PhysicalDocument":
+    def from_dict(cls, data: dict[str, Any]) -> PhysicalDocument:
         blocks = tuple(DocumentBlock(**b) for b in data["blocks"])
         return cls(
             path=data["path"],

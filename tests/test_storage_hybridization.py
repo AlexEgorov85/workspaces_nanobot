@@ -91,7 +91,11 @@ class TestNoDirectSQLToSessionTables:
             *whitelist,
         ):
             try:
-                src = path.read_text(encoding="utf-8")
+                # utf-8-sig, а не utf-8: файл с BOM начинается с U+FEFF, и
+                # ast.parse на нём падает. ``except SyntaxError: continue``
+                # ниже проглатывал это молча, и модуль с BOM выпадал из-под
+                # стража, оставаясь зелёным.
+                src = path.read_text(encoding="utf-8-sig")
                 tree = ast.parse(src, filename=str(path))
             except (SyntaxError, UnicodeDecodeError):
                 continue
@@ -130,7 +134,7 @@ class TestNoNewPoolCreated:
             if not path.exists():
                 continue
             try:
-                src = path.read_text(encoding="utf-8")
+                src = path.read_text(encoding="utf-8-sig")  # см. выше: BOM роняет ast.parse
                 tree = ast.parse(src, filename=str(path))
             except (SyntaxError, UnicodeDecodeError):
                 continue

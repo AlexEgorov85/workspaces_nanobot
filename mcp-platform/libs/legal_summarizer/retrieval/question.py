@@ -16,7 +16,9 @@ from libs.legal_summarizer.document.analysis import (
     DocumentAnalysis,
 )
 from libs.legal_summarizer.retrieval.followup import (
-    FollowupConfig, FollowupResult, build_followup_response,
+    FollowupConfig,
+    FollowupResult,
+    build_followup_response,
 )
 
 

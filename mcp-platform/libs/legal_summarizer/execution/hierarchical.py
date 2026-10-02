@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
 
 from libs.legal_summarizer.document.structure import DocumentStructure
 from libs.legal_summarizer.execution.config import HierarchicalReducerConfig
 from libs.legal_summarizer.llm.config import mr_trace_enabled
+
 
 def deterministic_truncate(text: str, max_chars: int) -> str:
     """Deterministic head + tail truncate с omission marker.

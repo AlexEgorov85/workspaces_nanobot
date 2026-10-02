@@ -178,7 +178,11 @@ def _imported_target(module: str | None) -> str | None:
 
 def _walk_module(path: Path) -> list[tuple[str, str]]:
     """Return list of (source_line, fully-qualified-module) imports in ``path``."""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    # utf-8-sig, а не utf-8: файл с BOM начинается с U+FEFF, и ast.parse
+    # на нём падает. ``errors="replace"`` тут не спасает — BOM не ошибка
+    # декодирования, поэтому SyntaxError уходил в ``except`` ниже и модуль
+    # молча выпадал из-под стража, оставаясь зелёным.
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
     try:
         tree = ast.parse(text, filename=str(path))
     except SyntaxError:
@@ -256,7 +260,7 @@ def test_execution_does_not_import_application() -> None:
         if path.name == "__init__.py":
             continue
         rel = path.relative_to(_PLATFORM_ROOT)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")  # см. _walk_module
         try:
             tree = ast.parse(text, filename=str(path))
         except SyntaxError:

@@ -33,12 +33,6 @@ from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.analysis import (
     DocumentAnalysis,
 )
-from libs.legal_summarizer.chunking.chunker import (
-    ChunkPlanner,
-)
-from libs.legal_summarizer.document.loader import (
-    DocumentLoader,
-)
 from libs.legal_summarizer.document.heading import (
     detect_heading_candidates,
 )
@@ -49,8 +43,8 @@ from libs.legal_summarizer.document.hierarchy import (
 from libs.legal_summarizer.document.identity import (
     DocumentIdentity,
 )
-from libs.legal_summarizer.document.structure import (
-    DocumentStructure,
+from libs.legal_summarizer.document.loader import (
+    DocumentLoader,
 )
 from libs.legal_summarizer.document.physical import (
     PhysicalDocument,
@@ -58,11 +52,15 @@ from libs.legal_summarizer.document.physical import (
 from libs.legal_summarizer.document.repair import (
     repair_structure,
 )
+from libs.legal_summarizer.document.structure import (
+    DocumentStructure,
+)
 from libs.legal_summarizer.document.title import (
     resolve_title,
 )
 from libs.legal_summarizer.document.validation import (
-    ValidationReport, validate_structure,
+    ValidationReport,
+    validate_structure,
 )
 
 

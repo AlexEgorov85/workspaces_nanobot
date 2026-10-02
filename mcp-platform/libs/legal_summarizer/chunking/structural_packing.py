@@ -20,19 +20,16 @@ chunks в 5-10x для документов с nested sections.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
-from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
 from libs.legal_summarizer.document.structure import (
     DocumentStructure,
-    StructureNode,
 )
-
 
 _MAJOR_SEMANTIC_TYPES = frozenset({"chapter", "section", "appendix", "razdel"})
 
@@ -118,7 +115,6 @@ def _direct_blocks_for_node(
     subtree range ни одного child'а. Исключаем tables и oversized —
     они обрабатываются отдельно как packing barriers.
     """
-    node = struct.nodes[node_id]
     start, end = _node_subtree_range(node_id, struct)
 
     child_ranges: list[tuple[int, int]] = []

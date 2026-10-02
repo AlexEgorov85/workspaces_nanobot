@@ -36,7 +36,8 @@ from libs.legal_summarizer.document.structure import (
     DocumentStructure,
 )
 from libs.legal_summarizer.llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
+    TokenEstimator,
+    TokenEstimatorConfig,
 )
 
 

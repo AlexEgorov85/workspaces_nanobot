@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 def _make_structure_with_nested():
     """Структура: root, chapter 0..4, два articles (0..1, 2..2), article2 (3..3)."""

@@ -38,7 +38,7 @@ from servers.enterprise.capabilities.audit.tools.run_script import (
     create_tool as create_run_script,
 )
 
-from test_audit_lib_fakes import (
+from audit_lib_fakes import (
     REGISTRY_TABLE,
     FakeSnapshot,
     make_registry_row,

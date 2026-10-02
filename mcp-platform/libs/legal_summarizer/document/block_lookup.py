@@ -16,7 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from libs.legal_summarizer.document.physical import (
-    DocumentBlock, PhysicalDocument,
+    DocumentBlock,
+    PhysicalDocument,
 )
 
 

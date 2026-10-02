@@ -59,20 +59,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from libs.legal_summarizer.chunking.chunks import Chunk
+from libs.legal_summarizer.application.brief_compression import (
+    BriefSection,
+    render_sections,
+)
 from libs.legal_summarizer.chunking.chunker import _make_chunk_id as _canonical_chunk_id
+from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.analysis import DocumentAnalysis
 from libs.legal_summarizer.document.physical import DocumentBlock
 from libs.legal_summarizer.document.structure import (
     DocumentStructure,
     StructureNode,
 )
-
-from libs.legal_summarizer.application.brief_compression import (
-    BriefSection,
-    render_sections,
-)
-
 
 _MEANINGFUL_NODE_TYPES = frozenset({
     "section",

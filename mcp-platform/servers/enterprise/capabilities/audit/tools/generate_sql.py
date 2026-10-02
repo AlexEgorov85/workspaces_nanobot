@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import json
-
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 

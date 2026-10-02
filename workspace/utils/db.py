@@ -61,7 +61,6 @@ from typing import Any
 import psycopg2
 import psycopg2.extensions
 import psycopg2.extras
-
 from utils.clean_text import clean_text
 
 # Глобальный адаптер: psycopg2 автоматически сериализует dict → JSONB

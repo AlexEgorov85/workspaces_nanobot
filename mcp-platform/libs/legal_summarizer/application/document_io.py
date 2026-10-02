@@ -11,7 +11,6 @@ from pathlib import Path
 
 from libs.office import extract_text
 
-
 _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 
 

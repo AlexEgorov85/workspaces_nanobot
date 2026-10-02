@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 #: Промпты лежат с доменом, в ``libs/legal_summarizer/skill/prompts/`` -
 #: рядом с ``SKILL.md`` и ``references/``. Пока payload не переехал в
 #: capability (п. 11.4), держать его в ``capabilities/`` нельзя: страж

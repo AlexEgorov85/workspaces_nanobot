@@ -23,22 +23,29 @@ Chunker, который использует ``DocumentStructure`` как еди
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING
 
 from libs.legal_summarizer.chunking.chunks import (
     Chunk,
     ChunkConfig,
     _split_block_with_offsets,
 )
+from libs.legal_summarizer.document.physical import (
+    PhysicalDocument,
+)
 from libs.legal_summarizer.document.structure import (
     DocumentStructure,
     build_block_ownership,
     owner_for_block,
 )
-from libs.legal_summarizer.document.physical import (
-    DocumentBlock,
-    PhysicalDocument,
-)
+
+if TYPE_CHECKING:
+    # ``PackableUnit`` живёт в ``structural_packing``, который импортируется
+    # отложенно (см. тело chunk_documents) — на уровне модуля цикл импортов
+    # не возник бы, но аннотация используется только для типизации и
+    # ``from __future__ import annotations`` делает её ленивой, так что
+    # поднимать импорт в рантайм незачем.
+    from libs.legal_summarizer.chunking.structural_packing import PackableUnit
 
 
 _MAJOR_SEMANTIC_TYPES = frozenset({"chapter", "section", "appendix", "razdel"})
@@ -172,7 +179,7 @@ def _ancestor_chain_titles(
 
 
 def _build_context_preamble(
-    unit: "PackableUnit",
+    unit: PackableUnit,
     struct: DocumentStructure,
     cache: dict[str, str],
 ) -> str:
@@ -501,14 +508,12 @@ def chunk_from_structure_with_diagnostics(
     struct: DocumentStructure,
     *,
     config: DocumentStructureChunkerConfig | None = None,
-) -> tuple[list[Chunk], "ChunkingDiagnostics"]:
+) -> tuple[list[Chunk], ChunkingDiagnostics]:
     """Создать chunks + вернуть ``ChunkingDiagnostics``.
 
     Diagnostics собирается по результату chunking'а и не влияет на сам
     алгоритм. Полезно для smoke-тестов и CLI-отчётов.
     """
-    from dataclasses import dataclass
-
     chunks = chunk_from_structure(doc, struct, config=config)
 
     char_counts = [c.char_count for c in chunks]

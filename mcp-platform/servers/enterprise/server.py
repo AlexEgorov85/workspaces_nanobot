@@ -236,7 +236,6 @@ def _build_container(
     отобранных capability. Это не оптимизация, а условие корректности —
     см. ``_needs_data()``.
     """
-    from libs.llm import gateway as llm_gateway
     from libs.llm.gateway import LlmGateway, set_gateway
     from servers.enterprise.capabilities.llm.service.main import LlmService
 

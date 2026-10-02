@@ -19,14 +19,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-from libs.legal_summarizer.document.structure import (
-    DocumentTitle,
-)
 from libs.legal_summarizer.document.physical import (
     DocumentBlock,
     PhysicalDocument,
+)
+from libs.legal_summarizer.document.structure import (
+    DocumentTitle,
 )
 
 

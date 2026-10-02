@@ -26,7 +26,8 @@ from dataclasses import dataclass
 
 from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
+    TokenEstimator,
+    TokenEstimatorConfig,
 )
 
 

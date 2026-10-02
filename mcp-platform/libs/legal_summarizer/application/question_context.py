@@ -24,8 +24,6 @@ document-level cache без повторного map-вызова LLM.
 
 from __future__ import annotations
 
-from typing import Iterable
-
 from libs.legal_summarizer.cache.document_cache import DocumentCache
 from libs.legal_summarizer.chunking.chunks import Chunk
 
@@ -72,7 +70,7 @@ def _format_section_summary_block(
 
 
 def _summaries_block_text(
-    chunk: "Chunk",
+    chunk: Chunk,
     *,
     section_summary: str | None,
     chunk_summary: str | None,
@@ -176,7 +174,7 @@ def build_question_context(
 
     # Вычислить «несущую» часть каждого блока (metadata + summaries).
     overhead_per_chunk: list[int] = []
-    for chunk, block in zip(selected_chunks, blocks):
+    for chunk, _block in zip(selected_chunks, blocks, strict=True):
         chunk_summary = chunk_summaries.get(chunk.chunk_id)
         section_summary = (
             section_summaries.get(chunk.section_id)
@@ -218,7 +216,9 @@ def build_question_context(
     per_chunk_source_budget = max(0, available_for_sources // max(1, len(selected_chunks)))
 
     truncated_blocks: list[str] = []
-    for chunk, overhead in zip(selected_chunks, overhead_per_chunk):
+    for chunk, _overhead in zip(
+        selected_chunks, overhead_per_chunk, strict=True,
+    ):
         chunk_summary = chunk_summaries.get(chunk.chunk_id)
         section_summary = (
             section_summaries.get(chunk.section_id)

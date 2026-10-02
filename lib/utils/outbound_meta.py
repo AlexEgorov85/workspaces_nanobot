@@ -105,10 +105,10 @@ def is_outbound_noise(msg: Any) -> bool:
     evt = _typed_event(msg)
     try:
         from nanobot.bus.outbound_events import (
-            StreamDeltaEvent,
-            StreamEndEvent,
             ProgressEvent,
             RetryWaitEvent,
+            StreamDeltaEvent,
+            StreamEndEvent,
         )
     except Exception:
         return False

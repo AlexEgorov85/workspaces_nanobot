@@ -40,7 +40,6 @@ from libs.llm.gateway import (
     LlmGateway,
     optional_text,
     require_messages,
-    require_text,
 )
 from libs.llm.gateway import gateway as llm_gateway
 

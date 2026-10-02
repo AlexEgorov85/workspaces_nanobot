@@ -26,7 +26,6 @@ from libs.office.parser import (
     summarize,
 )
 
-
 __all__ = [
     "detect_format",
     "extract_tables",

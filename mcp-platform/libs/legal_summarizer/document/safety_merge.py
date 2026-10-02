@@ -26,12 +26,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from libs.legal_summarizer.document.physical import (
+    DocumentBlock,
+)
 from libs.legal_summarizer.document.structure import (
     DocumentStructure,
     StructureNode,
-)
-from libs.legal_summarizer.document.physical import (
-    DocumentBlock,
 )
 
 

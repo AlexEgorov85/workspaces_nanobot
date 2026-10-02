@@ -250,7 +250,7 @@ class EnterpriseMcpClient:
             result = await asyncio.wait_for(
                 session.list_tools(), timeout=self._timeout
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             await self._reset()
             raise EnterpriseMcpUnavailable(
                 f"discovery не ответил за {self._timeout:g}с"
@@ -261,7 +261,7 @@ class EnterpriseMcpClient:
         tools = sorted(getattr(result, "tools", None) or [], key=lambda t: t.name)
         return [str(t.name) for t in tools]
 
-    def _identity_from_turn(self) -> "CallIdentity | None":
+    def _identity_from_turn(self) -> CallIdentity | None:
         """Собрать личность вызова из доверенного контекста оборота.
 
         Это единственное место, где личность вызова появляется сама. Раньше
@@ -326,7 +326,7 @@ class EnterpriseMcpClient:
         operation: str,
         arguments: dict[str, Any] | None = None,
         *,
-        identity: "CallIdentity | None" = None,
+        identity: CallIdentity | None = None,
     ) -> str:
         """Вызвать операцию и вернуть её текстовый ответ.
 
@@ -367,7 +367,7 @@ class EnterpriseMcpClient:
                 else session.call_tool(operation, arguments or {})
             )
             result = await asyncio.wait_for(call, timeout=self._timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             await self._reset()
             raise EnterpriseMcpUnavailable(
                 f"операция {operation!r} не ответила за {self._timeout:g}с"
@@ -384,7 +384,7 @@ class EnterpriseMcpClient:
             raise EnterpriseOperationError(code, message)
         return text
 
-    def _meta_for(self, identity: "CallIdentity | None") -> dict[str, str] | None:
+    def _meta_for(self, identity: CallIdentity | None) -> dict[str, str] | None:
         """``_meta`` для вызова: полный набор ключей или ничего.
 
         ``request_id`` вызывающая сторона знает не всегда — оборот мог ещё не

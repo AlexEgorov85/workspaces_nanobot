@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition
@@ -16,6 +15,7 @@ from servers.enterprise.capabilities.data.service.main import (
     AUDIENCE_MODEL,
     DataService,
 )
+
 
 #: Сервис замыкается обработчиком, а не лежит в модульной переменной: значение
 #: глобальной зависело бы от порядка регистрации операций.

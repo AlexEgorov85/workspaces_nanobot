@@ -96,8 +96,76 @@ packages = [
 ]
 
 [tool.pytest.ini_options]
-# Изолированный прогон. Тесты платформы НЕ входят в тесты агента
-# (в корневом pyproject testpaths остаются tests/ и skills).
+# Изолированный прогон. Тесты платформы НЕ входят в тесты агента:
+# у платформы своя кодовая база, свой requirements.txt и свой pyproject.toml,
+# а корневой testpaths = ["tests"] (skills агента снесены).
 testpaths = ["tests"]
 pythonpath = ["."]
+python_files = ["test_*.py"]
 asyncio_mode = "auto"
+filterwarnings = [
+    # Тот же фильтр, что в корневом pyproject.toml: FAISS SWIG-биндинги не имеют
+    # __module__, предупреждение приходит из importlib._bootstrap при загрузке
+    # C-расширения _faiss (не наш код). Словарь маркеров ниже — тоже единый с
+    # корневым, чтобы оба набора фильтровались одинаково.
+    "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
+]
+# Объявляются только реально применяемые маркеры: объявленный, но не
+# используемый маркер вводит в заблуждение («маркер = фильтр CI») и мёртв.
+# В платформенных тестах применяются unit-функции pytest (parametrize),
+# asyncio_mode=auto и anyio (pytestmark = pytest.mark.anyio в
+# tests/test_live_stdio_contract.py) — последний регистрируется плагином
+# anyio, поэтому --strict-markers здесь не включается.
+markers = [
+    "live: live e2e (real gateway / live DB / live LLM); needs NANOBOT_LIVE_E2E=1",
+    "integration: worker pool on real DB; needs NANOBOT_INTEGRATION=1 (+ DATABASE_URL)",
+    "contract: nanobot-ai compatibility checks; runs in CI always (not gated)",
+    "benchmark: offline baseline benchmark (synthetic fixtures); opt-in via -m benchmark",
+]
+# Верхняя граница времени ОДНОГО теста. Значения — ровно те же, что в
+# корневом pyproject.toml: платформа отдельная кодовая база с отдельным
+# конфигом, но правило безопасного прогона у неё то же самое.
+# До этого границы не было НИ ОДНОЙ — ни опции здесь, ни pytest-timeout в
+# зависимостях, ни timeout-minutes в CI: прогон, который должен занять
+# десятки секунд, мог висеть бесконечно, накапливая память, и остановить его
+# было нечем. Замерено на машине разработчика: норма 157 МБ / 26 с против
+# 1.5 ГБ → 3.4 ГБ за ~6 минут, после чего свободная память машины
+# (15.7 ГБ всего, 0.4 ГБ осталось) была исчерпана.
+# Почему 300, а не 10: в наборе есть намеренно долгие тесты — живой
+# stdio-контракт (~11 с), нагрузочные интеграционные, тяжёлые импорты
+# (duckdb / faiss / pyarrow), и 10 с рубили бы их ложно. Но тест, держащий
+# процесс 6+ минут при норме в десятки секунд, — это дефект: он должен падать
+# с диагностикой, а не висеть. 300 с — заведомо выше любого штатного теста и
+# заведомо ниже «зависшего намертво».
+# timeout_method = "thread": прерывание не убивает сам процесс pytest
+# (в отличие от signal), поэтому подвисшие потоки и сервисы теста не тянут за
+# собой весь прогон. Работает плагином pytest-timeout: БЕЗ него опция timeout
+# молча игнорируется (pytest печатает "Unknown config option: timeout").
+timeout = 300
+timeout_method = "thread"
+
+[tool.ruff]
+# Линтер платформы объявлен ЗДЕСЬ, а не наследуется от корневого pyproject.toml.
+# Платформа — независимая кодовая база (свой requirements.txt, свой pytest-конфиг),
+# и её правила линтинга не должны зависеть от того, где запущен ruff. Пока этой
+# секции не было, ruff поднимался вверх по дереву и находил конфиг корня
+# (pyproject.toml без [tool.ruff] конфигурацией ruff не считается): правила
+# случайно совпадали, а объявления не существовало — и шага линта в CI не было.
+# Настройки — ровно те же, что в корне: единый подход на обе кодовые базы.
+line-length = 100
+target-version = "py311"
+# tests исключены по той же осознанной причине, что и в корневом pyproject.toml:
+# тесты — фикстуры с намеренными нарушениями стиля и длинными литералами, их
+# чинить массово нельзя. ВНИМАНИЕ: extend-exclude действует только на файлы,
+# найденные обходом каталогов. Явно переданный путь (`ruff check tests`) он НЕ
+# отсекает — исключение срабатывает лишь с --force-exclude. Поэтому пути,
+# исключённые здесь, нельзя передавать в команду линтинга.
+extend-exclude = ["tests", "benchmarks", "*.egg-info"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "B008",  # function call in defaults (pydantic Field pattern)
+    "UP038", # isinstance tuple form (3.12 deprecation, fix later)
+]

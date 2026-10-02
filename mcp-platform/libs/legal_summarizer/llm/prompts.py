@@ -18,11 +18,9 @@ NOTE: legacy импорт ``ContextBatch`` удалён. Сигнатура
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any, Sequence
+from collections.abc import Sequence
 
 from libs.legal_summarizer.chunking.chunks import Chunk
-
 
 _BATCH_USER_TEMPLATE = """Документ для анализа.
 

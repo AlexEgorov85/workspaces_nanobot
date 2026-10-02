@@ -37,9 +37,13 @@ _PLATFORM_ROOT = Path(__file__).resolve().parents[5]
 #: состояние на диске повреждено - это «это не твоя ошибка, попроси
 #: пересуммировать».
 _ERROR_CODES: dict[str, str] = {
+    # Ключи обязаны совпадать с ``cli_query._MANIFEST_ERROR_TYPES`` буквально:
+    # перевод идёт по строке ``error_type`` из конверта домена, поэтому
+    # «почти то же самое» имя не попадает в таблицу и молча уходит в
+    # ``internal`` (дефолт вызова). Источник имён - домен.
     "manifest_not_found": "not_found",
     "manifest_corrupted": "internal",
-    "unsupported_manifest_version": "upstream_unavailable",
+    "manifest_unsupported_version": "upstream_unavailable",
 }
 
 

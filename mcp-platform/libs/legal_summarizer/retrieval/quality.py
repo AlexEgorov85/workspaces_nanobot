@@ -23,17 +23,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from libs.legal_summarizer.chunking.chunks import Chunk
-from libs.legal_summarizer.retrieval.provenance import (
-    ProvenanceChain, build_provenance_chain,
-)
-from libs.legal_summarizer.retrieval.qa import (
-    ReferenceQASet, evaluate_retrieval,
-)
 from libs.legal_summarizer.retrieval.index import (
     RetrievalIndex,
+)
+from libs.legal_summarizer.retrieval.provenance import (
+    ProvenanceChain,
+)
+from libs.legal_summarizer.retrieval.qa import (
+    ReferenceQASet,
+    evaluate_retrieval,
 )
 
 

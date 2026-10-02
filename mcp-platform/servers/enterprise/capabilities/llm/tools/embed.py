@@ -14,7 +14,6 @@ import json
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
-
 from servers.enterprise.capabilities.llm.service.main import (
     AUDIENCE_RUNTIME,
     LlmService,

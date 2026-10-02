@@ -1,18 +1,28 @@
-"""Финальные invariants A–L.
+"""Финальные invariants.
 
-Ручная проверка всех invariant'ов из плана. Каждый invariant проверяется
+Ручная проверка invariant'ов из плана. Каждый invariant проверяется
 отдельным тестом с чётким assert.
+
+Два invariant'а из исходного списка A–L здесь намеренно ОТСУТСТВУЮТ,
+потому что их полноценная проверка живёт в специализированных модулях,
+а копии здесь были зелёными пустышками с телом ``pass``:
+
+* H (два конкурентных входа → максимум один LLM-вызов) —
+  ``test_single_flight_concurrent_safety.py::test_concurrent_runs_peak_is_one``
+  (два потока, peak active LLM ≤ 1).
+* L (нет legacy-файлов) — ``test_legacy_audit.py``
+  (``test_forbidden_files_do_not_exist``,
+  ``test_forbidden_runtime_dirs_do_not_exist``).
+
+Оставшиеся проверки обязаны выполняться всегда: если предусловие
+(``ctx.plan``, ``insp.analysis``) не построилось, тест падает, а не
+проходит молча.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
@@ -103,13 +113,16 @@ def test_invariant_d_selected_equals_planned(tmp_path, monkeypatch):
     ctx = summarizer.build_execution_context(
         insp, selected_chunks=selected,
     )
-    if ctx.plan is not None:
-        selected_ids = {c.chunk_id for c in selected}
-        planned_ids = set()
-        for batch in ctx.plan.batches:
-            for cid in batch.chunk_ids:
-                planned_ids.add(cid)
-        assert selected_ids == planned_ids
+    assert ctx.plan is not None, (
+        "D требует построенный план: 4 выбранных chunk'а + structure "
+        f"обязаны дать plan, получено strategy={ctx.strategy!r}"
+    )
+    selected_ids = {c.chunk_id for c in selected}
+    planned_ids = set()
+    for batch in ctx.plan.batches:
+        for cid in batch.chunk_ids:
+            planned_ids.add(cid)
+    assert selected_ids == planned_ids
 
 def test_invariant_e_planned_equals_actual(tmp_path, monkeypatch):
     """E: planned batches == actual batches."""
@@ -123,11 +136,14 @@ def test_invariant_e_planned_equals_actual(tmp_path, monkeypatch):
     ctx = summarizer.build_execution_context(
         insp, selected_chunks=selected,
     )
-    if ctx.plan is not None:
-        planned = [list(batch.chunk_ids) for batch in ctx.plan.batches]
-        actual = summarizer.map_plan_to_chunk_batches(ctx.plan, selected)
-        actual_str = [[c.chunk_id for c in batch] for batch in actual]
-        assert planned == actual_str
+    assert ctx.plan is not None, (
+        "E требует построенный план: 4 выбранных chunk'а + structure "
+        f"обязаны дать plan, получено strategy={ctx.strategy!r}"
+    )
+    planned = [list(batch.chunk_ids) for batch in ctx.plan.batches]
+    actual = summarizer.map_plan_to_chunk_batches(ctx.plan, selected)
+    actual_str = [[c.chunk_id for c in batch] for batch in actual]
+    assert planned == actual_str
 
 def test_invariant_f_each_chunk_processed_exactly_once(tmp_path, monkeypatch):
     """F: each selected chunk → processed exactly once."""
@@ -141,10 +157,13 @@ def test_invariant_f_each_chunk_processed_exactly_once(tmp_path, monkeypatch):
     ctx = summarizer.build_execution_context(
         insp, selected_chunks=selected,
     )
-    if ctx.plan is not None:
-        actual = summarizer.map_plan_to_chunk_batches(ctx.plan, selected)
-        all_ids = [c.chunk_id for batch in actual for c in batch]
-        assert len(all_ids) == len(set(all_ids))
+    assert ctx.plan is not None, (
+        "F требует построенный план: 4 выбранных chunk'а + structure "
+        f"обязаны дать plan, получено strategy={ctx.strategy!r}"
+    )
+    actual = summarizer.map_plan_to_chunk_batches(ctx.plan, selected)
+    all_ids = [c.chunk_id for batch in actual for c in batch]
+    assert len(all_ids) == len(set(all_ids))
 
 def test_invariant_g_idempotent_no_reexecution(tmp_path, monkeypatch):
     """G: completed idempotent run → no pipeline, no plan, no LLM."""
@@ -182,15 +201,6 @@ def test_invariant_g_idempotent_no_reexecution(tmp_path, monkeypatch):
     assert result2.get("stats", {}).get("cached") is True
     assert seen["n"] == 0, "cached run must not call LLM"
 
-def test_invariant_h_two_concurrent_max_one_llm(tmp_path, monkeypatch):
-    """H: two concurrent runs → max one active LLM call.
-
-    (Уже покрыт test_single_flight_concurrent_safety,
-    здесь повторная проверка.)
-    """
-    # Пропускаем — покрыто в test_single_flight_concurrent_safety.
-    pass
-
 def test_invariant_i_exception_releases_lock():
     """I: LLM exception → lock released."""
     from libs.legal_summarizer.llm.calls import chat_locked
@@ -225,10 +235,13 @@ def test_invariant_j_same_input_same_plan(tmp_path):
     ctx1 = summarizer.build_execution_context(insp, selected_chunks=selected)
     ctx2 = summarizer.build_execution_context(insp, selected_chunks=selected)
 
-    if ctx1.plan is not None:
-        b1 = [list(batch.chunk_ids) for batch in ctx1.plan.batches]
-        b2 = [list(batch.chunk_ids) for batch in ctx2.plan.batches]
-        assert b1 == b2
+    assert ctx1.plan is not None and ctx2.plan is not None, (
+        "J требует оба плана построенными: одинаковый вход обязан дать "
+        f"план, ctx1={ctx1.plan!r}, ctx2={ctx2.plan!r}"
+    )
+    b1 = [list(batch.chunk_ids) for batch in ctx1.plan.batches]
+    b2 = [list(batch.chunk_ids) for batch in ctx2.plan.batches]
+    assert b1 == b2
 
 def test_invariant_k_identity_matches_structure(tmp_path):
     """K: identity.document_id == structure.document_id."""
@@ -237,10 +250,8 @@ def test_invariant_k_identity_matches_structure(tmp_path):
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
 
-    if insp.analysis is not None and insp.structure is not None:
-        assert insp.analysis.identity.document_id == insp.structure.document_id
-
-def test_invariant_l_no_legacy_files():
-    """L: no legacy files, no legacy symbols."""
-    # Уже покрыт test_legacy_audit.py.
-    pass
+    assert insp.analysis is not None and insp.structure is not None, (
+        "K требует и analysis, и structure: "
+        f"analysis={insp.analysis!r}, structure={insp.structure!r}"
+    )
+    assert insp.analysis.identity.document_id == insp.structure.document_id

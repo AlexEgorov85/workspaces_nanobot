@@ -7,39 +7,111 @@
 
 Наборы не смешаны: у агента и у платформы свои `pyproject.toml`, свой
 `testpaths` и своя кодовая база. Корневой `testpaths = ["tests"]` не видит
-`mcp-platform/tests`, а платформенный — не видит `tests/`. Запускать их нужно
-из своих каталогов.
+`mcp-platform/tests`, поэтому голый `python -m pytest` в корне собирает
+только агентские тесты. Платформенный конфиг ищется по своему корню —
+запускать её нужно из `mcp-platform/`.
 
 | | Агент | Платформа |
 |---|---|---|
 | Корень pytest | `.` (корень репозитория) | `mcp-platform/` |
-| Набор | `tests/` — 136 файлов | `mcp-platform/tests/` — 189 файлов |
+| Набор | `tests/` — 137 файлов `test_*.py` | `mcp-platform/tests/` — 189 файлов `test_*.py` |
+| Собрано тестов | 2862 | 4722 |
 | `testpaths` | `["tests"]` | `["tests"]` |
 | `python_files` | `["test_*.py"]` | `["test_*.py"]` |
-| `pythonpath` | `["."`, "workspace"]` | `["."]` |
+| `pythonpath` | `[".", "workspace"]` | `["."]` |
+| `filterwarnings` | фильтр FAISS | тот же фильтр FAISS |
+| `markers` | 4 маркера | тот же словарь из 4 |
+| Верхняя граница теста | `timeout = 300`, `timeout_method = "thread"` | те же два значения |
+| `[tool.ruff]` | объявлен | объявлен отдельно |
+
+Платформа объявляет `python_files`, `filterwarnings` и `markers` **у себя**, а
+не наследует от корня: у неё своя кодовая база и свой `requirements.txt`, и
+правила не должны зависеть от того, откуда запущен pytest. Секция
+`[tool.ruff]` в `mcp-platform/pyproject.toml` добавлена по той же причине —
+раньше ruff поднимался вверх по дереву и находил конфиг корня, то есть
+объявления не существовало вовсе.
+
+Словарь маркеров при этом **одинаковый** с корневым: одинаковые объявления
+означают, что один и тот же `-m` на двух джобах CI отбирает одно и то же.
+Ровно так же объявлена верхняя граница теста (`timeout` / `timeout_method`):
+платформа конфиг агента не наследует, поэтому граница у неё прописана своей
+строкой с тем же значением — см. раздел ниже.
+
+Числа файлов сняты `Get-ChildItem -Recurse -Filter 'test_*.py'`, числа
+тестов — `pytest --collect-only -q`.
 
 Следствие общего шаблона имён: файл с **ведущим** подчёркиванием
 (`_test_*.py`) не собирается ни одним из двух наборов. Хелперы, которые
 pytest не должен собирать, называются без префикса `test_`
 (например `mcp-platform/tests/audit_lib_fakes.py`).
 
+Маркер `unit` удалён из обоих словарей как мёртвый: применять его было нечему,
+а объявление создавало впечатление фильтра, которого нет.
+
+## Маркеры и их env-гейты
+
+| Маркер | Гейт | Кто применяет |
+|---|---|---|
+| `live` | `NANOBOT_LIVE_E2E=1` (плюс живой БД/провайдер) | агент: `tests/test_gateway_live_media_e2e.py`, `tests/test_startup_schema_validation_live.py`; платформа: `mcp-platform/tests/test_live_stdio_contract.py` (8 тестов) |
+| `integration` | `DATABASE_URL` | агент: `tests/integration/test_postgres_channel_lifecycle_stress.py` (6 тестов); в платформе не применяется нигде |
+| `contract` | не гейтится, выполняется всегда | 20 файлов совместимости с `nanobot-ai` |
+| `benchmark` | опт-ин через `-m benchmark` | `tests/test_history_search_benchmark.py` |
+
+Маркер `live` ставят **обе** стороны — и это меняет смысл фильтра. Проверка
+решает всё: без маркера `-m "not live"` не отсекает ровно ничего (тест молча
+скипался на env-гейте и CI его прогонял), а маркер, который никто не ставит, —
+мёртвый фильтр. Словарь маркеров нужен в `mcp-platform/pyproject.toml` и
+поэтому, что `integration` там пока не применяется: фильтр должен быть
+настроен раньше, чем появится место, которое его поставит.
+
+**Расхождение с текстом маркера.** В обоих `pyproject.toml` написано
+«needs `NANOBOT_INTEGRATION=1` (+ `DATABASE_URL`)», но код читает только
+`DATABASE_URL`: переменная `NANOBOT_INTEGRATION` в дереве не встречается
+нигде, кроме докстринга самого теста. Гейт задаёт модульная фикстура
+`test_schema` (`pytest.skip`, если DSN пуст), поэтому без `DATABASE_URL` набор
+даёт `6 skipped`, а не падение. Текст маркера в обоих конфигах ещё не
+поправлен — это расхождение объявления и кода, а не две разные настройки.
+
+Отбор маркером и готовность контура — разные решения: `-m` решает, что
+попадёт в прогон, env-переменная — есть ли чему работать. У живого
+агентского e2e маркер добавлен **поверх** уже существовавшего env-гейта в
+фикстуре `live_env`, а не вместо него. Платформенный stdio-контракт, наоборот,
+энергозависимого гейта не имеет вовсе: он всегда готов к запуску, потому что
+поднимает эталонный сервер без БД, модели и снимка.
+
+`contract` помечают 20 файлов; ещё два файла в `tests/contract/`
+(`test_history_search_identity_contract.py`, `test_runtime_events_api.py`)
+лежат в каталоге, но маркер не несут — их отбирает джоба
+`upgrade-readiness` по пути.
+
 ## Команды
 
-Все команды ниже проверены `Test-Path` на текущем дереве.
+Все команды ниже прогнаны на текущем дереве; фактический итог — в комментарии
+справа.
 
 ```bash
 # ── Полные наборы ────────────────────────────────────────────────────────────
 # Агент: из корня репозитория
-python -m pytest tests -q
+python -m pytest tests -q                                     # AGENTFULL
 
-# Платформа: обязательно из mcp-platform, иначе подхватится корневой conftest
-cd mcp-platform && python -m pytest tests -q
+# Платформа: из mcp-platform, там ищется её pyproject.toml
+cd mcp-platform && python -m pytest tests -q                   # PLATFULL
 
-# Только сборка имён тестов, без исполнения (быстрая проверка коллекции)
-python -m pytest --collect-only -q
-cd mcp-platform && python -m pytest --collect-only -q
+# Только сборка имён тестов, без исполнения
+python -m pytest tests --collect-only -q                       # 2862 tests collected
+cd mcp-platform && python -m pytest tests --collect-only -q   # 4722 tests collected
 
-# ── Агент: точечные наборы (все файлы существуют) ────────────────────────────
+# ── Агент: маркерные прогоны ─────────────────────────────────────────────────
+# Всё, кроме живых гейтов и опт-ин-бенчмарка
+python -m pytest tests -q -m "not live and not integration and not benchmark"   # MARKER1
+
+# Только контракты совместимости
+python -m pytest tests -q -m contract                          # MARKER2
+
+# Бенчмарк по требованию
+python -m pytest -m benchmark tests/test_history_search_benchmark.py -q        # MARKER3
+
+# ── Агент: точечные наборы ──────────────────────────────────────────────────
 # Сервисный слой, без БД
 python -m pytest tests/test_config_service.py tests/test_session_storage.py \
                     tests/test_runtime_patcher.py tests/test_channel_factory.py \
@@ -47,15 +119,29 @@ python -m pytest tests/test_config_service.py tests/test_session_storage.py \
                     tests/test_bus_factory.py tests/test_agent_factory.py \
                     tests/test_gateway_runner.py tests/test_shutdown_coordinator.py \
                     tests/test_console_loop.py tests/test_application_context.py -q
+                    # 224 passed
 
 # Пул соединений (mock psycopg2, БД не нужна)
-python -m pytest tests/test_utils_db.py -q
+python -m pytest tests/test_utils_db.py -q                    # 52 passed
 
 # Сессии поверх PostgreSQL
-python -m pytest tests/test_pg_session_manager.py -q
+python -m pytest tests/test_pg_session_manager.py -q          # 18 passed
 
 # Чтение офисных файлов
-python -m pytest tests/test_office_files.py -q
+python -m pytest tests/test_office_files.py -q                # 19 passed
+
+# Живой пул воркеров: без DATABASE_URL честно скипается
+python -m pytest tests/integration -q                          # 6 skipped
+```
+
+Живой агентский e2e и живой integration в список не внесены: для них нужны
+`DATABASE_URL` и живой LLM-провайдер, в этом окружении их нет, поэтому
+фактический итог этих двух прогонов **не проверен**. Форма запуска — из
+докстрингов самих файлов:
+
+```bash
+$env:NANOBOT_LIVE_E2E="1"; python -m pytest tests/test_gateway_live_media_e2e.py -q
+$env:DATABASE_URL="postgresql://..."; python -m pytest tests/integration -q
 ```
 
 > Модулей `test_transcription_service.py`, `test_subprocess_manager.py`,
@@ -65,42 +151,170 @@ python -m pytest tests/test_office_files.py -q
 > Скилл `audit_analyzer` обезличен, поэтому прежний
 > `workspace/skills/audit_analyzer/tests/e2e_test.py` тоже не существует.
 
-## Маркеры и их env-гейты
+## Верхняя граница теста и безопасный локальный прогон
 
-Объявлены в `pyproject.toml` обоих корней (словари одинаковые). Фактически
-маркеры применяет **только** агентский набор: в `mcp-platform/tests` вхождений
-маркеров нет, платформенные тесты фильтруются только по пути.
+У каждого теста в обоих корнях объявлена верхняя граница: `timeout = 300`
+секунд на тест и `timeout_method = "thread"` в `[tool.pytest.ini_options]`
+(`pyproject.toml` и `mcp-platform/pyproject.toml` — значения **одинаковые**,
+это один подход на две кодовые базы, а не два набора настроек).
 
-| Маркер | Гейт | Кто применяет |
-|---|---|---|
-| `live` | `NANOBOT_LIVE_E2E=1` (плюс живой БД/провайдер) | `tests/test_startup_schema_validation_live.py` |
-| `integration` | `NANOBOT_INTEGRATION=1` + `DATABASE_URL` | `tests/integration/test_postgres_channel_lifecycle_stress.py` |
-| `contract` | не гейтится, выполняется всегда | 20 файлов совместимости с `nanobot-ai` |
-| `benchmark` | опт-ин через `-m benchmark` | `tests/test_history_search_benchmark.py` |
+Граница появилась не из соображений порядка. Прогон без неё на машине
+разработчика вырос с 1.5 ГБ до **3.4 ГБ за ~6 минут** при норме **157 МБ и
+26 секунд**, выел свободную память (15.7 ГБ всего, 0.4 ГБ осталось) и
+привёл к зависанию машины. Остановить такой прогон было нечем: ни `timeout`,
+ни `timeout-minutes` в CI, ни `pytest-timeout` в зависимостях не
+объявлялось нигде.
+
+**Срабатывание границы — это дефект теста, а не «медленная машина».** 300 секунд
+заведомо выше любого штатного теста в этих наборах (самый долгий измеренный —
+живой stdio-контракт, ~11 с). Тест, который не уложился, обязан падать с
+диагностикой и указывать, где именно он встал, а не удерживать процесс
+неограниченно долго.
+
+Граница работает **плагином `pytest-timeout`**. Без установленного плагина
+опции `timeout` / `timeout_method` **молча игнорируются**: pytest печатает
+`Unknown config option: timeout` и продолжает прогон как ни в чём не бывало.
+Поэтому в CI `pytest-timeout` объявлен во всех четырёх строках установки
+тест-зависимостей, а локально его нужно поставить самому:
 
 ```bash
-# Живой e2e: реальный gateway + живая БД + живой LLM.
-# Пишет в изолированную таблицу public.agent_conversation_messages_e2e —
-# боевая очередь не трогается.
-$env:NANOBOT_LIVE_E2E="1"; python -m pytest tests/test_gateway_live_media_e2e.py -q
-
-# Integration: пул воркеров на реальной БД
-$env:NANOBOT_INTEGRATION="1"; $env:DATABASE_URL="postgresql://..."
-python -m pytest tests/integration -q
-
-# Без живых гейтов: снять opt-in-метки и opt-in-бенчмарк
-python -m pytest tests -q -m "not live and not integration and not benchmark"
-
-# Только контракты совместимости
-python -m pytest tests -q -m contract
-
-# Бенчмарк по требованию
-python -m pytest -m benchmark tests/test_history_search_benchmark.py -v
+python -m pip install pytest-timeout
 ```
 
-Маркер, объявленный, но не применённый, — мёртвый фильтр: он создаёт
-впечатление, что что-то отсекается, и ничего не отсекает. Новый маркер имеет
-смысл только вместе с местом, которое его ставит.
+Пока плагина нет, объявленные значения — это заявленное намерение, а не
+работающая защита.
+
+Рекомендуемая команда полного локального прогона — одна, последовательно:
+
+```bash
+python -m pytest tests -q
+```
+
+**Не запускайте несколько полных наборов одновременно** (агентский и
+платформенный в двух окнах, два прогона одного набора, прогон в фоне на
+этапе правок). Это ровно то, что произошло: параллельные процессы делили
+между собой 15.7 ГБ, каждый набирал память, и машина встала. Параллельные
+полные прогоны не экономят время — они тратят его вместе с рабочей сессией,
+а результат всё равно недостоверен.
+
+Если для проверки нужен **временный pytest-плагин** (мутационная проверка,
+одноразовый `conftest`, подключаемый через `-p`): запускайте его с явным
+таймаутом — `--timeout=300`, а не «просто запустить и посмотреть», — и
+**обязательно завершайте дочерние процессы** после прогона. В окружении уже
+оставались осиротевшие процессы от временных харнессов: pytest закончил, а
+порождённые им подпроцессы продолжали жить и держать память. Плагин,
+подключаемый на одну проверку, сносят вместе с порождённым им хозяйством.
+
+## Что гоняет CI
+
+`.github/workflows/ci.yml` — четыре джобы: `fast-tests` (3 версии Python),
+`coverage`, `upgrade-readiness`, `platform-tests` (3 версии Python). Фильтр
+маркеров **одинаков на обеих** тестовых джобах: `-m "not live and not integration"`.
+
+**Границы времени.** У всех четырёх джоб объявлен `timeout-minutes`:
+`fast-tests` 20, `coverage` 25, `upgrade-readiness` 15, `platform-tests` 20.
+Ориентир — фактические замеры (агентский набор ≈ 2.5 минуты, платформенный
+≈ 1.2 минуты) с запасом на медленные раннеры, холодный кеш pip, тяжёлые
+`requirements.txt` и матрицу Python 3.11/3.12/3.13; матрица лимит не
+умножает — таймаут у каждого `job-leg` свой. Граница джобы ловит не тест, а
+**прогон целиком**: зависший тест должен падать на `timeout = 300` с
+именем теста в отчёте, а не съедать лимит всей джобы молча.
+
+**Линт.** Шаг `ruff check lib workspace` — ровно эти два каталога. `tests/` и
+`tools/` помещены в `[tool.ruff].extend-exclude` намеренно (фикстуры с
+длинными литералами и нарушениями стиля), а `extend-exclude` **не действует
+на явно переданный путь** — для этого есть `--force-exclude`. Пока пути
+оставались в команде, линт падал на 307 ошибках из файлов, которые проект
+решил не линтовать. Причина оставлена комментарием в самом YAML.
+
+**Платформа.** Джоба `platform-tests` идёт параллельно агентским, в `needs:`
+не входит. Основной шаг гоняет общий фильтр, а живой stdio-контракт
+возвращён в гейт **отдельным шагом** `Run live stdio contract` — сознательное
+исключение из фильтра: тест поднимает настоящий подпроцесс, но эталонный
+сервер не требует ни БД, ни модели, ни снимка, а пересечение границы процесса
+не проверяется никаким другим набором. Маркер `live` у него про единообразие
+отбора, а не про дороговизну.
+
+**Покрытие платформы.** Джобы `coverage` для платформы нет, и это решение, а
+не недосмотр: порога покрытия не задано, поэтому метрика не actionable —
+отчёт без порога никто не смотрит. Линт платформы в CI тоже не включён
+(шага не было, код не зачищен); включать вместе с установкой ruff в джобу.
+
+## Стражи границ
+
+Страж — это тест, который обходит дерево и падает на нарушении. Его главный
+собственный риск: **обход возвращает пусто, и страж зеленеет вхолостую.**
+Поэтому у каждого стража есть проверка, что он вообще что-то прочитал, и
+мета-тесты самих сканеров.
+
+| Страж | Что охраняет |
+|---|---|
+| `tests/test_platform_import_boundary.py` | агент не импортирует платформенные пакеты и не добавляет `mcp-platform` в `sys.path` |
+| `mcp-platform/tests/legal_summarizer/architecture/test_document_cache_boundaries.py` | слои домена `legal_summarizer` |
+| `tests/test_no_legal_imports_in_agent.py` | в коде агента нет упоминаний `legal_summarizer` |
+
+`test_platform_import_boundary.py` обходит AST'ом `lib/`, `workspace/`,
+`tools/` и ловит **любой** импорт платформенного пакета (`from libs.…`,
+`servers.…`, `mcp_platform*`), включая динамические формы
+(`importlib.import_module`, `__import__`) по строковым литералам, — и любое
+добавление `mcp-platform` в `sys.path`. Allowlist ровно один:
+`workspace/tools/document_read.py` → `libs.office`; кроме того стража
+проверяет, что этот allowlist не расползся. Обход пропускает tombstone-компоненты
+пути и `workspace/data_store/` — это рантайм-хранилище, где лежат полные
+копии репозитория.
+
+Как пишется страж, чтобы он не стал пустышкой:
+
+1. **Сам сканер проверяется.** Мета-тесты подсаживают заведомо
+   нарушающий файл и убеждаются, что сканер его видит; и подсаживают
+   безобидную правку `sys.path` и убеждаются, что её — нет. Зелёный сканер,
+   который ничего не находит, должен это уметь отличать от «нарушений нет».
+2. **Пустой обход — падение, а не «нечего проверять».** Порог на число
+   прочитанных файлов проверяется явно.
+3. **Пропавший охраняемый файл роняет страж.** `pytest.skip` на «файл
+   исчез» выключил бы страж ровно тогда, когда он нужен.
+
+Пункт 2 — не теория: `test_document_cache_boundaries.py` так и проходил
+вхолостую, сканируя несуществующий `tests/scripts` (0 файлов) после переноса
+домена в платформу. Обход перенаправлен на `libs/legal_summarizer` (77
+файлов), а `test_production_tree_is_actually_collected` падает, если собрано
+меньше 30.
+
+Покрытие capability'ов платформы: `test_llm_capability.py`,
+`test_vectors_capability.py`, `test_audit_capability.py`,
+`test_data_service.py` и `test_legal_summarizer_capability.py` — пять
+capability'ов, объявленных в `platform.json`, и ни одной непокрытой.
+`legal_summarizer` закрыт последним.
+
+## Мёртвые тестовые файлы
+
+`git ls-files -- '*_test_*.py'` даёт 13 строк, но tombstone-заглушками
+тестов являются **12**: тринадцатая (`tools/apply_test_profile_tables.py`) —
+живая утилита, попавшая в выборку из-за подстроки `_test_` в имени.
+
+| Файл | `def test_` |
+|---|---|
+| `tests/_test_information_preservation.py` | 0 |
+| `tests/_test_legal_summarizer_identity.py` | 0 |
+| `tests/_test_legal_summarizer_query_ipc.py` | 0 |
+| `tests/_test_legal_summarizer_query_manifest_integration.py` | 0 |
+| `tests/_test_legal_summarizer_running_subprocess.py` | 0 |
+| `tests/_test_manifest.py` | 0 |
+| `tests/_test_resume_scenarios.py` | 0 |
+| `tests/_test_skill_legal_summarizer_characterization.py` | 0 |
+| `tests/_test_structure_physical.py` | 0 |
+| `tests/benchmarks/_test_acceptance_matrix.py` | 0 |
+| `mcp-platform/tests/legal_summarizer/_test_legal_summarizer_no_legacy.py` | 0 |
+| `mcp-platform/tests/legal_summarizer/_test_structure_architecture_guard.py` | 0 |
+
+**Все 12 проверены и физически лежат в репозитории** — и в индексе git, и на
+диске. Код из них вырезан, остались докстринги с причиной. Снести вручную
+нельзя было в этом окружении: удаление обязано идти через восстановимый
+лаунчер `mavis-trash`, а `rm` здесь блокируется политикой безопасности.
+Список зафиксирован в `PENDING-DELETIONS.md` § F вместе с готовой командой
+`git rm`. **Прогон на них не влияет:** pytest эти файлы не собирает по
+префиксу `_`, снимать нечего. Утверждать, что они удалены, нельзя — на
+момент написания документа они в дереве.
 
 ---
 

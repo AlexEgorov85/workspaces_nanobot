@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import inspect
 import types
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from libs.enterprise_common.errors import EnterpriseError
 from libs.enterprise_common.execution.quality import POLICY_NAMES

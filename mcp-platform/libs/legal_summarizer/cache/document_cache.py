@@ -53,12 +53,11 @@ import json
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from libs.legal_summarizer.cache.session_key import safe_session_key
-
 
 __all__ = ["DocumentCache"]
 
@@ -252,7 +251,7 @@ class DocumentCache:
                 json.dumps(
                     {
                         "version": 1,
-                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "completed_at": datetime.now(UTC).isoformat(),
                     },
                     ensure_ascii=False,
                 ),

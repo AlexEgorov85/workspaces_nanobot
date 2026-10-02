@@ -8,9 +8,19 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from libs.legal_summarizer.chunking.chunks import Chunk
+
+
+def _chunk_index(c: Chunk) -> int:
+    """Ключ сортировки по умолчанию — ``chunk.index``.
+
+    Отдельная функция вместо ``lambda`` внутри тела: она определена до
+    первого вызова ``restore_document_order``, поэтому момент связывания
+    тот же, а у рефакторинга нет побочного эффекта.
+    """
+    return c.index
 
 
 def restore_document_order(
@@ -19,9 +29,7 @@ def restore_document_order(
     key=None,
 ) -> list[Chunk]:
     """Восстановить document order (по ``chunk.index``)."""
-    if key is None:
-        key = lambda c: c.index
-    return sorted(chunks, key=key)
+    return sorted(chunks, key=_chunk_index if key is None else key)
 
 
 def ensure_order_preserved(

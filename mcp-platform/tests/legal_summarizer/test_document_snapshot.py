@@ -14,15 +14,8 @@ monkey-patch'а ``_atomic_write_json``); это явное исключение 
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 
 def test_snapshot_atomic_complete_marker(tmp_path):
@@ -174,12 +167,16 @@ def test_snapshot_no_staging_leftover_on_error(tmp_path):
     finally:
         dc._atomic_write_json = original
 
+    # Staging-каталог создаётся до падения, поэтому documents parent обязан
+    # существовать. Раньше здесь стоял ``for`` по iterdir() с ассертом
+    # внутри: при пустом каталоге (штатный случай — staging уже удалён)
+    # тело цикла не выполнялось ни разу и проверка была мёртвой.
     docs_parent = dc._cache_root(tmp_path, "default")
-    if docs_parent.exists():
-        for p in docs_parent.iterdir():
-            assert not p.name.startswith(".staging_"), (
-                f"staging leftover: {p}"
-            )
+    assert docs_parent.exists(), (
+        f"documents parent не создан после неудачного write: {docs_parent}"
+    )
+    leftovers = [p.name for p in docs_parent.iterdir() if p.name.startswith(".staging_")]
+    assert not leftovers, f"staging leftover: {leftovers}"
     assert not cache._document_dir(document_id).exists()
 
 

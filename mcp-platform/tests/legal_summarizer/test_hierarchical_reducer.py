@@ -8,13 +8,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 def _make_chunks_and_summaries(n: int):
     from libs.legal_summarizer.chunking.chunks import Chunk

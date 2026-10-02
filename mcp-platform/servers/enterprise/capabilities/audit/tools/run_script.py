@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import json
-
 from typing import Any
 
 from libs.enterprise_common.container import ToolContainer

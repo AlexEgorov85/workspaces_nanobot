@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 MID_REDUCE_GROUP_SIZE = 3
 MAX_REDUCE_ROUNDS = 4
 

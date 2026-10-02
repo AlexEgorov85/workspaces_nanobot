@@ -7,13 +7,8 @@ pipeline — он получает готовый ``DocumentAnalysis`` из ``In
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
@@ -32,13 +27,13 @@ def _long_text() -> str:
 
 def _install_pipeline_counter(monkeypatch):
     """Подменяем ``run_canonical_pipeline`` счётчиком вызовов."""
-    from legal_summarizer import test_pipeline_recorder
+    from legal_summarizer import pipeline_recorder
     import libs.legal_summarizer.application.pipeline_structure as _pipeline_mod
 
     original = _pipeline_mod.run_canonical_pipeline
 
     def _counting_run(*args, **kwargs):
-        test_pipeline_recorder.record_pipeline_call()
+        pipeline_recorder.record_pipeline_call()
         return original(*args, **kwargs)
 
     monkeypatch.setattr(_pipeline_mod, "run_canonical_pipeline", _counting_run)
@@ -67,8 +62,8 @@ def _install_llm_mocks(monkeypatch):
     import libs.legal_summarizer.execution.pipeline as _pipeline_mod
 
 def _reset_pipeline_counter():
-    from legal_summarizer import test_pipeline_recorder
-    test_pipeline_recorder.reset()
+    from legal_summarizer import pipeline_recorder
+    pipeline_recorder.reset()
 
 def test_run_calls_pipeline_exactly_once_map(tmp_path: Path, monkeypatch):
     """Map-reduce: ``run_canonical_pipeline`` вызывается один раз."""
@@ -89,9 +84,9 @@ def test_run_calls_pipeline_exactly_once_map(tmp_path: Path, monkeypatch):
     )
     assert result["status"] in ("completed", "partial"), result
 
-    from legal_summarizer import test_pipeline_recorder
-    assert test_pipeline_recorder.PIPELINE_CALLS == 1, (
-        f"expected exactly 1 pipeline call, got {test_pipeline_recorder.PIPELINE_CALLS}"
+    from legal_summarizer import pipeline_recorder
+    assert pipeline_recorder.PIPELINE_CALLS == 1, (
+        f"expected exactly 1 pipeline call, got {pipeline_recorder.PIPELINE_CALLS}"
     )
 
 def test_run_calls_pipeline_exactly_once_direct(tmp_path: Path, monkeypatch):
@@ -112,9 +107,9 @@ def test_run_calls_pipeline_exactly_once_direct(tmp_path: Path, monkeypatch):
     )
     assert result["status"] == "completed", result
 
-    from legal_summarizer import test_pipeline_recorder
-    assert test_pipeline_recorder.PIPELINE_CALLS == 1, (
-        f"expected exactly 1 pipeline call, got {test_pipeline_recorder.PIPELINE_CALLS}"
+    from legal_summarizer import pipeline_recorder
+    assert pipeline_recorder.PIPELINE_CALLS == 1, (
+        f"expected exactly 1 pipeline call, got {pipeline_recorder.PIPELINE_CALLS}"
     )
 
 def test_run_map_reduce_does_not_re_run_pipeline(tmp_path: Path, monkeypatch):
@@ -135,7 +130,7 @@ def test_run_map_reduce_does_not_re_run_pipeline(tmp_path: Path, monkeypatch):
         confirmed=True,
     )
 
-    from legal_summarizer import test_pipeline_recorder
-    assert test_pipeline_recorder.PIPELINE_CALLS == 1, (
-        f"expected exactly 1 pipeline call inside run(), got {test_pipeline_recorder.PIPELINE_CALLS}"
+    from legal_summarizer import pipeline_recorder
+    assert pipeline_recorder.PIPELINE_CALLS == 1, (
+        f"expected exactly 1 pipeline call inside run(), got {pipeline_recorder.PIPELINE_CALLS}"
     )

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import libs.legal_summarizer.planning.strategy as _planning_strategy_mod
 from libs.legal_summarizer.application.chunk_selection import select_chunks_for_mode
 from libs.legal_summarizer.application.inspection import Inspection
 from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.planning.plan import ExecutionPlan
-import libs.legal_summarizer.planning.strategy as _planning_strategy_mod
 
 
 @dataclass(frozen=True)

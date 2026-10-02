@@ -3,8 +3,17 @@
 Создаёт синтетический документ с разнообразными секциями, прогоняет
 новый chunker и печатает diagnostics.
 
-Использование:
-    python -m legal_summarizer.smoke_chunking_diagnostics
+Это ручной диагностический скрипт, а не тест: pytest его не собирает
+(имя не подходит ни под ``test_*.py``, ни под ``*_test.py``).
+
+Использование (из каталога ``mcp-platform``)::
+
+    python tests/legal_summarizer/smoke_chunking_diagnostics.py
+
+Раньше скрипт подключал ``tests/scripts`` к ``sys.path`` и предлагал
+``python -m legal_summarizer.smoke_chunking_diagnostics``; и каталога, и
+модуля с таким именем в репозитории нет — команда не работала. Домен лежит
+в ``mcp-platform/libs/``, поэтому в путь добавляется корень платформы.
 """
 
 from __future__ import annotations
@@ -12,14 +21,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-_WORKSPACE_ROOT = _SKILL_ROOT.parent.parent.parent
-
-for p in [str(_WORKSPACE_ROOT), str(_WORKSPACE_ROOT / "workspace"), str(_SCRIPTS_DIR)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
+_PLATFORM_ROOT = Path(__file__).resolve().parents[2]
+if str(_PLATFORM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM_ROOT))
 
 from libs.legal_summarizer.chunking.chunker import (
     DocumentStructureChunkerConfig,
