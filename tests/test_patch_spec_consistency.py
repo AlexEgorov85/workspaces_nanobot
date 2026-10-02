@@ -126,6 +126,12 @@ class TestKnownPatchesRemainDeclared:
         "exec_timeout_cap",
         "subagent_logging",
         "tool_limits",
+        # Седьмой патч (change repeat-guard-hook). Единственный, кто патчит
+        # не AgentLoop, а nanobot.agent.tools.execution._execute_tool_call:
+        # hook-API не умеет отклонить вызов, а before_execute_tool там стоит
+        # вне try, поэтому без патча режим block либо молчит, либо роняет
+        # оборот. Условие удаления — в runtime-patcher-inventory.md.
+        "repeat_guard_block",
     })
 
     REMOVED_IN_PHASE_6 = frozenset({

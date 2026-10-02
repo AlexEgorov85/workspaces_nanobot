@@ -65,31 +65,91 @@ Hooks наследуют `nanobot.agent.hook.AgentHook`
 
 ## Decisions
 
-### Decision 1: поднимать `RuntimeError` в `before_execute_tool`
+### Decision 1: поднимать `RepeatGuardBlocked` и перехватывать его патчем
 
-Защитник вызывает `RuntimeError(...)` из
+> **Это решение заменяет первоначальную редакцию.** Оно опиралось на
+> допущение, что исключение из `before_execute_tool` штатно
+> превращается в синтетический `Error: …`. Допущение опровергнуто на
+> живом коде nanobot 0.3.5, и ниже это зафиксировано, чтобы следующий
+> читатель не проверял его заново.
+
+Защитник вызывает `RepeatGuardBlocked(RuntimeError)` из
 `RepeatGuardHook.before_execute_tool(...)` при превышении порога
-в режиме `block`. Этот путь уже поддержан upstream: исключение
-ловится в `nanobot/agent/tools/execution.py:177-194`, вызывается
-`on_execute_tool_error`, и возвращается синтетический
-`"Error: <type>: <msg>"` как tool-результат, который модель видит
-как обычный tool-error.
+в режиме `block`. Исключение перехватывает
+`RuntimePatcher.patch_repeat_guard_block`, который подменяет
+`_execute_tool_call` в `nanobot.agent.tools.execution` и возвращает
+`("Error: RepeatGuardBlocked: repeat-guard: …", {name, status: "error",
+detail})` — результат того же вида, что и штатная ошибка инструмента,
+плюс вызывает `on_execute_tool_error` с исходным контекстом вызова.
+
+**Почему штатный путь непригоден.** Проверено на исходниках 0.3.5:
+
+1. `HookRegistry._for_each_hook_safe` (`nanobot/agent/hook.py:174-183`)
+   глотает исключение каждого хука и логирует его. Без
+   `reraise=True` режим `block` — **молчаливый no-op**: состояние
+   обновилось бы, а вызов всё равно выполнился. Защитник, который
+   «вроде блокирует», но не блокирует, хуже отсутствия защитника: он
+   даёт ложную гарантию.
+2. С `reraise=True` исключение пробрасывается, но
+   `before_execute_tool` вызывается в `tools/execution.py:165` —
+   **вне** `try`, который начинается строкой 166. Синтетический
+   `"Error: …"` не образуется: исключение уходит из
+   `execute_tool_calls` наверх, весь оборот падает с
+   `stop_reason="error"`, а в режиме `concurrent`
+   `asyncio.gather` без `return_exceptions=True` отменяет ещё и
+   соседние вызовы батча.
+3. Подменить вызов из `ctx.tool_calls` нельзя: `runner.py:483`
+   присваивает `context.tool_calls = list(response.tool_calls")` —
+   копию; мутация из хука ничего не отменила бы.
+
+Остаётся ровно одна точка, где результат ещё можно подменить, — сама
+`_execute_tool_call`.
 
 **Альтернативы:**
 
-- **Monkey-patch `_execute_tool_call`** через `RuntimePatcher` —
-  расширяет patch-surface, требует обновления
-  `runtime-patcher-inventory.md`. Отвергнуто как избыточное.
-- **`after_execute_tool`/`on_finally` для остановки оборота** —
-  не соответствует upstream-семантике: точку решения нужно
-  ставить ДО выполнения tool'а, не после.
-- **`finalize_content` + event-flag на stop** — чище теоретически,
-  но требует monkey-patch на `_assemble_outbound` /
-  `TurnDelivery`. Расширяет patch-surface ещё больше.
+- **Полагаться на штатный `except` в `execution.py:177-194`** —
+  отвергнуто: `before_execute_tool` вне `try` (см. п. 2).
+- **Патчить `execute_tool_calls` вместо `_execute_tool_call`** —
+  шире поверхность патча и не даёт доступа к `hook`/`context` в той
+  форме, в какой их передаёт upstream (позиционно). Отвергнуто.
+- **Блокировать на уровне `before_execute_tools`, снимая вызов из
+  `ctx.tool_calls`** — отвергнуто: поле уже копия (п. 3), и снятие
+  из копии не изменит ни факт выполнения, ни порядок результатов.
+- **Глобальный reset в `before_run`** вместо `before_iteration` —
+  отвергнуто, см. Decision 3.
 
-**Почему A выигрывает:** нулевое изменение upstream-кода, нулевой
-новый patch, нулевая модификация runner'а. Защитник остаётся
-чисто-проектной сущностью в `lib/hooks/`.
+**Цена решения:** седьмой runtime-патч и его каталог в
+`docs/architecture/runtime-patcher-inventory.md`. Это осознанное
+расширение scope относительно первоначального design, который требовал
+«нулевого нового патча». Альтернатива с нулевым патчем — оставить
+режим `block` непригодным (молчаливый no-op либо обрыв оборота), что
+хуже: оператор включил бы режим и получил бы либо отсутствие защиты,
+либо падение каждого зациклившегося оборота вместо короткого
+tool-ошибки. Патч ловит **только** `RepeatGuardBlocked`, поэтому
+остальные ошибки хуков остаются видимыми.
+
+### Decision 1a: сброс state в `before_iteration`, а не в `before_run`
+
+> Тоже уточнение первоначальной редакции (см. Decision 3).
+
+`AgentRunHookContext` в nanobot 0.3.5 **не содержит** `session_key` —
+его раннер создаёт как `AgentRunHookContext(messages=...)`
+(`runner.py:311`). Сброс по ключу там физически невозможен, а
+глобальный сброс на каждом `before_run` стирал бы буферы параллельных
+оборотов. У `AgentHookContext` ключ есть (`runner.py:436-440`), и
+`iteration == 0` однозначно означает первый вызов нового оборота.
+Сброс перенесён туда.
+
+### Decision 1b: ограничение числа отслеживаемых сессий вместо чистки в `after_run`
+
+`after_run` получает `AgentRunHookContext` — тоже без `session_key`,
+поэтому адресно удалить state сессии оттуда нельзя. Вместо этого
+держится жёсткий потолок `_MAX_TRACKED_SESSIONS = 512` с LRU-вытеснением
+по `time.monotonic()` на касание буфера. На долгоживущем gateway память
+остаётся ограниченной без контракта на явную очистку. `after_run` при
+этом подчищает только множество `published` — выкидывает из него
+fingerprint'ы, уже выпавшие из окна, иначе вернувшийся в окно вызов не
+опубликует событие, хотя для оператора это снова crossing.
 
 ### Decision 2: точное равенство canonical-представления для детекции, hex-truncation — только для observability
 
@@ -146,11 +206,12 @@ canonical-представления.
 ### Decision 3: глобальный скользящий буфер на сессию
 
 State защитника — `dict[session_key, deque[tuple[tool_name,
-fingerprint_tuple, iteration]]]` с `maxlen=window_size` на каждый
-`session_key`. Это даёт O(1) push/pop и естественную эвикцию
-старых записей. Сброс — через `before_run` для текущего
-`session_key` (или глобально для всех, если session_key ещё не
-известен).
+fingerprint_tuple]]]` с `maxlen=window_size` на каждый `session_key`
+плюс множество `published` (fingerprint'ы, для которых событие уже
+опубликовано в этом окне). Это даёт O(1) push/pop и естественную
+эвикцию старых записей. Сброс — в `before_iteration` при
+`iteration == 0` для текущего `session_key`; см. Decision 1a, почему
+не в `before_run`.
 
 **Альтернативы:**
 
@@ -193,9 +254,9 @@ fingerprint_tuple, iteration]]]` с `maxlen=window_size` на каждый
 - `warn` → вычислить fingerprint, добавить в буфер, проверить
   crossing; при crossing → enqueue `tool_repeat_warned` через
   `DbLoggingService.try_log_event`; НЕ прерывать вызов;
-- `block` → то же + поднять `RuntimeError` с сообщением
+- `block` → то же + поднять `RepeatGuardBlocked` с сообщением
   `"repeat-guard: 3 identical read_file calls in last 5 iterations;
-  use existing result or vary arguments"`.
+  use existing result or vary arguments"` (см. Decision 1).
 
 Семантика подсчёта: `max_repeats_in_window = N` означает
 "срабатывание на N-ом ИДЕНТИЧНОМ вызове" (текущий включается).
@@ -220,12 +281,16 @@ fingerprint'ом. Последующие повторы сверх порога 
 (новый оборот, `session_key` сменился) НЕ публикуют новых
 событий.
 
-Реализуется через флаг `_last_published_fingerprint: set` в state
-сессии: при каждом crossing'е fingerprint фиксируется; при
-последующих вызовах того же fingerprint'а, пока он уже в set'е,
-публикация пропускается. При эвикции fingerprint'а из буфера
-(выпал из `deque(maxlen=window_size)`) — соответствующая запись
-удаляется из `_last_published_fingerprint`.
+Реализуется через множество `published` в state'е сессии: при
+каждом crossing'е fingerprint фиксируется; при последующих вызовах
+того же fingerprint'а, пока он уже в множестве, публикация
+пропускается. Когда fingerprint выпадает из
+`deque(maxlen=window_size)`, его запись удаляется из `published` —
+иначе вернувшийся в окно вызов не опубликует событие, хотя для
+оператора это снова crossing. Чистка выполняется в `after_run` по всем
+сессиям: `deque` не сообщает, какой именно элемент вытеснился, а
+держать обратный индекс ради этого дороже, чем один проход по буферам
+на завершении оборота.
 
 **Альтернативы:**
 
@@ -238,13 +303,18 @@ fingerprint'ом. Последующие повторы сверх порога 
 
 ### Decision 6: подключение после `ToolAuditHook`
 
-В `lib/core/agent_factory.py::create` (после строки 121 с
-`hooks.append(tool_audit_hook)`) добавляется чтение
-`ctx._settings_ref.gateway.repeat_guard` и условный
-`hooks.append(RepeatGuardHook(settings=..., db_logging_service=...))`.
-В режиме `off` хук всё равно добавляется (zero-cost early-return
-по флагу) — это упрощает каноническую регистрацию в
-`canonical_framework_hooks()` для `diagnose_startup.py`.
+В `lib/core/agent_factory.py::create` добавляется чтение
+`settings.gateway.repeat_guard` и безусловный
+`hooks.append(RepeatGuardHook(settings=..., db_logging_service=...))`
+сразу после `TerminalToolPrintHook`. В режиме `off` хук всё равно
+добавляется (zero-cost early-return по флагу) — это упрощает
+каноническую регистрацию в `canonical_framework_hooks()` для
+`diagnose_startup.py`.
+
+Чтение настройки идёт через `_read_repeat_guard_settings`, а не через
+поле на `ApplicationContext`: `create()` принимает `settings` явно, и
+завязка на приватный `ctx._settings_ref` сделала бы фабрику
+зависимой от внутреннего состояния контекста.
 
 **Альтернативы:**
 
@@ -300,25 +370,38 @@ source="lib/hooks/repeat_guard_hook.py")` в
 - **[Risk] Утечка памяти при долгом обороте (200 итераций × N
   вызовов).** → **Mitigation:** `deque(maxlen=window_size)`
   per-session; суммарно ≤ `window_size × 1` записей
-  (типично ≤20); `_last_published_fingerprint` тоже ограничен
-  размером буфера.
-- **[Risk] `RuntimeError` от `before_execute_tool` приводит к
-  side-эффекту в `on_execute_tool_error` других хуков.**
-  → **Mitigation:** `RuntimeError` — стандартный upstream-путь,
-  никаких новых side-эффектов; другие хуки видят `event_type=
-  "error"`, как и для любого другого исключения в tool.
-- **[Risk] Unbounded `_last_published_fingerprint` set.**
-  → **Mitigation:** удаление записей при эвикции fingerprint'а
-  из основного буфера (те же `append`/`popleft` синхронизированно).
+  (типично ≤20); множество `published` ограничено тем же размером
+  буфера, а число сессий — потолком `_MAX_TRACKED_SESSIONS`.
+- **[Risk] `RepeatGuardBlocked` виден остальным хукам как
+  side-эффект в `on_execute_tool_error`.**
+  → **Mitigation:** это ровно тот же контракт, что и для любой другой
+  ошибки инструмента: патч вызывает `on_execute_tool_error` с
+  исходным `context`/`tool_call`/`tool`/`params`, и остальные хуки видят
+  обычный отказ, а не экзотическое событие. Но защитник НЕ может
+  навесить на этот вызов ничего своего — поэтому `on_execute_tool_error`
+  у него no-op, а весь эффект сделан до вызова инструмента.
+- **[Risk] Патч `_execute_tool_call` — седьмой runtime-патч, и
+  расширение patch-surface против design.** → **Mitigation:** патч
+  ловит только собственный тип `RepeatGuardBlocked`, идемпотентен
+  (`_repeat_guard_patched`), и при несовместимом API возвращает
+  `(False, причина)` вместо тихой подмены. Контракт закрыт
+  `tests/contract/test_repeat_guard_hook_contract.py`, который гоняет
+  патч на настоящем `_execute_tool_call` и настоящем
+  `execute_tool_calls`. Без патча режим `block` непригоден вовсе —
+  см. Decision 1.
+- **[Risk] Unbound-ное множество `published`.**
+  → **Mitigation:** из него вычищаются fingerprint'ы, уже выпавшие из
+  окна (в `after_run`); сверх того число отслеживаемых сессий
+  ограничено потолком `_MAX_TRACKED_SESSIONS` (Decision 1b).
 - **[Risk] Несовместимость с upstream-изменениями в
-  `_execute_tool_call`.** → **Mitigation:** поведение
-  `before_execute_tool` + exception-handling в
-  `tools/execution.py:177-194` — публичный стабильный контракт
-  с версии 0.3.5; контракт покрыт `tests/contract/`.
+  `_execute_tool_call`.** → **Mitigation:** патч проверяет наличие
+  функции, запоминает её сигнатуру и извлекает `hook`/`context`
+  биндингом по этой сигнатуре — перестановка или добавление
+  параметров upstream его не сломают. Контракт покрыт `tests/contract/`.
 - **[Risk] Log-storm в `warn`/`block` режимах (отменён).**
   → **Mitigation:** ровно одно событие на момент crossing'а
-  (см. Decision 5); `_last_published_fingerprint` синхронизирован
-  с эвикцией из буфера.
+  (см. Decision 5); множество `published` чистится от выпавших из
+  окна fingerprint'ов.
 
 ## Migration Plan
 

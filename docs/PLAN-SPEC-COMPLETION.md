@@ -56,8 +56,8 @@
 | `i18n-schema-validation-error` | **закрыт и архивирован** | `ebf85ea` |
 | `startup-schema-validation` | **закрыт и архивирован** | `781ff73` |
 | `remove-profile-environment-selection` | **закрыт и архивирован** | `744d7c9` |
-| `fix-cache-process-boundary` | закрыт, готовится архивация | — |
-| `repeat-guard-hook` | не начат (0/23) | — |
+| `fix-cache-process-boundary` | **закрыт и архивирован** | `1ed6349` |
+| `repeat-guard-hook` | **реализован, все 23 пункта закрыты, ждёт архивации** | — |
 
 Очередь открытых change'ей: **8 → 4** (из них `drop-local-cache-read-from-pg`
 закрыт ранее и ждёт архивации).
@@ -83,6 +83,38 @@ PostgreSQL 13.22 отвечает, Ollama отвечает. Два change'я и�
 закрыты не «по коду», а с живой проверкой: `startup-schema-validation`
 проверен настоящим `statement_timeout` против настоящего сервера,
 `fix-cache-process-boundary` — настоящим стартом `gateway.py`.
+
+**Р12. `RepeatGuardHook` требует седьмого патча `repeat_guard_block`, и это
+расширение scope против исходного design.**
+Design Decision 1 утверждал: «поднять `RuntimeError`, upstream сам поймает и
+вернёт синтетический `Error:`». Допущение опровергнуто на живом коде 0.3.5, и
+оба варианта плохи: `HookRegistry._for_each_hook_safe` глотает исключение хука
+при `reraise=False` (то есть `block` — **молчаливый no-op**, хуже отсутствия
+защитника, потому что даёт ложную гарантию), а `before_execute_tool` в
+`_execute_tool_call` вызывается **вне** `try`, ловящего ошибки инструмента, —
+при `reraise=True` исключение валит весь оборот, а в `concurrent` отменяет
+соседние вызовы батча через `asyncio.gather` без `return_exceptions=True`.
+`ctx.tool_calls` не годится: раннер кладёт туда копию. Остаётся сама
+`_execute_tool_call`. Цена — седьмой runtime-патч; альтернатива с «нулём
+патчей» — оставить `block` непригодным, что хуже. Патч ловит **только**
+`RepeatGuardBlocked`, так что чужие ошибки хуков не маскируются. Зафиксировано
+в `design.md` (Decision 1) и отдельным требованием в спеке.
+
+**Р13. Сброс state — в `before_iteration`, а не в `before_run`.**
+У `AgentRunHookContext` в nanobot 0.3.5 **нет** `session_key`: раннер создаёт
+его как `AgentRunHookContext(messages=...)`. Адресный сброс по сессии там
+невозможен, а глобальный стирал бы буферы параллельных оборотов. У
+`AgentHookContext` ключ есть, и `iteration == 0` — первый вызов нового оборота.
+Вместо чистки в `after_run` (тоже без ключа) введён потолок
+`_MAX_TRACKED_SESSIONS = 512` с LRU по `time.monotonic()`.
+
+**Р14. Вставка вложенной pydantic-модели требует внимания к границам классов.**
+Первая вставка `GatewayRepeatGuardSettings` в середину `GatewaySettings`
+обрезала родительский класс и утянула в новый класс его валидатор
+`_reject_legacy_renamed_sections` — legacy-секции `gateway.*` перестали падать
+fail-fast'ом, и об этом узнал только `test_legacy_vector_index_top_level_rejected`.
+Класс перенесён ниже родителя, причина записана в его docstring. В Python
+ссылка на вложенную модель допустима и раньше, но цена ошибки неочевидна.
 
 ### Находки, которые дал живой стенд
 

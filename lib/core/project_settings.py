@@ -21,7 +21,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from config import ConfigurationError
 
@@ -229,6 +236,7 @@ class GatewaySettings(_StrictOptional):
     usage_store: UsageStoreSettings | None = None
     session_cold_sync: SessionColdSyncSettings | None = None
     startup: StartupSettings | None = None
+    repeat_guard: GatewayRepeatGuardSettings | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -260,6 +268,66 @@ class GatewaySettings(_StrictOptional):
                 + "\n".join(problems)
             )
         return data
+
+
+class GatewayRepeatGuardSettings(_StrictOptional):
+    """Защитник от повторных tool-вызовов (``gateway.repeat_guard.*``).
+
+    Детектирует вырожденные циклы вида «модель зовёт один и тот же
+    инструмент с одними и теми же аргументами» внутри одного оборота.
+    Существующие throttles nanobot покрывают только web-fetch/web-search и
+    workspace-bypass; этот — общий случай.
+
+    Дефолт ``mode = "off"``: деплой без правок ``project.json`` ведёт себя
+    ровно как раньше.
+
+    Объявлен ПОСЛЕ ``GatewaySettings``, хотя используется в его поле
+    ``repeat_guard``: в Python это не мешает, но держать вложенную модель
+    рядом с местом использования опасно — одна правка порядка классов
+    незаметно утянула бы за собой валидаторы родителя (так уже случилось
+    с ``_reject_legacy_renamed_sections``).
+
+    Attributes:
+        mode: ``off`` (no-op) / ``warn`` (событие в журнал) / ``block``
+            (вызов подменяется синтетической ошибкой для модели).
+        window_size: сколько последних вызовов оборота удерживать.
+            Ограничение ``le=1000`` — это потолок памяти на сессию.
+        max_repeats_in_window: срабатывание на N-ом **идентичном** вызове
+            (текущий считается). Первые ``N-1`` проходят.
+        exempt_tools: имена инструментов, которые никогда не проверяются.
+            Сопоставление точным равенством, шаблоны запрещены.
+
+    См. ``openspec/specs/runtime/anti-loop/spec.md``.
+    """
+
+    mode: Literal["off", "warn", "block"] = "off"
+    window_size: int = Field(default=20, ge=1, le=1000)
+    max_repeats_in_window: int = Field(default=3, ge=2, le=100)
+    exempt_tools: list[str] = Field(default_factory=list)
+
+    @field_validator("exempt_tools")
+    @classmethod
+    def _reject_patterns(cls, value: list[str]) -> list[str]:
+        """Отвергнуть glob/regex-шаблоны: сопоставление только точное.
+
+        Молчаливый шаблон был бы ловушкой: ``exempt_tools=["read_*"]``
+        выглядел бы как «исключить read_file», а на деле исключил бы
+        инструмент, которого нет. Лучше fail-fast на старте.
+        """
+        for entry in value:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"gateway.repeat_guard.exempt_tools: запись {entry!r} "
+                    "не является строкой"
+                )
+            for meta in ("*", "?", "[", "]", "^", "$", "\\"):
+                if meta in entry:
+                    raise ValueError(
+                        f"gateway.repeat_guard.exempt_tools: запись "
+                        f"{entry!r} содержит метасимвол {meta!r}; "
+                        "сопоставление только точное, шаблоны не поддерживаются"
+                    )
+        return value
 
 
 class CliSettings(_StrictOptional):

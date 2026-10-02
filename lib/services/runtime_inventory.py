@@ -83,6 +83,16 @@ def canonical_framework_hooks() -> list[HookSpec]:
             source="lib/hooks/terminal_tool_print_hook.py",
         ),
         HookSpec(
+            name="RepeatGuardHook",
+            kind="framework",
+            # required=False: хук подключается всегда, но его поведение
+            # определяется ``gateway.repeat_guard.mode`` (дефолт ``off``).
+            # Отсутствие не считаем критичным drift'ом — это opt-in фича.
+            required=False,
+            description="защитник от повторных tool-вызовов (mode off/warn/block)",
+            source="lib/hooks/repeat_guard_hook.py",
+        ),
+        HookSpec(
             name="ToolResultArchiveHook",
             kind="framework",
             # required=False, потому что хук гейтится конфигом:

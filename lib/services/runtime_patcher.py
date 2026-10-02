@@ -335,6 +335,22 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         risk="high",
         required=True,
     ),
+    "repeat_guard_block": PatchSpec(
+        name="repeat_guard_block",
+        purpose="превратить отказ защитника от повторов (mode=block) в "
+                "синтетический результат инструмента вместо падения оборота",
+        nanobot_target="nanobot.agent.tools.execution._execute_tool_call",
+        reason="hook.before_execute_tool вызывается ДО try-блока "
+               "(execution.py:165 против 166), поэтому RepeatGuardBlocked "
+               "уходит из execute_tool_calls и валит весь оборот; модель не "
+               "получает результата и не может попробовать иначе",
+        alternatives_checked="return-значение из before_execute_tool "
+                             "не поддерживается Hook-API; правка ctx."
+                             "tool_calls не годится — runner копирует список "
+                             "(runner.py:483) и передаёт оригинал; "
+                             "агентный monkey-patch шире не нужен",
+        risk="low",
+    ),
 }
 
 
@@ -517,6 +533,7 @@ class RuntimePatcher:
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager, bus=bus))
+        self._record(report, "repeat_guard_block", self.patch_repeat_guard_block())
         return report
 
     @staticmethod
@@ -1434,6 +1451,113 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"patch failed: {exc}"
         return True, "SubagentManager._SubagentHook patched for DB logging"
+
+    def patch_repeat_guard_block(self) -> tuple[bool, str]:
+        """Отказ защитника от повторов → синтетический результат инструмента.
+
+        ``nanobot.agent.tools.execution._execute_tool_call`` вызывает
+        ``hook.before_execute_tool`` на строке 165 — **до** ``try``, который
+        начинается строкой 166. Поэтому ``RepeatGuardBlocked`` из
+        ``RepeatGuardHook`` не попадает в штатный ``except`` (строки 177-194)
+        и уходит из ``execute_tool_calls`` наверх: ``asyncio.gather`` в
+        параллельном режиме additionally отменяет соседние вызовы, а весь
+        оборот падает с ``stop_reason="error"``.
+
+        Hook-API не даёт «мягкого» отказа: возвращаемого значения, которое
+        читает раннер, у ``AgentHook`` нет, а ``ctx.tool_calls`` — копия
+        (``runner.py:483``), поэтому подменить вызов оттуда нельзя. Остаётся
+        единственная точка, где результат ещё можно подменить, — сама
+        ``_execute_tool_call``.
+
+        Патч ловит **только** ``RepeatGuardBlocked`` (свой тип): любая другая
+        ошибка хука остаётся видимой, а не маскируется под отказ защитника.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` если API
+            nanobot изменился (патч пропускается, режимы ``off`` и ``warn``
+            продолжают работать, ``block`` деградирует до обрыва оборота —
+            это громче отказа, но не тише).
+        """
+        try:
+            from nanobot.agent.tools import execution as _exec_mod
+            from lib.hooks.repeat_guard_hook import RepeatGuardBlocked
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+
+        original = getattr(_exec_mod, "_execute_tool_call", None)
+        if original is None:
+            return False, "_execute_tool_call is missing"
+        if getattr(original, "_repeat_guard_patched", False):
+            return True, "already patched: _execute_tool_call"
+
+        # upstream вызывает ``_execute_tool_call`` ПОЗИЦИОННО
+        # (``execution.py::execute_tool_calls``), поэтому искать ``hook`` и
+        # ``context`` в ``kwargs`` бессмысленно — там их не будет никогда.
+        # Биндинг по сигнатуре оригинала устойчив и к перестановке, и к
+        # добавлению параметров. Считается только в ветке отказа (редко),
+        # поэтому цена не имеет значения — зато она не зависит от формы
+        # вызова.
+        try:
+            from inspect import signature as _signature
+
+            _exec_signature = _signature(original)
+        except Exception:
+            _exec_signature = None
+
+        def _resolve(args: tuple[Any, ...], kwargs: dict[str, Any], name: str) -> Any:
+            if name in kwargs:
+                return kwargs[name]
+            if _exec_signature is None:
+                return None
+            try:
+                return _exec_signature.bind_partial(*args, **kwargs).arguments.get(name)
+            except TypeError:
+                return None
+
+        async def _execute_tool_call_guarded(*args: Any, **kwargs: Any):
+            try:
+                return await original(*args, **kwargs)
+            except RepeatGuardBlocked as exc:
+                hook = _resolve(args, kwargs, "hook")
+                context = getattr(exc, "context", None)
+                tool_call = getattr(exc, "tool_call", None)
+                if context is None:
+                    # Подстраховка: контекст лежит и в аргументах оригинала.
+                    context = _resolve(args, kwargs, "context")
+                if hook is not None and context is not None:
+                    await hook.on_execute_tool_error(
+                        context,
+                        tool_call,
+                        getattr(exc, "tool", None),
+                        getattr(exc, "params", None),
+                        exc,
+                    )
+                # Формат ``Error: <type>: <msg>`` — тот же, что даёт штатный
+                # except в ``_execute_tool_call``, чтобы модель увидела
+                # привычную ошибку инструмента, а не новый класс сообщений.
+                payload = f"Error: {type(exc).__name__}: {exc}"
+                try:
+                    from nanobot.agent.tools.execution import _with_retry_hint
+
+                    payload = _with_retry_hint(payload)
+                except Exception:
+                    # Приватный helper upstream мог исчезнуть. Без подсказки
+                    # модель всё равно получит корректную ошибку — хуже
+                    # восстанавливаемость, не хуже сам отказ.
+                    pass
+                event = {
+                    "name": getattr(tool_call, "name", "?"),
+                    "status": "error",
+                    "detail": str(exc).replace("\n", " ").strip()[:120],
+                }
+                return payload, event
+
+        _execute_tool_call_guarded._repeat_guard_patched = True  # type: ignore[attr-defined]
+        try:
+            _exec_mod._execute_tool_call = _execute_tool_call_guarded
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
+        return True, "tools.execution._execute_tool_call patched for RepeatGuardBlocked"
 
     # Вспомогательный комментарий (компакция + context-bridge seed) удалён в 0.3.5.
 # Исторический audit-trail сохранён в

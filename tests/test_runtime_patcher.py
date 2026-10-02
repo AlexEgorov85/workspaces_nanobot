@@ -1137,6 +1137,70 @@ class TestApplyAllFailed:
         assert report.failed == [], f"unexpected failures: {report.failed}"
 
 
+class TestRepeatGuardBlock:
+    """Юнит-контур седьмого патча ``repeat_guard_block``.
+
+    Содержательный контур (блокировка превращается в синтетический
+    tool-результат, соседние вызовы батча не отменяются, чужая ошибка
+    не маскируется) живёт в
+    ``tests/contract/test_repeat_guard_hook_contract.py`` — на настоящем
+    upstream. Здесь проверяется управляющая часть: идемпотентность и
+    отказ при несовместимом API, потому что это единственное, что
+    юнит-контур может проверить без подмены фреймворка.
+
+    Отдельная фикстура обязательна: соседние тесты зовут ``apply_all()``,
+    который патчит ``_execute_tool_call`` в модуле **глобально** и не
+    откатывает его. Без отката порядок прогон�� менял бы исходную точку
+    отсчёта, и «патч подменил функцию» превратилось бы в ложное
+    падение.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_module_state(self):
+        from nanobot.agent.tools import execution as exec_mod
+
+        saved = exec_mod._execute_tool_call
+        yield
+        exec_mod._execute_tool_call = saved
+
+    def test_repeat_guard_block_applies(self):
+        from nanobot.agent.tools import execution as exec_mod
+
+        original = exec_mod._execute_tool_call
+        ok, message = RuntimePatcher().patch_repeat_guard_block()
+        assert ok, message
+        if not getattr(original, "_repeat_guard_patched", False):
+            # Чистая база: патч обязан реально подменить функцию.
+            assert exec_mod._execute_tool_call is not original
+
+    def test_repeat_guard_block_is_idempotent(self):
+        """Повторный вызов в том же процессе не обязан наматывать
+        функцию дважды: без флага второй выход в ``except`` сделал бы
+        счётчик вызовов неверным."""
+        from nanobot.agent.tools import execution as exec_mod
+
+        patcher = RuntimePatcher()
+        ok1, _ = patcher.patch_repeat_guard_block()
+        first = exec_mod._execute_tool_call
+        ok2, message2 = patcher.patch_repeat_guard_block()
+        assert ok1 and ok2
+        assert "already patched" in message2, message2
+        assert exec_mod._execute_tool_call is first
+
+    def test_repeat_guard_block_reports_missing_target(self):
+        """Нет функции — внятный ``False``, а не подмена на заглушку.
+
+        Молчаливый no-op означал бы, что режим ``block`` включён, а
+        защиты нет; при отказе оператор хотя бы видит причину.
+        """
+        from nanobot.agent.tools import execution as exec_mod
+
+        del exec_mod._execute_tool_call
+        ok, message = RuntimePatcher().patch_repeat_guard_block()
+        assert ok is False
+        assert "_execute_tool_call is missing" in message, message
+
+
 # Контракт fallback-а на internal-ошибку переехал вместе с патчем:
 # ``tests/test_turn_delivery_factory.py`` (нативная фабрика вместо
 # monkey-patch'а). Здесь тестировать нечего: метода

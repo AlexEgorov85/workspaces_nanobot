@@ -356,6 +356,23 @@
     "usage_store": {
       "enabled": true
     },
+    // === Repeat guard ===
+    //  Защитник от вырожденных циклов одинаковых tool-вызовов
+    //  (lib/hooks/repeat_guard_hook.py). Секция полностью опциональна:
+    //  без неё хук работает в mode="off" и не делает ничего.
+    //
+    //  "repeat_guard": {
+    //    "mode": "off",                    // off | warn | block
+    //    "window_size": 20,                // размер скользящего окна вызовов
+    //    "max_repeats_in_window": 3,       // столько одинаковых вызовов = повтор
+    //    "exempt_tools": []                // ТОЧНЫЕ имена инструментов, без * и ?
+    //  },
+    //
+    //  mode=block поднимает RepeatGuardBlocked, которую перехватывает
+    //  патч repeat_guard_block (runtime_patcher.py) и превращает в обычный
+    //  синтетический tool-результат — оборот при этом не падает.
+    //  Подробности: openspec/specs/runtime/anti-loop/spec.md
+    // === /Repeat guard ===
     //  session_cold_sync.* — фоновый mirror upstream JSONL → PG.
     //  enabled=false отключает sync (escape hatch для multi-instance).
     "session_cold_sync": {

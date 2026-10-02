@@ -144,6 +144,22 @@ class AgentFactory:
         if terminal_print_hook is not None:
             hooks.append(terminal_print_hook())
 
+        # RepeatGuardHook — защитник от повторных tool-вызовов
+        # (``gateway.repeat_guard.*``). Регистрируется ВСЕГДА, даже при
+        # ``mode="off"``: тогда его каноническая запись в
+        # ``canonical_framework_hooks()`` совпадает с фактом, и
+        # ``tools/diagnose_startup.py`` не сообщает о ложном drift'е.
+        # В режиме ``off`` хук делает один флаг-чек и выходит.
+        repeat_guard_settings = self._read_repeat_guard_settings(settings)
+        repeat_guard_cls = self._import_repeat_guard_hook()
+        if repeat_guard_cls is not None:
+            hooks.append(
+                repeat_guard_cls(
+                    settings=repeat_guard_settings,
+                    db_logging_service=db_logging_service,
+                )
+            )
+
         # Плагины workspace/hooks/ идут ПЕРЕД ToolAuditHook, чтобы их
         # правки ``params["path"]`` уже были видны в аудите.
         if project_hooks:
@@ -247,6 +263,22 @@ class AgentFactory:
         return wrap_provider_snapshot_loader(base_loader, usage_store, bus=bus)
 
     @staticmethod
+    def _read_repeat_guard_settings(settings: Any) -> Any:
+        """Достать ``gateway.repeat_guard`` из settings, терпимо к мусорам.
+
+        Возвращает ``None``, когда секции нет (дефолт ``mode="off"``) или
+        settings недоступны. Ошибки чтения проглатываются: отсутствие
+        настройки не повод не стартовать.
+        """
+        try:
+            gateway = getattr(settings, "gateway", None)
+            if gateway is None:
+                return None
+            return getattr(gateway, "repeat_guard", None)
+        except Exception:
+            return None
+
+    @staticmethod
     def _import_tool_audit_hook():
         """Ленивый импорт ``ToolAuditHook`` из ``lib/hooks/``.
 
@@ -277,6 +309,19 @@ class AgentFactory:
         except Exception:
             return None
         return TerminalToolPrintHook
+
+    @staticmethod
+    def _import_repeat_guard_hook():
+        """Ленивый импорт ``RepeatGuardHook`` из ``lib/hooks/``.
+
+        Опционален, как и предыдущий: отсутствие модуля не должно ломать
+        старт — защитник от повторов удобен, но не обязателен.
+        """
+        try:
+            from lib.hooks.repeat_guard_hook import RepeatGuardHook
+        except Exception:
+            return None
+        return RepeatGuardHook
 
     @staticmethod
     def _build_database_logging_factory(

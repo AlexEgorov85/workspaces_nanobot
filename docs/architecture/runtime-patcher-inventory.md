@@ -52,6 +52,7 @@ runtime patch'ом — это отдельный loader
 | 4 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | **PARTIAL** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, подкласс не перехватывает; они лишь значения по умолчанию (per-call `head_limit` есть) |
 | 5 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `TurnEndEvent` в 0.3.5 **не существует** (проверено инспекцией пакета, см. ADR `turn-delivery-public-extension.md`), поэтому пункт «`_final_turn` → `TurnEndEvent`» плана нереализуем в этой формулировке. Остаётся перенос на существующие `EventSink` / `RuntimeEventPublisher` либо решение оставить патч — это отдельное решение владельца, а не молчаливое |
 | 6 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. Проверить, запускаются ли субагенты в деплое — если нет, патч удаляется |
+| 7 | `repeat_guard_block` | `nanobot.agent.tools.execution._execute_tool_call` | MEDIUM | — | KEEP | upstream даст способ **отклонить** tool-вызов из хука. Hook-API возвращаемого значения не имеет, а `before_execute_tool` в `_execute_tool_call` вызывается вне `try`, поэтому без патча режим `block` непригоден: с `reraise=False` он молчаливый no-op, с `reraise=True` — обрыв оборота и отмена соседних вызовов батча через `asyncio.gather`. Пока отказа нет — патч нужен |
 
 Колонка и каталог внесены в рамках openspec change
 [`enterprise-mcp-platform`](../../openspec/changes/enterprise-mcp-platform/).
@@ -136,19 +137,21 @@ return result, {...}                           # возвращается ИСХ
 
 ### Ожидаемый результат
 
-6 патчей → **3–4**. `turn_delivery_fail` уже переехал на публичный параметр
+7 патчей → **4–5**. `turn_delivery_fail` уже переехал на публичный параметр
 `AgentLoop(turn_delivery_factory=...)`; из трёх оставшихся кандидатов на снятие
 `context_governor` (уже не нужен по сути), `exec_timeout_cap` (только после
 переезда `legal_summarizer` в платформу) и `assemble_outbound` (нужно решение
 о переносе на `EventSink` / `RuntimeEventPublisher` — `TurnEndEvent` в 0.3.5
-нет). `exec_limits`, `tool_limits` и `subagent_logging` остаются: точки
-расширения у них структурно нет.
+нет). `exec_limits`, `tool_limits`, `subagent_logging` и `repeat_guard_block`
+остаются: точки расширения у них структурно нет.
 
 Остаются: `context_governor` — только подстановка ссылки для встроенных
 tool'ов, и при переносе тяжёлых запросов в MCP он тоже исчезает;
 `subagent_logging` — у `SubagentManager` нет фабрики хуков, точка вставки
 структурно отсутствует; `exec_limits` и `tool_limits` — конфигурации upstream
-нет; `exec_timeout_cap` — пересматривается вместе с уходом legal в фазу 11.
+нет; `exec_timeout_cap` — пересматривается вместе с уходом legal в фазу 11;
+`repeat_guard_block` — снимается первым среди них, если upstream даст способ
+отклонить tool-вызов из хука.
 
 ---
 
@@ -339,6 +342,38 @@ public_alternative: следить за hook-factory для subagents.
 risk: HIGH (CRITICAL пересмотрен до HIGH — публичные атрибуты Task/Context
   стабильны в 0.3.5).
 tests: tests/test_runtime_patcher.py::test_subagent_logging*
+```
+
+### 7. `patch_repeat_guard_block()`
+
+```yaml
+PATCH: repeat_guard_block
+target: nanobot.agent.tools.execution._execute_tool_call (private)
+nanobot_version: 0.3.5
+required: false
+purpose: >
+  Превращает RepeatGuardBlocked из RepeatGuardHook в синтетический
+  tool-результат вида ("Error: RepeatGuardBlocked: ...", {name, status: "error",
+  detail}) и вызывает hook.on_execute_tool_error с исходным контекстом
+  вызова. Без него режим gateway.repeat_guard.mode="block" непригоден.
+why_not_hook: >
+  Hook-API не имеет возвращаемого значения, которое читает раннер.
+  _for_each_hook_safe глотает исключение хука при reraise=False
+  (молчаливый no-op), а при reraise=True исключение уходит из
+  execute_tool_calls наверх, потому что before_execute_tool вызывается
+  ВНЕ try-блока; в concurrent-режиме asyncio.gather без
+  return_exceptions=True отменяет весь батч соседних вызовов.
+public_alternative: >
+  ctx.tool_calls не годится: runner.py присваивает
+  context.tool_calls = list(response.tool_calls), то есть копию.
+risk: >
+  MEDIUM — патч ловит ТОЛЬКО собственный тип RepeatGuardBlocked, поэтому
+  чужие ошибки хуков не маскируются; идемпотентен (_repeat_guard_patched);
+  hook/context извлекаются биндингом по сигнатуре оригинала, потому что
+  upstream вызывает _execute_tool_call позиционно и kwargs["hook"] всегда
+  был бы None. При несовместимом API возвращает (False, причина).
+tests: tests/contract/test_repeat_guard_hook_contract.py,
+  tests/test_runtime_patcher.py::test_repeat_guard_block*
 ```
 
 ### 7. ~~`patch_turn_delivery_fail`~~ — УДАЛЁН (фаза 6, п. 6.1)

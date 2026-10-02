@@ -17,11 +17,13 @@ class TestCanonical:
         фичи. Поэтому blanket-утверждение заменено правилом, которое
         различает «обязателен всегда» и «обязателен, если фича
         включена», и **проверяет гейт**, а не просто разрешает
-        ``required=False``.
+        ``required=False``. Тем же правилом помечен ``RepeatGuardHook``
+        (change ``repeat-guard-hook``): он обязателен, пока
+        ``gateway.repeat_guard.mode`` не выключен.
 
         Проверяется на заведомо плохих данных: убери гейт
-        ``persist_threshold`` из ``_make_tool_result_archive_hook`` —
-        ``test_optional_framework_hook_is_config_gated`` упадёт,
+        ``persist_threshold`` из ``_make_tool_result_archive_hook``
+        или ``mode == "off"`` из ``RepeatGuardHook`` — тест упадёт,
         и required=False станет неправомерным.
         """
         import inspect
@@ -36,6 +38,8 @@ class TestCanonical:
         assert "TerminalToolPrintHook" in specs
         # Нативная замена патча save_turn — тоже фреймворковый хук.
         assert "ToolResultArchiveHook" in specs
+        # Защитник от вырожденных циклов (change repeat-guard-hook).
+        assert "RepeatGuardHook" in specs
 
         for name, spec in specs.items():
             assert (root / spec.source).is_file(), (
@@ -46,7 +50,7 @@ class TestCanonical:
 
         # Ровно те optional, чья опциональность обоснована гейтом.
         optional = {n for n, s in specs.items() if not s.required}
-        assert optional == {"ToolResultArchiveHook"}, (
+        assert optional == {"ToolResultArchiveHook", "RepeatGuardHook"}, (
             f"неожиданный набор optional framework hooks: {sorted(optional)}"
         )
 
@@ -54,6 +58,14 @@ class TestCanonical:
         assert "persist_threshold" in src, (
             "ToolResultArchiveHook помечен required=False, но фабрика "
             "не гейтится persist_threshold — optionality не обоснована"
+        )
+
+        from lib.hooks.repeat_guard_hook import RepeatGuardHook
+
+        guard_src = inspect.getsource(RepeatGuardHook)
+        assert 'self._mode == "off"' in guard_src, (
+            'RepeatGuardHook помечен required=False, но before_execute_tool '
+            'не гейтится mode="off" — optionality не обоснована'
         )
 
     def test_plugin_hooks_include_required(self) -> None:
