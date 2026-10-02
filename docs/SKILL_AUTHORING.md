@@ -2,23 +2,61 @@
 
 > Практическое руководство для разработчика. Нормативные правила —
 > `docs/TARGET_ARCHITECTURE.md` (§3, §21, §22, §26, §30, §31), контракт
-> Skill ↔ Tool — `docs/skill-tool-architecture.md`, модель ресурсов —
-> `docs/table-registry.md`. Этот документ — мост между «как должно быть»
-> и практическим «что нажимать».
+> Skill ↔ Tool — `docs/skill-tool-architecture.md`, текущее состояние
+> skill'ов и tool'ов — `docs/skill-tool-inventory.md`. Этот документ — мост
+> между «как должно быть» и практическим «что нажимать».
+
+---
+
+## Статус документа
+
+Проект разделён на два дерева: агент (`lib/`, `workspace/`) и платформа
+`mcp-platform/` (процесс `enterprise-mcp`). Данные, модель и векторные индексы
+уехали на платформу, и большая часть прежней обвязки skill'а была снята вместе
+с ними. Прежде чем писать skill, посмотрите, где живёт нужный слой:
+
+| Что | Где живёт сейчас | Статус |
+|---|---|---|
+| Каталог skill'а (`SKILL.md`) | `workspace/skills/<name>/` | живой; в каталоге один навык — `audit_analyzer` |
+| Данные домена | capability `audit` платформы; состав таблиц — `mcp-platform/platform.json` → `audit` | у агента доступа к данным нет |
+| Векторные индексы | capability `vectors`; объявления — `platform.json` → `vectors.indexes`, сборка — `python -m servers.enterprise.build_index` (из `mcp-platform`) | у агента кода индекса нет |
+| Модель | capability `llm`; настройки и параметры эмбеддера — `platform.json` → `llm` | у агента LLM-клиента нет |
+| Снимок данных | capability `data`; путь — `platform.json` → `data.snapshot_path` | у агента нет |
+| Объявление навыка | `config.json → gateway.agent.skills.<name>`; форма — `lib/core/project_settings.py` | объявление есть, регистрирующего потребителя нет (§4) |
+| Runtime API для skill'ов (`lib/core/skill_config.py`) | — | **снят**, §5 |
+| Реестр ресурсов (`table_registry.py`, `skill_registration.py`, `infra_registration.py`) | — | **снят**, §6 |
+| CLI навыка (`scripts/cli.py`), `scripts/skill_config.py` | — | **удалены**: доступ к данным даёт tool агента (§7) |
+| Валидация SQL (`lib/utils/sql_safety.py`) | `mcp-platform/libs/enterprise_data/sql_safety.py` | уехала на платформу |
+
+Актуальное состояние — [`skill-tool-inventory.md`](skill-tool-inventory.md)
+(сводная таблица skill'ов и tool'ов, удалённые компоненты), контракт границ —
+[`skill-tool-architecture.md`](skill-tool-architecture.md). Часть расхождений
+между документацией и диском ловят тесты: `tests/test_docs_consistency.py`
+(относительные ссылки, запрет CLI навыка) и
+`tests/test_audit_analyzer_skill_doc.py` (`SKILL.md` против объявлений
+платформы).
+
+> Устаревший документ: `docs/table-registry.md` описывает снятый реестр
+> ресурсов (`table_registry.py`, `scripts/register.py`, `_auto_register_skills`)
+> и как образец не годится — §6.
 
 ---
 
 ## 0. TL;DR
 
-**Skill** — доменный пакет для агента:
+**Skill** — доменной пакет для агента:
 
-- инструкции (когда применять, какой capability выбрать);
-- Python-скрипты (детерминированные процедуры, map-reduce);
-- доменная оркестрация и capability доступа к доменным данным;
-- опциональные данные/промпты/references (progressive disclosure);
-- декларация PG-таблиц/vector-индексов в `config.json`.
+- инструкции (когда применять, какую операцию выбрать);
+- опциональные детерминированные Python-скрипты (парсинг, map-reduce,
+  батчинг) — их роль сузилась: за данными они не ходят;
+- опциональные references/prompts (progressive disclosure).
 
-Skill **не вызывает** Tool программно (`TARGET_ARCHITECTURE.md:209-228`), Tool **не знает** о Skill (§22.1). Связь — через agent runtime: skill описывает capability терминами, агент решает какой tool вызвать.
+Skill **не владеет данными**: ни снимком, ни индексами, ни моделью. Данные
+обслуживает capability `audit` платформы, и агент доходит до них через tool
+`workspace/tools/audit_analyzer_query.py`. Skill описывает в `SKILL.md`, какую
+операцию и когда звать, — в терминах операций, а не таблиц и не Python-классов.
+
+Skill **не вызывает** Tool программно (`TARGET_ARCHITECTURE.md` §22.2), Tool **не знает** о Skill (§22.1). Связь — через agent runtime: skill описывает capability терминами, агент решает какой tool вызвать.
 
 **Shared infrastructure** (`lib/services`, `lib/core`, `lib/utils`) — общий слой
 проверки, исполнения и хранения, используемый и Skills, и Tools. Наличие
@@ -46,10 +84,10 @@ workspace/skills/<skill_name>/
 | Сценарий | Создаём |
 |---|---|
 | Доменная логика «как решать задачу X в нашей БД» | **Skill** |
-| Доменный workflow из нескольких шагов | **Skill** (`scripts/`, оркестрация) |
-| Детерминированная операция **внутри** Skill workflow | **Skill script** + существующий runtime interface |
-| LLM-фолбэк на естественном языке для конкретного домена | **Skill** (`generated_sql`/`map_reduce` режим) |
-| Тонкая обёртка вокруг generic utility для домена | **Skill** (как `office_files` поверх `workspace/utils/`) |
+| Доменный workflow из нескольких шагов | **Skill** (`SKILL.md` + `scripts/`) |
+| Детерминированная операция **внутри** Skill workflow | **Skill script** |
+| LLM-фолбэк на естественном языке для конкретного домена | **Skill** (операция `generate_sql` платформы) |
+| Тонкая обёртка вокруг generic utility для домена | **Skill** (описание поверх `workspace/utils/`) |
 | Capability, которую агент выбирает и вызывает **самостоятельно** | **Tool** (`workspace/tools/`) |
 | Реализация, общая для Skill и Tool | **`lib/services`** / **`lib/core`** |
 | Универсальный SQL validator / chunker / splitter | **`lib/utils`** |
@@ -61,95 +99,94 @@ workspace/skills/<skill_name>/
 >
 > Каноничные примеры «generic, но не agent-facing»: свободный read-only
 > SQL, семантический поиск, NL→SQL для конкретной схемы. Для них Agent-facing
-> Tools (`duckdb_query`, `vector_search`, `nl_sql_generate`) **не создаются** —
-> см. `docs/skill-tool-architecture.md` §6–§8.
+> Tools (`duckdb_query`, `vector_search`, `nl_sql_generate`) **не создаются**:
+> их заменили операции одного tool'а `audit_analyzer_query` (`run_script`,
+> `generate_sql`, `vector_search`) — см. `docs/skill-tool-architecture.md` §6–§8
+> и `docs/skill-tool-inventory.md` («Удалённые компоненты»).
 
-Если вы сомневаетесь — посмотрите на существующие skill'ы (`audit_analyzer`, `legal_summarizer`, `office_files`) как референс.
+Если вы сомневаетесь — посмотрите на существующий skill (`audit_analyzer`) как
+референс.
 
 ---
 
 ## 2. Структура каталога
 
-### 2.1 Минимум (один режим, без таблиц)
+### 2.1 Минимум (только `SKILL.md`)
+
+```text
+workspace/skills/<skill_name>/
+└── SKILL.md
+```
+
+Это то, что получилось у `audit_analyzer`: навык не исполняет запросы, а
+выбирает операцию и читает её ответ, поэтому исполняемого кода в нём нет.
+
+### 2.2 Полная (`SKILL.md` + `scripts/`)
 
 ```text
 workspace/skills/<skill_name>/
 ├── SKILL.md
-├── __init__.py
 └── scripts/
     ├── __init__.py
-    ├── cli.py                 # операционный entry-point (опционально, см. §2.4a)
-    └── skill_config.py        # обёртка над lib.core.skill_config
+    └── <домен>.py        # детерминированная логика (парсинг, map-reduce, батчинг)
 ```
 
-> `cli.py` — **операционный** интерфейс, а не обязательная часть Skill.
-> Он нужен, если skill запускают из CLI/бенчмарков/CI или агент должен
-> обращаться к capability отдельным вызовом. Skill, которому это не требуется,
-> может обойтись `SKILL.md` + `scripts/`. Норма (`TARGET_ARCHITECTURE.md` §11)
-> не предписывает его наличие.
+`scripts/` опционален и нужен только когда навыку есть что считать самому:
+разбор входа, группировка, скоринг, обход пакета файлов. Skill при этом
+запускается подпроцессом, своего MCP-клиента у него нет, и единственный
+разрешённый выход наружу — клиент платформы
+`mcp-platform/libs/enterprise_client/llm.py` (`complete()`, `complete_json()`,
+`embed()`). За данными skill не ходит: к ним обращается tool агента (§7).
 
-### 2.2 Полная (несколько режимов + БД + LLM)
-
-```text
-workspace/skills/<skill_name>/
-├── SKILL.md
-├── __init__.py
-├── predefined/               # пакет режима "predefined" (если есть)
-│   ├── __init__.py           # public API (run, list_scripts, ScriptDefinition, ...)
-│   ├── builder.py            # сборка SQL из шаблона (DynamicQueryBuilder)
-│   ├── mode.py               # режим (run/list_*/CacheQueryService)
-│   ├── models.py             # ScriptDefinition / ParamDefinition
-│   ├── scripts.py            # реестр SQL (Python-литералы)
-│   └── validator.py          # валидация параметров
-├── scripts/
-│   ├── __init__.py
-│   ├── cli.py                # операционный entry-point (опционально, не норма)
-│   ├── skill_config.py       # тонкая обёртка над lib.core.skill_config
-│   ├── llm.py                # LLM-клиент (если нужен)
-│   ├── generated_sql_mode.py # режим NL → SELECT (если нужен)
-│   └── output.py             # форматирование/санитизация вывода
-├── references/
-│   ├── schema.md
-│   ├── vector_indexes.md
-│   ├── sql_guidance.md       # правила формулировки SELECT
-│   └── predefined_scripts.md # каталог predefined-скриптов
-└── cache/
-    └── schema.json           # дамп схемы для reference
-```
+> Прежняя структура навыка (`predefined/`, `scripts/cli.py` с
+> `--mode predefined|vector|generated_sql`, `scripts/skill_config.py`,
+> `scripts/generated_sql_mode.py`, `providers.py`) **снята**: это был Python-слой,
+> который сам открывал снимок и строил запросы. Сейчас таких файлов в
+> `workspace/skills/audit_analyzer/` нет, и возвращать их не нужно — данные
+> обслуживает capability `audit`; возврат CLI ловит
+> `tests/test_audit_analyzer_skill_doc.py` и
+> `tests/test_docs_consistency.py`.
 
 ### 2.3 Три паттерна структуры skill'а
 
 | Паттерн | Когда | Что есть | Пример |
 |---|---|---|---|
-| **Полный skill** | Своя логика, таблицы/индексы, LLM-режимы | SKILL.md + scripts/ (10+ модулей) + config.json::skills | `audit_analyzer` (по составу каталога — только SKILL.md) |
-| **Минимальный skill** | Своя логика, но без своих таблиц | SKILL.md + scripts/ + config.json::skills (без `tables[]`) | — (в `workspace/skills/` таких нет) |
-| **Documentation-only skill** | Только описывает готовый модуль из `workspace/utils/*` | **Только** SKILL.md; без `__init__.py`, без `scripts/`, **без** записи в `config.json::skills` | — (в `workspace/skills/` таких нет) |
+| **Полный skill** | Своя доменная логика, за ней capability платформы | `SKILL.md` (+ `scripts/`, если есть что считать) + секция `config.json → gateway.agent.skills.<name>` | `audit_analyzer` (по составу каталога — только `SKILL.md`) |
+| **Минимальный skill** | Своя логика, которой не за что зацепиться в capability | `SKILL.md` + `scripts/` с детерминированной обработкой | — (в `workspace/skills/` таких нет) |
+| **Documentation-only skill** | Только описывает готовый модуль из `workspace/utils/*` | **Только** SKILL.md; без `__init__.py`, без `scripts/`, без секции в `config.json` | — (в `workspace/skills/` таких нет) |
 
 **Documentation-only skill** допустим **только** когда выполняются **все** условия:
 
 1. Реализация уже живёт в `workspace/utils/<module>.py` и покрыта собственными unit-тестами.
-2. У skill'а нет собственной PG/vector-инфраструктуры — нечего регистрировать через `config.json::skills`.
+2. У skill'а нет собственной доменной инфраструктуры — нечего объявлять в `config.json`.
 3. SKILL.md нужен исключительно для **discovery** агентом при маршрутизации по описанию.
 
-Если хотя бы одно условие не выполнено — это не documentation-only skill, а полноценный skill без кода. Нужно либо `scripts/`, либо регистрация в `config.json::skills` (либо удалить skill).
+Если хотя бы одно условие не выполнено — это не documentation-only skill, а
+полноценный skill без кода. Нужно либо `scripts/`, либо объявление в `config.json`
+(либо удалить skill).
 
 **Когда выбирать documentation-only**, а когда полный:
 
 - ✅ Documentation-only: skill — это `extract_text`/`extract_tables`/`summarize` офисного файла поверх общей утилиты.
-- ❌ Не documentation-only: skill делает что-то доменное (выбор скрипта по реестру, LLM-генерация SQL, map-reduce) — это полный skill.
+- ❌ Не documentation-only: skill делает что-то доменное (выбор операции по каталогу, LLM-разбор, map-reduce) — это полный skill.
 
 ### 2.4 Чего НЕ должно быть
 
-- **Никаких `register.py`** — мёртвый паттерн, проверяется
-  `tests/test_skill_config_lookup.py::TestNoRegisterPy`. Регистрация —
-  декларация в `config.json::skills.<name>` + `_auto_register_skills`
-  в `lib/core/application_context.py:681-693`.
-- **Не дублировать `skill_config.py`** с бизнес-логикой. Только тонкая
-  обёртка (`lib/core/skill_registration.py:9-16`); никакого `register_*`.
-- **Не импортировать `workspace.tools.*`** в skill (§3.3).
-- **Не класть абсолютные пути** в `--file` аргументах CLI — см. `workspace/AGENTS.md:40-58`.
+- **Никаких `register.py`** — мёртвый паттерн. Регистрации ресурсов больше нет
+  (§6): объявление навыка — это данные в `config.json`, а не код.
+- **Никаких `scripts/skill_config.py`** — модуль `lib/core/skill_config.py`
+  снят (§5). Параметры прогона skill берёт из своей секции в `config.json`.
+- **Никаких `scripts/cli.py` с `--mode ...`** — CLI навыка удалён; возврат ловит
+  `tests/test_docs_consistency.py::test_readme_md_describes_the_live_audit_analyzer_entrypoint`.
+- **Не импортировать `workspace.tools.*`** в skill (§7.3).
+- **Не открывать снимок данных, не строить и не читать векторные индексы** —
+  это capability `data` и `vectors`.
+- **Не заводить свой LLM-клиент** — выход наружу только
+  `mcp-platform/libs/enterprise_client/llm.py` (§2.2).
+- **Не класть абсолютные пути** вида `/home/<user>/<project>/...` в аргументы
+  файловых команд — см. `workspace/AGENTS.md`.
 - **Не делать `pip install`** в коде — `requirements.txt` уже полный
-  (`workspace/AGENTS.md:7-34`).
+  (`workspace/AGENTS.md`).
 
 ---
 
@@ -159,72 +196,89 @@ workspace/skills/<skill_name>/
 
 ```yaml
 ---
-name: <skill_name>            # совпадает с ключом в config.json::skills
+name: <skill_name>            # совпадает с ключом в config.json → gateway.agent.skills
 description: <одна строка>    # как skill выбирается агентом
 metadata: {"nanobot":{"emoji":"📊","always":true}}
 ```
 
 `description` — это всё, что видит LLM-маршрутизатор при выборе skill'а.
-Сделайте его конкретным: «SQL-отчёты по oarb.*, семантический поиск по FAISS,
-LLM-генерация SELECT», а не «работа с аудитами».
+Сделайте его конкретным: «анализ данных аудиторских проверок через capability
+audit платформы — каталог готовых скриптов, их выполнение, NL→SQL и семантический
+поиск», а не «работа с аудитами».
 
 `metadata.nanobot.always: true` — skill всегда виден агенту. Используйте
 `false` если skill нужен только по явному запросу.
 
 ### 3.2 Структура основной части
 
-Все три существующих skill'а следуют одной структуре. Используйте как шаблон:
+Рабочая структура `workspace/skills/audit_analyzer/SKILL.md` — шаблон:
 
 1. **Заголовок H1** с именем skill.
-2. **Одно-двухстрочное описание** назначения.
-3. **Decision procedure / Когда использовать** — самая важная секция.
-4. **Режимы работы** (если несколько) — детали с примерами CLI.
-5. **Доменные таблицы и индексы** — что доступно.
-6. **Что не делать** — запреты.
-7. **References / Что внутри** — ссылки на детальные документы.
+2. **Одно-двухстрочное описание** назначения + кто владеет данными.
+3. **Единственная точка входа** — какая операция/tool обслуживает домен.
+4. **Порядок выбора** (decision procedure) — самая важная секция.
+5. **Каталоги** (скрипты, индексы) — что доступно и откуда берётся список.
+6. **Ответы и что они знают** — разбор кодов ошибок и пустых результатов.
+7. **Жёсткие правила / Что не делать** — запреты.
+8. **Доменная модель** — бизнес-глоссарий без физических имён хранилища.
+9. **Тесты** — какие сторожа держат этот файл.
 
 ### 3.3 Decision procedure — обязательная секция
 
-Если у skill'а >1 режима, нужна decision procedure
-(`audit_analyzer/SKILL.md:13-19`):
+Если у навыка больше одной операции, нужна decision procedure
+(`workspace/skills/audit_analyzer/SKILL.md:30-53`, «Порядок выбора»):
 
-```markdown
-| Задача | Capability | Как выполняется |
-|---|---|---|
-| Аггрегация / фильтр по полям | Predefined / NL→SQL | внутренняя операция Skill'а |
-| Свободный вопрос про данные (SELECT) | NL→SQL | внутренняя операция Skill'а |
-| Семантический поиск по смыслу | Vector search | внутренняя операция Skill'а |
-| Известный отчёт из реестра | Predefined | внутренняя операция Skill'а |
+```text
+вопрос про данные аудита
+          │
+          ├── «найди похожие / по смыслу»  ──→ vector_search
+          │
+          └── нужно посчитать / сгруппировать / отфильтровать
+                    │
+                    ├── в каталоге есть подходящий скрипт?
+                    │        ├── да  ──→ run_script
+                    │        └── нет ──→ generate_sql
+                    │
+                    └── (в любом случае сначала list_scripts)
 ```
 
-Для однорежимных skill'ов (`legal_summarizer`, `office_files`) — секции
-«Когда использовать» + «Когда не вызывать».
+Рядом держите таблицу операций с обязательными аргументами
+(`audit_analyzer/SKILL.md:23-28`): именно по ней модель выбирает вызов, а
+обязательность аргумента проверяет tool и возвращает `invalid_params`.
 
 Описывайте **capability и условия выбора**, а не способ доставки. Конкретный
-интерфейс (`--mode predefined`, `--mode vector` и т.п.) — деталь текущей
-реализации, а не норма: он может измениться, не делая `SKILL.md` неверным.
+интерфейс — деталь текущей реализации, а не норма: он может измениться, не
+делая `SKILL.md` неверным.
 
 ### 3.4 Имена таблиц/индексов
 
-**Не зашивайте как константы.** Имена — настраиваемые в `config.json`.
-См. `audit_analyzer/SKILL.md:81-89`:
+**Не зашивайте физические имена хранилища.** Навык описывает операции, а данные
+принадлежат capability: состав доступных таблиц объявлен на платформе
+(`mcp-platform/platform.json` → `audit`), логические индексы — там же
+(`vectors.indexes`). См. `audit_analyzer/SKILL.md:157-173` («Доменная модель»):
 
-> Имена таблиц и индексов ниже — значения текущей инсталляции,
-> настраиваемые в `config.json` (`skills.audit_analyzer.tables[*].name`,
-> `skills.audit_analyzer.vector_indexes[*].name`). В других развёртываниях
-> они могут отличаться; не зашивайте их в код/промпты как константы.
+> Физические таблицы и колонки — не зона навыка: они объявлены на платформе и
+> проверяются до выполнения. Здесь только бизнес-глоссарий.
+
+Исключение — **логические имена индексов**: их skill называет прямо, потому что
+передаёт `index_name` в `vector_search`, и каждое объявленное имя обязано быть
+описано (`tests/test_audit_analyzer_skill_doc.py` сверяет список в `SKILL.md` с
+`platform.json` в обе стороны).
 
 ### 3.5 Секция «Что не делать»
 
-Всегда явно фиксируйте запреты. Примеры из существующих skill'ов:
+Всегда явно фиксируйте запреты. Пример из живого skill'а —
+`workspace/skills/audit_analyzer/SKILL.md:144-156` («Жёсткие правила»):
 
-- `audit_analyzer/SKILL.md:91-94` — не использовать неизвестные таблицы/
-  индексы, не использовать DDL/DML, не подставлять пользовательские
-  значения в SQL строкой.
-- `legal_summarizer/SKILL.md:78-82` — не редактировать `subject` от LLM,
-  не подставлять пользовательский текст в `system` промпт.
-- `office_files/SKILL.md:64-72` — OCR недоступен, защищённые паролем
-  файлы бросают исключение, `.doc` не поддерживается.
+- не писать SQL и не просить вернуть его — инструмент текст запроса не принимает;
+- не выдумывать имена скриптов, параметров и индексов;
+- не вызывать `exec` / `python` ради данных — путь только один;
+- не обещать «актуальные на сейчас» данные: ответ отражает снимок на момент
+  последней загрузки.
+
+Прежние примеры из удалённых skill'ов (`legal_summarizer` уехал в capability
+`legal_summarizer` платформы, `office_files` удалён) в дереве
+`workspace/skills/` больше не лежат — ориентируйтесь на `audit_analyzer`.
 
 ### 3.6 Anti-patterns в SKILL.md
 
@@ -238,55 +292,81 @@ LLM-генерация SELECT», а не «работа с аудитами».
 
 ---
 
-## 4. Регистрация в `config.json`
+## 4. Объявление навыка в `config.json`
 
-### 4.1 Секция `skills.<name>` — канонический формат
+> **Сначала прочитайте врезку, иначе правильный текст будет прочитан неправильно.**
+> Секция объявления **жива** (модели в `lib/core/project_settings.py`, ключи в
+> `config.json` есть), но **регистрирующего потребителя у неё больше нет**:
+> `_auto_register_skills` и реестр ресурсов сняты (§5, §6). Никто не читает
+> `tables[]`/`vector_indexes[]`, чтобы что-то построить. Это декларация, а не
+> механизм.
+>
+> **Авторитетные объявления живут на платформе:**
+> состав доступных таблиц — `mcp-platform/platform.json` → `audit`,
+> векторных индексов — `platform.json` → `vectors.indexes`,
+> параметров эмбеддера — `platform.json` → `llm`. Расхождение между секцией в
+> `config.json` и платформой не проверяется — держите их синхронными руками.
 
-`lib/core/project_settings.py:386-424` (`SkillSettings(BaseModel)` с
-`extra="forbid"` — опечатки ловятся на старте):
+### 4.1 Секция `gateway.agent.skills.<name>` — форма
 
 ```jsonc
-"skills": {
-  "<skill_name>": {
-    "enabled": true,                          // OPTIONAL, default true
-    "tables": [ ... ],                        // OPTIONAL — §4.2
-    "vector_indexes": [ ... ],                // OPTIONAL — §4.3
-    "cli": { ... },                           // OPTIONAL — §4.4
-    "llm": { "max_tokens": 8192, "temperature": 0.1 },   // OPTIONAL
-    "chunking": { ... }                       // OPTIONAL — §4.4
+"gateway": {
+  "agent": {
+    "skills": {
+      "<skill_name>": {
+        "enabled": true,                          // OPTIONAL, default true
+        "tables": [ ... ],                        // OPTIONAL — §4.2
+        "vector_indexes": [ ... ],                // OPTIONAL — §4.3
+        "cli": { ... },                           // OPTIONAL — §4.4
+        "llm": { "max_tokens": 8192, "temperature": 0.1 },   // OPTIONAL
+        "chunking": { ... },                      // OPTIONAL — §4.4
+        "brief_context": { ... },                 // OPTIONAL — §4.4
+        "execution": { ... }                      // OPTIONAL — §4.4
+      }
+    }
   }
 }
 ```
 
-### 4.2 Секция `tables` — главная
+Форму описывают pydantic-модели `lib/core/project_settings.py`: `SkillSettings`
+(строки 606-650, `model_config = ConfigDict(extra="forbid")`), контейнер
+`SkillsSettings` (653-710).
 
-`lib/core/project_settings.py:277-311` — единый список ресурсов
-(`str | TableEntry`).
+**Оговорка про fail-fast.** Строгая валидация `SkillSettings` применяется к
+верхнеуровневой секции `skills`, а объявление в `config.json` лежит по пути
+`gateway.agent.skills`, который `GatewaySettings` не моделирует (там
+`extra="allow"`). Опечатка в этой секции на старте **не упадёт** — проверяйте
+её сами. Валидация вызывается при старте в
+`lib/core/application_context.py:262-265` (`validate_project_settings`).
+
+### 4.2 Секция `tables`
+
+`TableEntry` (`lib/core/project_settings.py:397-426`), в списке допускается
+`str | TableEntry`:
 
 | Поле | Тип | Описание |
 |---|---|---|
-| `name` | str (required) | Формат `"schema.table"` (контракт `TableResource.__post_init__`, `lib/services/table_registry.py:58-63`); голые имена запрещены. |
-| `type` | `"table"` (default) \| `"vector"` | Какой `Resource` создаёт `_auto_register_skills`. |
-| `label` | str \| null | opaque-метка. Таблица с label НЕ попадает в LLM-схему; доступ через `TableRegistry.resources_by_label(label)`. Runtime-sync игнорирует. |
-| `tracking_column` | str \| null | Колонка для инкрементального поллинга. Дефолт `updated_at` для type=table, `id` для type=vector. |
+| `name` | str (required) | Формат `"schema.table"`; голые имена не имеют смысла — таблица должна быть адресуема на платформе. |
+| `label` | str \| null | opaque-метка. Смысл был в том, чтобы отделить метаданные от доменных таблиц (так помечается реестр скриптов capability `audit`). Потребителя в агенте нет. |
+| `tracking_column` | str \| null | Колонка инкрементального обновления. Синхронизации в агенте нет: снимок наполняет capability `data`. |
 
 **Объектная форма:**
 
 ```jsonc
 "tables": [
-  {"name": "oarb.audits", "tracking_column": "updated_at"},
-  {"name": "oarb.violations"},
-  {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
+  {"name": "oarb.audits"},
+  {"name": "oarb.violations"}
 ]
 ```
 
 **Строковая форма (минимум):** `"oarb.audits"` ≡ `{"name": "oarb.audits"}`.
 
-**Неизвестные ключи запрещены** (`extra="forbid"`, `lib/core/project_settings.py:306`).
+**Неизвестные ключи запрещены** (`extra="forbid"`, `project_settings.py:420`) —
+но см. оговорку про путь секции в §4.1.
 
 ### 4.3 Секция `vector_indexes`
 
-`lib/core/project_settings.py:314-343`. Минимальный generic-контракт: **только `name`**:
+`VectorIndexEntry` (`project_settings.py:428-458`). Минимальный контракт: **только `name`**:
 
 ```jsonc
 "vector_indexes": [
@@ -294,183 +374,87 @@ LLM-генерация SELECT», а не «работа с аудитами».
 ]
 ```
 
-`VectorIndexEntry.model_config = ConfigDict(extra="forbid")` —
-`source`/`embedding` и прочие legacy-поля НЕ пройдут pydantic.
+`model_config = ConfigDict(extra="forbid")` — `source`/`embedding` и прочие
+legacy-поля не пройдут валидацию.
 
 **Что НЕ должно быть в `vector_indexes[]`**:
-- `source` — теперь в `gateway.vector.index.indexes.<name>.table`
-  (общий runtime-конфиг; см. `VectorIndexConfig`).
-- `embedding` — параметры эмбеддера захардкожены в `cache_provider_impl`
-  (общий runtime; токен — из `EMBED_TOKEN` env).
+- `source` — объявление индекса целиком живёт на платформе,
+  `platform.json` → `vectors.indexes.<name>`;
+- `embedding` — параметры эмбеддера объявлены там же, в секции `llm`:
+  `embed_api_base`, `embed_path`, `embed_model`, `embed_dimension`,
+  `embed_timeout`, `embed_key` (`${EMBED_TOKEN}`). Захардкоженных констант
+  `_EMBED_*` в коде агента нет.
 
 ### 4.4 Опциональные runtime-секции
 
 | Секция | Обязательные поля | Расширения |
 |---|---|---|
-| `cli` | `default_mode`, `default_format`, `max_retries`, `timeout_sec` (`project_settings.py:346-356`) | Skill-специфичные флаги допустимы через `SkillCliSettings(extra='allow')`. Пример: `legal_summarizer.cli.default_length = "medium"` (literal среди `brief`/`medium`/`detailed`). |
-| `llm` | `max_tokens`, `temperature` (не выбор модели!) (`project_settings.py:359-368`) | — |
-| `chunking` | `chunk_size`, `chunk_overlap`, `single_call_threshold` (`project_settings.py:371-383`) | — |
+| `cli` | `default_mode`, `default_format`, `max_retries`, `timeout_sec` (`project_settings.py:506-516`) | `SkillCliSettings(extra='allow')` — skill-специфичные флаги допустимы. |
+| `llm` | `max_tokens`, `temperature` (не выбор модели!) (`project_settings.py:519-533`) | — |
+| `chunking` | `chunk_size`, `chunk_overlap`, `single_call_threshold` (`project_settings.py:536-554`) | — |
+| `brief_context` | пороги и оценки символов на символ (`project_settings.py:557-571`) | — |
+| `execution` | бюджеты и батчинг контекста (`project_settings.py:574-603`) | — |
 
-**Выбор модели/провайдера — в `config.json`** (`agents.defaults.*`).
-`skills.<name>.llm` — только execution policy.
+**Модель, провайдер и адрес API — не здесь.** Общение с моделью принадлежит
+capability `llm` платформы (`platform.json` → `llm`). `skills.<name>.llm` —
+только execution policy: сколько токенов и какая температура.
 
-> **Контракт `extra="allow"`:** вложенные секции (`SkillCliSettings`, `SkillLlmSettings`,
-> `SkillChunkingSettings`) наследуют `_StrictOptional(extra='allow')`, поэтому skill-специфичные
-> поля (например, `default_length`, `default_kind`) проходят валидацию. Однако **собственные**
-> поля `SkillSettings` (включая `tables`, `vector_indexes`, имя самой секции) — `extra="forbid"`,
-> опечатки ловятся на старте gateway. Это намеренная асимметрия: жёсткий контракт на уровне
-> декларации skill'а, мягкое расширение внутри каждой подсекции.
+> **Контракт `extra="allow"`:** вложенные секции (`SkillCliSettings`,
+> `SkillLlmSettings`, `SkillChunkingSettings`, `SkillBriefContextSettings`,
+> `SkillExecutionSettings`) наследуют `_StrictOptional(extra='allow')`, поэтому
+> skill-специфичные поля проходят валидацию. Однако **собственные** поля
+> `SkillSettings` (включая `tables`, `vector_indexes`) — `extra="forbid"`.
+> Это намеренная асимметрия: жёсткий контракт на уровне декларации, мягкое
+> расширение внутри каждой подсекции.
 
 ### 4.5 Что НЕ должно быть в `skills.<name>`
 
 | Legacy ключ | Куда перенесён |
 |---|---|
-| `embedding.*` | — (удалён; hardcoded в `cache_provider_impl`) |
-| `cache.*` (был мёртвым) | — (удалён) |
-| `sync.*` | **удалена** (поллинга и пересинхронизации больше нет) |
-| `vector_index.*` | → `gateway.vector.index.*` |
-| `vector_indexes[].source` | → `gateway.vector.index.indexes.<name>.table` |
+| `embedding.*` | → платформа, `platform.json` → `llm.embed_*` |
+| `cache.*` (был мёртвым) | — (удалён; снимком владеет capability `data`) |
+| `sync.*` | — (удалена: синхронизации в агенте нет) |
+| `vector_index.*` (секция, не массив) | → `gateway.vector.index.*` |
+| `vector_indexes[].source` | → платформа, `platform.json` → `vectors.indexes.<name>` |
 
-Обратной совместимости нет — runtime-проверка даст fail-fast.
+Обратной совместимости нет — legacy-ключи ловит
+`tests/test_no_legacy_imports.py`.
 
 ### 4.6 Валидация
 
-Pydantic-валидация в `ApplicationContext.create()`
-(`lib/core/application_context.py:117-119`) — fail-fast с `ConfigurationError`
-и списком всех проблем сразу. При добавлении новой обязательной настройки —
-добавьте запись в `REQUIRED_KEYS` (`tests/test_config_keys.py:31-171`).
+Pydantic-валидация выполняется на старте в `ApplicationContext.create()`
+(`lib/core/application_context.py:262-265`) и падает с `ConfigurationError` со
+списком всех проблем сразу. Формы секций зафиксированы тестами
+`tests/test_project_settings.py`.
 
 ---
 
-## 5. Runtime API для skill'ов (`lib.core.skill_config`)
+## 5. Runtime API для skill'ов
 
-Единая точка (`lib/core/skill_config.py`) — **никакой копипасты** между skill'ами.
+> **Раздел описывает снятый API.** Модуля `lib/core/skill_config.py` в проекте
+> нет: skill больше не получает доступ к данным, DuckDB-снимку и векторным
+> индексам сам. Реестр ресурсов (`table_registry.py`), декларативная регистрация
+> (`skill_registration.py`) и `infra_registration.py` снесены вместе с ним
+> (фаза 5, 2026-10-01). Живой инвентарь — `docs/skill-tool-inventory.md`.
 
-### 5.1 Доступные функции
-
-| Функция | Назначение |
-|---|---|
-| `get_db_tables(skill_name)` | Доменные таблицы без label (для LLM-схемы) |
-| `get_db_schema(skill_name)` | Имя схемы по первой таблице |
-| `get_predefined_scripts_table(skill_name)` | Имя реестра SQL-шаблонов через `resources_by_label("scripts_registry")` |
-| `get_cli_config(skill_name)` | `default_mode`, `timeout_sec`, `max_retries` — бюджет прогона. Настроек модели здесь нет: они в `mcp-platform/platform.json`, а skill ходит в LLM через операцию `complete` |
-| `get_chunking_config(skill_name)` | Map-reduce параметры |
-| `get_in_memory_cache_path(skill_root)` | Путь к общему DuckDB snapshot |
-| `get_vector_index_path(skill_name, skill_root)` | Путь к FAISS-индексу |
-| `get_vector_db_table(skill_name)` | Имя storage-таблицы векторов |
-| `build_cache_provider(skill_name, skill_root)` | CacheProvider для DuckDB |
-| `get_vector_indexes(skill_name)` | Метаданные индексов из runtime-БД |
-| `get_embedding_config()` / `get_embedding_model()` | Общий runtime (без `skill_name`) |
-| `load_db_config(skill_name)` | `{"schema", "tables"}` |
-| `get_max_retries(skill_name)` | — |
-| `get_tool_config(skill_name)` | Полная секция skill'а |
-
-### 5.2 Конвенция `skill_config.py` в skill'е
-
-Тонкая обёртка (`audit_analyzer/scripts/skill_config.py:1-93`):
-
-```python
-from lib.core import skill_config as _lib
-_SKILL_NAME = "<skill_name>"
-
-def get_db_tables() -> list[str]:
-    return _lib.get_db_tables(_SKILL_NAME)
-# ...
-```
-
-Главное — никакой бизнес-логики, только тонкий alias.
-**Антипаттерн:** вызывать `lib.core.skill_config` напрямую с литералом
-в каждом месте кода.
-
-### 5.3 Standalone-регистрация
-
-Если skill запускается без поднятого gateway (CLI, утилита) — он
-регистрирует себя сам (`audit_analyzer/scripts/cli.py:86-110`):
-
-```python
-def _ensure_registered() -> None:
-    from lib.core.infra_registration import register_vector_storage
-    from lib.core.skill_registration import register_skill_from_config
-    from config import SETTINGS
-
-    cfg = SETTINGS.get("skills", {}).get("<skill_name>", {})
-    register_skill_from_config("<skill_name>", cfg)
-    register_vector_storage()
-```
-
-`register_skill_from_config` (`lib/core/skill_registration.py:63-99`)
-идемпотентен — повторный вызов безопасен.
-
-**Skill без vector/tables** (как `legal_summarizer`): вызовы `register_skill_from_config`,
-`register_vector_storage` будут no-op (нечего регистрировать,
-`gateway.vector.index.storage_table` пуст → `register_vector_storage` пропускает).
-Тем не менее **рекомендуется всегда вызывать `_ensure_registered()`** для единообразия
-(контракт в §5.3 соблюдается безусловно; код одинаков во всех skill'ах).
-
-> `register_embedding_config` удалён: параметры эмбеддера захардкожены
-> в `cache_provider_impl`, токен берётся из переменной окружения `EMBED_TOKEN`.
-> Отдельная runtime-регистрация больше не нужна.
+Единственный вход skill'а к данным аудита — инструмент
+`workspace/tools/audit_analyzer_query.py`, который вызывает операции capability
+`audit` платформы по MCP: `list_scripts`, `run_script`, `generate_sql`,
+`vector_search`. Параметры прогона skill берёт из своей секции
+`config.json → gateway.agent.skills.<name>`, а к LLM ходит операцией `complete`
+capability `llm`.
 
 ---
 
-## 6. TableRegistry и модель ресурсов
+## 6. Реестр ресурсов (снят)
 
-### 6.1 Что попадает в реестр
-
-`ApplicationContext._auto_register_skills`
-(`lib/core/application_context.py:681-693`) запускается при старте gateway:
-
-```python
-def _auto_register_skills(ctx):
-    from lib.core.skill_registration import register_skill_from_config
-    skills = ctx.config_service.settings_section("skills") or {}
-    for name, cfg in skills.items():
-        register_skill_from_config(name, cfg)
-```
-
-### 6.2 SkillRegistration
-
-`lib/services/table_registry.py:94-133`:
-
-```python
-@dataclass(frozen=True)
-class SkillRegistration:
-    name: str
-    resources: tuple[Resource, ...]   # TableResource | VectorResource
-    enabled: bool = True
-```
-
-`__post_init__` (`table_registry.py:58-63, 83-88`) проверяет формат `schema.table`.
-
-### 6.3 Lookup по label
-
-Если ресурс имеет `label` — он исключён из LLM-схемы. Доступ через
-`TableRegistry.resources_by_label(label)` (`table_registry.py:233-247`):
-
-```python
-from lib.services.table_registry import table_registry
-scripts_table = table_registry.resources_by_label("scripts_registry")[0]
-```
-
-`skill_config.get_predefined_scripts_table()` использует этот путь
-(`lib/core/skill_config.py:82-98`). Подробности — `skill-tool-architecture.md:222-303`.
-
-### 6.4 Инфраструктурные ресурсы
-
-Через `gateway.vector.index.storage_table` регистрируется **общий storage**
-сырых эмбеддингов (`lib/core/infra_registration.py:27-53`):
-
-```python
-INFRA_KEY_VECTOR_STORAGE = "vector.storage"
-
-def register_vector_storage():
-    table_registry.register_infra(INFRA_KEY_VECTOR_STORAGE, (
-        VectorResource(name=storage_table, tracking_column="id"),
-    ))
-```
-
-Регистрируется через `ApplicationContext._register_infra_resources()`
-(`lib/core/application_context.py:699-717`).
+> **Раздел описывает снятую подсистему.** `lib/services/table_registry.py`,
+> `lib/core/skill_registration.py` и `lib/core/infra_registration.py` удалены
+> вместе с локальным кэшем (фаза 5, 2026-10-01). Реестра ресурсов с владельцем
+> у него больше нет: состав таблиц снимка объявляет capability `data` платформы
+> (`mcp-platform/platform.json -> audit.tables`), а состав векторных индексов -
+> capability `vectors` (`vectors.indexes`). Ни skill, ни tool не регистрируют
+> ресурсы сами.
 
 ---
 
@@ -483,49 +467,46 @@ SKILL instructions → Agent → selects Tool → Tool executes capability
 ```
 
 Skill **не вызывает** Tool программно (TARGET §22.2,
-`tests/test_skill_tool_independence.py:53-67`).
+`tests/test_skill_tool_independence.py:59-73`).
 Tool **не импортирует** Skill (TARGET §22.1,
-`tests/test_skill_tool_independence.py:70-84`).
+`tests/test_skill_tool_independence.py:76-89`).
 
 ### 7.1.1 Два пути к одной инфраструктуре
 
-Кэш и векторный поиск живут в **общем runtime** (`lib/services/cache_provider.py`):
-локальный снимок (по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb`,
-см. `resolve_cache_path()`) наполняется разовой загрузкой при старте
-(`CacheLoadService`), FAISS-индексы строятся на его основе и живут в памяти.
-Снимок актуален на момент загрузки; обновляется перезапуском процесса.
+Инфраструктура данных и модели уехала в процесс `enterprise-mcp`: снимок
+загружает и держит capability `data` (путь — `platform.json` →
+`data.snapshot_path`, по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb`),
+векторные индексы строит и держит в памяти capability `vectors`, модель —
+capability `llm`. В агенте этого кода больше нет: ни локального кэша, ни
+`CacheProvider`, ни FAISS. Снимок актуален на момент загрузки и обновляется
+перезапуском процесса.
 
-К этому runtime подключаются **две независимые поверхности**:
+К этой инфраструктуре подключаются **две независимые поверхности**:
 
 | Поверхность | Кто использует | Когда |
 |---|---|---|
-| **`CacheProvider` напрямую** | Standalone CLI skill'ов (`audit_analyzer/scripts/cli.py`), утилиты (`tools/build_vectors.py`), тесты | Детерминированные сценарии: retry-цикл LLM, predefined-скрипты, map-reduce, ручной smoke |
-| **Skill CLI** (`scripts/cli.py`) | Agent runtime (CLI/gateway) при NL-вопросе | Агент вызывает CLI через `exec` по инструкциям `SKILL.md` |
+| **Операции capability `audit` по MCP** | `workspace/tools/audit_analyzer_query.py` | Единственный вход к данным аудита: `list_scripts`, `run_script`, `generate_sql`, `vector_search` |
+| **Операция `complete` capability `llm`** | Клиент платформы `mcp-platform/libs/enterprise_client/llm.py` | Обращение к модели из skill'а, запущенного подпроцессом |
 
-Обе поверхности **сводятся к одному runtime-синглтону** — данные в кэше и индексах
-общие. Это **не дублирование**, а намеренное разделение:
-- Skill'у нужен прямой доступ для retry-циклов, подготовки входных данных,
-  валидации параметров — то, что generic tool не делает;
-- CLI — единый «ровный» entrypoint для агента без generic tools.
+Прямого доступа к данным у skill'а больше нет: снимком владеет capability `data`,
+индексами — capability `vectors`, и оба живут в процессе `enterprise-mcp`.
+Skill запускается подпроцессом без собственного MCP-клиента, поэтому ходит к
+модели через `libs.enterprise_client.llm`, а к данным — только через tool агента.
 
-Связь — **только через agent runtime/runtime CLI**: skill в `SKILL.md` описывает
-capability в терминах CLI («use `scripts/cli.py --mode vector` with
-`--index-name 'audits_index'`»), агент вызывает CLI. Сам skill generic tools
-**программно не вызывает** (tools `duckdb_query` / `vector_search` не существуют).
+Связь skill↔данные — **через agent runtime**: skill в `SKILL.md` описывает
+capability в терминах операций («выполни семантический поиск по индексу
+`violations_index`»), агент выбирает tool и передаёт аргументы. Сам skill tool'ы
+**программно не вызывает**.
 
 ### 7.2 Что РАЗРЕШЕНО в Skill
 
-`skill-tool-architecture.md:34-44`:
-
 ```python
-from lib.services.cache_provider_impl import build_cache_provider
-from lib.utils.sql_safety import validate_sql
-from lib.utils.text_utils import sanitize_value
-from lib.services.table_registry import table_registry
-from lib.core.skill_config import get_db_tables, get_vector_index_path, ...
+from lib.utils.text_utils import truncate_middle     # ЗАПРЕЩЕНО
 ```
 
-Skill и Tool могут использовать **общую инфраструктуру** (`lib/utils`, `lib/services`).
+Skill не импортирует `lib` и не касается данных. Из общей инфраструктуры ему
+доступны только чистые утилиты без побочных эффектов; всё, что ходит в базу,
+живёт в tool'ах агента.
 
 ### 7.3 Что ЗАПРЕЩЕНО
 
@@ -560,20 +541,24 @@ Skill пишет инструкции в терминах capability, не Pytho
 - ❌ «call `VectorSearchTool.execute(query=...)`»
 - ❌ «import VectorSearchTool»
 
-Норма фиксирует **форму** инструкции, а не способ доставки: `--mode vector`
-в примере выше — деталь текущей реализации, а не требование.
+Норма фиксирует **форму** инструкции, а не способ доставки: конкретный вызов
+(`operation=vector_search` вместо прежнего `--mode vector`) — деталь текущей
+реализации, а не требование.
 
 ### 7.6 Capability доступ Skill'ам
 
 | Capability | Контракт | Конфиг |
 |---|---|---|
-| `scripts/cli.py --mode predefined` | `--script --params` → `{status, columns, rows, ...}` | `skills.audit_analyzer.*` |
-| `scripts/cli.py --mode vector` | `--query --index-name` → `{status, results, ...}` | `gateway.vector.index.*` (runtime-инфраструктура) |
-| `scripts/cli.py --mode generated_sql` | `--query --context` → `{status, columns, rows, ...}` | LLM-конфиг (эмбеддер захардкожен в `cache_provider_impl`) |
-| `compact_context` tool | `{session_key, force}` | `gateway.compact.*` |
+| `audit_analyzer_query`, `operation=list_scripts` | — → каталог допустимых скриптов | `config.json → gateway.agent.skills.audit_analyzer.*` |
+| `audit_analyzer_query`, `operation=run_script` | `{script, params}` → `{status, columns, rows, ...}` | `config.json → gateway.agent.skills.audit_analyzer.*` |
+| `audit_analyzer_query`, `operation=generate_sql` | `{query, context}` → SQL и результат | параметры прогона skill'а |
+| `audit_analyzer_query`, `operation=vector_search` | `{query, index_name}` → `{status, results, ...}` | `mcp-platform/platform.json → vectors.indexes` |
+| `compact_context` tool | `{session_key, force}` | `config.json → gateway.compact.*` |
 
-Generic tools `duckdb_query` / `vector_search` **не создаются** — это внутренние
-операции Skill'а, а не agent-facing capability (границы описаны в
+Skill-side CLI (`scripts/cli.py` с `--mode predefined|vector|generated_sql`)
+**не существует** и не должен появляться. Отдельные generic-tools
+`duckdb_query` / `vector_search` тоже не создаются: это внутренние операции
+платформы, а не agent-facing capability (границы — в
 `docs/skill-tool-architecture.md` § 6–§8). Новый Tool заводится **только** при
 agent-facing критерии (§1); для добавления — `workspace/tools/history_search_tool.py`.
 
@@ -592,38 +577,31 @@ agent-facing критерии (§1); для добавления — `workspace/
 - **Запрещены** абсолютные пути вида `/home/<user>/<project>/...` —
   на сервере таких путей нет.
 
-### 8.1 CLI skill'ы с файловым входом (`--file`)
+### 8.1 Файловый вход (`--file`) у skill'а с `scripts/`
 
 `SessionFileRedirectHook` НЕ перенаправляет пути в произвольных командах
-(`exec`-tunnels skill CLI, `nanobot exec`, и т.п.) — он рассчитан только
-на `write_file`/`edit`. Skill CLI **сам не делает redirect** и не имеет
-доступа к session_key агента. Поэтому **агент обязан передавать корректный
-путь явно**.
+(`exec`, `nanobot exec`) — он рассчитан только на `write_file`/`edit`. Скрипт
+навыка **сам не делает redirect** и не имеет доступа к session_key агента.
+Поэтому **агент обязан передавать корректный путь явно**.
 
 Допустимые пути для `--file <path>`:
 
-- ✅ **Абсолютный** путь: `C:\Users\<user>\.nanobot\workspace\data_store\cache\sessions\<session_key>\<file>.pdf`
-- ✅ **Относительный от корня репо** (cwd = `.nanobot/`): `data_store/cache/sessions/<session_key>/<file>.pdf`
-- ❌ Только basename файла (`<file>.pdf` без префикса) — skill вернёт
-  `Файл не найден`, потому что в cwd такого файла нет.
+- ✅ **Абсолютный** путь: `<project_root>/data_store/cache/sessions/<session_key>/<file>.pdf`
+- ✅ **Относительный от корня репо** (cwd = корень проекта): `data_store/cache/sessions/<session_key>/<file>.pdf`
+- ❌ Только basename файла (`<file>.pdf` без префикса) — обработчик вернёт
+  «Файл не найден», потому что в cwd такого файла нет.
 
 Если агент не знает session_key и видит только basename из media-attach —
-он должен найти файл через `glob` по `data_store/cache/sessions/*/<file>`,
-или через `SessionFileRedirectHook` (если бы они использовался для `exec`,
-но это не так), или просто передать абсолютный путь, который он знает
-из контекста канала.
+он должен найти файл через `glob` по `data_store/cache/sessions/*/<file>`
+или передать абсолютный путь, который знает из контекста канала.
 
-Skill со своей стороны **не делает redirect-логику** — это контрактная
-ответственность агента: «передавай то, что есть; мы валидируем и либо
-читаем, либо отдаём структурированную ошибку с понятным сообщением».
+Скрипт навыка со своей стороны **не делает redirect-логику** — это контрактная
+ответственность агента: «передавай то, что есть; мы валидируем и либо читаем,
+либо отдаём структурированную ошибку с понятным сообщением».
 
-Пример из `legal_summarizer/cli.py::load_text(...)`:
-
-```python
-text = load_text(Path(args.file))
-# если args.file не существует — FileNotFoundError с указанием пути;
-# ошибка пробрасывается в JSON-ответ агенту.
-```
+Живой пример приёма файлового входа в агенте — tool
+`workspace/tools/document_read.py`: путь приходит аргументом, разбор текста
+делегирован парсеру платформы (`mcp-platform/libs/office`).
 
 ---
 
@@ -633,73 +611,69 @@ text = load_text(Path(args.file))
 
 | Слой | Тесты |
 |---|---|
-| **Unit (skill)** | `tests/test_skill_legal_summarizer.py` — smoke через `monkeypatch` LLM-вызовов |
-| **Unit (cache)** | `tests/test_duckdb_cache_store.py` — реальный DuckDB-кэш + `TableRegistry` |
-| **Integration** | `tests/test_skill_tool_integration.py` — Skill scenarios + Tool execution |
-| **Architecture** | `tests/test_skill_tool_independence.py`, `tests/test_architecture_tool_domain_free.py` |
-| **Resource universality** | `tests/test_resource_universality.py` — DoD «новый skill без правок lib/» |
+| **Документ skill'а** | `tests/test_audit_analyzer_skill_doc.py` — четыре операции названы с обязательными аргументами, индексы совпадают с `platform.json` в обе стороны, физических имён (таблиц, снимка, движков) нет |
+| **Tool** | `tests/test_audit_analyzer_query_tool.py` — маршрутизация операции, сбор аргументов, личность оборота, ужатие ответа |
+| **Architecture** | `tests/test_skill_tool_independence.py`, `tests/test_architecture_tool_domain_free.py`, `tests/test_core_infrastructure_independence.py` |
+| **Конфиг и инвентарь** | `tests/test_project_settings.py`, `tests/test_runtime_inventory.py` |
+| **Согласованность документации** | `tests/test_docs_consistency.py`, `tests/test_no_legacy_imports.py` |
 
-### 9.2 Шаблон теста skill'а
+Тестов «skill против живого DuckDB-кэша» и «регистрации skill'а» больше нет:
+и кэша у агента нет, и регистрации тоже (§4, §6).
 
-По паттерну `tests/test_duckdb_cache_store.py` (DuckDB-кэш + `TableRegistry`, см. ниже):
+### 9.2 Шаблон теста tool'а навыка
+
+Skill без исполняемого кода тестируется стражем документа, а исполняемая
+часть — tool'ом. Рабочий паттерн — фейковый MCP-клиент из
+`tests/test_audit_analyzer_query_tool.py`: единственный async-метод `call`,
+который записывает имя операции, аргументы и `identity` и возвращает заданный
+JSON. Ни сеть, ни снимок, ни модель в тесте не участвуют.
 
 ```python
-import sys
-from pathlib import Path
-import pytest
+class _FakeClient:
+    """Клиент, который только запоминает вызов."""
 
-_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT))
-sys.path.insert(0, str(_ROOT / "workspace" / "skills" / "<skill_name>" / "scripts"))
+    def __init__(self, reply: str = '{"status": "ok", "row_count": 0, "rows": []}') -> None:
+        self.reply = reply
+        self.calls: list[tuple[str, dict, object]] = []
 
-
-@pytest.fixture
-def provider():
-    from skill_config import build_cache_provider
-    from lib.core.skill_registration import register_skill_from_config
-    from lib.services.table_registry import table_registry
-
-    register_skill_from_config("<skill_name>", _CFG_FOR_REGISTRATION)
-    p = build_cache_provider()
-    if not p.open_cache():
-        pytest.skip("DuckDB-кэш не найден — нужен реальный gateway refresh")
-    return p
-
-
-@pytest.fixture(autouse=True)
-def _reset_registry():
-    from lib.services.table_registry import table_registry
-    table_registry.clear()
-    yield
-    table_registry.clear()
+    async def call(self, operation: str, arguments: dict | None = None, *, identity=None) -> str:
+        self.calls.append((operation, arguments or {}, identity))
+        return self.reply
 ```
+
+Тест проверяет ровно две вещи: **куда ушёл вызов** (имя операции совпадает с
+`operation` модели, аргументы — с подписью операции) и **куда не ушла личность**
+(`session_id`/`user_id`/`request_id` едут в `identity`, а не в аргументы).
 
 ### 9.3 Что НЕ нужно тестировать
 
-Не пишите `tests/test_<skill>_register.py` с ручной регистрацией через
-`lib/core.skill_registration` — registration-test уже в
-`tests/test_auto_register_skills.py`. Лучше покройте доменную логику.
+Не пишите тестов регистрации (`register.py`, `_ensure_registered()`,
+`tests/test_skill_register.py`): регистрации больше нет (§6), и такой тест
+проверял бы код, которого не существует. Лучше покройте доменную логику
+`scripts/` и границы tool'а.
 
 ---
 
 ## 10. Архитектурные тесты — обязательно зелёные
 
-Перед коммитом убедитесь, что эти 4 теста проходят (поломан любой =
+Перед коммитом убедитесь, что эти тесты проходят (поломан любой =
 архитектурная регрессия):
 
 ```bash
 pytest tests/test_skill_tool_independence.py          -v
 pytest tests/test_architecture_tool_domain_free.py    -v
-pytest tests/test_resource_universality.py            -v
-pytest tests/test_auto_register_skills.py             -v
+pytest tests/test_core_infrastructure_independence.py -v
+pytest tests/test_audit_analyzer_skill_doc.py         -v
+pytest tests/test_audit_analyzer_query_tool.py        -v
 ```
 
 Что они проверяют:
 
 - `test_skill_tool_independence.py` — Skill не импортирует Tool, Tool не импортирует Skill.
 - `test_architecture_tool_domain_free.py` — Tool не содержит audit/домен-строк в коде и описаниях.
-- `test_resource_universality.py` — DoD: добавление skill'а не требует правок `lib/`.
-- `test_auto_register_skills.py` — декларативная регистрация работает (label, tracking_column, отключённые skill'ы).
+- `test_core_infrastructure_independence.py` — `lib/services` и `lib/utils` не зависят от skills.
+- `test_audit_analyzer_skill_doc.py` — `SKILL.md` описывает реальные операции платформы и не содержит физических имён хранилища.
+- `test_audit_analyzer_query_tool.py` — tool маршрутизирует операции и не выпускает личность оборота в аргументы.
 
 ---
 
@@ -709,27 +683,22 @@ pytest tests/test_auto_register_skills.py             -v
 
 ✅ Пишите `SKILL.md` в терминах capability, не Python-классов Tool'ов.
 
-✅ Используйте `lib.core.skill_config` через тонкую обёртку, не импортируйте напрямую с литералами.
+✅ Описывайте операции tool'а и условия их выбора; обязательные аргументы
+перечисляйте явно — по ним модель строит вызов.
 
-✅ Декларируйте ресурсы как JSON в `config.json` — никаких `register.py`.
+✅ Называйте логические имена индексов только те, что объявлены в
+`mcp-platform/platform.json` → `vectors.indexes`.
 
-✅ Все таблицы — fully qualified `schema.table`. Голые имена → `TableResource().__post_init__` бросит `ValueError`.
-
-✅ `label` — для таблиц-реестров метаданных (которые не нужны в LLM-схеме).
-
-✅ Проверяйте `extra="forbid"` в `SkillSettings` — опечатка `tablse` ловится на старте.
+✅ Берите параметры прогона из секции `config.json → gateway.agent.skills.<name>`,
+не дублируя их литералами в коде.
 
 ✅ Соблюдайте storage policy из `workspace/AGENTS.md` — относительные пути.
 
-✅ Имена индексов в `vector_indexes[]` — только `name`. Никаких `source`/`embedding`.
-
 ✅ Используйте progressive disclosure — большие знания выносите в `references/` (TARGET §10, §25).
 
-✅ При standalone-вызове самостоятельно регистрируйтесь через `_ensure_registered()`.
+✅ Запускайте архитектурные тесты (см. §10).
 
-✅ Запускайте 4 архитектурных теста (см. §10).
-
-✅ Покрывайте минимум один сценарий unit-тестом по паттерну `tests/test_duckdb_cache_store.py` (DuckDB-кэш + `TableRegistry`).
+✅ Покрывайте страж документа skill'а и границы его tool'а (см. §9).
 
 ### 11.2 DON'T (anti-patterns)
 
@@ -739,7 +708,7 @@ pytest tests/test_auto_register_skills.py             -v
 
 ❌ Прятать домен-логику в `lib/services` (TARGET §22.9).
 
-❌ Создавать ещё один `register.py`.
+❌ Создавать `register.py` или `scripts/skill_config.py` — оба сняты (§5, §6).
 
 ❌ `pip install` в коде skill'а. Все библиотеки в `requirements.txt`.
 
@@ -749,17 +718,19 @@ pytest tests/test_auto_register_skills.py             -v
 
 ❌ Заводить Tool только потому, что capability уже реализована и выглядит generic. Сначала §1 / TARGET §30 вопрос 11.
 
-❌ Multi-statement SQL или DDL/DML. Безопасность — `lib.utils.sql_safety.validate_sql()`.
+❌ Multi-statement SQL или DDL/DML. Валидация запроса —
+`mcp-platform/libs/enterprise_data/sql_safety.py::validate_sql`; в агенте
+модуля `lib/utils/sql_safety.py` больше нет.
 
 ❌ Секреты в `config.json` — `${VAR}` + `.secrets.env`.
 
-❌ Дублировать LLM-клиент, чанкинг, офисные утилиты — всё это в `lib/services/` и `workspace/utils/`.
+❌ Заводить свой LLM-клиент: модель принадлежит capability `llm`, выход из
+skill'а — `mcp-platform/libs/enterprise_client/llm.py`.
 
-❌ Generic infrastructure в `skills.<name>` (embedding, sync, FAISS root, cache).
+❌ Параметры эмбеддера, путь снимка и объявления индексов в `skills.<name>` —
+это объявления платформы (`platform.json` → `llm`, `data`, `vectors`).
 
-❌ Зашивать имена таблиц/индексов в код или промпты как строковые константы.
-
-❌ Описывать конкретные Python-классы tools в SKILL.md.
+❌ Зашивать физические имена таблиц в код или промпты как строковые константы.
 
 ---
 
@@ -772,12 +743,12 @@ pytest tests/test_auto_register_skills.py             -v
 1. ☐ Структура соответствует одному из трёх паттернов §2.3 (полный / минимальный / documentation-only).
 2. ☐ `SKILL.md` написан по §3: правильный frontmatter, decision procedure, «Что не делать».
 3. ☐ Skill **НЕ импортирует** `workspace.tools` и **НЕ вызывает** Tool'ы (в т.ч. через tool-call).
-4. ☐ Skill **не зависит** от конкретных Tool implementation: внутренние операции workflow идут
-   через существующий runtime/application interface напрямую. Tool создан **только** если
+4. ☐ Skill **не зависит** от конкретных Tool implementation: данные приходят через
+   операции capability, а не через чужой код tool'а. Tool создан **только** если
    capability действительно agent-facing — агент выбирает и вызывает её самостоятельно, как
    отдельный шаг плана (§1, TARGET §30 вопрос 11); наличие готовой generic-функции в
    `lib/services` основанием для Tool'а не является.
-5. ☐ Архитектурные тесты `tests/test_skill_tool_independence.py tests/test_architecture_tool_domain_free.py tests/test_resource_universality.py tests/test_auto_register_skills.py` — без падений.
+5. ☐ Архитектурные тесты `tests/test_skill_tool_independence.py tests/test_architecture_tool_domain_free.py tests/test_core_infrastructure_independence.py tests/test_audit_analyzer_skill_doc.py tests/test_audit_analyzer_query_tool.py` — без падений.
 6. ☐ `pytest tests/ -q` — без регрессий.
 7. ☐ `python cli_agent.py` стартует без ошибок (smoke).
 8. ☐ Документация обновлена:
@@ -788,25 +759,30 @@ pytest tests/test_auto_register_skills.py             -v
 
 ### Полный skill (audit_analyzer)
 
-9. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/skill_config.py}` создан; `scripts/cli.py` — если нужен операционный интерфейс (§2.1).
-10. ☐ В `config.json` добавлена секция `skills.<name>` с fully qualified таблицами.
-11. ☐ Если используется `label="scripts_registry"` (или другое) — явно отмечено.
-12. ☐ Если у таблицы нестандартная track-колонка — задана per-resource (по умолчанию `updated_at`).
-13. ☐ Если vector — `gateway.vector.index.storage_table` настроен в общем инфра-слое + `vector_indexes[]` в skill-секции.
-14. ☐ CLI skill'а использует `lib.core.skill_config` + сам регистрируется через `_ensure_registered()` для standalone.
-15. ☐ Unit-тест минимум на один сценарий skill'а.
+9. ☐ Каталог `workspace/skills/<name>/SKILL.md` создан; `scripts/` — только если
+   навыку есть что считать самому (§2.2). `scripts/cli.py` и
+   `scripts/skill_config.py` не заводятся.
+10. ☐ В `config.json` добавлена секция `gateway.agent.skills.<name>` с
+    параметрами прогона (§4.1); физические таблицы в skill'е не упоминаются.
+11. ☐ Состав доступных таблиц совпадает с `mcp-platform/platform.json` → `audit`.
+12. ☐ Каждый упомянутый в `SKILL.md` индекс объявлен в `platform.json` →
+    `vectors.indexes` (сверяет `tests/test_audit_analyzer_skill_doc.py`).
+13. ☐ Тест стража документа skill'а проходит.
 
-### Минимальный skill (legal_summarizer)
+### Минимальный skill
 
-9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/skill_config.py}` создан (без `tables[]`/`vector_indexes[]`, если их нет); `scripts/cli.py` — по необходимости.
-10'. ☐ В `config.json` есть `skills.<name>` с `cli`/`llm`/`chunking` (по необходимости).
-11'. ☐ CLI регистрирует skill через `_ensure_registered()` (для skill'ов с LLM обязательно; для чистых LLM-pipeline вызовы могут быть no-op).
-12'. ☐ Unit-тест минимум на один сценарий.
+9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/}` создан (без
+`tables[]`/`vector_indexes[]`, если их нет).
+10'. ☐ В `config.json` есть `gateway.agent.skills.<name>` с `llm`/`chunking`/`cli`
+    (по необходимости).
+11'. ☐ Если скрипт ходит к модели — только через
+    `mcp-platform/libs/enterprise_client/llm.py`.
+12'. ☐ Есть тест на доменную логику `scripts/` (паттерн §9.2).
 
-### Documentation-only skill (office_files)
+### Documentation-only skill
 
 9''. ☐ Реализация уже живёт в `workspace/utils/<module>.py`.
-10''. ☐ У skill'а нет PG/vector-инфраструктуры — `config.json::skills` НЕ трогаем.
+10''. ☐ У skill'а нет доменной инфраструктуры — секцию в `config.json` НЕ трогаем.
 11''. ☐ SKILL.md секции: «Когда использовать», «Когда не вызывать», «Что не делать» (может называться «Ограничения»), «Что внутри» со ссылкой на utility-модуль.
 
 ---
@@ -816,68 +792,66 @@ pytest tests/test_auto_register_skills.py             -v
 ### Шаг 1. Спроектируйте
 
 - Это Skill, Tool или shared infrastructure? (см. §1, TARGET §30 вопрос 11)
-- Какие таблицы/индексы? Сколько режимов?
-- Нужен ли операционный entry-point (`cli.py`)? Нужен ли LLM? Чанкинг?
+- Какая capability стоит за доменом и какие операции она даёт?
+- Нужны ли `scripts/` (есть что считать)? Нужна ли модель? Чанкинг?
 
 ### Шаг 2. Создайте структуру каталога
 
 ```bash
-mkdir -p workspace/skills/<name>/{scripts,references,prompts}
-touch workspace/skills/<name>/__init__.py
-touch workspace/skills/<name>/scripts/__init__.py
+mkdir -p workspace/skills/<name>
 ```
+
+`scripts/` добавляйте, только если навыку есть что считать самому (§2.2);
+`__init__.py` в корне каталога skill'а не нужен.
 
 ### Шаг 3. SKILL.md (см. §3)
 
 ### Шаг 4. Объявите в `config.json` (см. §4)
 
 ```jsonc
-"skills": {
-  "<name>": {
-    "enabled": true,
-    "tables": [
-      {"name": "<schema>.<table>"}
-    ],
-    "vector_indexes": [
-      {"name": "<index_name>"}
-    ],
-    "cli": {
-      "default_mode": "<mode>",
-      "timeout_sec": 60
-    },
-    "llm": {
-      "max_tokens": 8192,
-      "temperature": 0.1
+"gateway": {
+  "agent": {
+    "skills": {
+      "<name>": {
+        "enabled": true,
+        "llm": {
+          "max_tokens": 8192,
+          "temperature": 0.1
+        }
+      }
     }
   }
 }
 ```
 
-Если нужны embeddings — параметры подключения к эмбеддеру захардкожены
-в `cache_provider_impl` (модульные константы `_EMBED_*`); bearer-токен —
-через переменную окружения `EMBED_TOKEN`. Секция `gateway.vector.embedding`
-больше не нужна. Конфиг vector-индексов — в `gateway.vector.index.*`
-(storage_table, indexes).
+Состав таблиц и индексов в эту секцию не дублируется «на всякий случай»: он
+объявлен на платформе (`mcp-platform/platform.json` → `audit` и
+`vectors.indexes`), и расхождения никто не проверяет. Параметры эмбеддера
+(`embed_api_base`, `embed_path`, `embed_model`, `embed_dimension`,
+`embed_timeout`, `embed_key` = `${EMBED_TOKEN}`) — тоже там, в секции `llm`.
 
-### Шаг 5. Реализуйте `scripts/`
+### Шаг 5. Реализуйте `scripts/` (если нужен)
 
-По образцу `audit_analyzer/scripts/`:
-- `cli.py` — точка входа.
-- `skill_config.py` — обёртка над `lib.core.skill_config`.
-- `<core>.py` — основная логика (split на режимы).
-- Если есть LLM — `scripts/llm.py` (паттерн `audit_analyzer/scripts/llm.py`).
+- `scripts/__init__.py`;
+- `scripts/<домен>.py` — детерминированная логика;
+- к модели — только `mcp-platform/libs/enterprise_client/llm.py`
+  (`complete()`, `complete_json()`, `embed()`).
+
+Образца в `audit_analyzer/scripts/` нет: навык сейчас `SKILL.md`-only.
+Ориентируйтесь на §2.2 и на границы §7.
 
 ### Шаг 6. Тесты (см. §9)
 
-### Шаг 7. Документация (см. §12 п.16)
+### Шаг 7. Документация (см. §12)
 
 ### Шаг 8. Проверки
 
 ```bash
 pytest tests/test_skill_tool_independence.py \
        tests/test_architecture_tool_domain_free.py \
-       tests/test_resource_universality.py \
-       tests/test_auto_register_skills.py -v
+       tests/test_core_infrastructure_independence.py \
+       tests/test_audit_analyzer_skill_doc.py \
+       tests/test_audit_analyzer_query_tool.py -v
 
 pytest tests/ -q
 python cli_agent.py          # smoke
@@ -890,36 +864,41 @@ python cli_agent.py          # smoke
 ### Нормативные документы
 - `docs/TARGET_ARCHITECTURE.md` — нормативный контракт (§3, §22.1-§22.9, §30, §31).
 - `docs/skill-tool-architecture.md` — Skill ↔ Tool contract.
-- `docs/skill-tool-inventory.md` — текущее состояние реестра skill'ов.
-- `docs/table-registry.md` — Resource Model, label semantics, DoD.
+- `docs/skill-tool-inventory.md` — текущее состояние skill'ов и tool'ов.
 
-### Reference для runtime API
-- `lib/core/skill_config.py` — параметризованный runtime API.
-- `lib/core/skill_registration.py` — декларативная регистрация ресурсов.
-- `lib/core/infra_registration.py` — регистрация инфра-ресурсов.
-- `lib/core/project_settings.py` — pydantic-валидация (`extra="forbid"`).
-- `lib/services/table_registry.py` — каноническая модель `TableResource`/`VectorResource`/`SkillRegistration`.
-- `lib/utils/sql_safety.py::validate_sql` — SQL security boundary.
+### Живой код агента
+- `workspace/skills/audit_analyzer/SKILL.md` — рабочий образец навыка.
+- `workspace/tools/audit_analyzer_query.py` — единственный вход к данным аудита.
+- `workspace/tools/document_read.py` — чтение текста офисных документов.
+- `lib/core/project_settings.py` — формы секции `skills.<name>` (`SkillSettings`, `TableEntry`, `VectorIndexEntry`).
+- `lib/services/enterprise_mcp_client.py` — клиент агента к платформе.
+
+### Живой код платформы
+- `mcp-platform/platform.json` — объявления capability: `audit` (таблицы),
+  `vectors` (индексы, `storage_table`), `data` (путь снимка), `llm` (модель и `embed_*`).
+- `mcp-platform/libs/enterprise_client/llm.py` — `complete()`, `complete_json()`, `embed()` для skill'ов-подпроцессов.
+- `mcp-platform/libs/enterprise_data/sql_safety.py::validate_sql` — SQL security boundary.
+- `mcp-platform/servers/enterprise/build_index.py` — сборка векторных индексов.
 
 ### Конфигурация
-- `config.json` — главная карта; раздел `skills.*`.
-- `tests/test_config_keys.py:31-171` — `REQUIRED_KEYS`.
+- `config.json` — главная карта; секция навыка — `gateway.agent.skills.<name>`.
 
 ### Существующие skill'ы как reference
 - `workspace/skills/audit_analyzer/` — единственный skill в `workspace/skills/`;
-  в каталоге сейчас только `SKILL.md` (логика уехала в capability `audit` платформы).
+  в каталоге только `SKILL.md` (логика уехала в capability `audit` платформы).
 - `legal_summarizer` и `office_files` — каталогов в `workspace/skills/` больше нет
   (`legal_summarizer` живёт в capability `legal_summarizer` платформы).
 
 ### Тесты для архитектурных инвариантов
 - `tests/test_skill_tool_independence.py`
 - `tests/test_architecture_tool_domain_free.py`
-- `tests/test_resource_universality.py`
-- `tests/test_auto_register_skills.py`
-- `tests/test_skill_config_api.py`
+- `tests/test_core_infrastructure_independence.py`
+- `tests/test_audit_analyzer_skill_doc.py`
+- `tests/test_audit_analyzer_query_tool.py`
 - `tests/test_project_settings.py`
-- `tests/test_skill_tool_integration.py`
-- `tests/test_duckdb_cache_store.py` — паттерн fixture для skill'ов с DuckDB.
+- `tests/test_docs_consistency.py`
+- `tests/test_no_legacy_imports.py`
+- `tests/test_runtime_inventory.py`
 
 ### Hooks и runtime
 - `lib/hooks/tool_audit_hook.py` — автоматическая audit trail для всех tool'ов.
