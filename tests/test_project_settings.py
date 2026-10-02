@@ -357,10 +357,15 @@ class TestSkillBriefContextSettings:
         assert s.brief_context.structure_max_chars == 12000
 
     def test_brief_context_defaults_roundtrip_via_project_settings(self) -> None:
-        """Полная валидация секции legal_summarizer-стиля проходит."""
+        """Полная валидация секции skill'а с brief_context проходит.
+
+        Имя навыка здесь произвольное: ``SkillsSettings`` — контейнер
+        ``skills.<name>``, а не описание конкретного навыка (суммаризатор
+        legal уехал на платформу, секция вырезана из project.json).
+        """
         result = validate_project_settings({
             "skills": {
-                "legal_summarizer": {
+                "example_skill": {
                     "enabled": True,
                     "chunking": {"brief_input_ratio": 0.13},
                     "brief_context": {
@@ -373,8 +378,8 @@ class TestSkillBriefContextSettings:
             },
         })
         assert result.skills is not None
-        legal = result.skills.legal_summarizer
-        assert legal["brief_context"]["max_chars_fallback"] == 30000
+        section = result.skills.example_skill
+        assert section["brief_context"]["max_chars_fallback"] == 30000
 
     def test_brief_context_optional_and_empty(self) -> None:
         s = SkillSettings.model_validate({})

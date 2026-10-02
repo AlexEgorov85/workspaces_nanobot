@@ -67,20 +67,6 @@ def _required_keys():
         ("channels.redis.reply_to_trim_to", 5000),
         # skills.audit_analyzer
         # Новая модель (Phase 7): tables[] + vector_indexes[] вместо db.* + vector_index.*
-        ("skills.legal_summarizer.enabled", True),
-        ("skills.legal_summarizer.cli.default_length", "brief"),
-        ("skills.legal_summarizer.cli.timeout_sec", 120),
-        ("skills.legal_summarizer.cli.max_retries", 3),
-        ("skills.legal_summarizer.llm.max_tokens", 8192),
-        ("skills.legal_summarizer.llm.temperature", 0.1),
-        ("skills.legal_summarizer.chunking.chunk_size", 100000),
-        ("skills.legal_summarizer.chunking.chunk_overlap", 0),
-        ("skills.legal_summarizer.chunking.single_call_threshold", 20000),
-        ("skills.legal_summarizer.chunking.chunk_size_input_ratio", 0.5),
-        ("skills.legal_summarizer.chunking.brief_input_ratio", 0.13),
-        ("skills.legal_summarizer.brief_context.max_chars_fallback", 30000),
-        ("skills.legal_summarizer.brief_context.chars_per_token", 3.5),
-        ("skills.legal_summarizer.brief_context.structure_max_chars", 12000),
         ("skills.audit_analyzer.tables", [
             {"name": "oarb.audit_reports"},
             {"name": "oarb.audits"},

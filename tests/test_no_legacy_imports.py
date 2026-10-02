@@ -14,8 +14,8 @@ Regression guard для всего проекта (см. ``docs/architecture/COM
    запрещён (Type E — fail-fast).
 
 Тест-каталоги и тестовые файлы исключены: они могут содержать
-legacy-ссылки для проверки invariant'ов (например,
-``test_skill_legal_summarizer_characterization.py`` импортирует удалённые
+legacy-ссылки для проверки invariant'ов (например, обезличенный
+``_test_skill_legal_summarizer_characterization.py`` импортировал удалённые
 модули, чтобы проверить, что они не воссозданы).
 
 Этот тест — единая точка входа для архитектурного guard из основного

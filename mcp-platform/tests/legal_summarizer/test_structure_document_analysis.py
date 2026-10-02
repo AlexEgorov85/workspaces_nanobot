@@ -124,11 +124,11 @@ def test_retrieve_falls_back_when_no_index():
     hits = analysis.retrieve("оплата")
     assert len(hits) >= 1
 
-def test_custom_identity_used():
+def test_custom_identity_used(tmp_path):
     chunks = (_c("001", "x"),)
-    identity = DocumentIdentity.from_path_with_mtime(
-        "C:/tmp/x.txt", size_bytes=0, mtime_ns=0,
-    )
+    doc_path = tmp_path / "x.txt"
+    doc_path.write_text("custom identity doc", encoding="utf-8")
+    identity = DocumentIdentity.from_path(doc_path)
     analysis = DocumentAnalysis.build(
         physical=_doc(), structure=_struct(), chunks=chunks,
         identity=identity,

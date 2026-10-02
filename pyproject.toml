@@ -8,8 +8,6 @@ python_files = ["test_*.py"]
 pythonpath = [
     ".",
     "workspace",
-    "workspace/skills/legal_summarizer",
-    "workspace/skills/legal_summarizer/scripts",
 ]
 asyncio_mode = "auto"
 filterwarnings = [

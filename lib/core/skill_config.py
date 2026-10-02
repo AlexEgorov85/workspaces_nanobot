@@ -12,11 +12,11 @@
 ``get_vector_index_path``, ``get_vector_db_table``, ``get_vector_indexes``,
 ``get_embedding_config``, ``get_embedding_model``. Снимок, FAISS-индексы и
 эмбеддинги принадлежат capability ``data``/``vectors`` платформы; навык ходит к
-ним по MCP. Единственный production-потребитель этого API был
-``audit_analyzer`` (``scripts/_skill_config.py``), который после фазы 9
-запрашивает данные операциями capability ``audit``; ``legal_summarizer``
-берёт отсюда только конфиг — ``get_cli_config``, ``get_max_retries``,
-``get_chunking_config``, ``get_brief_context_config``.
+ним по MCP. **Production-потребителей этого API у агента не осталось.**
+``audit_analyzer`` после фазы 9 ходит в данные операциями capability
+``audit``; ``legal_summarizer`` уехал на платформу (фаза 11) и больше
+ничего отсюда не берёт. API оставлен как единая точка входа для skill'ов
+и покрыт тестами; активных вызывающих в репозитории нет.
 
 ``TableRegistry`` и ``skill_registration.py`` остаются: они описывают состав
 снимка, а не способ доступа к нему.
@@ -138,7 +138,8 @@ def get_chunking_config(skill_name: str) -> dict[str, Any]:
     brief-chunk (а не выборку canonical chunks). Используется
     ``BriefContextBuilder`` через ``resolve_max_chars``: формула
     ``max_chars = contextWindowTokens * brief_input_ratio * chars_per_token``.
-    См. ``workspace/skills/legal_summarizer/scripts/application/brief_context.py``.
+    См. ``mcp-platform/libs/legal_summarizer/application/brief_context.py``
+    (навык агента, откуда эта формула пришла, уехал на платформу).
     """
 
     cfg = _skill_cfg(skill_name)

@@ -51,19 +51,24 @@ def test_is_fresh_missing_file(tmp_path: Path):
     p.unlink()
     assert ident.is_fresh(p) is False
 
-def test_to_dict_roundtrip():
-    ident = DocumentIdentity.from_path_with_mtime(
-        Path("/tmp/x.pdf"), size_bytes=100, mtime_ns=12345
-    )
+def test_to_dict_roundtrip(tmp_path: Path):
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"%PDF-1.4 hello")
+    ident = DocumentIdentity.from_path(p)
+    st = p.stat()
     d = ident.to_dict()
-    assert d["size_bytes"] == 100
-    assert d["mtime_ns"] == 12345
+    assert d["size_bytes"] == st.st_size
+    assert d["mtime_ns"] == st.st_mtime_ns
+    assert d["resolved_path"] == str(p.resolve())
     assert d["physical_cache_key"] == d["fingerprint"]
 
-def test_identity_is_frozen():
+
+def test_identity_is_frozen(tmp_path: Path):
     import dataclasses
 
-    ident = DocumentIdentity.from_path_with_mtime(Path("/tmp/x.pdf"), size_bytes=0, mtime_ns=0)
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"%PDF-1.4 hello")
+    ident = DocumentIdentity.from_path(p)
     with pytest.raises(dataclasses.FrozenInstanceError):
         ident.size_bytes = 999  # type: ignore[misc]
 

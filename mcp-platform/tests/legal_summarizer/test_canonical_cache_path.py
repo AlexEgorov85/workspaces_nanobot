@@ -49,7 +49,7 @@ def test_second_run_returns_same_identity(tmp_path: Path):
     )
 
 def test_modified_file_creates_new_identity(tmp_path: Path):
-    """Изменённый файл → новый DocumentIdentity."""
+    """Другое содержимое → другой DocumentIdentity."""
     from libs.legal_summarizer.application.canonical import (
         build_pipeline_result,
     )
@@ -64,6 +64,31 @@ def test_modified_file_creates_new_identity(tmp_path: Path):
     assert (
         result1.analysis.identity.document_id
         != result2.analysis.identity.document_id
+    )
+
+
+def test_same_content_different_path_same_identity(tmp_path: Path):
+    """Одинаковое содержимое под разными путями → один document_id.
+
+    Старый алгоритм (sha256 от resolved_path+size+mtime) давал здесь
+    разные id: адрес документа был привязан к месту, а не к байтам.
+    """
+    from libs.legal_summarizer.application.canonical import (
+        build_pipeline_result,
+    )
+
+    text = "1. First\n\nContent.\n\n2. Second\n\nMore."
+    p1 = _write_doc(tmp_path, text)
+    p2 = tmp_path / "elsewhere" / "doc.txt"
+    p2.parent.mkdir(parents=True, exist_ok=True)
+    p2.write_text(text, encoding="utf-8")
+
+    result1 = build_pipeline_result(document_path=p1)
+    result2 = build_pipeline_result(document_path=p2)
+
+    assert (
+        result1.analysis.identity.document_id
+        == result2.analysis.identity.document_id
     )
 
 def test_followup_uses_cached_analysis(tmp_path: Path, monkeypatch):

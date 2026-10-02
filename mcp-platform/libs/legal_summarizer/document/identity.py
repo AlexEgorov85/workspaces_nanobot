@@ -14,11 +14,19 @@
 
 Не делает НИЧЕГО, кроме:
 
-1. Считает fingerprint от ``(resolved_path, size, mtime)``.
+1. Считает fingerprint как SHA-256 от **содержимого** файла
+   (:func:`_content_sha256`), а не от ``(resolved_path, size, mtime)``.
 2. Хранит ``document_id`` (== fingerprint[:12]) и ``physical_cache_key``
    (== fingerprint).
 3. Проверяет freshness: ``is_fresh(path)`` — сравнивает ``(size, mtime)``
-   с закэшированным.
+   с закэшированными.
+
+Почему контент, а не stat: ``document_id`` — адрес содержимого. Тот же
+документ, положенный в другой каталог или скопированный под другим
+именем, получает **тот же** ``document_id`` и делит один кэш-разбор
+вместо второго парсинга. Обратная сторона: ``touch`` файла больше не
+инвалидирует кэш, а ``resolved_path``/``mtime_ns`` в хеш не входят —
+остаются только метаданными для :meth:`is_fresh`.
 
 Вся остальная информация (title, blocks, structure) — ответственность
 ``PhysicalDocument`` / ``DocumentStructure``.
@@ -30,6 +38,23 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+# Порция чтения при хешировании: память ограничена этой величиной
+# независимо от размера документа (файл целиком в память не читается).
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def _content_sha256(path: Path) -> str:
+    """SHA-256 **содержимого** файла, потоково (чанк за чанком).
+
+    Единственное место в проекте, где считается контент-хеш документа:
+    определение ``document_id`` обязано быть ровно одно.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(_HASH_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 @dataclass(frozen=True)
 class DocumentIdentity:
@@ -38,7 +63,7 @@ class DocumentIdentity:
     Attributes:
         document_id: короткий ID (первые 12 hex fingerprint'а) для
             логирования и manifest.
-        fingerprint: полный sha256 hex от ``(resolved_path, size, mtime)``.
+        fingerprint: полный sha256 hex от **содержимого** файла.
         physical_cache_key: == fingerprint (для обратной совместимости
             с ``_physical_cache_key`` из ``physical.py``).
         resolved_path: абсолютный путь к файлу.
@@ -82,10 +107,24 @@ class DocumentIdentity:
 
     @classmethod
     def from_path(cls, path: str | Path) -> "DocumentIdentity":
+        """Identity по контент-хешу файла.
+
+        Стоимость: читается **весь** файл. SHA-256 через OpenSSL идёт
+        примерно 1-2 ГБ/с, то есть 100 МБ ≈ 0.05-0.1 с, 1 ГБ ≈ 0.5-1 с,
+        плюс время чтения с диска; память ограничена ``_HASH_CHUNK_BYTES``.
+
+        Это плата за контент-адресность, и её видно на cache-hit пути:
+        ``pipeline_structure._try_load_cached`` вызывает ``from_path`` на
+        каждом прогоне, поэтому повторный вопрос по уже разобранному
+        документу читает файл целиком. Дешёвый stat-gate :meth:`is_fresh`
+        чтения не требует, но применим лишь там, где ключ известен заранее:
+        snapshot ищется по ``document_id``, то есть по тому самому хешу, а
+        индекса «stat → document_id» в слое кэша нет. Поэтому здесь он
+        не используется, и хеш считается на каждом прогоне.
+        """
         p = Path(path)
         st = p.stat()
-        raw = f"{p.resolve()}|{st.st_size}|{st.st_mtime_ns}"
-        fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        fingerprint = _content_sha256(p)
         return cls(
             document_id=fingerprint[:12],
             fingerprint=fingerprint,
@@ -93,25 +132,6 @@ class DocumentIdentity:
             resolved_path=str(p.resolve()),
             size_bytes=st.st_size,
             mtime_ns=st.st_mtime_ns,
-        )
-
-    @classmethod
-    def from_path_with_mtime(cls, path: str | Path, *, size_bytes: int, mtime_ns: int) -> "DocumentIdentity":
-        """Создать identity по явно переданным ``size_bytes``/``mtime_ns``.
-
-        Полезно для back-compat с ``_physical_cache_key``,
-        который использовал ``st.st_mtime`` (секунды).
-        """
-        p = Path(path)
-        raw = f"{p.resolve()}|{size_bytes}|{mtime_ns}"
-        fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        return cls(
-            document_id=fingerprint[:12],
-            fingerprint=fingerprint,
-            physical_cache_key=fingerprint,
-            resolved_path=str(p.resolve()),
-            size_bytes=size_bytes,
-            mtime_ns=mtime_ns,
         )
 
 

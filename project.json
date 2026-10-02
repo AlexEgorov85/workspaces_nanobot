@@ -193,105 +193,13 @@
       //   * llm.* — LLM-параметры (модель/провайдер/ключ) берёт capability
       //     llm платформы из mcp-platform/platform.json. Агентская копия
       //     выбора модели (lib.services.llm_config) снесена 2026-10-02.
-    },
-
-    // -------------------------------------------------------------------------
-    //  legal_summarizer — суммаризация юридических документов (PDF/DOCX/TXT).
-    //  Извлечение текста — capability office платформы
-    //  (mcp-platform/libs/office; агентская копия workspace.utils.office_files
-    //  удалена 2026-10-02);
-    //  чанкинг — lib.services.text_splitter.split_text;
-    //  LLM-клиент — клиент платформы libs.enterprise_client.llm.
-    //  У skill'а нет PG-таблиц, поэтому tables[] пуст и регистрация в
-    //  TableRegistry пропускается автоматически.
-    // -------------------------------------------------------------------------
-    "legal_summarizer": {
-      "enabled": true,
-
-      "cli": {                                       // legal_summarize --length ...
-        "default_length": "brief",                   // brief | detailed (medium удалён в Phase 2B+)
-        "timeout_sec": 120,
-        "max_retries": 3
-      },
-
-      "llm": {                                       // Execution policy для саммари.
-        "max_tokens": 8192,
-        "temperature": 0.1
-      },
-
-      "chunking": {                                  // Map-reduce пороги для длинных документов.
-                                                   // Источник истины для размера чанка —
-                                                   // chunk_size_input_ratio (доля от контекстного окна):
-                                                   // chunk_size = contextWindowTokens * chunk_size_input_ratio
-                                                   // Остальные поля (chunk_size/chunk_overlap) — fallback,
-                                                   // если ratio не задан или контекстное окно неизвестно.
-        "chunk_size_input_ratio": 0.5,              // Доля контекстного окна под один чанк (0 < r < 1).
-                                                   // 0.5 - компромисс между числом LLM-вызовов и риском
-                                                   // переполнения контекста (system prompt + history + ответ).
-                                                   // Для контекста 65536 tokens * 0.5 ~ 100K символов
-                                                   // (русский текст ~3.5 chars/token) - ГК РФ за ~20 чанков.
-        "chunk_size": 100000,                        // Fallback если ratio не задан/не применим.
-        "chunk_overlap": 0,                          // Этап 11: overlap=0 для summarization.
-                                                    // В RAG overlap нужен для recall, но summarization
-                                                    // обрабатывает каждый chunk независимо → overlap
-                                                    // только раздувает LLM-вход без пользы.
-                                                    // Oversized blocks (этап 10) получают минимальный
-                                                    // overlap внутри split_text fallback для continuity.
-        "single_call_threshold": 20000,              // Ниже этого — single-call, выше — map-reduce.
-
-        //  brief_input_ratio — доля контекстного окна под ОДИН итоговый
-        //  brief-chunk (вместо выборки canonical chunks). Контракт:
-        //    max_chars = contextWindowTokens * brief_input_ratio * chars_per_token.
-        //  Источник contextWindowTokens — agents.defaults.contextWindowTokens
-        //  в config.json. Если ключ недоступен — fallback на max_chars ниже.
-        //  Подробности: workspace/skills/legal_summarizer/scripts/application/brief_context.py.
-        "brief_input_ratio": 0.13
-      },
-
-      //  brief_context.* — параметры BriefContextBuilder (этап brief-refactor):
-      //  brief теперь собирает ровно один Chunk из DocumentStructure +
-      //  PhysicalDocument (а не выборку canonical chunks). Эти параметры
-      //  описывают приоритеты составных частей итогового chunk'а
-      //  (структура → preamble → top-level sections).
-      //  Подробности: workspace/skills/legal_summarizer/scripts/application/brief_context.py.
-      "brief_context": {
-        "max_chars_fallback": 30000,        // Fallback если контекстное окно неизвестно
-                                            // (contextWindowTokens отсутствует в config.json).
-                                            // В норме max_chars расчитывается динамически:
-                                            //   max_chars = agents.defaults.contextWindowTokens
-                                            //             * chunking.brief_input_ratio
-                                            //             * brief_context.chars_per_token
-        "chars_per_token": 3.5,             // Оценка токенов для русского текста (используется
-                                            // для Chunk.token_estimate).
-        "structure_max_chars": 12000       // Лимит на блок DOCUMENT STRUCTURE. Если структура
-                                            // документа превышает этот порог, outline обрезается
-                                            // по newline-boundary, чтобы оставить budget контенту.
-      },
-
-      "execution": {                                 // Phase 2B: пользовательский контроль
-                                                   // над долгими операциями + safety net + context batching.
-        "confirmation_threshold_sec": 120,           // Если estimated_duration_max_sec > этого
-                                                   // значения, skill возвращает confirmation_required
-                                                   // и ждёт --confirm. Дефолт: 2 минуты.
-        "estimated_chunk_duration_sec": 20,          // Оценка времени обработки одного ContextBatch
-                                                   // (Phase 2B: считается per-batch, а не per-chunk).
-        "max_chunks_for_execution": 50,              // Safety net: chunks_total > этого значения → requires_continuation.
-        "max_concurrent_batches": 1,                 // DEPRECATED: runtime invariant single-flight (см. ARCHITECTURE.md §21).
-                                                      // Ключ оставлен для backward-compat, runtime всегда clamp'ит до 1.
-                                                      // Значения > 1 эмитят DeprecationWarning и игнорируются.
-                                                      // Удаление ключа планируется в v3.0 (MAJOR).
-"max_chunks_per_question": 10,               // Лимит выборки для brief и --question режимов.
-                                                      // brief: ≤10 И ≤50% от chunks_total, round-robin по секциям.
-                                                      // question: ≤N релевантных chunks.
-        "context_batching": {                        // Phase 2B: параметры TokenBudget.
-          "chars_per_token": 3.5,                    // Оценка токенов для русского текста.
-          "system_prompt_tokens": 1200,              // Резерв под system prompt + format(length_instruction).
-          "instruction_tokens_per_map": 200,         // Резерв под инструкции в user_body.
-          "safety_margin": 0.85,                     // 15% запас поверх budget.
-          "llm_max_tokens": 8192                    // Резерв под output.
-        }
-      }
     }
+
+    //  legal_summarizer — секция удалена 2026-10-02 (фаза 11, п. 11.6).
+    //  Навык переехал в домен платформы (mcp-platform/libs/legal_summarizer),
+    //  агент ходит в него операцией query_operation через tool
+    //  workspace/tools/legal_summarizer_query.py. Настройки домена живут в
+    //  mcp-platform/platform.json → legal_summarizer.
   },
 
   // ---------------------------------------------------------------------------

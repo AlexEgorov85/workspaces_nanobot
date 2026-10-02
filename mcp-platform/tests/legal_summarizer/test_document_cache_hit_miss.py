@@ -139,38 +139,75 @@ def test_cache_invalidation_on_file_change(tmp_path):
     assert document_id_v1 != document_id_v2
 
 
-def test_cache_hit_invalidates_when_fingerprint_mtime_mismatch(tmp_path):
-    """Если «осиротевший» snapshot от старого fingerprint — cache hit для
-    текущего файла всё равно работает (свой document_id), старый snapshot
-    остаётся (его никто не запрашивает).
+def test_same_content_different_path_shares_document_id(tmp_path):
+    """Ключевой инвариант контент-хеша: одинаковое содержимое под разными
+    путями — это **один** document_id, а значит один кэш-разбор.
+
+    До перехода на контент-хеш id выводился из resolved_path, и такой
+    документ платил за парсинг дважды.
     """
-    from libs.legal_summarizer.application.pipeline_structure import run_canonical_pipeline
+    from libs.legal_summarizer.application.pipeline_structure import (
+        run_canonical_pipeline,
+    )
     from libs.legal_summarizer.cache.document_cache import DocumentCache
-    from libs.legal_summarizer.document.identity import DocumentIdentity
 
     text = _build_text(sections=2)
-    p = _write_txt(tmp_path, text)
+    a = tmp_path / "a.txt"
+    a.write_text(text, encoding="utf-8")
+    b = tmp_path / "nested" / "b.txt"
+    b.parent.mkdir(parents=True, exist_ok=True)
+    b.write_text(text, encoding="utf-8")
 
-    result = run_canonical_pipeline(p, workspace_root=tmp_path)
-    document_id = result.analysis.identity.document_id
+    result_a = run_canonical_pipeline(a, workspace_root=tmp_path)
+    document_id = result_a.analysis.identity.document_id
+
     cache = DocumentCache(tmp_path)
     assert cache.is_complete(document_id)
 
-    fake_identity = DocumentIdentity.from_path_with_mtime(
-        p, size_bytes=1, mtime_ns=999,
-    )
-    if fake_identity.document_id == document_id:
-        pytest.skip("test setup: file mtime не дал разные identity")
+    result_b = run_canonical_pipeline(b, workspace_root=tmp_path)
 
+    assert result_b.analysis.identity.document_id == document_id
+    # Тот же разбор, а не второй: те же chunk_id.
+    assert [c.chunk_id for c in result_b.chunks] == [
+        c.chunk_id for c in result_a.chunks
+    ]
+
+
+def test_orphan_snapshot_from_other_content_does_not_serve_current_file(tmp_path):
+    """«Осиротевший» snapshot от другого содержимого не подставляется
+    текущему файлу: у него свой document_id, и он остаётся лежать.
+
+    Раньше «другой» id здесь выдумывался подменой stat (size/mtime).
+    Теперь различие обязано приходить из содержимого — иначе оно
+    недостижимо, что и делало тест фиктивным.
+    """
+    from libs.legal_summarizer.application.pipeline_structure import (
+        run_canonical_pipeline,
+    )
+    from libs.legal_summarizer.cache.document_cache import DocumentCache
+    from libs.legal_summarizer.document.identity import DocumentIdentity
+
+    p = _write_txt(tmp_path, _build_text(sections=2))
+
+    result = run_canonical_pipeline(p, workspace_root=tmp_path)
+    document_id = result.analysis.identity.document_id
+
+    other = tmp_path / "other.txt"
+    other.write_text(_build_text(sections=5) + " иное", encoding="utf-8")
+    orphan_id = DocumentIdentity.from_path(other).document_id
+    assert orphan_id != document_id
+
+    cache = DocumentCache(tmp_path)
     cache.write_snapshot(
-        document_id=fake_identity.document_id,
-        physical_data={"path": str(p.resolve())},
-        analysis_data={"document_id": fake_identity.document_id},
+        document_id=orphan_id,
+        physical_data={"path": str(other.resolve())},
+        analysis_data={"document_id": orphan_id},
     )
 
     result2 = run_canonical_pipeline(p, workspace_root=tmp_path)
-    new_document_id = result2.analysis.identity.document_id
-    assert cache.is_complete(new_document_id)
+
+    assert result2.analysis.identity.document_id == document_id
+    assert cache.is_complete(orphan_id), "чужой snapshot никто не запрашивал"
 
 
 def test_cache_workspace_root_none_always_miss(tmp_path):
