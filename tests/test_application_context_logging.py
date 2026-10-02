@@ -50,7 +50,9 @@ def minimal_fake_modules(tmp_path):
         sol.agent = types.ModuleType("nanobot.agent")
         loop = types.ModuleType("nanobot.agent.loop")
         hook = types.ModuleType("nanobot.agent.hook")
-        hook.AgentHook = type("AgentHook", (), {})
+        hook.AgentHook = type(
+            "AgentHook", (), {"__init__": lambda self, reraise=False: None}
+        )
         hook.AgentHookContext = type("AgentHookContext", (), {})
         hook.AgentRunHookContext = type("AgentRunHookContext", (), {})
         sol.agent.AgentHook = hook.AgentHook
@@ -216,7 +218,6 @@ def minimal_fake_modules(tmp_path):
 
         for name in [
             "lib.session.pg_session_manager",
-            "lib.channels.redis_channel",
             "lib.channels.postgres_channel",
         ]:
             m = types.ModuleType(name)

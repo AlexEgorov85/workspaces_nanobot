@@ -1,8 +1,9 @@
 """DatabaseLoggingHook — AgentHook для логирования событий агента в БД.
 
 Реализуется как ``AgentHook`` (async-методы из nanobot.agent.hook) для
-tool-событий, и использует ``BusFactory`` (обёртки ``publish_inbound`` /
-``publish_outbound``) для content-сообщений. НЕ использовать как обычный
+tool-событий, и использует обёртки ``publish_inbound`` /
+``publish_outbound`` шины (``ApplicationContext._create_bus``) для
+content-сообщений. НЕ использовать как обычный
 sync-класс — он не подключается к циклу агента.
 
 Подключение:
@@ -10,7 +11,7 @@ sync-класс — он не подключается к циклу агент�
     фабрику оборота ``make_db_logging_hook_factory`` в
     ``AgentLoop.from_config(hook_factories=[...])``. Фабрика создаёт
     СВЕЖИЙ ``DatabaseLoggingHook`` на каждый оборот (конкурентно-безопасно);
-  * ``BusFactory(inbound_logger=..., outbound_logger=...)`` — обёртки шины.
+  * ``_create_bus(inbound_logger=..., outbound_logger=...)`` — обёртки шины.
 """
 
 from __future__ import annotations

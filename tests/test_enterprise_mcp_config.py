@@ -56,28 +56,37 @@ class TestRuntimeEnvExport:
         )
 
 
-# --- секция project.json -------------------------------------------------
+# --- секция enterprise_mcp в config.json --------------------------------
 
 
-def _load_project_raw() -> dict:
-    """project.json — JSONC (с комментариями), голый json.loads не берёт."""
-    return dict(config.load_config_json(PROJECT_ROOT / "project.json"))
+def _load_enterprise_mcp_raw() -> dict:
+    """Секция объявления сервера — как она лежит в файле.
+
+    В корне ``config.json`` её быть не может: корневой объект разбирает
+    схема nanobot, а она отвергает неизвестный ключ верхнего уровня. Поэтому
+    секция живёт под ``gateway.agent.enterprise_mcp`` и поднимается в
+    ``SETTINGS`` функцией ``config._lift_agent_sections`` — здесь читается
+    именно файл, чтобы проверять объявление как оно записано, а не то, что
+    из него получилось после мерджа с профилями.
+    """
+    raw = json.loads((PROJECT_ROOT / "config.json").read_text(encoding="utf-8"))
+    return raw["gateway"]["agent"]["enterprise_mcp"]
 
 
-class TestProjectSection:
+class TestEnterpriseMcpSection:
     def test_section_exists_and_is_typed(self) -> None:
-        section = _load_project_raw().get("enterprise_mcp")
+        section = _load_enterprise_mcp_raw()
         assert section, "раздел enterprise_mcp обязателен: без него адаптер не работает"
         validate_project_settings({"enterprise_mcp": section})
 
     def test_no_machine_specific_path_is_committed(self) -> None:
         """Пути конкретной машины в конфиге — это то, что ломает перенос."""
-        raw = (PROJECT_ROOT / "project.json").read_text(encoding="utf-8")
+        raw = (PROJECT_ROOT / "config.json").read_text(encoding="utf-8")
         assert "C:\\" not in raw
         assert "C:/" not in raw
 
     def test_paths_are_env_references(self) -> None:
-        section = _load_project_raw()["enterprise_mcp"]
+        section = _load_enterprise_mcp_raw()
         assert section["command"] == "${NANOBOT_PYTHON}"
         assert section["cwd"].startswith("${NANOBOT_PROJECT_ROOT}")
 

@@ -233,6 +233,18 @@ class DbLoggingService:
         # вторым владельцем пула записи, которого change и устраняет.
         self._mcp_writer = mcp_writer
         self._fallback_sink = fallback_sink
+        # Транспорт ещё не ВЫБРАН composition root'ом — в отличие от «выбран,
+        # и это прямая запись». Разница принципиальна: решение принимается в
+        # живом event loop (см. ``ApplicationContext.attach_log_transport``),
+        # а worker-поток поднимается раньше, из ``start()``, — иначе
+        # нарушился бы зафиксированный инвариант «журнал стартует до
+        # ``session_cold_sync``» (tests/test_unified_event_logging_lifecycle.py).
+        #
+        # Пока флаг стоит, уход в прямую запись означал бы возврат пула
+        # записи журнала в руки агента — молча и ровно тем способом,
+        # которым фаза 7 выглядела сделанной по тестам, не будучи сделанной
+        # в проде. Поэтому батч уходит в локальный след и в счётчик потерь.
+        self._transport_pending: bool = False
         if mcp_writer is not None and fallback_sink is not None:
             # В журнал не попадает всё, до чего у платформы руки не дотягиваются:
             # события без полной личности (операция ``log_events`` подписывается
@@ -296,7 +308,8 @@ class DbLoggingService:
     # ------------------------------------------------------------------
 
     def attach_transport(
-        self, *, mcp_writer: Any, fallback_sink: Any
+        self, *, mcp_writer: Any, fallback_sink: Any,
+        transport_pending: bool = False,
     ) -> None:
         """Подключить запись через ``enterprise-mcp`` после старта.
 
@@ -306,10 +319,21 @@ class DbLoggingService:
         - мост ``LoopCallRunner`` требует работающего loop.
 
         Повторный вызов отключает прежний транспорт, чтобы счётчики не
-        учитывались дважды.
+        учитывались дважды. Именно поэтому метод зовут дважды: сначала из
+        ``ApplicationContext.start()`` с ``transport_pending=True`` (loop ещё
+        не поднят), затем из живого loop с готовым writer'ом.
+
+        Args:
+            transport_pending: решение о транспорте ещё не принято. Батч не
+                уходит в прямую запись, а попадает в локальный след и в
+                счётчик потерь. Отличать это от «MCP не объявлен» (тогда
+                писать напрямую — законное решение оператора) обязан сам
+                вызывающий: состояние снаружи неразличимо, а поведение
+                противоположно.
         """
         self._mcp_writer = mcp_writer
         self._fallback_sink = fallback_sink
+        self._transport_pending = bool(transport_pending)
         if mcp_writer is not None and fallback_sink is not None:
             mcp_writer.on_fallback = self._write_fallback
 
@@ -916,6 +940,12 @@ class DbLoggingService:
         if self._mcp_writer is not None:
             self._flush_batch_via_mcp(batch)
             return
+        if self._transport_pending:
+            # Решение о транспорте ещё не принято. Прямая запись здесь -
+            # это возврат пула записи журнала в руки агента, и вернуться
+            # к ней можно было бы молча, не оставив следа.
+            self._defer_batch(batch)
+            return
         if not self._dsn:
             self._drop_batch(batch)
             return
@@ -942,6 +972,30 @@ class DbLoggingService:
                 self._stats["failed"] += len(batch)
                 self._stats["last_error"] = f"flush: {exc}"
                 self._stats["connected"] = False
+
+    def _defer_batch(self, batch: list[LogEvent]) -> None:
+        """Батч, для которого транспорт ещё не выбран.
+
+        Не ``failed`` и не ``dropped`` в полном смысле: событие не
+        скомпрометировано, оно ушло в локальный след и дожидается решения.
+        Но не отметить его нельзя — иначе окно между ``start()`` и входом в
+        event loop выглядело бы в статистике как полностью успешная запись,
+        и журнал выглядел бы полным, будучи неполным.
+
+        Счётчики и локальный файл пишутся тем же путём, что и при отказе
+        платформы: разница только в ``last_error``, где названа настоящая
+        причина.
+        """
+        with self._state_lock:
+            self._stats["dropped"] += len(batch)
+            self._stats["last_error"] = (
+                "flush: транспорт журнала не выбран, батч ушёл в локальный след"
+            )
+            for etype, count in _count_by_type(batch).items():
+                self._stats["dropped_by_type"][etype] = (
+                    self._stats["dropped_by_type"].get(etype, 0) + count
+                )
+        self._write_fallback(batch)
 
     def _write_fallback(self, events: list[LogEvent]) -> None:
         """Локальный след для событий, которые в журнал не попали.
@@ -1056,14 +1110,25 @@ class DbLoggingService:
         """Обработать контекст вопроса: upsert в agent_question_runs.
 
         Через общий пул ``utils.db``. При неудаче запись выбрасывается
-        (``failed++``), JSONL-файл не пишется. При ошибке upsert —
+        (``failed++``), локальный след не пишется. При ошибке upsert —
         ``connected = False``.
 
         При заданном ``mcp_writer`` путь другой: запись уходит платформе
         операцией ``upsert_question_run`` (см. ``_handle_question_run_via_mcp``).
+        При невыбранном транспорте — третий: локальный след, потому что
+        контекст вопроса связывает журнал с ``request_id``, и потерять его
+        молча значит потерять эту связь для всего оборота.
         """
         if self._mcp_writer is not None:
             self._handle_question_run_via_mcp(rec)
+            return
+        if self._transport_pending:
+            with self._state_lock:
+                self._stats["failed"] += 1
+                self._stats["last_error"] = (
+                    "question_run: транспорт журнала не выбран"
+                )
+            self._write_fallback([rec])  # type: ignore[list-item]
             return
         if not self._dsn:
             with self._state_lock:

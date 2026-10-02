@@ -3,21 +3,21 @@
 Проблема: ``nanobot.bus.queue.MessageBus`` — простая асинхронная очередь,
 у неё нет встроенных хуков на ``publish_inbound``/``publish_outbound``.
 Чтобы логировать содержимое сообщений без monkey-patch'ей, мы передаём
-async-callable-логгеры в ``BusFactory`` — и они оборачивают оригинальные
-методы шины (см. ``BusFactory._wrap``).
+async-callable-логгеры в ``ApplicationContext._create_bus`` — и те оборачивают
+оригинальные методы шины (см. ``_wrap_bus_publish``).
 
 Архитектура:
 
   Inbound (сообщение от пользователя в агенте)
     nanobot bus.publish_inbound(msg)
-      → wrapper (BusFactory)
+      → wrapper (_create_bus)
         → make_inbound_logger(service)(msg)
           → service.log_inbound(session_key, channel, content, message_id)
         → original publish_inbound(msg)
 
    Outbound (ответ агента пользователю)
      nanobot bus.publish_outbound(msg)
-       → wrapper (BusFactory)
+       → wrapper (_create_bus)
          → make_outbound_logger(service)(msg)
            → ``is_outbound_noise(msg)`` (stream-delta/stream-end/progress/
              reasoning/retry-wait) — drop (бесполезный шум, раздувает таблицу);
@@ -66,7 +66,7 @@ def make_inbound_logger(
     иначе агент зависнет. Если нужна диагностика — смотрите ``service.get_stats()``.
 
     Returns:
-        Async-callable ``async def(msg) -> None`` для ``BusFactory``.
+        Async-callable ``async def(msg) -> None`` для ``_create_bus``.
     """
     async def _log(msg: Any) -> None:
         try:

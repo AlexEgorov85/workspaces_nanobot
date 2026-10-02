@@ -92,12 +92,53 @@ def test_runtime_api_does_not_expose_llm_config() -> None:
 
     Функция отдавала словарь с ``api_key``, и любая её выжившая копия стала
     бы путём обойти границу «агент не знает ключа провайдера».
-    """
-    from lib.core import skill_config
 
-    assert not hasattr(skill_config, "get_llm_config")
-    for name in ("get_db_tables", "get_cli_config", "get_max_retries"):
-        assert hasattr(skill_config, name), f"удалён не тот хелпер: {name}"
+    Тест раньше проверял, что из ``lib.core.skill_config`` вырезан именно
+    ``get_llm_config``, а остальные хелперы на месте («не тот хелпер»).
+    Такая формулировка держала модуль живым ради одного отрицательного
+    утверждения. Теперь модуль удалён целиком (0 production-импортёров), и
+    инвариант сформулирован строже: хелпера, а значит и ``get_llm_config``,
+    в коде агента нет вовсе. Возврат любого из них означал бы возврат всей
+    второй точки конфигурации навыка.
+    """
+    from pathlib import Path
+
+    module_path = Path(__file__).resolve().parents[1] / "lib/core/skill_config.py"
+    if module_path.is_file():
+        # Файл удалить нельзя (нужен служебный лаунчер), поэтому пока он
+        # лежит инертным tombstone'ом. Достаточно, что в нём кода нет.
+        import ast
+
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        definitions = [
+            n
+            for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        assert definitions == [], (
+            "lib/core/skill_config.py вернулся: у него 0 production-импортёров, "
+            "а вместе с ним вернулись бы get_llm_config и доступ к ключу "
+            "провайдера. Определения: " + ", ".join(n.name for n in definitions)
+        )
+
+    # Отдельно: нигде в коде агента не осталось определения get_llm_config.
+    import ast
+
+    lib = module_path.parent.parent
+    offenders: list[str] = []
+    for path in lib.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover — битый файл ловит pytest
+            continue
+        for node in ast.walk(tree):
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ) and node.name == "get_llm_config":
+                offenders.append(f"{path.relative_to(lib.parent)}:{node.lineno}")
+    assert offenders == [], (
+        "get_llm_config определён в коде агента: " + ", ".join(offenders)
+    )
 
 
 def test_skill_llm_modules_are_actually_discovered() -> None:
