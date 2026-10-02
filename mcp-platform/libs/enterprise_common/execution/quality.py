@@ -113,20 +113,6 @@ def _check_truncation(value: Any) -> str:
     return ""
 
 
-def _check_truncation(value: Any) -> str:
-    """Источник сам признался, что отрезал ответ.
-
-    Отдельно от пустого результата: усечённый ответ выглядит как полный, и без
-    этого признака агент продолжит опираться на данные, которых нет.
-    """
-    if not isinstance(value, dict):
-        return ""
-    if value.get("truncated") or value.get("is_truncated"):
-        limit = value.get("limit") or value.get("returned")
-        return f"источник усек ответ{f' (лимит {limit})' if limit else ''}"
-    return ""
-
-
 def _first_list(value: Any, *keys: str) -> list[Any] | None:
     """Достать коллекцию из ответа по одному из известных ключей."""
     if not isinstance(value, dict):

@@ -74,6 +74,16 @@ class ArtifactStore:
         self._workspace = workspace
         self._subdir = session_subdir
 
+    @property
+    def session_subdir(self) -> str:
+        """Подкаталог вложений по умолчанию.
+
+        Открыт наружу потому, что чтение обязано знать, где искать: каталог
+        вложений и ``results/`` крупных ответов — разные подкаталоги, и
+        вызывающий, который ищет файл, должен перебрать оба, а не угадывать.
+        """
+        return self._subdir
+
     def create(
         self,
         session_id: str,
@@ -124,11 +134,56 @@ class ArtifactStore:
             uri=f"session://{target_subdir}/{relative}",
         )
 
-    def read(self, session_id: str, artifact_id: str, *, file_name: str = "") -> bytes:
+    def _names(self, session_id: str, subdir: str) -> list[str]:
+        """Имена файлов подкаталога относительно его корня.
+
+        Спускается на **один** уровень, потому что платформа раскладывает ровно
+        два вида файлов: вложение операции лежит прямо в подкаталоге, а крупный
+        результат — в папке ``request_id`` внутри ``results/``. Рекурсии глубже
+        нет и не должно быть: обход всего дерева сессии по чужому
+        идентификатору — это уже не чтение вложения, а обход границы.
+
+        Возвращаются пути с ``/``, потому что ``read_bytes`` принимает путь
+        относительный каталога сессии, а :meth:`list_files` — абсолютные.
+        """
+        try:
+            base = self._workspace.subdir(session_id, subdir, create=False)
+        except PathDeniedError:
+            # Неизвестный подкаталог — это «ничего не найдено», а не отказ
+            # доступа: иначе перебор по ``read`` и по имени файла отвечали бы
+            # разными кодами на один и тот же запрос.
+            return []
+        if not base.exists():
+            return []
+        names: list[str] = []
+        for item in sorted(base.iterdir()):
+            if item.is_file():
+                names.append(item.name)
+            elif item.is_dir():
+                names.extend(
+                    f"{item.name}/{child.name}"
+                    for child in sorted(item.iterdir())
+                    if child.is_file()
+                )
+        return names
+
+    def read(
+        self,
+        session_id: str,
+        artifact_id: str = "",
+        *,
+        file_name: str = "",
+        subdir: str = "",
+    ) -> bytes:
         """Прочитать вложение своей сессии.
 
         Отсутствующее отвечает ``not_found`` — см. модульную записку: подтверждать
         существование чужого файла нельзя.
+
+        ``subdir`` обязателен для крупного результата: он лежит в ``results/``
+        под папкой ``request_id``, а хранилище по умолчанию смотрит в
+        ``artifacts/``. Без этого параметра конвейер записал бы файл, который
+        не смог бы прочитать никто, — и ссылка в ответе указывала бы в пустоту.
 
         Перебор идёт по **именам** файлов, а не по путям из
         :meth:`list_files`: тот возвращает абсолютные пути, а чтение принимает
@@ -138,42 +193,48 @@ class ArtifactStore:
         """
         from libs.enterprise_common.errors import NotFoundError
 
-        base = self._workspace.subdir(session_id, self._subdir, create=False)
+        target_subdir = subdir or self._subdir
         candidates = (
-            [file_name]
-            if file_name
-            else sorted(item.name for item in base.iterdir() if item.is_file())
-            if base.exists()
-            else []
+            [file_name] if file_name else self._names(session_id, target_subdir)
         )
         for candidate in candidates:
             if artifact_id and artifact_id not in candidate:
                 continue
             try:
-                return self._workspace.read_bytes(session_id, candidate, subdir=self._subdir)
+                return self._workspace.read_bytes(
+                    session_id, candidate, subdir=target_subdir
+                )
             except (FileNotFoundError, PathDeniedError, OSError) as exc:
                 raise NotFoundError(f"вложение {artifact_id!r} не найдено") from exc
         raise NotFoundError(f"вложение {artifact_id!r} не найдено")
 
-    def list(self, session_id: str) -> list[dict[str, Any]]:
+    def list(self, session_id: str, *, subdir: str = "") -> list[dict[str, Any]]:
         """Вложения сессии — метаданными, без чтения содержимого.
 
         Имя файла и исходное имя различаются: на диске лежит
         ``<request_id>_<operation>_<artifact_id>__<name>``, чтобы каталог
         читался глазами и два вызова не перетирали файл. ``name`` здесь — то
         имя, которое вернул бы вызывающий, а не имя файла.
+
+        Обход тот же, что и в чтении: крупный результат в ``results/`` иначе
+        не попал бы в перечень, и операция чтения не знала бы, что вообще
+        сохранилось.
         """
+        target_subdir = subdir or self._subdir
+        names = self._names(session_id, target_subdir)
         result: list[dict[str, Any]] = []
-        for path in self._workspace.list_files(session_id, subdir=self._subdir):
-            stat = path.stat()
-            prefix, _, original = path.name.partition(NAME_SEPARATOR)
+        if not names:
+            return result
+        base = self._workspace.subdir(session_id, target_subdir, create=False)
+        for name in names:
+            prefix, _, original = name.partition(NAME_SEPARATOR)
             result.append(
                 {
                     "artifact_id": prefix.rsplit("_", 1)[-1] if prefix else "",
-                    "name": original or path.name,
-                    "file_name": path.name,
-                    "size": stat.st_size,
-                    "uri": f"session://{self._subdir}/{path.name}",
+                    "name": original or name.rsplit("/", 1)[-1],
+                    "file_name": name,
+                    "size": (base / name).stat().st_size,
+                    "uri": f"session://{target_subdir}/{name}",
                 }
             )
         return result

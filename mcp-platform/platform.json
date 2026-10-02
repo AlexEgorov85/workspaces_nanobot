@@ -21,7 +21,7 @@
   },
   "execution": {
     "_about": "Слой исполнения операций (change enterprise-mcp-platform, фаза 8). Пороги и флаги конвейера: он проходит вокруг каждой операции. Значения по умолчанию живут здесь, а не в коде операций. require_call_meta=true: переходное окно закрыто, идентичность приходит только в params._meta, а ключи в arguments больше не читаются. Возврат false — только вместе с вызывающей стороной, которая метаданные не передаёт.",
-    "max_inline_result_bytes": 65536,
+    "max_inline_result_bytes": 5000,
     "preview_bytes": 2048,
     "execution_timeout_sec": 120.0,
     "persist_large_results": true,
@@ -54,6 +54,17 @@
     ],
     "row_ceiling": 500
   },
+  "profiles": {
+    "_about": "Per-profile перекрытие ИМЕН ТАБЛИЦ. Применяется флагом `--profile <имя>`; без флага берётся база выше, и она же — prod. Агент передаёт платформе только ИМЯ профиля (`gateway.agent.enterprise_mcp` → args), а не значения: настройки, которой владел бы агент, у enterprise-mcp нет, и значение, присланное вызывающей стороной, сделало бы вход в данные агента независимым от его конфигурации. Здесь перекрываются РОВНО три ключа (PROFILE_OWNED_KEYS в libs/enterprise_common/settings.py): журнал, прогоны вопросов и очередь задач — те, что платформа пишет сама. Всё остальное (пул, LLM, эмбеддинги, снимок, индексы) профилем НЕ разделяется намеренно: это shared runtime resources, как и cache-файл у агента. Профиль, которого здесь нет, — ошибка на старте, а не повод писать в базу: молчаливый откат к базовым именам означал бы, что агент с `--profile test` опрашивает agent_conversation_messages_test, а платформа пишет в agent_gateway_logs.",
+    "test": {
+      "_about": "Тестовый контур. Имена обязаны совпадать с profiles/test.jsonc агента; при расхождении старт падает (сверка в gateway._verify_platform_table_alignment).",
+      "data": {
+        "log_table": "public.agent_gateway_logs_test",
+        "question_runs_table": "public.agent_question_runs_test",
+        "task_table": "public.agent_conversation_messages_test"
+      }
+    }
+  },
   "data": {
     "_about": "capability data — servers/enterprise/capabilities/data/. Журнал, прогоны вопросов, очередь задач, чтение журнала, schema_check. Здесь же путь к снимку DuckDB: снимком владеет capability data (libs/enterprise_data/snapshot/), и объявлять его должен она, а не получать окружением агента — два владельца одного файла означали бы, что снимок читают не оттуда, откуда пишут. Путь здесь OPTIONAL, и это честно: пустое значение означает «снимок ненастроен» (сервер поднимается, операции со снимком отвечают snapshot_unavailable), а не «сервер не запустится» — capability data от снимка не зависит. schema_check проверяет собственные таблицы платформы (журнал, прогоны вопросов, таблицы аудита, реестр скриптов), а не runtime-таблицы агента: их список приезжал окружением и молча перебивал файл.",
     "log_table": "public.agent_gateway_logs",
@@ -62,8 +73,10 @@
     "snapshot_path": "~/.cache/nanobot/duckdb/cache.duckdb",
     "log_buffer_maxlen": 2048,
     "log_flush_interval": 5.0,
+    "log_batch_size": 1024,
     "log_retention_days": 90,
     "log_purge_empty_outbound": true,
+    "log_unknown_event_type_policy": "soft",
     "statement_timeout_ms": 30000,
     "max_rows": 1000
   },

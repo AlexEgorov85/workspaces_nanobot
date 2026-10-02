@@ -212,6 +212,15 @@ def _declared_tables(settings: Settings) -> tuple[str, ...]:
     if audit["scripts_registry"]["table"]:
         tables.add(audit["scripts_registry"]["table"])
     tables.update(audit["audit"]["tables"])
+    # Очередь задач — тоже объявлена платформой и ею же используется, но в
+    # проверку раньше не попадала. Из-за этого профиль, перекрывший task_table,
+    # проверял бы наличие боевой таблицы: оверлей применился бы, а
+    # schema_check отвечал бы «таблицы на месте» про ту, в которую платформа
+    # не пишет. Агент сверяет по этому списку свои имена с именами
+    # платформы, поэтому отсутствующая здесь строка сделала бы сверку неполной.
+    task = _task_table(settings)
+    if task:
+        tables.add(".".join(task))
     return tuple(sorted(tables))
 
 
@@ -467,11 +476,16 @@ def _log_table(settings: Settings) -> tuple[str, str]:
 
 def build(
     capabilities: frozenset[str] | None = None,
+    profile: str | None = None,
 ) -> tuple[Any, ToolRegistry, ToolContainer]:
     """Собрать сервер: настройки, пул, сервисы, реестр, транспорт.
 
     Args:
         capabilities: поднять только эти capability. ``None`` — все.
+        profile: имя профиля из ``platform.json → profiles`` (``None`` — база,
+            то есть prod). Имя присылает агент: он знает, в каком контуре
+            запущен. Значения имён таблиц при этом не приходят — перекрывает
+            объявление платформы (:func:`read_profile_overlay`).
 
     Возвращает ``(server, registry, container)`` — чтобы тест мог проверить
     реестр, не поднимая транспорт.
@@ -483,7 +497,7 @@ def build(
     ``llm`` и ничего больше — см. :func:`_needs_data`.
     """
     wanted = _selected(capabilities)
-    settings = Settings()
+    settings = Settings(profile=profile)
     if _needs_data(wanted):
         _check_dependencies(settings)
         _configure_dsn(settings)
@@ -500,6 +514,22 @@ def build(
         sink=_event_sink(container),
         session_root=PLATFORM_ROOT / _session_root(settings),
     )
+    # Платформенная операция чтения сохранённого результата. Здесь, а не через
+    # загрузчик каталогов: файлами сессии владеет платформа, и страж
+    # ``tests/test_tool_execution_boundaries.py`` не пускает к ним capability —
+    # у операции из каталога появился бы второй каталог файлов одной сессии.
+    # Хранилище берётся у слоя исполнения и в контейнер не кладётся, поэтому
+    # второго пути к файлам сессии не появляется ни у кого.
+    #
+    # Условие — тот же ``_needs_data``, что и у сервиса ``data``: сервер для
+    # скиллов поднимается коротким подпроцессом ради одной операции LLM, у
+    # него нет ни оборота, ни сессии, и читать в них нечего.
+    if _needs_data(wanted) and execution.artifacts is not None:
+        from servers.enterprise.tools.read_result import create_tool as _read_result
+
+        registry.register(
+            _read_result(execution.artifacts, page_chars=execution.policy.preview_bytes)
+        )
     transport = build_server(
         registry,
         name="enterprise-mcp",
@@ -512,6 +542,17 @@ def build(
     from_file = settings.file_backed()
     if from_file:
         logger.info("настройки из platform.json: %s", ", ".join(from_file))
+    if profile:
+        # Без этой строки не видно, в каком контуре пишет платформа: имена
+        # таблиц одинаково выглядят в platform.json, а различаются только
+        # оверлеем профиля.
+        logger.info(
+            "профиль=%s: журнал=%s прогоны=%s очередь=%s",
+            profile,
+            settings.get("ENTERPRISE_LOG_TABLE"),
+            settings.get("ENTERPRISE_LOG_QUESTION_RUNS_TABLE"),
+            settings.get("ENTERPRISE_TASK_TABLE"),
+        )
     if wanted != _ALL_CAPABILITIES:
         logger.info("подняты только capability: %s", ", ".join(sorted(wanted)))
     _log_llm_settings(container.get("llm"))
@@ -730,7 +771,9 @@ def main(argv: list[str] | None = None) -> None:
     from mcp.server.stdio import stdio_server
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-    transport, _, container = build(_capabilities_from_argv(argv))
+    transport, _, container = build(
+        _capabilities_from_argv(argv), profile=_profile_from_argv(argv)
+    )
     # ``services``, а не ``get``: у процесса без ``data`` такого сервиса
     # нет, и строгий ``get`` уронил бы старт с «сервис не зарегистрирован»
     # вместо того, чтобы он просто обслуживал capability ``llm``.
@@ -774,6 +817,23 @@ def _capabilities_from_argv(argv: list[str] | None) -> frozenset[str] | None:
                 part.strip() for part in arg.split("=", 1)[1].split(",") if part.strip()
             )
     return frozenset(wanted) if wanted else None
+
+
+def _profile_from_argv(argv: list[str] | None) -> str | None:
+    """Разобрать ``--profile <имя>``; без флага — база (prod).
+
+    Имя присылает агент: он единственный знает, в каком контуре запущен, и
+    без него платформа писала бы в боевые таблицы под тестовым профилем.
+    Значения имён таблиц при этом не приходят — они объявлены в
+    ``platform.json → profiles``.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    for index, arg in enumerate(args):
+        if arg == "--profile" and index + 1 < len(args):
+            return args[index + 1].strip() or None
+        if arg.startswith("--profile="):
+            return arg.split("=", 1)[1].strip() or None
+    return None
 
 
 if __name__ == "__main__":  # pragma: no cover - ручной запуск

@@ -382,9 +382,17 @@ class TestBootstrap:
         ``capabilities/<имя>/tools/``, а сервис в ``_build_container`` забыли.
         Загрузчик операцию зарегистрирует, discovery её покажет, и она будет
         падать ``InfrastructureError`` на ПЕРВОМ же вызове в проде.
+
+        Проверка касается только capability. Платформенные операции (те, что
+        регистрирует composition root, а не загрузчик каталогов) получают
+        зависимости напрямую от слоя исполнения, и в контейнере их службы нет
+        намеренно: положив туда хранилище файлов сессии, мы дали бы capability
+        второй путь к файлам сессии мимо стража границ.
         """
         _, registry, container = enterprise_server.build()
         for category in registry.by_category():
+            if category not in enterprise_server._ALL_CAPABILITIES:
+                continue
             assert container.get(category) is not None, (
                 f"у capability {category!r} есть операции, но сервис не зарегистрирован"
             )
