@@ -672,7 +672,7 @@ class TestUserIdPropagation:
 
           register_request(alice)
                 ↓
-          _enqueue(LogEvent(user_id=None, request_id=req-A))
+          log_event(LogEvent(user_id=None, request_id=req-A))
                 ↓ _resolve_event_user_id
           event.user_id = alice  (через request_id matching)
                 ↓
@@ -685,8 +685,15 @@ class TestUserIdPropagation:
         auto-fill — отдельно (test_enqueue_fills_user_id_when_request_id_matches),
         но именно «auto-filled → INSERT» — нет. Это критично для
         history_search(session_scope="all") как security boundary:
-        если бы между ``_enqueue`` и ``_insert_batch`` значение
+        если бы между ``log_event`` и ``_insert_batch`` значение
         терялось, фильтр ``user_id = %s`` возвращал бы 0 строк.
+
+        Событие идёт через ``log_event``, а не напрямую в ``_enqueue``:
+        ``log_event`` — единственная точка входа в журнал, и именно она
+        ставит событию момент (``_stamp_event_time``). Колонки ``seq`` и
+        ``occurred_at`` объявлены ``NOT NULL``, поэтому событие без метки
+        честно не пишется — и тест, обходящий точку входа, проверял бы
+        путь, которого в жизни нет.
         """
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.register_request(
@@ -699,8 +706,8 @@ class TestUserIdPropagation:
             request_id="req-A",
             user_id=None,
         )
-        svc._enqueue(event)
-        # После _enqueue event.user_id заполнен индексом.
+        assert svc.log_event(event) is True
+        # После разрешения event.user_id заполнен индексом.
         assert event.user_id == "alice"
 
         # Полный путь в INSERT: execute_batch должен получить SQL с
@@ -726,7 +733,7 @@ class TestUserIdPropagation:
         """End-to-end: stale-event auto-fill не «протекает» в INSERT.
 
         register A/alice → LogEvent(req-A, user_id=None) →
-        register B/bob → _enqueue того же события →
+        register B/bob → log_event того же события →
         _insert_batch: SQL params содержат ``None`` в позиции user_id,
         НЕ ``bob``. Это primary logging-security acceptance на уровне
         реальной INSERT-цепочки (не только очереди).
@@ -741,11 +748,11 @@ class TestUserIdPropagation:
             request_id="req-A",
             user_id=None,
         )
-        # Между созданием и _enqueue — перерегистрация индекса.
+        # Между созданием и постановкой в очередь — перерегистрация индекса.
         svc.register_request(
             "cli:1", "req-B", user_id="bob", chat_id="c1",
         )
-        svc._enqueue(stale_event)
+        assert svc.log_event(stale_event) is True
         # Stale event остался без user_id (не подхватил bob).
         assert stale_event.user_id is None
 

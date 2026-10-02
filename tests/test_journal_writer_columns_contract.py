@@ -42,30 +42,62 @@ INSERT = re.compile(r"INSERT INTO", re.IGNORECASE)
 COLUMN_GROUP = re.compile(r"\(([^()]*)\)\s*VALUES", re.IGNORECASE | re.DOTALL)
 
 
-def _literal(node: ast.AST) -> str | None:
+def _module_string_constants(path: Path) -> dict[str, str]:
+    """Строковые константы уровня модуля — чтобы резолвить f-строки.
+
+    Иначе ``{EVENT_SEQ_COLUMN}`` превращается в ``{}`` и попадает в
+    множество колонок как настоящее имя: страж сравнивал бы не колонки,
+    а артефакт собственного разбора.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        targets = (
+            [node.target] if isinstance(node, ast.AnnAssign) else getattr(node, "targets", [])
+        )
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id not in consts:
+                value = getattr(node, "value", None)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    consts[target.id] = value.value
+    return consts
+
+
+def _literal(node: ast.AST, consts: dict[str, str] | None = None) -> str | None:
     """Собрать текст SQL, склеенного конкатенацией или f-строкой.
 
-    Подстановки ``{...}`` заменяются на ``{}``: они не часть контракта колонок.
+    Подстановки ``{...}``, которые не резолвятся в константу модуля,
+    заменяются на ``{}``: они не часть контракта колонок.
     """
+    consts = consts or {}
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
         return "".join(
             chunk.value
             if isinstance(chunk, ast.Constant) and isinstance(chunk.value, str)
-            else "{}"
+            else _format_value(chunk, consts)
             for chunk in node.values
         )
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _literal(node.left)
-        right = _literal(node.right)
+        left = _literal(node.left, consts)
+        right = _literal(node.right, consts)
         if left is not None and right is not None:
             return left + right
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
-        return _literal(node.left)
+        return _literal(node.left, consts)
     if isinstance(node, ast.Call):
         return None
     return None
+
+
+def _format_value(node: ast.AST, consts: dict[str, str]) -> str:
+    """Значение подстановки f-строки: константа модуля либо ``{}``."""
+    if isinstance(node, ast.FormattedValue):
+        expr = node.value
+        if isinstance(expr, ast.Name):
+            return consts.get(expr.id, "{}")
+    return "{}"
 
 
 def _journal_insert_columns(path: Path) -> set[str]:
@@ -75,12 +107,13 @@ def _journal_insert_columns(path: Path) -> set[str]:
     ``INSERT`` — в ``agent_question_runs``, — и их колонки к контракту журнала
     отношения не имеют.
     """
+    consts = _module_string_constants(path)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     groups: list[set[str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.JoinedStr, ast.BinOp, ast.Constant)):
             continue
-        text = _literal(node)
+        text = _literal(node, consts)
         if not text or not INSERT.search(text):
             continue
         for match in COLUMN_GROUP.finditer(text):
@@ -110,6 +143,40 @@ def _journal_fields() -> set[str]:
     raise AssertionError("в models.py нет JOURNAL_FIELDS")
 
 
+def _event_time_columns() -> set[str]:
+    """Колонки момента события — если платформа их объявила.
+
+    ``seq`` и ``occurred_at`` заведены миграцией V008 и объявлены
+    ``NOT NULL``: без них отказ базы валит весь батч. Колонки момента
+    события — часть строки журнала, а не конверта, поэтому в
+    ``JOURNAL_FIELDS`` их нет, и контракт собирается как объединение.
+
+    Объявление читается у платформы, а не задаётся здесь намеренно: этот
+    страж — общий контракт двух писателей, и он не должен падать из-за
+    того, что колонки момента ещё (или уже) не заведены. Пока их нет,
+    контракт — это ``JOURNAL_FIELDS``, и равенство всё равно ловит
+    расхождение писателей; когда они появятся, контракт вырастет
+    вместе с ними и потребует от обоих писателей их писать.
+    """
+    consts = _module_string_constants(PLATFORM_WRITER)
+    declared = {
+        consts[name]
+        for name in ("EVENT_SEQ_COLUMN", "EVENT_TIME_COLUMN")
+        if name in consts
+    }
+    assert not declared or len(declared) == 2, (
+        f"в {PLATFORM_WRITER.name} объявлена часть колонок момента "
+        f"({sorted(declared)}): писатели разъедутся по форме, и одна "
+        "половина батча уйдёт в базу с seq, а другая без"
+    )
+    return declared
+
+
+def _full_contract() -> set[str]:
+    """Полный набор колонок строки журнала: конверт + момент события."""
+    return _journal_fields() | _event_time_columns()
+
+
 def test_platform_contract_is_readable() -> None:
     fields = _journal_fields()
     assert "request_id" in fields
@@ -118,16 +185,28 @@ def test_platform_contract_is_readable() -> None:
     assert len(fields) == 12, f"ожидалось 12 полей конверта, найдено {len(fields)}: {sorted(fields)}"
 
 
+def test_event_time_columns_are_not_part_of_the_envelope() -> None:
+    """``seq``/``occurred_at`` — колонки строки, а не поля конверта.
+
+    Разделение обязательное: иначе правка модели события тихо расширит
+    контракт колонок, и писатель без этих колонок станет «почти верным».
+    """
+    assert not (_event_time_columns() & _journal_fields()), (
+        f"колонки момента события попали в JOURNAL_FIELDS: "
+        f"{sorted(_event_time_columns() & _journal_fields())}"
+    )
+
+
 def test_agent_writer_writes_the_whole_envelope() -> None:
     """Писатель агента пишет ровно канонический набор."""
     written = _journal_insert_columns(AGENT_WRITER) - {"timestamp"}
-    assert written == _journal_fields()
+    assert written == _full_contract()
 
 
 def test_platform_writer_writes_the_whole_envelope() -> None:
     """Писатель платформы пишет ровно тот же набор — иначе журнал читают двое."""
     written = _journal_insert_columns(PLATFORM_WRITER) - {"timestamp"}
-    assert written == _journal_fields()
+    assert written == _full_contract()
 
 
 def test_both_writers_agree() -> None:
