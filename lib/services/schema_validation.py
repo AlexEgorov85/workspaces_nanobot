@@ -2,15 +2,19 @@
 
 Единая точка проверки перед подъёмом сервисов ``ApplicationContext.start()``.
 Источник имён — ``SETTINGS["channels"]["postgres"]`` и
-``SETTINGS["logging"]["db"]`` (те же 6 ключей, что проходят
+``SETTINGS["logging"]["db"]`` (те же 5 ключей, что проходят
 ``validate_runtime_isolation`` в ``config.py``). Имена не зашиты в
 коде проверки — они передаются как параметры SQL.
 
 Failure mode: при отсутствии любой из таблиц выбрасывается
 ``SchemaValidationError`` (наследник ``config.ConfigurationError``).
-Существующие startup-boundary в ``gateway.main()`` / ``cli_agent.main()``
-ловят ``ConfigurationError`` и превращают в ``exit 2`` + ``stderr`` —
-никаких изменений в entrypoint не требуется.
+Если проверка не уложилась в ``timeout_sec`` — отдельный
+``SchemaValidationTimeoutError``, тоже наследник ``ConfigurationError``,
+но **не** ``SchemaValidationError``: таймаут не означает «нет таблиц»,
+и сообщать о нём как о недостающих таблица было бы враньём.
+Оба ловятся startup-boundary в ``gateway.main()`` / ``cli_agent.main()``
+и превращаются в ``exit 2`` + ``stderr`` — никаких изменений в
+entrypoint не требуется.
 
 См. ``openspec/specs/runtime/startup-schema-validation/spec.md``.
 """
@@ -152,6 +156,49 @@ class _MissingConfigKeys(SchemaValidationError):
         return "\n".join(lines)
 
 
+class SchemaValidationTimeoutError(ConfigurationError):
+    """Проверка схемы не уложилась в отведённый ``timeout_sec``.
+
+    Намеренно **не** наследник ``SchemaValidationError``: таймаут и
+    отсутствие таблиц — разные отказы с разными последствиями. Первый
+    означает «сервер БД не ответил вовремя», второй — «миграции не
+    применены». Ошибочно назвать одно другим — значит отправить
+    оператора применять миграции там, где нужен DBA.
+
+    Наследник ``ConfigurationError`` — startup-boundary его поймает
+    и завершится с ``exit 2``, как и любой отказ конфигурации.
+    """
+
+    def __init__(self, timeout_sec: float, cause: BaseException | None = None) -> None:
+        self.timeout_sec = float(timeout_sec)
+        self.__cause__ = cause
+        super().__init__(
+            "Проверка схемы не уложилась в таймаут "
+            f"{self.timeout_sec:g} с. Сервер БД не ответил на SELECT к "
+            "information_schema.tables за это время. Проверьте доступность "
+            "БД и значение gateway.startup.schema_validation.timeout_sec."
+        )
+
+
+def _timeout_exceptions() -> tuple[type[BaseException], ...]:
+    """Классы ошибок, которыми PostgreSQL сообщает об истечении предела.
+
+    Импорт ленивый: ``schema_validation`` импортируется на старте агента и
+    не должен тянуть за собой драйвер только ради объявления обработчика.
+    Драйвер нужен ровно там, где есть настоящее соединение.
+
+    Ловится именно ``QueryCanceled``, а не весь ``OperationalError``: в
+    PostgreSQL отмена запроса — подкласс ``OperationalError``, и ловить
+    родителя означало бы замаскировать любую другую ошибку БД под
+    «не уложился в таймаут».
+    """
+    try:
+        from psycopg2 import errors as pg_errors
+    except Exception:  # noqa: BLE001 - без драйвера предел неотличим
+        return (TimeoutError,)
+    return (pg_errors.QueryCanceled,)
+
+
 class SchemaValidationService:
     """Сервис pre-startup проверки схемы.
 
@@ -209,16 +256,24 @@ class SchemaValidationService:
         """Один SELECT к ``information_schema.tables``.
 
         Args:
-            fetch: callable с сигнатурой ``(sql, *params) -> list[dict]``
-                — адаптер для ``utils.db.fetch`` или mock.
+            fetch: callable с сигнатурой ``(sql, *params) -> list[dict]``.
+                Обычно ``utils.db.fetch_with_timeout``: предел времени
+                реализует адаптер, потому что соединение принадлежит пулу,
+                а не этому модулю. Плоский ``utils.db.fetch`` тоже годен —
+                он просто ничего не ограничивает по времени.
             expected: список ``(schema, table_name)``.
-            timeout_sec: параметр для совместимости с вызывающим кодом
-                (сама логика таймаута реализуется на уровне пула).
+            timeout_sec: предел, упомянутый в тексте отказа. Значение
+                применяется адаптером; здесь оно нужно, чтобы сообщение
+                об ошибке назвало конкретную цифру.
 
         Returns:
             Список недостающих таблиц; пустой, если всё на месте.
+
+        Raises:
+            SchemaValidationTimeoutError: сервер отменил SELECT по
+                истечении предела. Прочие ошибки БД пробрасываются как
+                есть — они не должны выглядеть как «нет таблиц».
         """
-        del timeout_sec
         if not expected:
             return []
         schemas = sorted({s for s, _ in expected})
@@ -232,7 +287,11 @@ class SchemaValidationService:
             f"  AND table_type = 'BASE TABLE' "
             f"  AND table_name IN ({placeholders})"
         )
-        rows = fetch(sql, *schemas, *names)
+        params = [*schemas, *names]
+        try:
+            rows = fetch(sql, *params)
+        except _timeout_exceptions() as exc:
+            raise SchemaValidationTimeoutError(timeout_sec, exc) from exc
         existing = {(r["table_schema"], r["table_name"]) for r in rows}
         return [
             MissingTable(schema=s, name=n)
@@ -253,12 +312,15 @@ class SchemaValidationService:
         Args:
             settings: merged SETTINGS (с ``profile``). Может быть
                 сырым dict или ``_LazySettings`` proxy.
-            fetch: адаптер для SELECT (обычно ``utils.db.fetch``).
-            timeout_sec: пробрасывается в ``check_tables``.
+            fetch: адаптер для SELECT, обычно
+                ``utils.db.fetch_with_timeout`` — он же применяет предел.
+            timeout_sec: предел, названный в тексте отказа.
 
         Raises:
             SchemaValidationError: при non-empty ``missing`` ИЛИ при
                 отсутствии ожидаемых ключей в settings.
+            SchemaValidationTimeoutError: если сервер отменил SELECT по
+                истечении ``timeout_sec``.
         """
         raw = _unwrap_settings(settings)
         expected = cls.expected_table_names(raw)

@@ -23,6 +23,7 @@ from lib.services.schema_validation import (
     MissingTable,
     SchemaValidationError,
     SchemaValidationService,
+    SchemaValidationTimeoutError,
     _MissingConfigKeys,
     _hint_for_profile,
 )
@@ -360,3 +361,96 @@ class TestValidate:
             ]
 
         SchemaValidationService.validate(proxy, fetch=_fetch_all)
+
+
+# --- предел времени на SELECT ------------------------------------------------
+
+
+class TestStatementTimeout:
+    """Предел применяет адаптер; сервис переводит его отказ в доменный.
+
+    Механизм ``statement_timeout`` живёт в ``utils.db.fetch_with_timeout``,
+    потому что соединение принадлежит пулу. Здесь проверяется граница
+    договора: сервис узнаёт об отмене по ``QueryCanceled`` и не путает
+    её ни с «нет таблиц», ни с любой другой ошибкой БД.
+    """
+
+    def test_expired_limit_becomes_timeout_error(self) -> None:
+        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+            raise _fake_query_canceled()
+
+        with pytest.raises(SchemaValidationTimeoutError) as exc_info:
+            SchemaValidationService.check_tables(
+                _fetch, [("public", "t")], timeout_sec=0.25
+            )
+        assert exc_info.value.timeout_sec == 0.25
+        # Сообщение адресовано оператору и по-русски: проверяется именно
+        # actionable-часть, а не английский идентификатор настройки.
+        assert "gateway.startup.schema_validation.timeout_sec" in str(exc_info.value)
+        assert "0.25" in str(exc_info.value)
+
+    def test_timeout_error_is_not_a_missing_tables_error(self) -> None:
+        """Таймаут и «нет таблиц» — разные отказы.
+
+        Наследование сделало бы первый вторым по сообщению, и оператор
+        получил бы неверную подсказку «примените миграции».
+        """
+        assert not issubclass(SchemaValidationTimeoutError, SchemaValidationError)
+        assert issubclass(SchemaValidationTimeoutError, ConfigurationError)
+
+    def test_other_database_error_is_not_turned_into_timeout(self) -> None:
+        """Отмена запроса — подкласс ``OperationalError`` в PostgreSQL.
+
+        Ловить родителя означало бы замаскировать любую другую ошибку БД
+        под «не уложился в таймаут».
+        """
+
+        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+            raise _fake_operational_error("permission denied for table")
+
+        with pytest.raises(Exception) as exc_info:
+            SchemaValidationService.check_tables(_fetch, [("public", "t")])
+        assert not isinstance(exc_info.value, SchemaValidationTimeoutError)
+
+    def test_validate_propagates_timeout_error(self) -> None:
+        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+            raise _fake_query_canceled()
+
+        with pytest.raises(SchemaValidationTimeoutError):
+            SchemaValidationService.validate(
+                _full_settings(), fetch=_fetch, timeout_sec=1.0
+            )
+
+
+class TestDatabaseErrorsAreNotMasked:
+    def test_operational_error_is_not_reported_as_missing(self) -> None:
+        """Сбой БД не должен выглядеть как «нет таблиц».
+
+        Раньше оба отказа возвращали один и тот же список, поэтому
+        оператор читал «apply migrations» там, где БД просто не отвечал.
+        """
+
+        def _boom(sql: str, *params: Any) -> list[dict[str, Any]]:
+            raise _fake_operational_error("connection refused")
+
+        with pytest.raises(Exception) as exc_info:
+            SchemaValidationService.check_tables(_boom, [("public", "t")])
+        assert not isinstance(exc_info.value, SchemaValidationError)
+
+
+def _fake_operational_error(message: str) -> Exception:
+    """Настоящий ``OperationalError``, если драйвер доступен.
+
+    Класс берётся из ``psycopg2``, а не выдумывается: проверка должна
+    ловить именно тот отказ, который вернёт PostgreSQL.
+    """
+    from psycopg2 import OperationalError
+
+    return OperationalError(message)
+
+
+def _fake_query_canceled() -> Exception:
+    """Настоящий ``QueryCanceled`` — как при истечении ``statement_timeout``."""
+    from psycopg2 import errors as pg_errors
+
+    return pg_errors.QueryCanceled("canceling statement due to statement timeout")

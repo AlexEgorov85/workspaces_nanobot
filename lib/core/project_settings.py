@@ -69,7 +69,7 @@ class StartupSchemaValidationSettings(_StrictOptional):
     """Pre-startup проверка наличия обязательных runtime-таблиц.
 
     При ``enabled=True`` (по умолчанию) ``ApplicationContext.start()``
-    выполняет один ``SELECT`` к ``information_schema.tables`` для 6
+    выполняет один ``SELECT`` к ``information_schema.tables`` для 5
     таблиц из ``SETTINGS["channels"]["postgres"]`` и
     ``SETTINGS["logging"]["db"]`` (те же ключи, что проходят
     ``validate_runtime_isolation``). При отсутствии любой из них —
@@ -80,12 +80,15 @@ class StartupSchemaValidationSettings(_StrictOptional):
         enabled: включить проверку (по умолчанию ``True``).
         timeout_sec: верхняя граница ожидания запроса к БД
             (по умолчанию ``5.0``, диапазон ``0.1 ≤ value ≤ 60.0``).
+            Выставляется как ``statement_timeout`` на соединении пула;
+            истечение даёт ``SchemaValidationTimeoutError`` — отдельный
+            отказ, а не «нет таблиц».
 
     См. спеку ``openspec/specs/runtime/startup-schema-validation``.
     """
 
     enabled: bool = True
-    timeout_sec: float = Field(default=5.0, gt=0.0, le=60.0)
+    timeout_sec: float = Field(default=5.0, ge=0.1, le=60.0)
 
 
 class StartupSettings(_StrictOptional):

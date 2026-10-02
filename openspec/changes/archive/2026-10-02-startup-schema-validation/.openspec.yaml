@@ -1,0 +1,21 @@
+schema: spec-driven
+created: 2026-09-27
+
+# Требования этого change'а уже находятся в активной спеке
+# openspec/specs/runtime/startup-schema-validation/spec.md — они были слиты
+# туда вручную до того, как дельта была применена инструментом.
+#
+# Из-за этого `openspec archive` отказывался закрывать change:
+#   ADDED failed for header "### Requirement: Pre-startup runtime schema gate"
+#   - already exists
+#
+# Переписывать дельту как MODIFIED нельзя: такая форма заменяет блок
+# требования целиком, поэтому дельта обязана дословно повторять активную
+# спеку вместе со всеми сценариями — иначе архив откатит более поздние,
+# уже исправленные формулировки (код выхода exit 2 вместо exit 1, источник
+# имён, исключение claims_table со ссылкой на V006).
+#
+# Поэтому change сознательно не трогает спеки при закрытии. Разбор всех
+# трёх вариантов — в specs/runtime/startup-schema-validation/spec.md,
+# раздел «Дельта пуста намеренно».
+skip_specs: true

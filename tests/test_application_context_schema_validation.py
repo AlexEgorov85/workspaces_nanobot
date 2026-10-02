@@ -104,14 +104,14 @@ class TestValidateRuntimeSchema:
         names = SchemaValidationService.expected_table_names(ctx.settings)
         existing = {n for _, n in names}
 
-        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+        def _fetch(sql: str, *params: Any, timeout_sec: float = 0.0, **_kw: Any) -> list[dict[str, Any]]:
             return [
                 {"table_schema": s, "table_name": n}
                 for s, n in names
                 if n in params
             ]
 
-        with patch("utils.db.fetch", _fetch):
+        with patch("utils.db.fetch_with_timeout", _fetch):
             ctx._validate_runtime_schema()  # no raise
 
     def test_raises_when_one_table_missing(self) -> None:
@@ -121,7 +121,7 @@ class TestValidateRuntimeSchema:
         names = SchemaValidationService.expected_table_names(settings)
         existing = {n for _, n in names if n != runtime_table("gateway_logs")}
 
-        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+        def _fetch(sql: str, *params: Any, timeout_sec: float = 0.0, **_kw: Any) -> list[dict[str, Any]]:
             return [
                 {"table_schema": "public", "table_name": p}
                 for p in params
@@ -129,7 +129,7 @@ class TestValidateRuntimeSchema:
             ]
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch", _fetch):
+        with patch("utils.db.fetch_with_timeout", _fetch):
             with pytest.raises(SchemaValidationError) as exc_info:
                 ctx._validate_runtime_schema()
         assert exc_info.value.profile == "prod"
@@ -139,22 +139,22 @@ class TestValidateRuntimeSchema:
         settings = _settings(enabled=False)
 
         # fetch-функция, которая RAISE'ит, если её вызвали.
-        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+        def _fetch(sql: str, *params: Any, timeout_sec: float = 0.0, **_kw: Any) -> list[dict[str, Any]]:
             raise AssertionError("fetch should not be called when disabled")
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch", _fetch):
+        with patch("utils.db.fetch_with_timeout", _fetch):
             ctx._validate_runtime_schema()  # no raise
 
     def test_missing_settings_keys_raises_configuration_error(self) -> None:
         settings = _settings()
         del settings["logging"]["db"]["question_runs_table"]
 
-        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+        def _fetch(sql: str, *params: Any, timeout_sec: float = 0.0, **_kw: Any) -> list[dict[str, Any]]:
             return []
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch", _fetch):
+        with patch("utils.db.fetch_with_timeout", _fetch):
             with pytest.raises(ConfigurationError) as exc_info:
                 ctx._validate_runtime_schema()
         assert isinstance(exc_info.value, SchemaValidationError)
@@ -165,19 +165,30 @@ class TestValidateRuntimeSchema:
         """
         settings = _settings()
 
-        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+        def _fetch(sql: str, *params: Any, timeout_sec: float = 0.0, **_kw: Any) -> list[dict[str, Any]]:
             raise RuntimeError("DB connection refused")
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch", _fetch):
+        with patch("utils.db.fetch_with_timeout", _fetch):
             with pytest.raises(RuntimeError, match="DB connection refused"):
                 ctx._validate_runtime_schema()
 
     def test_uses_timeout_from_settings(self) -> None:
-        """Таймаут берётся из settings, не из литерала."""
+        """Предел берётся из settings и доходит до адаптера.
+
+        Проверяется переданное значение, а не сам факт вызова: настройка,
+        которая читается и не применяется, — это ровно тот дефект, который
+        change закрывает.
+        """
         captured: dict[str, Any] = {}
 
-        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+        def _fetch(
+            sql: str,
+            *params: Any,
+            timeout_sec: float = 0.0,
+            **_kw: Any,
+        ) -> list[dict[str, Any]]:
+            captured["timeout_sec"] = timeout_sec
             captured["called"] = True
             # Возвращаем все 5 таблиц существующими, чтобы не падать.
             names = SchemaValidationService.expected_table_names(_settings())
@@ -188,9 +199,10 @@ class TestValidateRuntimeSchema:
 
         settings = _settings(timeout=2.5)
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch", _fetch):
+        with patch("utils.db.fetch_with_timeout", _fetch):
             ctx._validate_runtime_schema()
         assert captured["called"]
+        assert captured["timeout_sec"] == 2.5
 
 
 class TestOrderingInStart:

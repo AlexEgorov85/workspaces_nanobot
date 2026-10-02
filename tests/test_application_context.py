@@ -432,3 +432,129 @@ class TestTableRegistryReset:
             "в начале; остались ресурсы от предыдущего context"
         )
 
+
+class TestStartupSchemaValidation:
+    """Проверка схемы на старте: состояния, которые должен различать код.
+
+    Тесты дёргают ``ApplicationContext._validate_runtime_schema`` напрямую и
+    подменяют только ``utils.db`` — сам composition root не поднимается.
+    Живой прогон по настоящей базе и настоящему пулу лежит в
+    ``tests/test_startup_schema_validation_live.py``.
+
+    Переиспользуется подход из ``tests/test_application_context_schema_validation.py``
+    (тот же метод, тот же seam). Здесь проверяется другое: gate
+    ``gateway.startup.schema_validation.enabled`` и доставка значения
+    ``timeout_sec`` до адаптера — обе вещи не должны молча разочаровывать.
+    """
+
+    @staticmethod
+    def _ctx(settings: dict) -> object:
+        from lib.core.application_context import ApplicationContext
+
+        holder = object.__new__(ApplicationContext)
+        holder.settings = settings
+        return holder
+
+    @staticmethod
+    def _settings(*, enabled: bool = True, timeout_sec: float = 5.0) -> dict:
+        from config import runtime_table
+
+        return {
+            "profile": "test",
+            "gateway": {
+                "startup": {
+                    "schema_validation": {
+                        "enabled": enabled,
+                        "timeout_sec": timeout_sec,
+                    }
+                }
+            },
+            "channels": {
+                "postgres": {
+                    "table_name": runtime_table("conversation_messages"),
+                    "messages_table": runtime_table("session_messages"),
+                    "meta_table": runtime_table("session_meta"),
+                }
+            },
+            "logging": {
+                "db": {
+                    "table_name": runtime_table("gateway_logs"),
+                    "question_runs_table": runtime_table("question_runs"),
+                }
+            },
+        }
+
+    @staticmethod
+    def _all_names(settings: dict) -> list[str]:
+        return list(settings["channels"]["postgres"].values()) + list(
+            settings["logging"]["db"].values()
+        )
+
+    def test_missing_table_blocks_start(self, monkeypatch) -> None:
+        from lib.services.schema_validation import SchemaValidationError
+
+        settings = self._settings()
+        everything = self._all_names(settings)
+        absent = {everything[2], everything[3]}  # session_meta и gateway_logs
+        present = [n for n in everything if n not in absent]
+
+        monkeypatch.setattr(
+            "utils.db.fetch_with_timeout",
+            lambda sql, *p, **_kw: [
+                {"table_schema": "public", "table_name": n} for n in present
+            ],
+        )
+
+        with pytest.raises(SchemaValidationError) as exc_info:
+            self._ctx(settings)._validate_runtime_schema()
+        assert {m.name for m in exc_info.value.missing} == absent, (
+            "в списке должны быть ровно недостающие таблицы, "
+            f"а не всё подряд: {exc_info.value.missing}"
+        )
+
+    def test_all_present_passes(self, monkeypatch) -> None:
+        settings = self._settings()
+        everything = self._all_names(settings)
+        monkeypatch.setattr(
+            "utils.db.fetch_with_timeout",
+            lambda sql, *p, **_kw: [
+                {"table_schema": "public", "table_name": n} for n in everything
+            ],
+        )
+        self._ctx(settings)._validate_runtime_schema()
+
+    def test_gate_disabled_skips_even_when_missing(self, monkeypatch) -> None:
+        """``enabled=False`` — аварийный пропуск проверки.
+
+        Обращаться к базе при выключенном гейте нельзя: оператор отключил
+        проверку именно потому, что база может быть недоступна.
+        """
+
+        def _explode(*_a, **_kw):
+            raise AssertionError("БД не должна трогаться при выключенном гейте")
+
+        monkeypatch.setattr("utils.db.fetch_with_timeout", _explode)
+        self._ctx(self._settings(enabled=False))._validate_runtime_schema()
+
+    def test_timeout_value_reaches_the_adapter(self, monkeypatch) -> None:
+        """Настройка обязана доходить до адаптера, а не застревать в конфиге.
+
+        Проверяется переданное значение, а не сам факт вызова: настройка,
+        которая читается и не применяется, — тот самый дефект, который
+        change закрывает.
+        """
+        settings = self._settings(timeout_sec=1.5)
+        everything = self._all_names(settings)
+        seen: dict[str, float] = {}
+
+        def _fetch(sql: str, *params: object, timeout_sec: float = 0.0, **_kw: object) -> list[dict]:
+            seen["timeout_sec"] = timeout_sec
+            return [
+                {"table_schema": "public", "table_name": n} for n in everything
+            ]
+
+        monkeypatch.setattr("utils.db.fetch_with_timeout", _fetch)
+        self._ctx(settings)._validate_runtime_schema()
+        assert seen["timeout_sec"] == 1.5
+
+

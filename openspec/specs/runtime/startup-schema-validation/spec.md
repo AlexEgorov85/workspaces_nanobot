@@ -56,13 +56,22 @@
 ## Публичный контракт
 
 - `SchemaValidationService.expected_table_names(settings) -> list[tuple[str, str]]`
-  — извлекает 6 ожидаемых имён из merged SETTINGS (порядок и схема
+  — извлекает 5 ожидаемых имён из merged SETTINGS (порядок и схема
   `public` фиксированы).
 - `SchemaValidationService.check_tables(fetch, expected, *, timeout_sec)`
   — выполняет один SELECT к `information_schema.tables`,
   возвращает `list[MissingTable]` (пустой, если всё на месте).
 - `SchemaValidationService.validate(settings, *, fetch, timeout_sec)`
   — верхний уровень: ожидаемые → проверка → `raise SchemaValidationError`.
+- `utils.db.fetch_with_timeout(sql, *args, *, timeout_sec)` — адаптер,
+  которым `ApplicationContext` подменяет «голый» `fetch`. Механизм
+  предела живёт здесь, а не в сервисе проверки: соединение принадлежит
+  пулу, и держать открытый доступ к соединениям в потребителе нечего.
+  Плоский `utils.db.fetch` тоже годен — он просто ничего не ограничивает.
+- `SchemaValidationTimeoutError(ConfigurationError)` — отказ по превышении
+  предела. Намеренно **не** подкласс `SchemaValidationError`: таймаут не
+  означает «нет таблиц», и отправлять оператора применять миграции там,
+  где нужен DBA, — враньё.
 - `ApplicationContext._validate_runtime_schema(self) -> None` —
   приватный метод, вызывается из `start()`.
 
@@ -166,14 +175,24 @@ patches, preload, hooks). Проверка SHALL выполняться ровн
 ### Requirement: Проверка выполняется через пул соединений БД
 
 Проверка SHALL использовать тот же пул соединений, что и остальные
-сервисы (`utils.db` / `get_pool`). При недоступности БД SHALL
-выбрасываться отдельная ошибка (`OperationalError` /
-`RuntimeError`) — не подменяться «отсутствием таблиц».
+сервисы (`utils.db` / `get_pool`). Предел времени SHALL выставляться как
+`statement_timeout` на соединении воркера и SHALL сниматься после запроса
+(в том числе при отказе) — соединение возвращается в пул общим, и незакрытый
+предел уехал бы в чужие запросы. По истечении предела SHALL выбрасываться
+`SchemaValidationTimeoutError`, а не подменяться «отсутствием таблиц».
+Прочие ошибки БД (`OperationalError` и прочие) SHALL пробрасываться как есть:
+отмена запроса — подкласс `OperationalError` в PostgreSQL, поэтому ловление
+родителя замаскировало бы любую другую ошибку под «не уложился в таймаут».
 
 #### Scenario: БД недоступна
 - **WHEN** пул не может выполнить SELECT за отведённый таймаут
-- **THEN** проверка падает с ошибкой недоступности БД, а не
+- **THEN** проверка падает с `SchemaValidationTimeoutError`, а не
   маскирует её под «отсутствие таблиц»
+
+#### Scenario: Превышение предела не оставляет соединение сломанным
+- **WHEN** SELECT отменён сервером по истечении `statement_timeout`
+- **THEN** прерванная транзакция откатывается, предел снимается, и то же
+  соединение годится для следующего владельца пула
 
 #### Scenario: БД доступна, таблиц нет
 - **WHEN** пул соединений работает, но таблицы отсутствуют

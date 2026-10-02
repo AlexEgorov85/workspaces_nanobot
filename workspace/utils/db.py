@@ -1007,6 +1007,56 @@ def fetch(sql: str, *args: Any, _tag: str | None = None) -> list:
     return _get_manager()._submit(_Job(_work, tag=tag)).get()
 
 
+def fetch_with_timeout(
+    sql: str, *args: Any, timeout_sec: float = 5.0, _tag: str | None = None
+) -> list:
+    """SELECT под серверным пределом времени; форма ответа как у ``fetch``.
+
+    Предел выставляется как ``statement_timeout`` на соединении воркера, то
+    есть на стороне сервера. Клиентский предел ожидания не годится: прерванное
+    ожидание оставило бы запрос работать в базе.
+
+    Порядок ``except``/``finally`` существенен. По истечении ``statement_timeout``
+    PostgreSQL **прерывает транзакцию**, и любой следующий оператор на этом
+    соединении падает с ``InFailedSqlTransaction``. Поэтому сначала откат, и
+    только потом снятие предела. Соединение возвращается в пул общим: без отката
+    оно ушло бы к следующему владельцу с прерванной транзакцией и с пределом,
+    унаследованным от чужого запроса.
+
+    Предел снимается и при успехе, и при отказе — иначе ``pg_sleep``-подобный
+    тяжёлый SELECT отравит все последующие запросы пула.
+
+    Raises:
+        psycopg2.errors.QueryCanceled: сервер отменил запрос по истечении
+            предела. Доменный перевод в ``SchemaValidationTimeoutError``
+            делает вызывающая сторона (она же владеет терминологией ошибок).
+    """
+    params = _sanitize_params(args if args else None)
+    tag = _tag if _tag is not None else _caller_tag()
+    timeout_ms = max(1, int(round(float(timeout_sec) * 1000)))
+
+    def _work(conn: Any) -> list:
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = {timeout_ms}")
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+        except BaseException:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET statement_timeout = 0")
+            except Exception:
+                pass
+    return _get_manager()._submit(_Job(_work, tag=tag)).get()
+
+
 def fetchone(sql: str, *args: Any, _tag: str | None = None) -> dict | None:
     """Выполнить SELECT, вернуть одну строку как dict или None."""
     params = _sanitize_params(args if args else None)

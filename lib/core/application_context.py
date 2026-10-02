@@ -546,7 +546,7 @@ class ApplicationContext:
         _start_db_pool()
 
         # Pre-startup проверка наличия обязательных runtime-таблиц
-        # (6 имён из SETTINGS["channels"]["postgres"] +
+        # (5 имён из SETTINGS["channels"]["postgres"] +
         # SETTINGS["logging"]["db"]). При отсутствии любой — выброс
         # SchemaValidationError (наследник ConfigurationError), который
         # ловится в gateway.main() / cli_agent.main() → exit 2 + stderr.
@@ -718,7 +718,7 @@ class ApplicationContext:
             )
             return
         try:
-            from utils.db import fetch as _db_fetch
+            from utils.db import fetch_with_timeout as _db_fetch
             from lib.services.schema_validation import SchemaValidationService
         except Exception as exc:
             # Если зависимости не загрузились — это серьёзная проблема,
@@ -728,10 +728,15 @@ class ApplicationContext:
             return
         # ``SchemaValidationService.validate`` бросает ``SchemaValidationError``
         # (наследник ``ConfigurationError``) при missing — пусть поднимется
-        # до ``gateway.main()`` / ``cli_agent.main()``.
+        # до ``gateway.main()`` / ``cli_agent.main()``. Предел SELECT'а
+        # применяет адаптер на соединении пула, а не клиент: прерванное
+        # ожидание оставило бы запрос работать в базе.
+        def _bounded_fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+            return _db_fetch(sql, *params, timeout_sec=timeout_sec)
+
         SchemaValidationService.validate(
             settings,
-            fetch=_db_fetch,
+            fetch=_bounded_fetch,
             timeout_sec=timeout_sec,
         )
 
