@@ -278,20 +278,108 @@ class TestCallSite:
             "построен никогда, и весь журнал уйдёт в локальный след"
         )
 
+    @staticmethod
+    def _nested_calls(func: Any) -> set[tuple[str, str]]:
+        """Вызовы атрибута вместе с именем ближайшей объемлющей функции.
+
+        Нужно, чтобы отличить «вызов внутри живой петли» от «вызов рядом с
+        ней»: оба дают один и тот же набор имён, различается только
+        вложенность.
+
+        Владелец — БЛИЖАЙШИЙ объемлющий def, а не самый внешний и не самый
+        длинный по имени: иначе вложенная корутина всегда выдавала бы
+        внешнюю функцию, и проверка «вызов не на верхнем уровне» проходила
+        бы на любом коде. Вызов уровнем выше вложенного def помечается
+        ``<top>``.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+        parents: dict[int, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[id(child)] = node
+
+        def _owner(node: ast.AST) -> str:
+            current: ast.AST | None = parents.get(id(node))
+            while current is not None:
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return current.name
+                current = parents.get(id(current))
+            return "<top>"
+
+        return {
+            (_owner(node), node.func.attr)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+
+    @staticmethod
+    def _names_in(func: Any) -> set[str]:
+        """Голые вызовы по имени (``_run_cli_repl(...)``).
+
+        ``_calls_in`` ловит только вызовы через точку (``ctx.attach_log_transport``);
+        общий помощник CLI зовётся по имени, поэтому для него нужен свой
+        сборщик — иначе проверка «обе ветки доходят до общей точки» прошла бы
+        на пустом множестве.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+        return {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
     def test_cli_paths_wire_the_transport_in_the_live_loop(self) -> None:
         """Обе ветки CLI подключают транспорт внутри loop.
 
         Раннеры CLI не проходят через ``gateway._run``, поэтому подключение
-        там не наследуется и обязано быть явным в каждой ветке. Ветка
-        ``_run_patched_repl`` прячет вызов в корутине ``bg()`` - разбор AST
-        заходит внутрь вложенной функции, поэтому отдельного обхода не
-        требуется.
+        там не наследуется и обязано быть явным. Обе ветки идут через
+        общий ``_run_cli_repl``: когда это были два почти одинаковых тела,
+        ветка ``--patched`` разошлась с обычной и потеряла рукопожатие
+        (её ``create_task`` звался вне работающего loop).
+
+        Проверяется не «в файле есть вызов», а «он стоит ВНУТРИ живой
+        петли»: ``attach_log_transport`` строит writer через
+        ``LoopCallRunner``, которому нужен работающий event loop. Вызов
+        уровнем выше ``asyncio.run`` был бы тихим возвратом к прямой
+        записи в PostgreSQL — ровно тот дефект, ради которого фаза 7 и
+        существует.
         """
         import cli_agent
 
-        assert "attach_log_transport" in self._calls_in(cli_agent._run_vanilla), (
-            "CLI без enterprise-mcp останется без транспорта журнала"
+        for entry, label in (
+            (cli_agent._run_vanilla, "CLI без enterprise-mcp"),
+            (cli_agent._run_patched, "patched-CLI"),
+        ):
+            names = self._names_in(entry) | self._calls_in(entry)
+            assert "_run_cli_repl" in names, (
+                f"{label} больше не доходит до общей точки подключения "
+                "транспорта: одна из веток останется без журнала"
+            )
+
+        nested = self._nested_calls(cli_agent._run_cli_repl)
+        wiring_owners = {owner for owner, attr in nested if attr == "attach_log_transport"}
+        assert wiring_owners, (
+            "общая точка CLI не подключает транспорт журнала: обе ветки "
+            "останутся без writer"
         )
-        assert "attach_log_transport" in self._calls_in(cli_agent._run_patched_repl), (
-            "patched-CLI не подключает транспорт журнала в живом loop"
+        # Разбор ведётся по телу самой ``_run_cli_repl``, поэтому вызов
+        # «на верхнем уровне» принадлежал бы ей самой. Внутри живой петли
+        # его владелец — вложенная корутина.
+        assert "_run_cli_repl" not in wiring_owners, (
+            f"attach_log_transport вызван прямо в _run_cli_repl {wiring_owners}: "
+            "writer строится через LoopCallRunner и требует работающего "
+            "event loop — на верхнем уровне он молча вернёт локальный след"
         )
+        assert "run" in self._calls_in(cli_agent._run_cli_repl), (
+            "точка подключения не оборачивает корутину в asyncio.run: "
+            "живого loop, в котором строится writer, не будет"
+        )
+
