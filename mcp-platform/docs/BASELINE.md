@@ -145,6 +145,37 @@ cd mcp-platform && python -m pytest -q
 ресурсами и запрет SQL на поверхности агента, каждая со своим тестом на
 заведомо плохом коде.
 
+## Дельта фазы 8.14–8.16 — слой исполнения: перевод capability на конвейер
+
+Прогон платформы: **`2 failed, 4498 passed, 1 skipped` за 72 с**
+(`cd mcp-platform && python -m pytest tests -q`).
+
+Оба падения — **чужие**, и ни одно не связано с фазой:
+
+| Тест | Чей | Почему |
+|---|---|---|
+| `tests/test_vectors_indexing.py::TestBuildFaissIndex::test_cosine_normalizes_vectors` | предсуществующий | дефект изоляции в `test_server_bootstrap.py`: из `sys.modules` вычищается только верхний `numpy`, подмодули остаются от прежнего экземпляра → рекурсия в ленивом `__getattr__`. Воспроизводится тремя файлами: `test_vectors_capability.py`, `test_server_bootstrap.py`, `test_vectors_indexing.py` |
+| `tests/test_settings_registry.py::TestRegistryIsComplete::test_every_declared_name_is_read_somewhere` | **чужой, в работе** | объявлены `ENTERPRISE_LOG_RETENTION_DAYS` и `ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND`, которые пока никто не читает. Правятся `libs/enterprise_common/settings.py` и `platform.json` — файлы вне владения фазы 8 |
+
+Четыре падения в `tests/legal_summarizer/`, наблюдавшиеся в начале фазы
+(`test_structure_identity`, `test_structure_document_analysis`,
+`test_document_cache_hit_miss`), к концу исчезли — правка
+`libs/legal_summarizer/document/identity.py` была чужой и завершена.
+
+**Вклад фазы в числа.** Единственный изменённый файл —
+`tests/test_tool_execution_boundaries.py` (+227 строк, ноль удалённых): три
+новые оси пункта 8.14 и семь синтетических форм, каждая из которых обязана
+ронять страж. Плюс `docs/` — правки без влияния на сбор. Сбор вырос на
+**11 тестов** (три оси × несколько форм + проверка дублей корня в таблице).
+Код capability не менялся ни на строке.
+
+**Проверка мутацией.** Каждое новое правило отключалось правкой стража и
+обязано было покраснеть; все семь — краснеют, откат возвращает зелёный статус.
+Правило, которое осталось зелёным, было найдено именно так: список запрещённых
+файловых операций не срабатывал, пока для него не добавили форму
+`Path(p).unlink()` — единственную, которую ловит именно он, а не проверка по
+корню обращения.
+
 ## Дельта фазы 0 — удаление мёртвого и сломанного кода
 
 После фазы 0 корневой прогон: `4 failed, 4036 passed, 39 skipped, 1 xpassed`

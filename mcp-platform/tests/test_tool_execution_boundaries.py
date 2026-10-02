@@ -217,6 +217,83 @@ DYNAMIC_IMPORT = re.compile(
     r"""importlib\s*\.\s*import_module|__import__\s*\(""",
 )
 
+# -- приёмка 8.14: три оси, названные пунктом 8.14 --------------------------
+#
+#: Пункт 8.14 утверждает, что файлы capability «сегодня не используют файловую
+#: систему, ``os.environ`` и измерение времени в обвязке вызова». Утверждение
+#: верное — но это утверждение **о сегодня**, а не правило. Ни одна из трёх осей
+#: в таблице ``FORBIDDEN`` не была заявлена: ``mkdir`` запрещён, а ``open`` на
+#: запись нет; ``perf_counter`` запрещён, а ``time.time`` нет; про окружение не
+#: сказано ничего. Проверено пробой: capability, читающая ``os.environ``,
+#: пишущая файл через ``write_text`` и мерящая вызов через ``time.time()``,
+#: проходила страж насквозь.
+#:
+#: Проверяются эти оси по **форме обращения к модулю**, а не по токену, иначе
+#: правило либо не сработает, либо заденет законное:
+#:
+#: * ``time`` — законно в буфере журнала (``data/service/writer.py`` держит на
+#:   ``time.monotonic`` период сброса); запрещён именно ``time.time()`` —
+#:   замер «сколько занял вызов»;
+#: * ``open`` — законно на чтение; запрещён открытый на запись;
+#: * ``timestamp`` в доменном поле — законно; в ``data`` это колонка журнала.
+#:
+#: ``(корень обращения, множество имён, причина)``
+FORBIDDEN_CALLS_BY_ROOT: tuple[tuple[str, frozenset[str], str], ...] = (
+    (
+        "os",
+        frozenset(
+            {
+                "getenv",
+                "putenv",
+                "remove",
+                "unlink",
+                "rmdir",
+                "rename",
+                "replace",
+            }
+        ),
+        "окружение читает реестр настроек, а уборку файлов ведёт платформа: "
+        "поимённое чтение сделало бы вторым читателем значение из "
+        "platform.json, а своя уборка — вторым местом, где живут результаты",
+    ),
+    (
+        "time",
+        frozenset({"time", "clock"}),
+        "измерение длительности вызова — забота конвейера; своё измерение "
+        "разойдётся с длительностью в журнале",
+    ),
+    (
+        "datetime",
+        frozenset({"now", "utcnow", "today"}),
+        "свой «сейчас» в обвязке вызова — второй источник длительности и "
+        "второе расписание событий",
+    ),
+    (
+        "shutil",
+        frozenset({"rmtree", "copytree", "move", "copy2", "rmdir", "unlink"}),
+        "уборку и раскладку файлов сессии ведёт платформа",
+    ),
+)
+
+#: Методы файловой записи у ``Path`` и у самой строки. Ходьба по каталогам
+#: (``mkdir``, ``makedirs``) запрещена отдельно, в ``FORBIDDEN``; здесь — запись
+#: содержимого, то есть собственный каталог результатов под своим именем.
+FILE_WRITE_METHODS: frozenset[str] = frozenset(
+    {"write_text", "write_bytes", "writelines"}
+)
+
+#: Удаление файлов и каталогов. Список намеренно узкий: в него входят только
+#: имена, означающие файловую операцию сами по себе. Общие имена методов
+#: (``replace``, ``remove``, ``rename``) сюда не годятся — ``str.replace`` в
+#: capability ``legal_summarizer`` это правка строки, а не файла, и запрет по
+#: имени звал бы страж на доменном коде. Файловые формы с явным получателем
+#: (``os.remove``, ``shutil.move``) ловит ``FORBIDDEN_CALLS_BY_ROOT``.
+FILE_DESTRUCTIVE: frozenset[str] = frozenset({"unlink", "rmdir", "rmtree"})
+
+#: Режимы ``open``, которые создают файл или усекают существующий. Чтение
+#: (``r``, отсутствие режима) остаётся разрешённым.
+WRITE_MODES: tuple[str, ...] = ("w", "a", "x", "+")
+
 
 def _strip_docstrings(tree: ast.AST) -> None:
     """Вырезать докстринги: они описывают правила, а не нарушают их.
@@ -266,6 +343,102 @@ def _imported_roots(tree: ast.AST) -> set[str]:
     return roots
 
 
+def test_ambient_table_has_no_duplicate_roots() -> None:
+    """Один корень — одна строка таблицы, иначе правило исчезает молча.
+
+    Проверка по той же причине, что и ``test_capability_dirs_are_discovered``:
+    словарь строится по корню, и вторая строка с тем же корнем не добавит
+    правила, а просто перезапишет первое — страж останется зелёным на коде,
+    который он обязан ловить.
+    """
+    roots = [root for root, _, _ in FORBIDDEN_CALLS_BY_ROOT]
+    duplicates = sorted({root for root in roots if roots.count(root) > 1})
+    assert not duplicates, (
+        f"в FORBIDDEN_CALLS_BY_ROOT корень встречается дважды: {duplicates} — "
+        "второе правило молча перезапишет первое"
+    )
+    assert len(FORBIDDEN_CALLS_BY_ROOT) >= 4, (
+        "ожидаются как минимум os, time, datetime и shutil — три оси пункта 8.14"
+    )
+
+
+def _root_name(node: ast.AST) -> str | None:
+    """Имя объекта, к атрибуту которого обращаются: ``os.getenv`` -> ``os``.
+
+    У результата вызова (``Path(p).unlink()``) корня нет: возвращается ``None``,
+    и решение принимает сам список запрещённых имён.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _root_name(node.value)
+    return None
+
+
+def _open_write_mode(node: ast.Call) -> str | None:
+    """Режим ``open``, если файл в нём создаётся или усекается.
+
+    Режим может стоять вторым позиционным аргументом или быть названным
+    ``mode=``; отсутствие режима означает чтение, а не запись.
+    """
+    mode = "r"
+    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+        if isinstance(node.args[1].value, str):
+            mode = node.args[1].value
+    for keyword in node.keywords:
+        if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+            if isinstance(keyword.value.value, str):
+                mode = keyword.value.value
+    return mode if any(flag in mode for flag in WRITE_MODES) else None
+
+
+def _scan_ambient_resources(tree: ast.AST, rel: str) -> list[str]:
+    """Три оси пункта 8.14: файловая система, окружение, измерение времени.
+
+    Отдельная функция, а не ещё несколько строк в ``_scan``: правила иные —
+    их интересует не имя, а форма обращения (``open`` на чтение разрешён,
+    ``time.monotonic`` разрешён), и в общий список токенов они не ложатся —
+    там они задели бы законный код.
+    """
+    offenders: list[str] = []
+    by_root = {root: (names, reason) for root, names, reason in FORBIDDEN_CALLS_BY_ROOT}
+
+    for node in ast.walk(tree):
+        # ``os.environ`` — атрибут, а не вызов: ловится обходом дерева, иначе
+        # форма ``os.environ.get(...)`` осталась бы незамеченной.
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "environ"
+            and _root_name(node.value) == "os"
+        ):
+            offenders.append(f"{rel}: os.environ — чтение окружения в обход реестра")
+            continue
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            attr, root = func.attr, _root_name(func.value)
+        elif isinstance(func, ast.Name):
+            attr, root = func.id, None
+        else:
+            continue
+
+        if attr in FILE_WRITE_METHODS:
+            offenders.append(f"{rel}: {attr}() — файловая запись внутри capability")
+        elif attr in FILE_DESTRUCTIVE:
+            offenders.append(f"{rel}: {attr}() — правка чужих файлов внутри capability")
+        elif attr == "open":
+            mode = _open_write_mode(node)
+            if mode is not None:
+                offenders.append(
+                    f"{rel}: open(mode={mode!r}) — файл создаёт платформа, "
+                    "операция отдаёт результат конвейеру"
+                )
+        elif root in by_root and attr in by_root[root][0]:
+            offenders.append(f"{rel}: {root}.{attr}() — {by_root[root][1]}")
+    return offenders
+
+
 def _scan(source: str, rel: str) -> list[str]:
     """Нарушения одного файла. Пустой список — файл чист."""
     tree = ast.parse(source, filename=rel)
@@ -282,6 +455,7 @@ def _scan(source: str, rel: str) -> list[str]:
         for imported in modules:
             if imported == module or imported.startswith(module + "."):
                 offenders.append(f"{rel}: импорт {imported!r} — {reason}")
+    offenders.extend(_scan_ambient_resources(tree, rel))
     return offenders
 
 
@@ -377,6 +551,45 @@ VIOLATIONS: tuple[tuple[str, str], ...] = (
         "прямой вызов инструмента мимо конвейера",
         "def f(session, name, arguments):\n    return session.call_tool(name, arguments)\n",
     ),
+    # -- три оси пункта 8.14 ------------------------------------------------
+    (
+        "чтение окружения в обход реестра",
+        "import os\ndef f():\n    return os.environ.get('ENTERPRISE_DATA_SNAPSHOT_PATH')\n",
+    ),
+    (
+        "чтение окружения через getenv",
+        "import os\ndef f():\n    return os.getenv('ENTERPRISE_DATA_SNAPSHOT_PATH')\n",
+    ),
+    (
+        "собственная файловая запись",
+        "from pathlib import Path\ndef f(path, payload):\n"
+        "    Path(path).write_text(payload, encoding='utf-8')\n",
+    ),
+    (
+        "собственное сохранение крупного результата в файл",
+        "def f(path, body):\n    with open(path, 'w', encoding='utf-8') as fh:\n"
+        "        fh.write(body)\n",
+    ),
+    (
+        "своя уборка файлов",
+        "import shutil\ndef f(path):\n    shutil.rmtree(path, ignore_errors=True)\n",
+    ),
+    (
+        "своё удаление файла через Path (корень обращения не os и не shutil)",
+        "from pathlib import Path\ndef f(path):\n"
+        "    target = Path(path) / 'result.json'\n"
+        "    if target.exists():\n        target.unlink()\n",
+    ),
+    (
+        "свой замер длительности вызова",
+        "import time\ndef f(fn):\n    started = time.time()\n"
+        "    return fn(), time.time() - started\n",
+    ),
+    (
+        "свой «сейчас» для события",
+        "from datetime import datetime\ndef f(fn):\n    started = datetime.now()\n"
+        "    return fn(), datetime.now() - started\n",
+    ),
 )
 
 #: Формы, которые выглядят нарушением, но им не являются.
@@ -403,6 +616,20 @@ ALLOWED: tuple[tuple[str, str], ...] = (
         "import time\n"
         "def f(interval):\n    deadline = time.monotonic() + interval\n"
         "    return time.monotonic() < deadline\n",
+    ),
+    (
+        "чтение файла внутри операции",
+        "def f(path):\n    with open(path, 'r', encoding='utf-8') as fh:\n"
+        "        return fh.read()\n",
+    ),
+    (
+        "доменное поле времени, а не замер вызова",
+        "def f(rows):\n    return {'rows': rows, 'timestamp': None, 'session': 's1'}\n",
+    ),
+    (
+        "путь без файловой записи",
+        "from pathlib import Path\nROOT = Path(__file__).resolve().parents[1]\n"
+        "def f(name):\n    return str(ROOT / name)\n",
     ),
     (
         "обычный импорт разрешённого",
