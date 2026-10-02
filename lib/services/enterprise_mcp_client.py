@@ -196,6 +196,7 @@ class EnterpriseMcpClient:
         cwd: str | os.PathLike[str] | None = None,
         tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
         server_name: str = "enterprise-mcp",
+        db_logging_service: Any = None,
     ) -> None:
         self._command = command
         self._args = list(args or [])
@@ -208,6 +209,10 @@ class EnterpriseMcpClient:
         self._session: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        # Источник ``request_id`` текущего оборота. Приходит сюда же, куда и
+        # остальные сервисы, - из ApplicationContext. Создавать ради этого
+        # отдельный компонент незачем: нужен метод журнала, а не новый объект.
+        self._db_logging_service = db_logging_service
 
     # -- состояние ---------------------------------------------------------
 
@@ -256,6 +261,66 @@ class EnterpriseMcpClient:
         tools = sorted(getattr(result, "tools", None) or [], key=lambda t: t.name)
         return [str(t.name) for t in tools]
 
+    def _identity_from_turn(self) -> "CallIdentity | None":
+        """Собрать личность вызова из доверенного контекста оборота.
+
+        Это единственное место, где личность вызова появляется сама. Раньше
+        каждый tool' собирал её руками - одна и та же функция копировалась по
+        проекту, и любая из копий могла разойтись с остальными, а расхождение
+        не было бы заметно нигде: вызов либо проходил, либо нет.
+
+        Источник - ``RequestContext`` и журнал оборотов, а не аргументы
+        вызова. Значение, присланное моделью или вызывающим tool'ом, границей
+        изоляции не является.
+
+        Вне оборота возвращается ``None``: тогда ``_meta`` не отправляется
+        вовсе, и сервер сам отвечает ``identity_missing``. Выдумывать
+        значения здесь нельзя - подставленная сессия выглядела бы в журнале
+        как настоящая.
+        """
+        try:
+            from nanobot.agent.tools.context import (
+                current_request_context,
+                current_request_session_key,
+            )
+        except Exception:
+            return None
+        try:
+            turn = current_request_context()
+        except Exception:
+            return None
+        if turn is None:
+            return None
+
+        try:
+            session_id = current_request_session_key()
+        except Exception:
+            session_id = None
+        if not session_id:
+            return None
+
+        sender_id = getattr(turn, "sender_id", None)
+        user_id = sender_id if isinstance(sender_id, str) and sender_id else None
+        if not user_id:
+            return None
+
+        request_id = None
+        logging_service = self._db_logging_service
+        if logging_service is not None:
+            try:
+                request_id = logging_service.get_request_id(str(session_id))
+            except Exception:
+                # Журнал недоступен - это не повод отказывать в вызове: связь
+                # с agent_question_runs выразится признаком correlated=false,
+                # который проставит сервер.
+                request_id = None
+
+        return CallIdentity(
+            session_id=str(session_id),
+            user_id=user_id,
+            request_id=request_id,
+        )
+
     async def call(
         self,
         operation: str,
@@ -287,7 +352,12 @@ class EnterpriseMcpClient:
             EnterpriseMcpUnavailable: сервер недоступен или не ответил.
         """
         session = await self._ensure_session()
-        meta = self._meta_for(identity)
+        # Личность, которую не собрал вызывающий, достраивается здесь.
+        # Явный ``identity`` всегда выигрывает: подмена источника - это
+        # осознанное решение вызывающей стороны, а не запасной путь.
+        meta = self._meta_for(
+            identity if identity is not None else self._identity_from_turn()
+        )
         try:
             # ``meta`` не передаётся вовсе, когда идентичности нет: пустой
             # ``_meta`` на сервере неотличим от «идентичность была и пустая».
@@ -443,7 +513,9 @@ class EnterpriseMcpClient:
         return env
 
 
-def client_from_settings(settings: Any) -> EnterpriseMcpClient | None:
+def client_from_settings(
+    settings: Any, *, db_logging_service: Any = None
+) -> EnterpriseMcpClient | None:
     """Собрать клиента из ``project.json → enterprise_mcp``.
 
     ``None`` — раздел выключен или не задан: тогда потребитель сообщает
@@ -470,4 +542,5 @@ def client_from_settings(settings: Any) -> EnterpriseMcpClient | None:
         tool_timeout_sec=float(
             section.get("tool_timeout_sec") or DEFAULT_TOOL_TIMEOUT_SEC
         ),
+        db_logging_service=db_logging_service,
     )

@@ -1346,7 +1346,14 @@ def _make_enterprise_mcp(settings: Any, ctx: Any = None) -> Any:
     """
     from lib.services.enterprise_mcp_client import client_from_settings
 
-    return client_from_settings(settings)
+    # Журнал нужен клиенту, чтобы достроить ``request_id`` оборота, когда
+    # вызывающий tool' личность не передал. Пробуем оба имени: на момент
+    # сборки сервис может быть ещё не создан.
+    return client_from_settings(
+        settings,
+        db_logging_service=getattr(ctx, "db_logging_service", None)
+        or getattr(ctx, "_db_logging_service", None),
+    )
 
 
 def _make_cron_service(config: Any) -> Any:
