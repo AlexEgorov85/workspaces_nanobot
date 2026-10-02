@@ -16,7 +16,7 @@
 - Python-скрипты (детерминированные процедуры, map-reduce);
 - доменная оркестрация и capability доступа к доменным данным;
 - опциональные данные/промпты/references (progressive disclosure);
-- декларация PG-таблиц/vector-индексов в `project.json`.
+- декларация PG-таблиц/vector-индексов в `config.json`.
 
 Skill **не вызывает** Tool программно (`TARGET_ARCHITECTURE.md:209-228`), Tool **не знает** о Skill (§22.1). Связь — через agent runtime: skill описывает capability терминами, агент решает какой tool вызвать.
 
@@ -121,17 +121,17 @@ workspace/skills/<skill_name>/
 
 | Паттерн | Когда | Что есть | Пример |
 |---|---|---|---|
-| **Полный skill** | Своя логика, таблицы/индексы, LLM-режимы | SKILL.md + scripts/ (10+ модулей) + project.json::skills | `audit_analyzer` |
-| **Минимальный skill** | Своя логика, но без своих таблиц | SKILL.md + scripts/ + project.json::skills (без `tables[]`) | `legal_summarizer` |
-| **Documentation-only skill** | Только описывает готовый модуль из `workspace/utils/*` | **Только** SKILL.md; без `__init__.py`, без `scripts/`, **без** записи в `project.json::skills` | `office_files` |
+| **Полный skill** | Своя логика, таблицы/индексы, LLM-режимы | SKILL.md + scripts/ (10+ модулей) + config.json::skills | `audit_analyzer` (по составу каталога — только SKILL.md) |
+| **Минимальный skill** | Своя логика, но без своих таблиц | SKILL.md + scripts/ + config.json::skills (без `tables[]`) | — (в `workspace/skills/` таких нет) |
+| **Documentation-only skill** | Только описывает готовый модуль из `workspace/utils/*` | **Только** SKILL.md; без `__init__.py`, без `scripts/`, **без** записи в `config.json::skills` | — (в `workspace/skills/` таких нет) |
 
 **Documentation-only skill** допустим **только** когда выполняются **все** условия:
 
 1. Реализация уже живёт в `workspace/utils/<module>.py` и покрыта собственными unit-тестами.
-2. У skill'а нет собственной PG/vector-инфраструктуры — нечего регистрировать через `project.json::skills`.
+2. У skill'а нет собственной PG/vector-инфраструктуры — нечего регистрировать через `config.json::skills`.
 3. SKILL.md нужен исключительно для **discovery** агентом при маршрутизации по описанию.
 
-Если хотя бы одно условие не выполнено — это не documentation-only skill, а полноценный skill без кода. Нужно либо `scripts/`, либо регистрация в `project.json::skills` (либо удалить skill).
+Если хотя бы одно условие не выполнено — это не documentation-only skill, а полноценный skill без кода. Нужно либо `scripts/`, либо регистрация в `config.json::skills` (либо удалить skill).
 
 **Когда выбирать documentation-only**, а когда полный:
 
@@ -142,7 +142,7 @@ workspace/skills/<skill_name>/
 
 - **Никаких `register.py`** — мёртвый паттерн, проверяется
   `tests/test_skill_config_lookup.py::TestNoRegisterPy`. Регистрация —
-  декларация в `project.json::skills.<name>` + `_auto_register_skills`
+  декларация в `config.json::skills.<name>` + `_auto_register_skills`
   в `lib/core/application_context.py:681-693`.
 - **Не дублировать `skill_config.py`** с бизнес-логикой. Только тонкая
   обёртка (`lib/core/skill_registration.py:9-16`); никакого `register_*`.
@@ -159,7 +159,7 @@ workspace/skills/<skill_name>/
 
 ```yaml
 ---
-name: <skill_name>            # совпадает с ключом в project.json::skills
+name: <skill_name>            # совпадает с ключом в config.json::skills
 description: <одна строка>    # как skill выбирается агентом
 metadata: {"nanobot":{"emoji":"📊","always":true}}
 ```
@@ -206,11 +206,11 @@ LLM-генерация SELECT», а не «работа с аудитами».
 
 ### 3.4 Имена таблиц/индексов
 
-**Не зашивайте как константы.** Имена — настраиваемые в `project.json`.
+**Не зашивайте как константы.** Имена — настраиваемые в `config.json`.
 См. `audit_analyzer/SKILL.md:81-89`:
 
 > Имена таблиц и индексов ниже — значения текущей инсталляции,
-> настраиваемые в `project.json` (`skills.audit_analyzer.tables[*].name`,
+> настраиваемые в `config.json` (`skills.audit_analyzer.tables[*].name`,
 > `skills.audit_analyzer.vector_indexes[*].name`). В других развёртываниях
 > они могут отличаться; не зашивайте их в код/промпты как константы.
 
@@ -238,7 +238,7 @@ LLM-генерация SELECT», а не «работа с аудитами».
 
 ---
 
-## 4. Регистрация в `project.json`
+## 4. Регистрация в `config.json`
 
 ### 4.1 Секция `skills.<name>` — канонический формат
 
@@ -711,7 +711,7 @@ pytest tests/test_auto_register_skills.py             -v
 
 ✅ Используйте `lib.core.skill_config` через тонкую обёртку, не импортируйте напрямую с литералами.
 
-✅ Декларируйте ресурсы как JSON в `project.json` — никаких `register.py`.
+✅ Декларируйте ресурсы как JSON в `config.json` — никаких `register.py`.
 
 ✅ Все таблицы — fully qualified `schema.table`. Голые имена → `TableResource().__post_init__` бросит `ValueError`.
 
@@ -751,7 +751,7 @@ pytest tests/test_auto_register_skills.py             -v
 
 ❌ Multi-statement SQL или DDL/DML. Безопасность — `lib.utils.sql_safety.validate_sql()`.
 
-❌ Секреты в `project.json` — `${VAR}` + `.secrets.env`.
+❌ Секреты в `config.json` — `${VAR}` + `.secrets.env`.
 
 ❌ Дублировать LLM-клиент, чанкинг, офисные утилиты — всё это в `lib/services/` и `workspace/utils/`.
 
@@ -789,7 +789,7 @@ pytest tests/test_auto_register_skills.py             -v
 ### Полный skill (audit_analyzer)
 
 9. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/skill_config.py}` создан; `scripts/cli.py` — если нужен операционный интерфейс (§2.1).
-10. ☐ В `project.json` добавлена секция `skills.<name>` с fully qualified таблицами.
+10. ☐ В `config.json` добавлена секция `skills.<name>` с fully qualified таблицами.
 11. ☐ Если используется `label="scripts_registry"` (или другое) — явно отмечено.
 12. ☐ Если у таблицы нестандартная track-колонка — задана per-resource (по умолчанию `updated_at`).
 13. ☐ Если vector — `gateway.vector.index.storage_table` настроен в общем инфра-слое + `vector_indexes[]` в skill-секции.
@@ -799,14 +799,14 @@ pytest tests/test_auto_register_skills.py             -v
 ### Минимальный skill (legal_summarizer)
 
 9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/skill_config.py}` создан (без `tables[]`/`vector_indexes[]`, если их нет); `scripts/cli.py` — по необходимости.
-10'. ☐ В `project.json` есть `skills.<name>` с `cli`/`llm`/`chunking` (по необходимости).
+10'. ☐ В `config.json` есть `skills.<name>` с `cli`/`llm`/`chunking` (по необходимости).
 11'. ☐ CLI регистрирует skill через `_ensure_registered()` (для skill'ов с LLM обязательно; для чистых LLM-pipeline вызовы могут быть no-op).
 12'. ☐ Unit-тест минимум на один сценарий.
 
 ### Documentation-only skill (office_files)
 
 9''. ☐ Реализация уже живёт в `workspace/utils/<module>.py`.
-10''. ☐ У skill'а нет PG/vector-инфраструктуры — `project.json::skills` НЕ трогаем.
+10''. ☐ У skill'а нет PG/vector-инфраструктуры — `config.json::skills` НЕ трогаем.
 11''. ☐ SKILL.md секции: «Когда использовать», «Когда не вызывать», «Что не делать» (может называться «Ограничения»), «Что внутри» со ссылкой на utility-модуль.
 
 ---
@@ -829,7 +829,7 @@ touch workspace/skills/<name>/scripts/__init__.py
 
 ### Шаг 3. SKILL.md (см. §3)
 
-### Шаг 4. Объявите в `project.json` (см. §4)
+### Шаг 4. Объявите в `config.json` (см. §4)
 
 ```jsonc
 "skills": {
@@ -902,13 +902,14 @@ python cli_agent.py          # smoke
 - `lib/utils/sql_safety.py::validate_sql` — SQL security boundary.
 
 ### Конфигурация
-- `project.json` — главная карта; раздел `skills.*`.
+- `config.json` — главная карта; раздел `skills.*`.
 - `tests/test_config_keys.py:31-171` — `REQUIRED_KEYS`.
 
 ### Существующие skill'ы как reference
-- `workspace/skills/audit_analyzer/` — самый полный: SKILL.md + 10 модулей scripts + 3 references + cache/schema.json.
-- `workspace/skills/legal_summarizer/` — skill без PG-таблиц, с LLM-map-reduce + prompts.
-- `workspace/skills/office_files/` — skill-обёртка над `workspace/utils/office_files.py`.
+- `workspace/skills/audit_analyzer/` — единственный skill в `workspace/skills/`;
+  в каталоге сейчас только `SKILL.md` (логика уехала в capability `audit` платформы).
+- `legal_summarizer` и `office_files` — каталогов в `workspace/skills/` больше нет
+  (`legal_summarizer` живёт в capability `legal_summarizer` платформы).
 
 ### Тесты для архитектурных инвариантов
 - `tests/test_skill_tool_independence.py`

@@ -4,18 +4,20 @@
 entry-point доступа к данным, generic tools для SQL/vector отсутствуют).
 
 Исторические process/baseline-артефакты — в
-[`docs/_archive/`](_archive/).
+[`openspec/changes/archive/`](../openspec/changes/archive/).
 
 ## Сводная таблица
 
 | component | path | type | depends_on_skill | depends_on_tool | depends_on_shared_infra | status |
 |---|---|---|---|---|---|---|
-| `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` + `scripts/` | Skill (domain, **CLI**) | — | следование SKILL.md через CLI `scripts/cli.py --mode predefined` (агент); CLI `--mode <predefined \| generated_sql \| vector>` для бенчмарков/CI/operator | — | active |
-| `legal_summarizer` Skill | `workspace/skills/legal_summarizer/SKILL.md` + `references/` + `scripts/` | Skill (domain) | — | через собственный skill-side CLI; follow-up через tool `legal_summarizer_query` | `mcp-platform/libs/llm` (операция `complete` через `libs/enterprise_client/llm.py`) | active |
-| `office_files` Skill | `workspace/skills/office_files/SKILL.md` + `references/` + `scripts/` | Skill (domain) | — | чтение docx/xlsx/xls/pdf/pptx/csv/txt через `workspace/utils/office_files.py` + `lib/services/text_splitter.py` | — | active |
+| `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` | Skill (domain) | — | следование SKILL.md; доступ к данным — через capability `audit` платформы | — | active (единственный skill в `workspace/skills/`) |
+| `legal_summarizer` Skill | ~~`workspace/skills/legal_summarizer/`~~ | Skill (domain) | — | — | — | **уехал в платформу**: каталога в `workspace/skills/` нет, навык живёт в capability `legal_summarizer` |
+| `office_files` Skill | ~~`workspace/skills/office_files/`~~ | Skill (domain) | — | — | — | **удалён**: каталога в `workspace/skills/` нет |
 | `compact_context` tool | `workspace/tools/compact_context.py` | Tool | — | — | `lib/services/context_compaction.py` | active |
 | `history_search` tool | `workspace/tools/history_search_tool.py` | Tool (generic infrastructure) | — | — | `agent_gateway_logs` (долговечный журнал) | active |
 | `legal_summarizer_query` tool | `workspace/tools/legal_summarizer_query.py` | Tool | `legal_summarizer` (follow-up по сохранённой `operation_id`) | — | skill CLI `cli_query.py` + `data_store/cache/skills/legal_summarizer/<op_id>/` | active |
+| `query_operation` operation | `mcp-platform/servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py` | Платформенная операция (capability `legal_summarizer`) | — | follow-up-вопрос по уже сохранённому документу, без повторного парсинга | — | active |
+| `read_result` operation | `mcp-platform/servers/enterprise/tools/read_result.py` | Платформенная операция | — | чтение результата, сохранённого по порогу, по ссылке `session://results/...` | `SessionWorkspace` / `ArtifactStore` (владелец — платформа, capability доступа не имеют) | active |
 
 ## Удалённые компоненты
 
@@ -53,9 +55,9 @@ entry-point доступа к данным, generic tools для SQL/vector от
   (`lib.core.skill_registration.register_embedding_config`) отсутствует:
   параметры эмбеддера захардкожены в `cache_provider_impl` (`_EMBED_*`-константы),
   токен — из переменной окружения `EMBED_TOKEN`. Секция
-  `gateway.vector.embedding` в `project.json` отсутствует.
+  `gateway.vector.embedding` в `config.json` отсутствует.
 - **`tools/build_vectors.py`** — generic: hardcoded `audit_analyzer` отсутствует,
-  источник индексов — `gateway.vector.index.indexes` в `project.json`
+  источник индексов — `gateway.vector.index.indexes` в `config.json`
   (PG-реестр `public.agent_vector_index_config` — legacy-артефакт,
   кодом не читается).
 - **Embedding `auth_token`** (bearer) поддерживается через
@@ -82,6 +84,7 @@ flowchart LR
 
 ## История
 
-Process/baseline/inventory-артефакты перенесены в [`_archive/`](_archive/) —
+Process/baseline/inventory-артефакты перенесены в
+[`openspec/changes/archive/`](../openspec/changes/archive/) —
 на актуальное состояние не ссылаться. Сводка изменений проекта — в
 [`CHANGELOG.md`](../CHANGELOG.md).

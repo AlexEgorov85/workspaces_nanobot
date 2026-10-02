@@ -133,7 +133,7 @@ Skill не должен зависеть от конкретного Python-кл
 
 ### Граница `skills.<name>.*` vs shared infrastructure
 
-`project.json::skills.<name>` содержит ТОЛЬКО **domain binding** skill'а —
+`config.json::skills.<name>` содержит ТОЛЬКО **domain binding** skill'а —
 то, что меняется при смене домена. Shared runtime-инфраструктура лежит
 вне `skills.*` (см. `gateway.*`). Это сознательное правило: оно
 фиксируется в `SkillSettings(extra="forbid")` (см.
@@ -669,15 +669,14 @@ Policy должна находиться ниже Skill, чтобы ошибка
 
 # 17. Configuration
 
-Конфигурация разделяется на три смысловых уровня.
+Конфигурация разделяется на два смысловых уровня.
 
 ```mermaid
 flowchart TB
-    NB["nanobot config (config.json) - generic runtime"]
-    PR["project config (project.json) - workspaces integration"]
+    CFG["config.json - generic runtime + workspaces integration"]
     SE["secrets (.secrets.env) - только credentials"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    class NB,PR,SE core
+    class CFG,SE core
 ```
 
 Не смешивать их без необходимости.
@@ -766,7 +765,7 @@ test
 
 Контракт замены описан в `openspec/specs/runtime/error-fallback/spec.md`:
 
-- **Single source of truth** — `gateway.error_messages.internal_error` в `project.json` (default `"Я не справился с вашим вопросом. Попробуйте, пожалуйста, переформулировать конкретнее — например, уточните ключевую часть или приведите пример."`); pydantic-валидация в `lib/core/project_settings.py::ErrorMessagesSettings`.
+- **Single source of truth** — `gateway.error_messages.internal_error` в `config.json` (default `"Я не справился с вашим вопросом. Попробуйте, пожалуйста, переформулировать конкретнее — например, уточните ключевую часть или приведите пример."`); pydantic-валидация в `lib/core/project_settings.py::ErrorMessagesSettings`.
 - **Patch** — `RuntimePatcher.patch_turn_delivery_fail` (на уровне класса, не инстанса) подменяет `TurnDelivery.fail` обёрткой: формирует `OutboundMessage(content=internal_error, metadata={"_error_kind": "internal", "_final_turn": True})`, при `log_to_db=true` (default) пишет `event_type="turn_failed"` в `agent_gateway_logs` через `try_log_event`, затем вызывает оригинальный `fail` для финализации `turn_completed` event.
 - **No-leak boundary** — `OutboundMessage.content` НЕ содержит ни типа исключения, ни str(exc), ни пути к исходнику. Детали остаются только в БД (для `history_search`) и в `loguru`.
 - **No regression** — `asyncio.CancelledError`-ветка (`abort_stream` + `restore_runtime_checkpoint`) не задета; `turn_completed` event по-прежнему публикуется с `outcome="failed"` и `failure_kind="internal"`; каналы (`PostgresChannel`, `RedisChannel`, `ConsoleLoop`, `Streamlit`) не меняются.
@@ -1145,7 +1144,7 @@ audit_analyzer Skill существует без Tool imports.
 workspaces_nanobot/
 |
 +-- gateway.py
-+-- project.json
++-- config.json
 +-- requirements.txt
 |
 +-- lib/

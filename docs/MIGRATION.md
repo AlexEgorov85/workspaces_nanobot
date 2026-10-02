@@ -18,7 +18,7 @@
 рабочей инсталляции не меняется. **Потеряно:** отказоустойчивость уровня HA —
 упавший инстанс gateway не отдаёт задачу, пока её не вернёт `_unstick_loop`
 соседнего. `SkillSettings` объявлен с `extra="forbid"`: оставленные в
-`project.json` ключи из удалённых остановят старт gateway с `ConfigurationError`.
+`config.json` ключи из удалённых остановят старт gateway с `ConfigurationError`.
 
 **Ручные действия:**
 
@@ -40,7 +40,7 @@
   `gateway.vector.index.storage_table`; persisted-артефактов в PG больше нет.
 - `tools/build_vectors.py` пишет векторы в `storage_table` и пересобирает
   FAISS в памяти; настройки `gateway.vector.index.signature_table` и
-  `config_table` удалены из `VectorIndexSettings` (их наличие в `project.json`
+  `config_table` удалены из `VectorIndexSettings` (их наличие в `config.json`
   — fail-fast на старте).
 - `--list-indexes` (CLI `audit_analyzer`) и `tools/check_indexes.py` читают
   runtime-состояние из того же снапшота, а не из PG-таблицы.
@@ -108,14 +108,16 @@
   с per-transaction advisory lock, батчами по 50 сессий.
 - Добавлен `lib/services/llm_usage_store_factory.py` — фабрика
   `LLMUsageStore` с дефолтом
-  `<get_runtime_subdir("usage")>/usage.db`.
+  `<get_runtime_subdir("usage")>/usage.db`. **Позже удалён:** хранилище создаёт
+  библиотека (`nanobot.llm_usage.get_llm_usage_store()`).
 - Добавлен `lib/services/llm_observer.py` —
-  `wrap_provider_snapshot_loader` подключает observer-pipeline.
+  `wrap_provider_snapshot_loader` подключает observer-pipeline. **Позже удалён:**
+  подписка observer'а свёрнута в `AgentFactory._wrap_provider_snapshot_loader`.
 - `PGSessionManager` теперь — тонкий compatibility layer
   (hot-path → `super()`); никаких прямых `INSERT/UPDATE` в
   `agent_session_meta` / `agent_session_messages`.
 - Добавлены секции `gateway.usage_store.*` и
-  `gateway.session_cold_sync.*` в `project.json`.
+  `gateway.session_cold_sync.*` в `config.json`.
 - Новые contract tests: `tests/contract/test_session_manager_api.py`,
   `tests/contract/test_usage_store_api.py`,
   `tests/contract/test_llm_observer_api.py`.
@@ -218,9 +220,9 @@ LLM-вызовы в production):
 - `agent_worker_claims` — новая таблица (создаётся автоматически миграцией схемы).
 - `metadata.context_window` — новое поле в финальном outbound; UI рисует прогресс-бар.
 - `gateway.print_llm_calls`, `gateway.print_worker_activity`, `gateway.print_db_activity` —
-  новые опциональные ключи `project.json` (`false` по умолчанию).
+  новые опциональные ключи `config.json` (`false` по умолчанию).
 
-**Новые ключи `project.json`** (опциональны, дефолты в коде):
+**Новые ключи `config.json`** (опциональны, дефолты в коде):
 
 | Ключ | Дефолт | Смысл |
 |---|---|---|
@@ -252,7 +254,7 @@ LLM-вызовы в production):
   (`base_url`, `model`, `dimension`, `http_timeout_sec`, `retries`)
   захардкожены модульными константами `_EMBED_*` в
   `lib/services/cache_provider_impl.py`. Bearer-токен — из переменной
-  окружения `EMBED_TOKEN` (env, не `project.json`).
+  окружения `EMBED_TOKEN` (env, не `config.json`).
 - `skills.<name>.embedding` — удалена; embedding больше не параметризован по skill'у.
 - `skills.<name>.vector_indexes[].source` — поле `source` больше не нужно.
   Source-таблица (`table`/`pk`/`content_columns`/`embedding_columns`/`track_column`/
@@ -296,7 +298,7 @@ LLM-вызовы в production):
   `python tools/migrate.py --apply`.
 - **⚠️ После этого релиза код `public.agent_vector_index_config` НЕ читает.**
   Таблица остаётся в репозитории как legacy-артефакт (для старых миграций
-  и исторических ссылок), но новый конфиг — в `project.json`.
+  и исторических ссылок), но новый конфиг — в `config.json`.
   При первоначальной настройке проекта перенесите seed-данные из
   `sql/audit_analyzer/seed_default_indexes.sql` в секцию
   `gateway.vector.index.indexes` (формат см. `VectorIndexConfig`).
@@ -337,7 +339,7 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 | Изменение | Действие |
 |-----------|----------|
-| `.env` → `project.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway` в `project.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
+| `.env` → `config.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway` в `config.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
 | Провайдерские ключи больше не через `export` | Секция `# providers: llm` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически (env-переменная — каноническая `LLM_API_KEY`) |
 | `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `public.agent_vector_index_config` (см. [docs/VECTOR_INDEXES.md](VECTOR_INDEXES.md)) |
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
@@ -356,7 +358,7 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 **Данные:**
 
-> Имена таблиц ниже — значения текущей инсталляции, настраиваемые в `project.json`
+> Имена таблиц ниже — значения текущей инсталляции, настраиваемые в `config.json`
 > (`channels.postgres.table_name`/`messages_table`/`meta_table`/`claims_table`,
 > `logging.db.table_name`/`question_runs_table`, `benchmark.runs_table`/`results_table`,
 > `gateway.vector.index.storage_table`/`config_table`/`signature_table`). В других

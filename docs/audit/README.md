@@ -23,7 +23,7 @@
 | **Этот файл** | сводка, карта находок, план действий |
 | [`AUDIT_PROTOCOL.md`](AUDIT_PROTOCOL.md) | правила, по которым выставлялись вердикты |
 | [`_scripts/build_inventory.py`](_scripts/build_inventory.py) | AST-сканер, породивший брифы (воспроизводимо) |
-| [`_data/`](_data/) | машинные данные: `inventory.json`, `orphans.md`, `dead_symbols.md`, `duplicates.md`, `test_gaps.md`, `_briefs/` |
+| `_data/` (генерируется скриптом, в снимок не входит) | машинные данные: `inventory.json`, `orphans.md`, `dead_symbols.md`, `duplicates.md`, `test_gaps.md`, `_briefs/` |
 
 ### Отчёты по подсистемам
 

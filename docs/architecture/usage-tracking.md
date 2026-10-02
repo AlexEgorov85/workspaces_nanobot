@@ -19,7 +19,7 @@
                               ▼
 ┌──────────────────────────────────────────────────────────────┐
 │   nanobot.llm_usage.store.LLMUsageStore (upstream)             │
-│   (lib/services/llm_usage_store_factory.py — DI)              │
+│   (хранилище создаёт библиотека: get_llm_usage_store)         │
 │                                                               │
 │   SQLite WAL:                                                 │
 │   <get_runtime_subdir("usage")>/usage.db                       │
@@ -151,7 +151,8 @@ for path in _iter_python_files(_LIB_ROOT):
             offenders.append((path, lineno, line))
 ```
 
-Whitelist — `lib/services/llm_observer.py` (где живёт сам observer).
+Whitelist — `AgentFactory._wrap_provider_snapshot_loader` (обёртка живёт в
+`lib/core/agent_factory.py` инлайном; отдельного модуля observer'а у агента нет).
 
 ## Тесты
 
@@ -170,9 +171,10 @@ Whitelist — `lib/services/llm_observer.py` (где живёт сам observer)
 
 ## Файлы
 
-- `lib/services/llm_usage_store_factory.py` — фабрика.
-- `lib/services/llm_observer.py` — `attach_llm_observer`,
-  `wrap_provider_snapshot_loader`, fail-soft.
+- `lib/services/llm_usage_store_factory.py`, `lib/services/llm_observer.py` —
+  **удалены**: хранилище создаёт библиотека
+  (`nanobot.llm_usage.get_llm_usage_store()`), а подписка observer'а свёрнута в
+  `AgentFactory._wrap_provider_snapshot_loader`.
 - `lib/core/application_context.py` — регистрация.
 - `lib/core/agent_factory.py` — пробрасывает `usage_store`
   в `AgentLoop.from_config(provider_snapshot_loader=...)`.

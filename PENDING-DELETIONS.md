@@ -9,6 +9,27 @@
 
 Поэтому удаление сводится к списку ниже. **После удаления строку убрать отсюда.**
 
+## Состояние реестра на 2026-10-02 — волна надгробий закрыта
+
+Проверено `Test-Path` по всему дереву и `git ls-files` по git-индексу.
+
+* **Надгробий агента не осталось.** Ни одного файла с `_`-префиксом в
+  `lib/services/`, `lib/channels/`, `lib/core/`, `lib/tools/`, `lib/utils/`,
+  `lib/session/` — ни на диске, ни в индексе. Волна переименований в `_`-имена
+  отработала и была впоследствии дочищена: команды `git rm` из этого реестра
+  уже выполнены, файлов под ними больше нет. Поэтому блоки команд ниже
+  помечены как отработавшие, а не удалены из текста — история переноса нужна.
+* **Живы только два надгробья платформы** (каталог capability `data`, а не
+  агент): `mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py`
+  и `.../_update_task_status.py`. Путь прежний; упоминаний
+  `mcp-platform/libs/enterprise_common/session/_claim_task.py` в реестре нет и
+  добавлять их не на чем — такого каталога с этими файлами нет ни на диске,
+  ни в индексе (`mcp-platform/libs/enterprise_common/session/` содержит только
+  `__init__.py`, `artifact_store.py`, `security.py`, `workspace.py`).
+* Остальные записи ниже — либо ещё существующие файлы, которые предлагается
+  удалить (они перечислены с командами), либо уже завершённые пункты, оставленные
+  как отметка о закрытии.
+
 ## Кластер снимка в агенте (фаза 5, п. 5.1–5.4, 5.10, 3.14)
 
 Снятие с агента сделано соседним воркером (`c660b6f`): `build_cache_provider`,
@@ -97,7 +118,8 @@
   `TestPreloadIndexesUsesOnlyConfig` → **вакуумны**, охраняли удалённый модуль.
 
 ```bash
-# кластер снимка:
+# кластер снимка — ОТРАБОТАНО 2026-10-02, файлов больше нет ни на диске,
+# ни в индексе; блок сохранён как история переноса, выполнять нечего:
 git rm lib/services/_duckdb_cache_store.py \
       lib/services/_cache_provider.py \
       lib/services/_cache_provider_impl.py \
@@ -108,7 +130,7 @@ git rm lib/services/_duckdb_cache_store.py \
       tools/_build_vectors.py \
       tools/_check_indexes.py
 
-# тесты кластера:
+# тесты кластера — ОТРАБОТАНО 2026-10-02, файлов больше нет:
 git rm tests/_test_duckdb_cache_store.py \
       tests/_test_cache_provider_mode.py \
       tests/_test_cache_provider_open_failure.py \
@@ -126,7 +148,7 @@ git rm tests/_test_duckdb_cache_store.py \
       tests/_test_vector_search_silent_failure.py
 git rm -r tests/integration/_test_vector_build_e2e.py
 
-# после переноса 3.6:
+# после переноса 3.6 — ОТРАБОТАНО 2026-10-02, файлов больше нет:
 git rm lib/services/duckdb_cache_store.py \
       lib/services/cache_load_service.py \
       lib/services/cache_provider.py \
@@ -146,6 +168,7 @@ git rm lib/services/duckdb_cache_store.py \
 Удаляются вместе с кластером, потому что их предмет и есть кластер:
 
 ```bash
+# ОТРАБОТАНО 2026-10-02 — файлов тестов больше нет ни на диске, ни в индексе:
 git rm tests/test_duckdb_cache_store.py \
       tests/test_cache_provider_mode.py \
       tests/test_cache_load_service.py \
@@ -182,6 +205,8 @@ git rm tests/test_duckdb_cache_store.py \
 Вместе с утилитами уезжают по 3.6 их собственные тесты и сами утилиты:
 
 ```bash
+# ОТРАБОТАНО 2026-10-02 — утилиты уехали на платформу вместе с тестами,
+# файлов больше нет ни на диске, ни в индексе:
 git rm tools/build_vectors.py \
       tools/check_indexes.py \
       tests/test_build_vectors_cli.py \
@@ -275,25 +300,29 @@ git rm tools/build_vectors.py \
 и зависимости между ними не возникло.
 
 ```bash
+# ОТРАБОТАНО 2026-10-02 — файла tests/test_llm_config.py больше нет:
 git rm tests/test_llm_config.py
 ```
 | `mcp-platform/.sessions_demo/` | Демонстрационный каталог файлов сессии, оставшийся после прогона `SessionWorkspace` вручную. Содержит только синтетические артефакты `sess-DEMO-1`, к проекту не относится | удалить вручную (каталог не отслеживается) |
 | `sql/vectors/create_vector_index_config.sql` | Мёртвый DDL: конфигурация индексов живёт в `mcp-platform/platform.json → vectors.indexes`. `migrate.py` обходит только `sql/migrations/`, файл не исполняется. Код вырезан (фаза 5, п. 5.9), осталась заглушка, которая **сама себя объявляет мёртвой**: строка 11 файла — «Удалить вручную: git rm …». Проверено 2026-10-02: кода, читающего файл, в репозитории нет; остались только упоминания в `sql/README.md:44`, `mcp-platform/docs/TARGET-ARCHITECTURE.md:529` и `CHANGELOG.md` (история) | `git rm sql/vectors/create_vector_index_config.sql`, затем поправить `sql/README.md:44` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:529` |
 | `sql/vectors/create_vector_index_store.sql` | Мёртвый DDL: persisted FAISS-кеш удалён ещё change `remove-vector-index-store`, таблица снесена миграцией `V003`. Не исполняется, заглушка с самообъявлением на строке 12. Упоминания — только `sql/README.md:45` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:530` | `git rm sql/vectors/create_vector_index_store.sql`, затем поправить `sql/README.md:45` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:530` |
-| `project.json → gateway.vector.index.*` | **Дубликат объявлений.** `mcp-platform/platform.json` сам признаёт его: «остаётся до переноса build-инструментов (фаза 8)». Перенос сделан (`mcp-platform/libs/vectors/builder.py`), условие выполнено. Читает агент: `lib/core/infra_registration.py:39` ← `lib/core/application_context.py:1292`. Правка чужой части конфига — сначала согласовать | вырезать секцию из `project.json` |
-| `tools/generate_comments_sql.py` | Черновик, который не запускается. Вся логика на верхнем уровне модуля — нет `main()`, нет `if __name__` — поэтому **`import tools.generate_comments_sql` пишет файл** (находка `docs/audit/reports/13-tools.md:262`). Плюс падает на импорте с `FileNotFoundError`: читает `workspace/skills/audit_analyzer/cache/schema.json`, которого в репозитории нет. Единственный держатель мёртвой секции `project.json → skills.audit_analyzer.tables` | `git rm tools/generate_comments_sql.py` — **после** вырезания секции из `project.json`. Вывод `sql/comments/apply_all_comments.sql` (упомянут в `sql/README.md:48,166`) оставить: он самодостаточен и ни от чего не зависит |
-| `project.json → skills.audit_analyzer.tables` | **Дубликат объявлений.** Объявление переехало в `mcp-platform/platform.json → audit.tables`; агент больше не отдаёт его процессу. Читает только `tools/generate_comments_sql.py:36` — оставшийся черновик. Таблица объявляется дважды в двух конфигах, и разъедутся они молча. Правка чужой части конфига — сначала согласовать | вырезать секцию, **затем** `git rm tools/generate_comments_sql.py` |
-| `tests/_test_sql_safety.py` | Тест мёртвого модуля: импортирует `lib.utils.sql_safety`, которого нет с фазы 9. Отключён префиксом `_` (pytest не собирает) и потому не падает — то есть молча не проверяет ничего. Импорт указывает и на старое имя без подчёркивания, то есть файл устарел вместе с модулем | `git rm tests/_test_sql_safety.py` |
+| ~~`project.json → gateway.vector.index.*`~~ | **ЗАКРЫТО: вырезать нечего.** `project.json` в репозитории не существует (ни на диске, ни в индексе), поэтому пункт снимается целиком, а не «после согласования». Состав индексов объявляет `mcp-platform/platform.json → vectors.indexes`; прежний читатель `lib/core/infra_registration.py:39` снят вместе с кластером снимка | — (файла нет) |
+| ~~`tools/generate_comments_sql.py`~~ | **УДАЛЁН 2026-10-02**, файла нет ни на диске, ни в индексе. Прежде это был черновик без `main()`/`if __name__`, падавший на отсутствующем `workspace/skills/audit_analyzer/cache/schema.json`. Вывод `sql/comments/apply_all_comments.sql` оставлен: он самодостаточен и ни от чего не зависит | — (файла нет) |
+| ~~`project.json → skills.audit_analyzer.tables`~~ | **ЗАКРЫТО: вырезать нечего** — `project.json` не существует. Объявление живёт в `mcp-platform/platform.json → audit.tables`; единственный держатель (`tools/generate_comments_sql.py`) удалён | — (файла нет) |
+| ~~`tests/_test_sql_safety.py`~~ | **УДАЛЁН 2026-10-02**, файла нет ни на диске, ни в индексе. Прежде это был отключённый префиксом `_` тест мёртвого `lib.utils.sql_safety`, молча не проверявший ничего | — (файла нет) |
 
 ## Python-слой навыка `audit_analyzer` (фаза 9)
 
 Навык перестал владеть данными: запросы строит и проверяет capability `audit`
-платформы, агент ходит до неё инструментом `audit_analyzer_query`. Всё
-перечисленное не импортируется ничем, но лежит на диске и убирается вручную.
-Код внутри каждого файла вырезан, осталась заглушка-описание: загрузчик по
-соглашению пропускает модули с именем, начинающимся с `_`.
+платформы, агент ходит до неё инструментом `audit_analyzer_query`.
 
-| Файл | Что было | Строк |
+**ПУНКТ ЗАКРЫТ 2026-10-02.** Заглушек не осталось: волна `_`-имён дочищена,
+файлов нет ни на диске, ни в индексе git. `workspace/skills/audit_analyzer/`
+содержит **ровно один файл — `SKILL.md`** (`git ls-files` по каталогу отдаёт его
+одного); каталога `scripts/` больше нет. Таблица ниже оставлена как история
+того, что было вырезано и куда уехало.
+
+| Файл (удалён) | Что было | Строк |
 |---|---|---|
 | `lib/utils/_sql_safety.py` | SQL Security Guard агента; копия живёт в `mcp-platform/libs/enterprise_data/sql_safety.py` | 425 |
 | `workspace/skills/audit_analyzer/scripts/_cli.py` | CLI навыка (`--mode predefined/vector/generated_sql`) | 411 |
@@ -305,9 +334,9 @@ git rm tests/test_llm_config.py
 | `workspace/skills/audit_analyzer/scripts/_removed_predefined/` | 6 модулей DB-first реестра скриптов; порт в `mcp-platform/libs/audit/predefined.py` + `registry_loader.py` | 931 |
 | `workspace/skills/audit_analyzer/_removed_tests/` | 4 файла тестов навыка (не в `tests/`, а внутри скилла) | ~1784 |
 
-Тесты агента на снятый код (pytest не собирает `_test_*.py`):
+Тесты агента на снятый код — тоже удалены (pytest и не собирал `_test_*.py`):
 
-| Файл | Строк |
+| Файл (удалён) | Строк |
 |---|---|
 | `tests/_test_audit_analyzer_cli.py` | 411 |
 | `tests/_test_audit_analyzer_mode_selection.py` | 311 |
@@ -316,7 +345,8 @@ git rm tests/test_llm_config.py
 | `tests/_test_skill_tool_integration.py` | 211 |
 | `tests/_test_sql_safety.py` | 250 |
 
-Удалить одним проходом:
+Проход, которым это было удалено (ОТРАБОТАН 2026-10-02 — выполнять нечего,
+файлов больше нет ни на диске, ни в индексе):
 
 ```bash
 git rm lib/utils/_sql_safety.py \
@@ -340,7 +370,7 @@ git rm -r workspace/skills/audit_analyzer/scripts/_removed_predefined \
 
 | Файл | Что это |
 |---|---|
-| `workspace/skills/audit_analyzer/err1.log` | Мусорный лог, оставшийся от ручных прогонов CLI |
+| ~~`workspace/skills/audit_analyzer/err1.log`~~ | **УДАЛЁН 2026-10-02** (п. 0.5 закрыт), файла нет; в `workspace/skills/audit_analyzer/` остался один `SKILL.md` |
 
 ## Черновики в корне
 
@@ -348,61 +378,71 @@ git rm -r workspace/skills/audit_analyzer/scripts/_removed_predefined \
 проекта, но перед удалением стоит убедиться, что соседний воркер сейчас не
 работает с ними.
 
-| Файл | Кто оставил |
-|---|---|
-| `.tmp_call_contract_block.md` | ассистент |
-| `.tmp_design_211.md` | ассистент |
-| `.tmp_registry_block.md` | ассистент |
-| `.tmp_rename_calls.py` | ассистент |
-| `.tmp_splice_registry.py` | ассистент |
-| `.tmp_strip_claims.py` | ассистент |
-| `mcp-platform/.tmp_contracts.py` | ассистент |
-| `mcp-platform/.tmp_inventory.py` | ассистент |
-| `mcp-platform/.tmp_rename_ctx.py` | ассистент |
-| `mcp-platform/.tmp_set_policy.py` | ассистент |
-| `mcp-platform/.tmp_container_fix.py` | ассистент (правки контейнера применены и закоммичены, скрипт больше не нужен) |
-| `mcp-platform/.tmp_journal_demo.py` | ассистент (ручной прогон писателя журнала, роль изменилась) |
-| `mcp-platform/.tmp_meta_probe.py` | ассистент (проба доставки `params._meta` по проводу, проверка стала тестом) |
-| `mcp-platform/.tmp_probe_live.py` | ассистент (разведка живой инфраструктуры перед переносом 3.6) |
-| `mcp-platform/.tmp_probe_rebuild.py` | ассистент (живая сверка хешей при пересборке индекса) |
-| `.tmp_live_mcp_probe.py` | ассистент (сквозной прогон настоящего MCP: сервер, клиент, `vector_search`) |
-| `.tmp_probe_values.py` | ассистент (проверка, что генерация SQL использует настоящие значения колонок) |
-| `.tmp_values_out.txt` | ассистент (сохранённый вывод того же прогона) |
-| `mcp-platform/.tmp_probe_values.py` | ассистент, **перезаписан заглушкой**: в корне платформы он импортировал код агента и ломал `test_architecture_boundaries` |
-| `mcp-platform/.tmp_nopg/` | ассистент (заглушка `sitecustomize`, запрещающая `psycopg2.connect`; **переименована в `.nopg_guard/`**: уборка в дереве сносит `.tmp_*`, а молча пропавший заглушка означает недостоверный «успех») |
-| `.nopg_guard/sitecustomize.py` | ассистент (заглушка, запрещающая `psycopg2.connect`; живёт в корне агента — в платформе ломала `test_settings_registry` и `test_architecture_boundaries`) |
-| `mcp-platform/.nopg_guard/sitecustomize.py` | ассистент, **перезаписан заглушкой** после переноса прибора в агента |
-| `mcp-platform/.tmp_probe_prompt.py` | ассистент (перехват настоящего промпта модели: схема + ACTUAL VALUES) |
-| `mcp-platform/.tmp_prompt_out.txt` | ассистент (вывод того же прогона) |
-| `.tmp_probe_audit.py`, `.tmp_audit_out.txt` | ассистент (сквозная проверка capability audit при запрещённом PG) |
-| `.tmp_probe_pipeline.py`, `.tmp_pipeline_out.txt` | ассистент (проверка замкнутости: правка в PG → векторы → снимок → поиск; строка возвращалась как была) |
-| `patch_registry_once.py` | ассистент (одноразовая правка этого же реестра: замена должна найти ровно одно совпадение, иначе скрипт падает и файл не трогает. Задача выполнена, скрипт не нужен) | удалить вручную |
-| `nopg_placeholder/` | ассистент (ошибочно созданный каталог, к проекту отношения не имеет) | удалить вручную целиком |
-| `mcp-platform/.tmp_probe_stale.py` | ассистент (создал и проверил остаток `oarb.stale_marker`; на нём доказано, что обычная загрузка снимок **не** пересоздаёт. Свою задачу выполнил — вывод перенесён в `tests/test_snapshot_reset.py`) |
-| `tests/test_user_stop_signal.dump`, `tests/test_user_stop_signal_priority.dump` | ассистент |
-| `-v` (корень, 0 байт) | Служебный мусор: пустой файл от неверно процитированного флага `-v`. Не принадлежит проекту ни по смыслу, ни по содержимому. Владелец не установлен — удалить как «свой» без разбора рискованно | `rm -- ./-v` |
+Проверено `Test-Path` 2026-10-02: пометка «**файла нет**» означает, что запись
+осталась как история — сам файл уже удалён и в дереве, и в индексе git.
+
+| Файл | Кто оставил | Состояние |
+|---|---|---|
+| `.tmp_call_contract_block.md` | ассистент | на месте |
+| `.tmp_design_211.md` | ассистент | на месте |
+| `.tmp_registry_block.md` | ассистент | на месте |
+| `.tmp_rename_calls.py` | ассистент | на месте |
+| `.tmp_splice_registry.py` | ассистент | на месте |
+| `.tmp_strip_claims.py` | ассистент | на месте |
+| `.tmp_head_server.py` | ассистент (проба подъёма сервера) | на месте — в реестре раньше не был, дописан по факту наличия |
+| `.tmp_probe_out.txt` | ассистент (вывод пробы) | на месте — в реестре раньше не был, дописан по факту наличия |
+| `mcp-platform/.tmp_contracts.py` | ассистент | **файла нет** (удалён) |
+| `mcp-platform/.tmp_inventory.py` | ассистент | **файла нет** (удалён) |
+| `mcp-platform/.tmp_rename_ctx.py` | ассистент | **файла нет** (удалён) |
+| `mcp-platform/.tmp_set_policy.py` | ассистент | **файла нет** (удалён) |
+| `mcp-platform/.tmp_container_fix.py` | ассистент (правки контейнера применены и закоммичены, скрипт больше не нужен) | **файла нет** (удалён) |
+| `mcp-platform/.tmp_journal_demo.py` | ассистент (ручной прогон писателя журнала, роль изменилась) | **файла нет** (удалён) |
+| `mcp-platform/.tmp_meta_probe.py` | ассистент (проба доставки `params._meta` по проводу, проверка стала тестом) | **файла нет** (удалён) |
+| `mcp-platform/.tmp_probe_live.py` | ассистент (разведка живой инфраструктуры перед переносом 3.6) | **файла нет** (удалён) |
+| `mcp-platform/.tmp_probe_rebuild.py` | ассистент (живая сверка хешей при пересборке индекса) | **файла нет** (удалён) |
+| `.tmp_live_mcp_probe.py` | ассистент (сквозной прогон настоящего MCP: сервер, клиент, `vector_search`) | на месте |
+| `.tmp_probe_values.py` | ассистент (проверка, что генерация SQL использует настоящие значения колонок) | на месте |
+| `.tmp_values_out.txt` | ассистент (сохранённый вывод того же прогона) | на месте |
+| `mcp-platform/.tmp_probe_values.py` | ассистент, **перезаписан заглушкой**: в корне платформы он импортировал код агента и ломал `test_architecture_boundaries` | на месте |
+| `mcp-platform/.tmp_nopg/` | ассистент (заглушка `sitecustomize`, запрещающая `psycopg2.connect`; **переименована в `.nopg_guard/`**: уборка в дереве сносит `.tmp_*`, а молча пропавший заглушка означает недостоверный «успех») | **каталога нет** — заглушка снята вместе с переносом прибора |
+| `.nopg_guard/sitecustomize.py` | ассистент (заглушка, запрещающая `psycopg2.connect`) | **файла нет** (удалён) |
+| `mcp-platform/.nopg_guard/sitecustomize.py` | ассистент, **перезаписан заглушкой** после переноса прибора в агента | **файла нет** (удалён) |
+| `mcp-platform/.tmp_probe_prompt.py` | ассистент (перехват настоящего промпта модели: схема + ACTUAL VALUES) | на месте |
+| `mcp-platform/.tmp_prompt_out.txt` | ассистент (вывод того же прогона) | на месте |
+| `.tmp_probe_audit.py`, `.tmp_audit_out.txt` | ассистент (сквозная проверка capability audit при запрещённом PG) | на месте (оба) |
+| `.tmp_probe_pipeline.py`, `.tmp_pipeline_out.txt` | ассистент (проверка замкнутости: правка в PG → векторы → снимок → поиск; строка возвращалась как была) | на месте (оба) |
+| `patch_registry_once.py` | ассистент (одноразовая правка этого же реестра) | **файла нет** (удалён) — команда «удалить вручную» больше не актуальна |
+| `nopg_placeholder/` | ассистент (ошибочно созданный каталог, к проекту отношения не имеет) | **каталога нет** (удалён) |
+| `mcp-platform/.tmp_probe_stale.py` | ассистент (создал и проверил остаток `oarb.stale_marker`; вывод перенесён в `tests/test_snapshot_reset.py`) | на месте |
+| `tests/test_user_stop_signal.dump`, `tests/test_user_stop_signal_priority.dump` | ассистент | на месте (оба) |
+| `-v` (корень, 0 байт) | Служебный мусор от неверно процитированного флага `-v` | **файла нет** (удалён) — команда `rm -- ./-v` больше не актуальна |
 
 ## Пункты 0.5 и 0.6 — удаление заблокировано, проверено 2026-10-02
 
 Оба пункта живут в `openspec/changes/enterprise-mcp-platform/tasks.md` (файл
 соседнего воркера, туда не лезем), а проверенные факты — здесь.
 
-**0.5 `workspace/skills/audit_analyzer/err1.log`** — файл на месте, 445 байт,
-13.09. Не отслеживается: `.gitignore:2` — `*.log`. Удалить без `mavis-trash`
-нельзя, `git rm` не подходит.
+**0.5 `workspace/skills/audit_analyzer/err1.log`** — **ЗАКРЫТ 2026-10-02: файла
+нет.** Проверено `Test-Path` и `git ls-files`: в `workspace/skills/audit_analyzer/`
+остался один `SKILL.md`. Прежняя запись (файл на месте, 445 байт, 13.09, не
+отслеживался из-за `.gitignore:2` — `*.log`) сохраняется как история: без
+`mavis-trash` удалить его было нечем.
 
 **0.6 `workspace/data_store/cache/**` — формулировка задачи опасна, как есть
 выполнять нельзя.** В каталоге 3346 файлов на 88.7 МБ, из них `.py` — 82.
 Рядом лежат реальные результаты прошлых сессий: 2285 `.json`, 611 `.md`,
 221 `.marker`, 85 `.txt`, 35 `.png`, 14 `.pdf`. «Удалить каталог» снёс бы их.
+Каталог `workspace/data_store/` **существует на месте** (проверено 2026-10-02),
+пункт не закрыт.
 
 Главная находка, которой нет в формулировке пункта: **из 82 `.py` на 56
 приходится на `sessions/` — и это не черновики, а рабочий каталог рантайма.**
-`project.json:62` объявляет `"media_cache_dir": "data_store/cache/sessions"`,
+`project.json:62` объявлял `"media_cache_dir": "data_store/cache/sessions"`,
 а `project.json:324` — `"persist_max_files": 100` с комментарием «Макс. файлов
-в data_store/cache/sessions/». То есть в этом каталоге лежит живой кеш
-медиа сессий, и там же стоят файлы трёхдневной давности. Слепой
-`rm -rf **/*.py` по этому каталогу заденет рабочую область.
+в data_store/cache/sessions/» (ссылки на строки исторические: самого
+`project.json` в репозитории уже нет, его секции живут в `config.json`). То есть
+в этом каталоге лежит живой кеш медиа сессий, и там же стоят файлы трёхдневной
+давности. Слепой `rm -rf **/*.py` по этому каталогу заденет рабочую область.
 
 Раскладка 82 `.py` (проверено 2026-10-02):
 
@@ -505,8 +545,8 @@ test_dependency_declaration.py` (страж объявлений зависим�
   агент чистит сам (`purge_old`, `purge_empty_outbound`, `_purge_old`).
   Перенос упирается в вопрос: `logging.db.retention_days` приходит в платформу
   аргументом операции, и решать, где он живёт — в `platform.json` или остаётся
-  в `project.json` — нужно до кода, иначе получится два источника правды о
-  сроке хранения.
+  в `config.json` (в `project.json` он жил раньше; самого файла уже нет) — нужно
+  до кода, иначе получится два источника правды о сроке хранения.
 * **`schema_validation.py:196` по-прежнему импортирует `psycopg2.errors`
   напрямую** вместо операции `schema_check` (перенос 2.16 из фазы 2). Тянет за
   собой перенос `SchemaValidationService` на MCP и пересекается с переключением
@@ -544,7 +584,10 @@ ruff-ошибок упало с 520 (HEAD) до 515 — удаления ни о
 | `*.pyc` уже удалённых модулей (`utils/office_files`, `utils/event_log`, `tools/duckdb_query_tool`, `tools/vector_search_tool`) | 6 файлов | байт-код несуществующих модулей |
 | `tools/generate_comments_sql.py` | 275 стр. | **сломан**: `:18` импортирует только `runtime_table`, а `:35` использует `load_config_json`/`ROOT` → `NameError`; `:63` читает несуществующий `audit_analyzer/cache/schema.json`; вызывающих нет |
 
-Команды для человека (само удаление заблокировано политикой среды):
+Команды для человека — **ОТРАБОТАНЫ 2026-10-02, всех перечисленных файлов
+уже нет** ни на диске, ни в индексе (включая `workspace/utils/_office_files.py`,
+которого в реестре не было, и `workspace/skills/audit_analyzer/scripts/` целиком).
+Блок сохранён как история того, что было удалено:
 
 ```bash
 git rm lib/services/_cache_load_service.py lib/services/_cache_provider.py \
@@ -560,30 +603,40 @@ git rm tools/_check_indexes.py
 
 ### B. Дубликаты платформы
 
-| Кандидат | Доказательство | Риск |
+Все три кандидата сняты 2026-10-02: файлов нет ни на диске, ни в индексе git.
+
+| Кандидат (удалён) | Доказательство | Состояние |
 |---|---|---|
-| `lib/services/text_splitter.py` (217 стр.) | `mcp-platform/libs/vectors/text_splitter.py` (222 стр.) — те же 6 функций, различие **только в докстринге и форматировании**; платформенный модуль сам объявляет «портировано из `lib/services/text_splitter.py`, удаление агентской копии — фазы 4/5/9». Прод-импортёров у агентской копии **0** (только `tests/test_text_splitter.py`; тот же набор тестов уже есть на платформе) | **низкий**: перенести/снять `tests/test_text_splitter.py` |
-| `workspace/skills/legal_summarizer` (15 704 стр. runtime + 20 401 стр. тестов) | живая параллельная копия `mcp-platform/libs/legal_summarizer/` (15 979 стр., те же 9 слоёв). Перенос в процессе — **зона соседа**, не трогать | **высокий** |
-| `workspace/skills/office_files/` | не объявлен ни в `project.json`, ни в `platform.json`; `SKILL.md` (8.9 КБ) ссылается на `workspace/utils/office_files.py`, которого **нет**; функциональность уехала в `libs/office` + tool `document_read` | **средний** |
+| `lib/services/text_splitter.py` (было 217 стр.) | `mcp-platform/libs/vectors/text_splitter.py` — те же 6 функций; прод-импортёров у агентской копии было 0 | **файла нет**; `tests/test_text_splitter.py` тоже снят |
+| `workspace/skills/legal_summarizer` (было 15 704 стр. runtime + 20 401 стр. тестов) | живая параллельная копия `mcp-platform/libs/legal_summarizer/`; перенос завершён | **каталога нет**; в `workspace/skills/` остался один навык — `audit_analyzer` |
+| `workspace/skills/office_files/` | не был объявлен ни в `config.json`, ни в `platform.json`; функциональность уехала в `libs/office` + tool `document_read` | **каталога нет** |
 
 ### C. Мёртвый вес на диске
 
 | Каталог | Объём | Комментарий |
 |---|---|---|
-| `workspace/data_store/` | **86.7 МБ, 3 272 файла** | кэш сессий, вложения PDF, чанки `gk_chunks`, `duckdb/cache.duckdb` (2.3 МБ) — всё от старого локального кэша, который уехал на платформу |
+| `workspace/data_store/` | **86.7 МБ, 3 272 файла** (проверено: каталог на месте) | кэш сессий, вложения PDF, чанки `gk_chunks`, `duckdb/cache.duckdb` — всё от старого локального кэша, который уехал на платформу |
 | `*.pyc` по всему дереву | **27.7 МБ, 1 349 файлов** | включая 6 байт-кодов уже удалённых модулей |
-| `workspace/skills/legal_summarizer/tests/` | 20 401 стр. | тесты внутри навыка; при переносе кода на платформу уезжают вместе с ним |
+| ~~`workspace/skills/legal_summarizer/tests/`~~ | 20 401 стр. | **каталога нет** — уехал вместе с навыком на платформу |
 
 Итого мёртвого Python-кода **~160 строк**, мёртвых артефактов на диске — **~114 МБ**.
 
 ### E. Мёртвые тесты агента (2026-10-02)
 
 **ВЫПОЛНЕНО 2026-10-02** скриптом `cleanup_tests.ps1`: **24/24 цели удалены**
-(23 tombstone-файла + пустой `test_pool_settings_seam.py`). В `tests/` осталось
-150 `.py` и ровно **3 tombstone-файла — все три принадлежат соседнему воркеру**
-(временно отключены им, не мертвы). Общее число ruff-ошибок по агенту:
-**520 (HEAD) → 515 (чистка кода) → 510 (чистка тестов)** — удаления ни одной не
-добавили.
+(23 tombstone-файла + пустой `test_pool_settings_seam.py`). Общее число
+ruff-ошибок по агенту: **520 (HEAD) → 515 (чистка кода) → 510 (чистка тестов)** —
+удаления ни одной не добавили.
+
+**Пересчёт 2026-10-02 (текущее состояние).** В `tests/` осталось **9**
+`tombstone-файлов `_test_*.py`. Прежняя формулировка здесь называла часть
+из них «временно отключёнными соседним воркером тестами `legal_summarizer`» —
+**это неверно**. Проверено: все 9 содержат **0 `def test_`**, то есть это
+такие же tombstone-заглушки, как и остальные, — докстринг с причиной и с
+готовой командой `git rm`. Никто их не отключал и не собирается снимать
+префикс `_`; снимать их нечего, сносить надо файлы. Команда проверки:
+`git ls-files -- 'tests/_test_*.py'` → 9 строк, на каждой
+`Select-String -Pattern '^\s*def test_'` → 0 совпадений.
 
 Аудит `tests/` двумя проходами по коду. **174 `.py`, 40 646 строк**; из них
 **24 файла были мёртвы**, и мёртвы они не по «устарелости», а потому что
@@ -598,12 +651,6 @@ pytest их физически не собирает.
 результат прогона после удаления — **тот же**, что до: снимать нечего, потому
 что pytest этих файлов и не видел.
 
-**Не трогаем (зона соседнего воркера).** Три файла сосед только что переименовал
-из `test_*` в `_test_*`, то есть **временно отключил**, а не убил:
-`_test_legal_summarizer_identity.py`, `_test_legal_summarizer_query_ipc.py`,
-`_test_legal_summarizer_query_manifest_integration.py`. Отключение — его решение,
-и снимать его должен он. Скрипт `cleanup_tests.ps1` их исключает.
-
 **Проверено и НЕ является мусором:** «сироты» по импорту `test_enterprise_mcp_identity.py`
 (`libs.enterprise_common.*`) и `test_office_files.py` (`libs.office`) — ложные
 срабатывания, эти пакеты живут на платформе (`mcp-platform/libs/`). Подкаталоги
@@ -612,6 +659,46 @@ pytest их физически не собирает.
 
 Скрипт: `cleanup_tests.ps1` (этап 0 — починка `mavis-trash`, этап 1 — прогон
 `-WhatIfOnly`, этап 2 — удаление, этап 3 — отчёт). Удаление восстановимое.
+
+### F. Tombstone-файлы тестов, оставшиеся на диске (2026-10-02)
+
+Продолжение пункта E: там описан выполненный снос 24 целей, эти 12 остались
+за его рамками и **ещё физически лежат в репозитории**. Содержимое у них
+уже вырезано — остались докстринги с причиной.
+
+Считано командой `git ls-files -- '*_test_*.py'` → **13** совпадений, из них
+**12** — tombstone-заглушки тестов, а 13-е (`tools/apply_test_profile_tables.py`)
+— живая утилита, попавшая в выборку случайно (в имени есть подстрока
+`_test_`). Итого tombstone-файлов тестов: **12**, и **у всех 12 ноль
+`def test_`** (проверено `Select-String -Pattern '^\s*def test_'` по каждому):
+
+| Файл | `def test_` | Готовый `git rm` в докстринге |
+|---|---|---|
+| `tests/_test_information_preservation.py` | 0 | да |
+| `tests/_test_legal_summarizer_identity.py` | 0 | да |
+| `tests/_test_legal_summarizer_query_ipc.py` | 0 | да |
+| `tests/_test_legal_summarizer_query_manifest_integration.py` | 0 | да |
+| `tests/_test_legal_summarizer_running_subprocess.py` | 0 | да |
+| `tests/_test_manifest.py` | 0 | да |
+| `tests/_test_resume_scenarios.py` | 0 | да |
+| `tests/_test_skill_legal_summarizer_characterization.py` | 0 | да |
+| `tests/_test_structure_physical.py` | 0 | да |
+| `tests/benchmarks/_test_acceptance_matrix.py` | 0 | да |
+| `mcp-platform/tests/legal_summarizer/_test_legal_summarizer_no_legacy.py` | 0 | нет (только причина) |
+| `mcp-platform/tests/legal_summarizer/_test_structure_architecture_guard.py` | 0 | нет (только причина) |
+
+**Почему они ещё на диске.** Не «отключены и ждут автора», а именно
+заблокированы: удаление обязано идти через восстановимый лаунчер
+`mavis-trash`, а в этом локальном рантайме любой `rm` блокируется политикой
+безопасности (разбор причины — ниже, про `LF` вместо `CRLF` в
+`mavis-trash.cmd`). **Снести вручную:**
+
+```console
+git rm tests/_test_information_preservation.py tests/_test_legal_summarizer_identity.py tests/_test_legal_summarizer_query_ipc.py tests/_test_legal_summarizer_query_manifest_integration.py tests/_test_legal_summarizer_running_subprocess.py tests/_test_manifest.py tests/_test_resume_scenarios.py tests/_test_skill_legal_summarizer_characterization.py tests/_test_structure_physical.py tests/benchmarks/_test_acceptance_matrix.py mcp-platform/tests/legal_summarizer/_test_legal_summarizer_no_legacy.py mcp-platform/tests/legal_summarizer/_test_structure_architecture_guard.py
+```
+
+Ожидаемый результат прогона после сноса — **тот же**, что до: pytest эти
+файлы не собирает (префикс `_`), снимать нечего.
 
 
 Задача «удали мёртвое» упиралась в политику: удаление обязано идти через

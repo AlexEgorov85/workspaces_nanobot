@@ -1,10 +1,10 @@
 # Nanobot Dependency Inventory
 
-> Инвентаризация всех зависимостей `workspaces_nanobot` от `nanobot-ai==0.3.0`.
+> Инвентаризация всех зависимостей `workspaces_nanobot` от `nanobot-ai==0.3.5`.
 > Машино-читаемая версия: [`nanobot-inventory.json`](nanobot-inventory.json).
 > Регенерация JSON: `python tools/scan_nanobot_inventory.py`.
 
-**Дата скана:** 2026-09-11 · **nanobot pinned:** 0.3.0 · **файлов просканировано:** 178
+**Дата скана:** 2026-09-11 · **nanobot pinned:** 0.3.5 · **файлов просканировано:** 178
 
 ## Легенда классификации
 

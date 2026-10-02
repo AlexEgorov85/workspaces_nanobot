@@ -10,9 +10,9 @@
 - **MINOR** (X.Y.0) — новые возможности, backward-compatible.
 - **PATCH** (X.Y.Z) — баг-фиксы и hardening, не меняющие интерфейс.
 
-Текущая версия — в `project.json::project.version` (без префикса `v`).
+Текущая версия — в `config.json::project.version` (без префикса `v`).
 git-теги имеют префикс `v` (`v2.5.2`).
-**Из-за release-веток git-теги могут отставать от актуальной версии в `project.json`** — см. секцию «Branching» ниже.
+**Из-за release-веток git-теги могут отставать от актуальной версии в `config.json`** — см. секцию «Branching» ниже.
 
 ## 1. Подготовка артефактов (на ветке `master`)
 
@@ -29,7 +29,7 @@ python -m pytest -q                    # Linux/macOS
 git diff --check
 ```
 
-### 1.1 `project.json::project.version`
+### 1.1 `config.json::project.version`
 
 ```diff
 - "version": "2.5.1"   // Версия проекта (актуальный релизный тег vX.Y.Z без префикса v)
@@ -63,7 +63,7 @@ git diff --check
 **Полный аудит** документации на ссылки, которые могли устареть:
 
 - пути к файлам (`workspace/data_store/duckdb/cache.duckdb`, `~/.cache/...`, `data_store/...`);
-- имена секций в `project.json` (`gateway.cache.local_path`);
+- имена секций в `config.json` (`gateway.cache.local_path`);
 - имена CLI-флагов, опций конфига, переменных окружения;
 - ссылки на коммиты (`605660b`) и PR.
 
@@ -128,7 +128,7 @@ git add \
   CHANGELOG.md \
   README.md \
   docs/ \
-  project.json \
+  config.json \
   tools/release_v252.py \
   .gitignore
 
@@ -203,7 +203,7 @@ git push origin release/v2.5.2
 
 ## 7. Чек-лист «что не забыл»
 
-- [ ] `project.json::project.version` бампнут
+- [ ] `config.json::project.version` бампнут
 - [ ] `CHANGELOG.md` блок `## [<version>]` + новый пустой `## [Unreleased]`
 - [ ] `README.md` блок «Что нового в v<version>»
 - [ ] `docs/*.md` — аудит устаревших ссылок (пути, опции)
@@ -218,6 +218,6 @@ git push origin release/v2.5.2
 ## 8. Что **не** делать
 
 - ❌ Не редактировать старые блоки в `CHANGELOG.md` (это история; правки только в новом блоке).
-- ❌ Не править `project.json::version` задним числом для уже опубликованного тега.
+- ❌ Не править `config.json::version` задним числом для уже опубликованного тега.
 - ❌ Не создавать несколько release-скриптов под один тег — один файл = одна версия.
 - ❌ Не писать секреты в payload-скрипт (он уйдёт в git и GitHub Release).

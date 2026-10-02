@@ -1,14 +1,14 @@
 # Resource Model: декларативное описание ресурсов skill'а
 
 Документ описывает, как skill объявляет свои PG-таблицы и vector-индексы
-в `project.json`, как эти декларации превращаются в `TableResource` /
+в `config.json`, как эти декларации превращаются в `TableResource` /
 `VectorResource` и попадают в `lib/services/table_registry.py`. Это
 единственный путь, которым skill заявляет о своих ресурсах runtime-инфраструктуре.
 
 ## Зачем это нужно
 
 Каждый skill читает свои данные через общий локальный снимок кеша
-(`resolve_cache_path()`: `project.json::gateway.cache.local_path` либо
+(`resolve_cache_path()`: `config.json::gateway.cache.local_path` либо
 `~/.cache/nanobot/duckdb/cache.duckdb`). Чтобы снимок содержал нужные
 таблицы, загрузчик (`CacheLoadService`) должен знать,
 что именно грузить. Раньше это знание было разбросано:
@@ -36,7 +36,7 @@ Resource Model решает это так: skill — это **деклараци
   `TableRegistry.register_infra`.
 
 ```jsonc
-// project.json
+// config.json
 "gateway": {
   "vector": {
     "index": {
@@ -65,7 +65,7 @@ Resource Model решает это так: skill — это **деклараци
 ```
 
 Какие индексы строить и из каких source-таблиц — декларируется в
-`project.json::gateway.vector.index.indexes.<name>` (`VectorIndexConfig`),
+`config.json::gateway.vector.index.indexes.<name>` (`VectorIndexConfig`),
 это **инфраструктурная декларация**, не часть skill'а. Легаси-реестр
 `public.agent_vector_index_config` (runtime-БД) кодом больше не читается.
 
@@ -110,7 +110,7 @@ table-sync (PG → DuckDB) и vector-индексация (FAISS / pgvector / Qd
 Параметры самого эмбеддинга (модель, размерность, URL Ollama,
 bearer-токен) захардкожены в `cache_provider_impl` (`_EMBED_*` константы,
 токен из окружения `EMBED_TOKEN`); параметры индекса — в
-`project.json::gateway.vector.index.indexes[]`.
+`config.json::gateway.vector.index.indexes[]`.
 Это разделение намеренное: ресурс описывает **что** читаем, конфиг — **как**.
 
 ### VectorIndexEntry
@@ -136,7 +136,7 @@ Backend-specific параметры (для FAISS: `text_chunk_size`, `text_chun
 и/или `VectorResource`), `enabled`. Это единственная точка сборки, через
 которую skill попадает в реестр.
 
-## Декларация через project.json
+## Декларация через config.json
 
 Секция `skills.<name>` описывается моделью `SkillSettings` в
 `lib/core/project_settings.py`. Pydantic-валидация запускается в
@@ -210,7 +210,7 @@ optional и backend-specific (read-only через `extra="allow"`):
 Имена читаются build-tool'ами (`tools/build_vectors.py`) и `get_vector_index_path()`
 для вычисления пути к FAISS-файлу (`<default_root>/<name>`).
 
-## Пример: audit_analyzer (реальный сниппет из project.json)
+## Пример: audit_analyzer (реальный сниппет из config.json)
 
 ```jsonc
 "gateway": {
@@ -449,7 +449,7 @@ Legacy `TableRegistry.snapshot_path(workspace_path)` через
 
 Чек-лист:
 
-1. В `project.json` добавлена секция `skills.<name>` с `tables: [...]`
+1. В `config.json` добавлена секция `skills.<name>` с `tables: [...]`
    (fully qualified имена). Если используются индексы — также
    `vector_indexes: [{name: ...}]` (только имена).
 2. Если используется role-based lookup (например, реестр SQL-шаблонов) —

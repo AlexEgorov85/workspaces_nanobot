@@ -256,7 +256,7 @@ CLI — **операционный** интерфейс доставки capabil
 `TableResource.label` — опциональная opaque-метка на dataclass-ресурсе таблицы,
 позволяющая skill'у найти «свою» таблицу по семантической роли, не зная её
 реального имени в PostgreSQL. Поле объявлено в `lib/services/table_registry.py`,
-заполняется из `project.json::skills.<name>.tables[]` (объектная форма).
+заполняется из `config.json::skills.<name>.tables[]` (объектная форма).
 
 Загрузка кэша (`CacheLoadService`, `DuckDbCacheStore`) **игнорирует** `label` —
 это **не** routing marker и **не** влияет на кэш. Значение label —
@@ -266,7 +266,7 @@ label.
 ### Контракт
 
 - `TableResource.label: str | None = None` — поле dataclass, **opaque для runtime**.
-- Задаётся через `tables[]` в `project.json` в объектной форме: `{"name": "...", "label": "..."}`
+- Задаётся через `tables[]` в `config.json` в объектной форме: `{"name": "...", "label": "..."}`
   (см. `TableEntry` в `lib/core/project_settings.py`).
 - Загрузка кэша (`CacheLoadService`, `DuckDbCacheStore`) **игнорирует** label —
   это **не** routing marker.
@@ -292,7 +292,7 @@ Skill может объявить свою метку и находить соо
 
 ### Пример: audit_analyzer + scripts_registry
 
-В `project.json` (секция `skills.audit_analyzer`, имена таблиц — настраиваемые):
+В `config.json` (секция `skills.audit_analyzer`, имена таблиц — настраиваемые):
 
 ```json
 "skills": {

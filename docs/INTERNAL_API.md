@@ -195,7 +195,7 @@ setattr(ctx, "_agent_ref", agent)   # для tool'ов, которым нуже�
 * `asyncio.wait_for(...)` — таймаут.
 * Обрезка длинного вывода — общий `ContextGovernor.normalize_tool_result`
   (патч `patch_context_governor`) с лимитом `gateway.tool_result_limits.*`
-  (см. `project.json` → `gateway.tool_result_limits.*`).
+  (см. `config.json` → `gateway.tool_result_limits.*`).
 * Sandbox/allow-deny — если tool дёргает subprocess, наследуйте политики
   `tools.exec.*` через явный `subprocess.run` с собственными аргументами.
 
@@ -282,7 +282,7 @@ foo, bar, baz; skipped: qux (disabled by config)"`.
 
 | Tool | Файл | Действие | Конфиг |
 |---|---|---|---|
-| `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
+| `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (config.json) |
 | `history_search` | `workspace/tools/history_search_tool.py` | generic-поиск по журналу `agent_gateway_logs` (переживает context compaction) | `tools.history_search.*` (config.json; если секция не задана — дефолты модели `HistorySearchConfig`) |
 | `legal_summarizer_query` | `workspace/tools/legal_summarizer_query.py` | follow-up по saved `operation_id` для `legal_summarizer` | `tools.legal_summarizer_query.*` (config.json) |
 
@@ -383,7 +383,7 @@ python -m servers.enterprise.server --health
   модель её не видит: сборка — пакетная работа администратора, а не действие в
   обороте.
 * **Настройки берутся из `mcp-platform/platform.json`**, а не из
-  `project.json` агента. Держать объявление индексов в обоих файлах — значит
+  `config.json` агента. Держать объявление индексов в обоих файлах — значит
   завести два источника правды; до удаления кластера так и было, и именно это
   породило расхождение между тем, куда пишут, и откуда читают.
 * Диагностика (`MISSING` / `ORPHAN` / `STALE` / `INVALID`) — операция
@@ -399,18 +399,18 @@ python -m servers.enterprise.server --health
 
 Если вы вводите новый параметр, который раньше был литералом в коде, следуйте правилу:
 
-1. **Объявите ключ в `project.json`** (JSONC, с дефолтом и комментарием) — в подходящей секции (`channels.*`, `skills.*`, `cli`, `gateway`, `logging.db` и т.п.).
+1. **Объявите ключ в `config.json`** (JSONC, с дефолтом и комментарием) — в подходящей секции (`channels.*`, `skills.*`, `cli`, `gateway`, `logging.db` и т.п.).
 2. **Для обязательных настроек навыка `audit_analyzer` используйте
    `config.py` (`require_setting` → `ConfigurationError`)**
    — это единый источник правды без литералов в коде. Для необязательных —
    `config.get_setting(*keys, default=...)`. **Не хардкодьте литерал.**
 3. **Добавьте ключ в `REQUIRED_KEYS` в `tests/test_config_keys.py`** — иначе CI не поймает случайное удаление/переименование.
-4. **Перезапустите gateway / CLI** после правки `project.json`.
+4. **Перезапустите gateway / CLI** после правки `config.json`.
 
 Пример (вынос `max_stuck_retries`):
 
 ```json
-// project.json
+// config.json
 "channels": {
   "postgres": {
     "max_stuck_retries": 3   // Лимит retry зависшего сообщения

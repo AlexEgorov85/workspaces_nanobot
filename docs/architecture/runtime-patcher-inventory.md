@@ -3,7 +3,7 @@
 > Каталог всех monkey-patch'ей к `nanobot-ai==0.3.5`.
 > Определение: [`lib/services/runtime_patcher.py`](../../lib/services/runtime_patcher.py).
 > См. также [nanobot-inventory.md](nanobot-inventory.md).
-> Opencode change: [`runtime-patcher-composition-cleanup`](../changes/runtime-patcher-composition-cleanup/).
+> Opencode change: [`runtime-patcher-composition-cleanup`](../../openspec/changes/archive/2026-09-28-runtime-patcher-composition-cleanup/).
 
 **Принцип (TARGET_ARCHITECTURE §20):** каждый patch обязан иметь purpose,
 target, nanobot version, проверенную public alternative, upgrade risk и тест.
@@ -46,13 +46,12 @@ runtime patch'ом — это отдельный loader
 
 | # | Патч | Target (nanobot API) | Risk | Required | Категория | Условие удаления |
 |---|---|---|---|---|---|---|
-| 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | MEDIUM | ✓ | **REMOVE** | **Уже не нужен.** `workspace` и `max_tool_result_chars` уже прокинуты: `AgentLoop` → `AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`. Патч переписывает работающую функцию |
-| 2 | `exec_limits` | глобалы `exec_session.MAX_OUTPUT_CHARS` + import-frozen схема | MEDIUM | — | KEEP | upstream даст конфигурацию лимитов вывода. Подкласс не достаёт: потолок в глобале модуля, схема заморожена `deepcopy` в `base.py:336` |
-| 3 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + схема параметра | MEDIUM | — | **KEEP (спорно)** | Снимать нельзя, пока у навыков нет своего таймаута: патч поднимает потолок `600` до `gateway.exec_timeout_cap_sec` (по умолчанию 3600). Обоснование в спецификации — «legal 7–10 мин» — отпадает только вместе с переездом `legal_summarizer` в платформу (фаза 11). До тех пор правдивая категория — **KEEP**, а не REMOVE: `tools.exec.timeout=0` снимает лимит только когда агент **не** передаёт явный `timeout`, а `TOOLS.md` учит его передавать |
-| 4 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | **PARTIAL** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, подкласс не перехватывает; они лишь значения по умолчанию (per-call `head_limit` есть) |
-| 5 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `TurnEndEvent` в 0.3.5 **не существует** (проверено инспекцией пакета, см. ADR `turn-delivery-public-extension.md`), поэтому пункт «`_final_turn` → `TurnEndEvent`» плана нереализуем в этой формулировке. Остаётся перенос на существующие `EventSink` / `RuntimeEventPublisher` либо решение оставить патч — это отдельное решение владельца, а не молчаливое |
-| 6 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. Проверить, запускаются ли субагенты в деплое — если нет, патч удаляется |
-| 7 | `repeat_guard_block` | `nanobot.agent.tools.execution._execute_tool_call` | MEDIUM | — | KEEP | upstream даст способ **отклонить** tool-вызов из хука. Hook-API возвращаемого значения не имеет, а `before_execute_tool` в `_execute_tool_call` вызывается вне `try`, поэтому без патча режим `block` непригоден: с `reraise=False` он молчаливый no-op, с `reraise=True` — обрыв оборота и отмена соседних вызовов батча через `asyncio.gather`. Пока отказа нет — патч нужен |
+| 1 | `exec_limits` | глобалы `exec_session.MAX_OUTPUT_CHARS` + import-frozen схема | MEDIUM | — | KEEP | upstream даст конфигурацию лимитов вывода. Подкласс не достаёт: потолок в глобале модуля, схема заморожена `deepcopy` в `base.py:336` |
+| 2 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + схема параметра | MEDIUM | — | **KEEP (спорно)** | Снимать нельзя, пока у навыков нет своего таймаута: патч поднимает потолок `600` до `gateway.exec_timeout_cap_sec` (по умолчанию 3600). Обоснование в спецификации — «legal 7–10 мин» — отпадает только вместе с переездом `legal_summarizer` в платформу (фаза 11). До тех пор правдивая категория — **KEEP**, а не REMOVE: `tools.exec.timeout=0` снимает лимит только когда агент **не** передаёт явный `timeout`, а `TOOLS.md` учит его передавать |
+| 3 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | **PARTIAL** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, подкласс не перехватывает; они лишь значения по умолчанию (per-call `head_limit` есть) |
+| 4 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `TurnEndEvent` в 0.3.5 **не существует** (проверено инспекцией пакета, см. ADR `turn-delivery-public-extension.md`), поэтому пункт «`_final_turn` → `TurnEndEvent`» плана нереализуем в этой формулировке. Остаётся перенос на существующие `EventSink` / `RuntimeEventPublisher` либо решение оставить патч — это отдельное решение владельца, а не молчаливое |
+| 5 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. Проверить, запускаются ли субагенты в деплое — если нет, патч удаляется |
+| 6 | `repeat_guard_block` | `nanobot.agent.tools.execution._execute_tool_call` | MEDIUM | — | KEEP | upstream даст способ **отклонить** tool-вызов из хука. Hook-API возвращаемого значения не имеет, а `before_execute_tool` в `_execute_tool_call` вызывается вне `try`, поэтому без патча режим `block` непригоден: с `reraise=False` он молчаливый no-op, с `reraise=True` — обрыв оборота и отмена соседних вызовов батча через `asyncio.gather`. Пока отказа нет — патч нужен |
 
 Колонка и каталог внесены в рамках openspec change
 [`enterprise-mcp-platform`](../../openspec/changes/enterprise-mcp-platform/).
@@ -65,8 +64,7 @@ runtime patch'ом — это отдельный loader
 архитектурное нарушение наравне с патчем без записи в этом документе.
 
 
-`Required = ✓` (3 патча: `assemble_outbound`, `subagent_logging`,
-`context_governor`) — критичность для
+`Required = ✓` (2 патча: `assemble_outbound`, `subagent_logging`) — критичность для
 diagnostics в startup-баннере. **НЕ** означает startup-abort
 (см. `openspec/specs/runtime/context/spec.md`).
 
@@ -137,9 +135,9 @@ return result, {...}                           # возвращается ИСХ
 
 ### Ожидаемый результат
 
-7 патчей → **4–5**. `turn_delivery_fail` уже переехал на публичный параметр
-`AgentLoop(turn_delivery_factory=...)`; из трёх оставшихся кандидатов на снятие
-`context_governor` (уже не нужен по сути), `exec_timeout_cap` (только после
+6 патчей → **4–5**. `turn_delivery_fail` уже переехал на публичный параметр
+`AgentLoop(turn_delivery_factory=...)`; из двух оставшихся кандидатов на снятие —
+`exec_timeout_cap` (только после
 переезда `legal_summarizer` в платформу) и `assemble_outbound` (нужно решение
 о переносе на `EventSink` / `RuntimeEventPublisher` — `TurnEndEvent` в 0.3.5
 нет). `exec_limits`, `tool_limits`, `subagent_logging` и `repeat_guard_block`
@@ -224,6 +222,14 @@ tool'ов, и при переносе тяжёлых запросов в MCP о�
 | `session_dir_watch` | Удалён целиком: гейт выключен по умолчанию, тестов не было | 6.5 |
 | `document_text_threshold` | Нативный document-tool агента — это наш код, патчить фреймворк не нужно | 6.7 |
 
+### `context_governor`
+
+Удалён — ушёл в upstream (change `use-upstream-tool-result-persist`). В nanobot
+0.3.5 `ContextGovernor.normalize_tool_result`
+(`nanobot/agent/context_governance.py:709-759`) делает построчно то же, что делал
+патч. `workspace` и `max_tool_result_chars` прокинуты штатно: `AgentLoop` →
+`AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`.
+
 ### `context_bridge_seed`
 
 Удалён ранее (см. change `post-0.3.5-patches-cleanup`). Seed лимита
@@ -269,7 +275,7 @@ target: >
   WriteStdinTool удалён в 0.3.5 — getattr-guard.
 nanobot_version: 0.3.5
 purpose: поднять потолок вывода exec/shell-tools (дефолт ~50K символов);
-  значения из gateway.tool_result_limits.* в project.json.
+  значения из gateway.tool_result_limits.* в config.json.
 public_alternative: проверять tools.exec секцию config.json на каждом апгрейде.
 risk: MEDIUM (модульные константы + JSON-Schema — оба публичных
   слоя, ломаются только при изменении схемы).

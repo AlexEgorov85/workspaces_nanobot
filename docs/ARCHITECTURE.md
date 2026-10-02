@@ -18,7 +18,7 @@
 
 > **Об именах таблиц и индексов.** Все имена таблиц/индексов, упомянутые ниже, —
 > **не зашитые константы**, а значения текущей инсталляции, настраиваемые в
-> `project.json`. Они могут отличаться в других развёртываниях. Ключи конфигурации:
+> `config.json`. Они могут отличаться в других развёртываниях. Ключи конфигурации:
 > `channels.postgres.table_name` / `messages_table` / `meta_table`,
 > `skills.audit_analyzer.tables[*].name` / `vector_indexes[*].name`,
 > `gateway.vector.index.storage_table`,
@@ -30,7 +30,7 @@
 
 ```mermaid
 flowchart LR
-    SRC["Данные аудита<br/>(в БД, имена в project.json)"] --> SYNC["Фоновая синхронизация<br/>изменения в кеш"]
+    SRC["Данные аудита<br/>(в БД, имена в config.json)"] --> SYNC["Фоновая синхронизация<br/>изменения в кеш"]
     VEC["Эмбеддинги строк"] --> SYNC
     SYNC --> CACHE["Локальный кеш<br/>DuckDB + FAISS"]
     CACHE -->|публикация| FILE[("Файл кеша<br/>cache.duckdb")]
@@ -338,7 +338,7 @@ dim-«нет данных в кэше», неотличимо от реальн�
 (`store → vdb → cache → files`), без какого-либо указания, что на
 самом деле расхождение есть. Тогда `PreloadService.preload_vector_indexes`
 после прогона считает явное расхождение между **declared** (JSON,
-`project.json::gateway.vector.index.indexes.*`) и **runtime** (DuckDB-снапшот
+`config.json::gateway.vector.index.indexes.*`) и **runtime** (DuckDB-снапшот
 таблицы-хранилища `gateway.vector.index.storage_table`,
 `cache_provider_impl.list_runtime_vector_indexes()`), классифицируя каждое
 имя индекса в одну из категорий:
@@ -441,7 +441,7 @@ PG/JOBS. **Состояние на 2026-10-01:** сам `preload_service.py` и 
   после `_typewriter(content)`. Гейт `cfg.show_context_window`
   (по умолчанию `true`).
 
-**Конфигурация** (`project.json`):
+**Конфигурация** (`config.json`):
 * `cli.show_context_window` (bool, дефолт `true`) — печатать в CLI.
   В `REQUIRED_KEYS` (`tests/test_config_keys.py`).
 
@@ -614,7 +614,7 @@ async def _notify(self, session_key, report):
 съедала токены, которые сжатие только что освободило. Заметка
 видна в чате, но не загружается в LLM-промпт.
 
-**Конфигурация** (`project.json` → `gateway.compact.*`, все ключи
+**Конфигурация** (`config.json` → `gateway.compact.*`, все ключи
 опциональны, дефолты прямо в коде):
 
 | Ключ | Дефолт | Эффект |
@@ -1026,7 +1026,7 @@ else:
 | `patch_save_turn` | Оборачивает `AgentLoop._save_turn`: любой большой результат `role == "tool"` (строка или JSON-сериализуемый список) пишется **полным** файлом в `data_store` через `SessionFileStore` (суффикс `__<hash>` — dedupe), в историю кладётся ссылка `[Result saved to data_store/<path> (<size> KB)]` — тот же формат, что кастомный persist. Оригинальный `_save_turn` вызывается с копией сообщений, логика nanobot не дублируется. |
 | `save(..., dedupe=True)` | Новый параметр `SessionFileStore.save`: повторное сохранение того же содержимого (sha1, первые 12 hex) возвращает уже существующий файл (`deduped=True`), чтобы повторные/конкурентные обороты не плодили копии. |
 
-**Конфигурация** — `gateway.tool_result_limits` в `project.json`
+**Конфигурация** — `gateway.tool_result_limits` в `config.json`
 (все ключи опциональны, дефолты в коде):
 
 ```jsonc
@@ -1063,7 +1063,7 @@ read→persist→read петли).
 `(tool_name, canonical_args)` встречается `max_repeats_in_window` раз,
 действует по режиму:
 
-- `off` — ничего не делает. **Дефолт**: деплой без правок `project.json`
+- `off` — ничего не делает. **Дефолт**: деплой без правок `config.json`
   ведёт себя ровно как раньше.
 - `warn` — ровно одно событие `tool_repeat_warned` в `agent_gateway_logs`
   на момент пересечения порога; вызов выполняется.
@@ -1542,7 +1542,7 @@ llm.describe()           → dict       # что настроено, без кл
 
 ### `lib/utils/node_access.py` — обход настроек
 
-Хелперы для безопасного обхода `SETTINGS` / `config.json` / `project.json`
+Хелперы для безопасного обхода `SETTINGS` / `config.json`
 с поддержкой `require_setting` (строгий) и `get_setting` (с fallback).
 Удаляет ad-hoc `cfg.get("a", {}).get("b", default)` по кодовой базе. Потребители:
 `config_service.py`, `channel_factory.py`, `runtime_patcher.py`.
@@ -1557,7 +1557,7 @@ llm.describe()           → dict       # что настроено, без кл
 ### `lib/utils/project_version.py` — версия проекта
 
 `project_version()` возвращает версию текущего проекта. Канонический источник —
-`project.json` → `project.version` (актуальный релизный тег `vX.Y.Z` без префикса
+`config.json` → `project.version` (актуальный релизный тег `vX.Y.Z` без префикса
 `v`), закоммичен на `master` и распространяется во все релизные ветки.
 Git-теги и CHANGELOG для этого ненадёжны: релизные ветки `release/vX.Y`
 ответвляются от `master` и не мержатся обратно, поэтому `git describe` и первый
@@ -1718,8 +1718,8 @@ nanobot/
 │
 ├── gateway.py                            #  тонкий оркестратор
 ├── cli_agent.py                          #  тонкий оркестратор
-├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
-└── project.json                          # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
+├── config.py                             # SETTINGS (config.json + session_manager.json + .secrets.env)
+└── config.json                           # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
 ```
 
 ---

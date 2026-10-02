@@ -1,8 +1,9 @@
 # nanobot — Personal AI Agent (Deployment)
 
 Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)**
-(PyPI: `nanobot-ai`) с кастомными доработками: PostgreSQL-каналы, Redis,
-бенчмарки, навыки `audit_analyzer`, `legal_summarizer` и `office_files`.
+(PyPI: `nanobot-ai`) с кастомными доработками: канал PostgreSQL, бенчмарки и один
+навык — `audit_analyzer` (домены `legal_summarizer` и `office_files` уехали в
+платформу `mcp-platform`).
 
 > **Агент:** Aura (🐈) · **Модель:** OpenAI-compatible · **ОС:** Windows · **Язык:** RU/EN
 
@@ -15,7 +16,7 @@ copy .secrets.env.example .secrets.env   # cp на Linux
 # Отредактируйте .secrets.env: DB_PASSWORD=... и # providers: llm / api_key=...
 python tools/migrate.py --apply         # применить миграции схемы
 # --profile обязателен для gateway (prod | test), иначе ConfigurationError + exit 2:
-python gateway.py --profile=prod        # AgentLoop + Postgres/Redis каналы
+python gateway.py --profile=prod        # AgentLoop + канал PostgreSQL
 # или (CLI — фиксированный профиль test, флаг --profile не принимается):
 python cli_agent.py -P -s dev           # REPL в patched-режиме (PostgreSQL)
 ```
@@ -75,11 +76,11 @@ flowchart LR
     UI["внешний веб-клиент"] --> ORCH
     ORCH --> AGENT["Агент<br/>рассуждение + инструменты"]
     ORCH --> BUS["Шина сообщений"]
-    AGENT --> CACHE[("Локальный кеш (DuckDB)")]
+    AGENT --> CACHE[("Снимок DuckDB<br/>(владеет платформа)")]
     AGENT --> TOOLS["Инструменты<br/>SQL / векторный поиск"]
-    CACHE --> VEC["Векторы (FAISS)"]
+    CACHE --> VEC["Индексы FAISS<br/>(владеет платформа)"]
     TOOLS --> DB[("База данных (PostgreSQL)")]
-    VEC --> EMB["Эмбеддинги (Ollama)"]
+    VEC --> EMB["Эмбеддинги<br/>(capability llm платформы)"]
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
@@ -88,8 +89,10 @@ flowchart LR
     class CACHE,VEC,DB,EMB infra
 ```
 
-**Поток:** 3 конфига → `config.py: SETTINGS` → `ApplicationContext.create()` →
+**Поток:** `config.json` → `config.py: SETTINGS` → `ApplicationContext.create()` →
 `MessageBus` → `AgentLoop` → `gateway.py`/`cli_agent.py` запускают каналы + lifecycle.
+Данные, снимок и индексы агент не держит: он ходит в них операциями capability
+`enterprise-mcp`.
 Полная таблица связей — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## 📁 Структура проекта
@@ -97,7 +100,7 @@ flowchart LR
 ```
 nanobot/
 ├── README.md  CHANGELOG.md  AGENTS.md
-├── config.json  project.json  config.py        # 3 конфига
+├── config.json  config.py                # конфиг + загрузчик (project.json удалён)
 ├── gateway.py  cli_agent.py                  # точки входа
 ├── lib/                          # сервисный слой: core, services, cli, hooks,
 │                                 #   lifecycle, channels, session, utils, commands
@@ -117,11 +120,14 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 - **Канал:** `public.agent_conversation_messages`
 - **Журнал:** `public.agent_gateway_logs`, `public.agent_question_runs` (UUID + JSONB)
 - **Домен audit_analyzer:** `oarb.audits/violations/audit_reports/report_items` (REFERENCE)
-- **Векторы:** `oarb.audit_vectors` (эмбеддинги, FAISS собирается в памяти из DuckDB-снапшота — таблица-хранилище задаётся `gateway.vector.index.storage_table`); `public.agent_vector_index_config` и `public.agent_vector_index_store` — legacy SQL-артефакты, кодом не читаются; конфиг индексов — в `project.json::gateway.vector.index.indexes`
+- **Векторы:** `oarb.audit_vectors` (эмбеддинги; FAISS и DuckDB-снапшот обслуживает платформа, состав индексов объявляет `mcp-platform/platform.json → vectors.indexes`); `public.agent_vector_index_config` и `public.agent_vector_index_store` — legacy SQL-артефакты, кодом не читаются
 - **Predefined scripts:** `public.agent_predefined_scripts`
 
 > Имена таблиц/индексов выше — значения текущей инсталляции (REFERENCE). Они
-> настраиваются в `project.json` (`channels.postgres.*`, `skills.audit_analyzer.tables[]`/`vector_indexes[]`, `gateway.vector.index.*`, `logging.db.*`, `benchmark.*`) и в других развёртываниях могут отличаться.
+> настраиваются в `config.json` (`channels.postgres.*`, `logging.db.*`) и в
+> `mcp-platform/platform.json` (`audit.tables`, `vectors.indexes`) — и в других
+> развёртываниях могут отличаться. Файла `project.json` больше нет: его секции
+> переехали в `config.json` (`gateway.agent.<name>`) либо в конфиг платформы.
 
 Реестр таблиц PG → DuckDB — в [docs/table-registry.md](docs/table-registry.md).
 
@@ -256,7 +262,7 @@ CLI/skill) и `TestWarnIfPublishPathOnNfs` (2 кейса); все ранее
 `audit_analyzer/scripts/cli.py::_list_indexes()` читает фактическое
 состояние индексов из DuckDB-снапшота таблицы-хранилища
 (`gateway.vector.index.storage_table`), а не декларативный JSON. Для сверки
-с декларацией (`project.json::gateway.vector.index.indexes.*`) добавлен
+с декларацией (`config.json::gateway.vector.index.indexes.*`) добавлен
 `tools/check_indexes.py`: MISSING / ORPHAN / STALE / INVALID-signature,
 exit 0/1/2, `--json` для CI. См. `docs/VECTOR_INDEXES.md`.
 
@@ -315,7 +321,18 @@ generic infrastructure tools (`duckdb_query`, `vector_search`, `nl_sql_generate`
 
 ## 🛡 Зависимости и лицензия
 
-`nanobot`, `psycopg2-binary`, `redis`, `loguru`, `httpx`, `duckdb`,
-`faiss-cpu`, `numpy`, `pyarrow`, `PyYAML` — точные версии в `requirements.txt`.
+Рантайм агента: `nanobot-ai`, `loguru`, `psycopg2-binary`, `httpx`, `PyYAML`,
+`mcp` (клиент stdio-сессии к `enterprise-mcp`) и пакеты разбора офисных
+документов (`python-docx`, `openpyxl`, `xlrd`, `pypdf`, `pdfplumber`,
+`python-pptx`, `Pillow`, `chardet`) — точные версии в `requirements.txt`.
+Пакеты данных и индексов (`duckdb`, `faiss-cpu`, `numpy`, `pyarrow`) в
+требования агента **не входят**: снимком, FAISS-индексами и эмбеддингами владеет
+платформа, они объявлены в её манифестах (`mcp-platform/requirements.txt`,
+`mcp-platform/pyproject.toml`).
+
+> **Требует решения владельца:** `requirements.txt` агента всё ещё объявляет
+> `redis==8.0.0`, хотя Redis-канал снят и ни один модуль агента пакет не
+> импортирует (сторож — `tests/test_channel_factory.py::TestRedisIsGone`).
+> Файл `requirements.txt` в эту правку не входил.
 
 **Лицензия:** MIT.

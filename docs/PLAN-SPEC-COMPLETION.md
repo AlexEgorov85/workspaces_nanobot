@@ -214,7 +214,8 @@ change'а убирает и эту цену. Удаление выбросило
    `turn_delivery_fail`, `document_text_threshold` давно не в
    `RuntimePatcher.patch_specs()`), и перечисляет 12 патчей без
    `repeat_guard_block`. Целевое состояние «2 необходимых + 2 частичных»
-   сейчас противоречит факту: патчей **7**, и седьмой — `repeat_guard_block`.
+   сейчас противоречит факту: патчей было **7**, и седьмой — `repeat_guard_block`
+   (после снятия `context_governor` в `_PATCH_SPECS` осталось **6**).
 2. **Покрытие случая.** Проанализированное ими ограничение — подмена значения
    в `after_execute_tool` (после выполнения). Мой случай другой: **отказ
    вызова до выполнения**. Правило в их виде suggests, что хук справится, а он
@@ -426,7 +427,7 @@ self-defeating состояние, которое пункт называет. �
 `repeat-guard-hook` изолирован (новый хук, 11 тестов, 3 документа) и не имеет ни одной зависимости от платформы и каналов. Он даёт полностью закрытый change дёшево. `unify-runtime-channels` — переписывание транспорта CLI, самый рискованный пункт, и он должен идти последним, когда остальное стабильно.
 
 **Р7. Осиротевшие таблицы закрываются миграцией `V008`.**
-Найдено при сверке живой базы: реестр миграций в БД обрывается на `005`, то есть **`V006__drop_agent_worker_claims.sql` и `V007__drop_benchmark_tables.sql` написаны, но не применены**, и таблицы `agent_worker_claims`, `agent_benchmark_runs`, `agent_benchmark_results` живы при удалённом коде. Хуже: для `agent_cache_ownership` (код удалён change'ом `drop-local-cache-read-from-pg`) **миграции удаления не существует вовсе**, а `agent_vector_index_config` тоже осиротевшая (конфиг уехал в `project.json`). Пишется `V008__drop_orphaned_tables.sql`, применяются V006→V008.
+Найдено при сверке живой базы: реестр миграций в БД обрывается на `005`, то есть **`V006__drop_agent_worker_claims.sql` и `V007__drop_benchmark_tables.sql` написаны, но не применены**, и таблицы `agent_worker_claims`, `agent_benchmark_runs`, `agent_benchmark_results` живы при удалённом коде. Хуже: для `agent_cache_ownership` (код удалён change'ом `drop-local-cache-read-from-pg`) **миграции удаления не существует вовсе**, а `agent_vector_index_config` тоже осиротевшая (конфиг уехал в `config.json`). Пишется `V008__drop_orphaned_tables.sql`, применяются V006→V008.
 
 ---
 
@@ -557,7 +558,7 @@ self-defeating состояние, которое пункт называет. �
 
 1. Настройка `GatewayRepeatGuardSettings` (`mode: off|warn|block`, `window_size`, `max_repeats_in_window`, `exempt_tools` с отсечением glob-метасимволов).
 2. `lib/hooks/repeat_guard_hook.py`: `_canonical_arguments` (детерминированный `json.dumps` + стабильный fallback для `Path`/`datetime`/`bytes`), `RepeatGuardHook(AgentHook)` с per-session состоянием.
-3. Интеграция в `lib/core/agent_factory.py`, запись в `canonical_framework_hooks()`, блок-пример в `project.json`.
+3. Интеграция в `lib/core/agent_factory.py`, запись в `canonical_framework_hooks()`, блок-пример в `config.json`.
 4. 11 тестов (окно, эвикция, режимы, разные инструменты, `exempt_tools`, конкурентные сессии, сбой логирования, контракт).
 5. Документация и CHANGELOG.
 6. Архивация.
@@ -568,7 +569,7 @@ self-defeating состояние, которое пункт называет. �
 
 ### Этап 9 — `unify-runtime-channels` (45 пунктов, последний и самый рискованный)
 
-**Зачем так поздно:** это переписывание транспорта CLI — CLI становится тонким WebSocket-клиентом Gateway. 45 пунктов затрагивают `cli_agent.py`, `console_loop.py`, `application_context.py`, `project.json` и документацию. Ставить это до стабилизации платформы — значит отлаживать транспорт на нестабильном фундаменте.
+**Зачем так поздно:** это переписывание транспорта CLI — CLI становится тонким WebSocket-клиентом Gateway. 45 пунктов затрагивают `cli_agent.py`, `console_loop.py`, `application_context.py`, `config.json` и документацию. Ставить это до стабилизации платформы — значит отлаживать транспорт на нестабильном фундаменте.
 
 Порядок: контракт (1.1–1.3, уже сделан) → `CliChannel` (2.1–2.8) → `console_loop` как клиент (3.1–3.8) → `cli_agent.py` без composition root (4.1–4.7) → снятие `role` и cron-флага (5.1–5.8) → согласованность документации (6.x) → верификация (7.x).
 

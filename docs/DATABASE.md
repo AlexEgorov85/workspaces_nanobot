@@ -5,6 +5,12 @@
 
 ## 🔌 Универсальный слой данных lib/services
 
+> **Раздел описывает бывший агентский контракт.** Модулей
+> `cache_provider.py`, `duckdb_cache_store.py`, `cache_provider_impl.py` и
+> `cache_load_service.py` в агенте больше нет (фаза 5, 2026-10-01): чтение
+> данных и владение снимком у capability `data` платформы. Ниже — что эти
+> имена значили, чтобы читать платформенный контракт и историю миграций.
+
 **Интерфейс** — `lib/services/cache_provider.py`, три роли в одном модуле:
 
 - `CacheProvider` (ABC) — **роль чтения**: `is_ready()`, `preload_indexes()`,
@@ -42,7 +48,7 @@
 
 - `get_embedding()` (Ollama `/api/embed`), `read_embedding_config()`,
   `read_embedding_defaults()`, `read_vector_index_config()` (конфиг индексов —
-  из `project.json::gateway.vector.index.indexes`, PG-реестр не читается),
+  из `config.json::gateway.vector.index.indexes`, PG-реестр не читается),
   `list_runtime_vector_indexes(provider=...)` — читает состав runtime-индексов
   **через интерфейс** провайдера и сама файл кэша не открывает.
 - Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pyarrow`, `httpx`)
@@ -131,7 +137,7 @@
   retry-connect. При полной недоступности БД задачи быстро падают с ошибкой
   подключения, а не висят в очереди вечно. Транзакции (`lease_id != 0`) на
   это правило не влияют — их воркер забирает безусловно.
-- **Настройка** — `project.json → channels.postgres.pool`:
+- **Настройка** — `config.json → channels.postgres.pool`:
   `min_conn`, `max_conn`, `pool_timeout`, `queue_maxsize`,
   `reconnect_backoff_sec`, `reconnect_backoff_max_sec`, `connect_max_retries`,
   `idle_timeout_sec`, `job_max_retries`. `ApplicationContext.create()` читает эту
@@ -145,6 +151,12 @@
 держит собственного psycopg2-соединения — соединение выдаёт пул на время
 запроса/транзакции. Чтение кэша в рабочем режиме пул **не занимает вовсе**:
 это и есть смысл кэша.
+
+**Транспорт записи журнала — `lib/services/log_transport.py`.** Слой выбирает
+запись событий либо напрямую в PostgreSQL, либо операцией `log_events`
+`enterprise-mcp`; при переходе на платформу агент перестаёт владеть пулом записи
+журнала. Учётные данные (`session_id`/`user_id`/`request_id`) операция берёт из
+контекста вызова, а не из тела батча, поэтому батч дробят по вызовам.
 
 **Санитизация NUL-байта.** PostgreSQL не принимает NUL (0x00) в text-литералах,
 а psycopg2 не любит литеральные escape `\u0000`..`\u0003` — такой контент
@@ -162,7 +174,7 @@
 
 ## ⚙️ Конфигурация навыка
 
-Секция `skills.audit_analyzer` в `project.json`:
+Секция `skills.audit_analyzer` в `config.json`:
 
 | Ключ | Назначение | Значение / по умолчанию |
 |------|-----------|-------------|
@@ -176,7 +188,7 @@
 | `gateway.vector.index.default_root` | Каталог FAISS-индексов (в runtime не персистится — FAISS в памяти) | `data_store/vectors` |
 | `gateway.vector.index.indexes.<name>` | Декларативный конфиг индексов (`table`, `pk`, `source_table`, `content_columns`, `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`, `enabled`) — единственный источник; PG-реестр не читается | `audits_index`, `violations_index`, `audit_reports_index` |
 | `gateway.sync.*` | **удалена** — поллинга и пересинхронизации больше нет | — |
-| `gateway.cache.local_path` | **Убран в фазе 5 (п. 5.7).** Тип `CacheSettings` и поле `GatewaySettings.cache` сняты: агент больше не открывает файл, а путь снимка объявляет платформа — `mcp-platform/platform.json` → `data.snapshot_path`. Ключ в `project.json` и раньше не был объявлен | — |
+| `gateway.cache.local_path` | **Убран в фазе 5 (п. 5.7).** Тип `CacheSettings` и поле `GatewaySettings.cache` сняты: агент больше не открывает файл, а путь снимка объявляет платформа — `mcp-platform/platform.json` → `data.snapshot_path`. Ключ в `config.json` и раньше не был объявлен | — |
 
 > **Дубликат объявлений, который пока живёт.** `skills.audit_analyzer.tables[*]`
 > и `skills.audit_analyzer.vector_indexes[*]` нужны агенту для загрузки снимка
@@ -187,16 +199,16 @@
 > расхождении доверять платформенному объявлению: запросы к данным идут через
 > него, и только агент читает своё.
 
-Декларация — единый источник истины. `ApplicationContext._auto_register_skills` (см. `lib/core/application_context.py`) читает эту секцию при старте и автоматически создаёт `TableResource`/`VectorResource` в `table_registry`. Никакого `register.py` не требуется. Для добавления нового skill достаточно добавить секцию `skills.<name>` в `project.json`. DoD-проверка — `tests/test_resource_universality.py`.
+Декларация — единый источник истины. `ApplicationContext._auto_register_skills` (см. `lib/core/application_context.py`) читает эту секцию при старте и автоматически создаёт `TableResource`/`VectorResource` в `table_registry`. Никакого `register.py` не требуется. Для добавления нового skill достаточно добавить секцию `skills.<name>` в `config.json`. DoD-проверка — `tests/test_resource_universality.py`.
 
 > Примечание: ретраи *генерации* SQL в режиме `generated_sql` захардкожены в
 > `generated_sql_mode.py` (`MAX_RETRIES = 3` → до 4 попыток) и от `cli_max_retries`
 > не зависят.
 
-DSN подключается только через `channels.postgres.dsn` в `project.json`
+DSN подключается только через `channels.postgres.dsn` в `config.json`
 (обычно `"${DATABASE_URL}"` из `.secrets.env`) через `utils.db.resolve_dsn()`.
 Подключение возможно только через полный DSN (`channels.postgres.dsn`
-в `project.json`, обычно `"${DATABASE_URL}"` из `.secrets.env` через
+в `config.json`, обычно `"${DATABASE_URL}"` из `.secrets.env` через
 `utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`dbname`/`user`
 не поддерживаются. Навык собственного DSN не хранит.
 
@@ -312,7 +324,7 @@ writer; поскольку writer'ом является только загру�
 #### Полный цикл (что происходит по шагам)
 
 1. **Старт** (`gateway.py::main()`): `ApplicationContext.create()` читает
-   секции `skills.*` и `gateway.vector` из `project.json`, регистрирует ресурсы
+   секции `skills.*` и `gateway.vector` из `config.json`, регистрирует ресурсы
    в `TableRegistry`, поднимает пул и проверяет схему, затем
    `_init_cache_runtime()`.
 2. **Стадия 1 — запись.** `open_cache_provider(mode=READ_WRITE)`;
@@ -334,7 +346,7 @@ writer; поскольку writer'ом является только загру�
 `started_at` и `duration_sec`); `CacheLoadService.get_stats()` отдаёт то же.
 С ним сверяются, чтобы не выдать устаревший снимок за «текущие» данные.
 
-#### Управляющие ключи (`gateway.vector.index` / `gateway.cache` в `project.json`)
+#### Управляющие ключи (`gateway.vector.index` / `gateway.cache` в `config.json`)
 
 > Имена таблиц/индексов не зашиты: они берутся из `skills.audit_analyzer.tables[*].name`,
 > `skills.audit_analyzer.vector_indexes[*].name` и `gateway.vector.index.*`.
@@ -343,12 +355,12 @@ writer; поскольку writer'ом является только загру�
 |------|-----------|--------|
 | `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Таблица векторов, включается в загрузку и прогревается в FAISS (имя настраивается) |
 | `gateway.vector.index.indexes` | `{}` | Декларация индексов (`<name>` → `VectorIndexConfig`); единственный источник конфигурации индексов (реестр `agent_vector_index_config` не читается) |
-| `gateway.cache.local_path` | — | **Снято в фазе 5 (п. 5.7)**, см. таблицу `project.json` выше. Путь снимка объявляет платформа: `platform.json` → `data.snapshot_path` |
+| `gateway.cache.local_path` | — | **Снято в фазе 5 (п. 5.7)**, см. таблицу `config.json` выше. Путь снимка объявляет платформа: `platform.json` → `data.snapshot_path` |
 | `channels.postgres.pool.max_conn` | `4` | Число слотов пула; оно же ограничивает число потоков загрузки |
 
 Секции `gateway.sync.*` **удалена**: поллинга и пересинхронизации больше нет,
-настраивать нечего. `config.py` мержит `project.json` в `SETTINGS`; после правки
-`project.json` перезапуск обязателен.
+настраивать нечего. `config.py` мержит `config.json` в `SETTINGS`; после правки
+`config.json` перезапуск обязателен.
 
 #### Требования к таблицам источника
 
@@ -365,8 +377,8 @@ writer; поскольку writer'ом является только загру�
 - **Добавить таблицу в анализ**: добавить её в **оба** места — `audit.tables`
   в `mcp-platform/platform.json` (этим пользуется capability `audit` и именно
   по этому списку проверяется сгенерированный запрос) и
-  `skills.audit_analyzer.tables` в `project.json` (этим наполняется снимок
-  агента), затем перезапустить процесс. Правка только в `project.json` даст
+  `skills.audit_analyzer.tables` в `config.json` (этим наполняется снимок
+  агента), затем перезапустить процесс. Правка только в `config.json` даст
   таблицу в снимке, но не в ответах, потому что запросы к данным больше не
   идут через агента.
 - **Сомнение в свежести кэша**: сверить `loaded_at` в `cache_load_done` с
@@ -484,7 +496,7 @@ SQL было нечем.
 
 ### Contract tests nanobot API — `tests/contract/`
 
-Фиксируют поверхность `nanobot-ai==0.3.0`, от которой зависит адаптер:
+Фиксируют поверхность `nanobot-ai==0.3.5`, от которой зависит адаптер:
 импорт-пути, сигнатуры `AgentLoop.from_config/_assemble_outbound/_save_turn`,
 hook-протокол, MessageBus, SessionManager, BaseChannel ABC, CommandRouter,
 AutoCompact/Consolidator, ключи консолидации конфига, ToolContext,

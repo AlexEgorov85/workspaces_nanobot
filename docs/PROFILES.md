@@ -29,22 +29,22 @@ runtime-таблиц остальная логика агента **не зна�
 ## Структура файлов
 
 ```
-project.json              ← prod (база; специальный файл не нужен)
+config.json               ← prod (база; специальный файл не нужен)
 profiles/
-    test.jsonc            ← test (только дельты от project.json)
+    test.jsonc            ← test (только дельты от config.json)
 session_manager.json      ← per-deploy override (опционально)
 ```
 
-- **`project.json`** — базовая конфигурация. Без оверлея = prod.
-- **`profiles/test.jsonc`** — оверлей для test. Содержит **только** 6
+- **`config.json`** — базовая конфигурация. Без оверлея = prod.
+- **`profiles/test.jsonc`** — оверлей для test. Содержит **только** 5
   profile-owned runtime-ключей (см. ниже). Любые другие ключи → fail-fast.
 - **`session_manager.json`** — historical per-deploy override (pool,
-  timeouts). Применяется на шаге 2 (после `project.json`, до профиля),
+  timeouts). Применяется на шаге 2 (после `config.json`, до профиля),
   поэтому **не может** перетереть profile-owned runtime-таблицы.
 
 ## Profile-owned runtime-настройки
 
-Эти 6 ключей **immutable** после применения профиля:
+Эти 5 ключей **immutable** после применения профиля:
 
 | Роль | Канал | prod | test |
 | --- | --- | --- | --- |
@@ -54,9 +54,58 @@ session_manager.json      ← per-deploy override (опционально)
 | `gateway_logs` | `logging.db.table_name` | `agent_gateway_logs` | `agent_gateway_logs_test` |
 | `question_runs` | `logging.db.question_runs_table` | `agent_question_runs` | `agent_question_runs_test` |
 
-В `profiles/test.jsonc` можно указать **только** эти 6 ключей. Никаких
+В `profiles/test.jsonc` можно указать **только** эти 5 ключей. Никаких
 `dsn`, `vector storage`, `skill data`. Иначе — `ConfigurationError` на
 старте.
+
+### Профиль на стороне платформы (enterprise-mcp)
+
+Три из этих таблиц пишет **не агент, а платформа**: журнал и прогоны
+вопросов уходят операциями `log_events` / `upsert_question_run`, очередь
+задач — операциями `claim_task` / `complete` / `append_assistant_message`.
+Поэтому одного `profiles/test.jsonc` мало: платформе тоже нужно знать, в каком
+контуре она работает.
+
+Агент передаёт платформе **только имя** контура — флагом
+`--profile <имя>` в `gateway.agent.enterprise_mcp.args`, который
+`client_from_settings` дописывает автоматически (только когда профиль не
+`prod`). Значения имён таблиц **не передаются никогда**: они объявлены в
+`mcp-platform/platform.json → profiles.<имя>`, и значение, присланное
+вызывающей стороной, сделало бы вход в данные агента независимым от его
+конфигурации — ровно тот дефект, который чинили в фазе 9 («окружение
+приоритетнее файла»).
+
+Оверлей платформы закрыт списком `PROFILE_OWNED_KEYS`
+(`libs/enterprise_common/settings.py`): перекрывать можно только
+
+| Ключ `platform.json` | prod | test |
+| --- | --- | --- |
+| `data.log_table` | `public.agent_gateway_logs` | `public.agent_gateway_logs_test` |
+| `data.question_runs_table` | `public.agent_question_runs` | `public.agent_question_runs_test` |
+| `data.task_table` | `public.agent_conversation_messages` | `public.agent_conversation_messages_test` |
+
+Всё остальное (пул, LLM, эмбеддинги, снимок, индексы) профилем **не
+разделяется** намеренно: это shared runtime resources, как и `cache.local_path`
+у агента. Пул — тем более: его владелец один.
+
+Три важных свойства:
+
+- **Неизвестный профиль падает, а не берёт базу.** База — это боевые имена,
+  и молчаливый откат означал бы, что тестовый контур пишет в боевой журнал;
+  заметить это можно только по содержимому журнала.
+- **Сверка на старте.** Оверлей объявлен в двух файлах, и правка одного без
+  другого возможна. Сразу после рукопожатия агент берёт у платформы список
+  таблиц, которые она реально проверяет (`schema_check` → поле `tables`) и
+  сверяет со своими. Расхождение — `ConfigurationError` и отказ подниматься.
+- **В очереди задач сверка полная.** `schema_check` раньше не включал
+  `task_table` в проверяемые, хотя платформа им пользуется, — из-за этого
+  профиль, перекрывший очередь, проверял бы наличие боевой таблицы.
+
+### Что профилем НЕ разделяется
+
+- Таблицы сессий (`messages_table` / `meta_table`) — платформа ими не
+  пользуется, они целиком в ведении агента.
+- Снимок DuckDB, векторные индексы, пул соединений, LLM/эмбеддинги.
 
 ## Запуск
 
@@ -122,7 +171,7 @@ search, Memory, Logging, Prompts, Runtime patches, что и в gateway.
 Различие — только в profile и transport (CLI == in-memory bus).
 
 **Streamlit удалён в фазе 1** миграции `enterprise-mcp-platform`: `streamlit_app.py`,
-`lib/services/subprocess_manager.py` и секция `streamlit.*` из `project.json`
+`lib/services/subprocess_manager.py` и секция `streamlit.*` из `config.json`
 не существуют, как и `test_streamlit_app.py`. Живы два entrypoint — `gateway.py`
 и `cli_agent.py`; оба получают профиль через `argv`.
 
@@ -191,7 +240,7 @@ proc = subprocess.Popen(
 ## Порядок merge (ConfigurationResolver)
 
 ```
-1. project.json                     ← база
+1. config.json                     ← база
 2. session_manager.json (если есть) ← per-deploy override
 3. config.json                      ← nanobot-настройки
 4. profiles/<mode>.jsonc            ← профиль (если mode != prod)
@@ -371,7 +420,7 @@ config._initialize_settings(profile)      ← lifecycle-gate
    ▼
 ConfigurationResolver (config.py)
    │
-   ├── 1) project.json
+   ├── 1) config.json
    ├── 2) session_manager.json (override ДО профиля)
    ├── 3) config.json
    ├── 4) profiles/<mode>.jsonc (ПРОФИЛЬ — последний)

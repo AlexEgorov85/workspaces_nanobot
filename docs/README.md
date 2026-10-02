@@ -44,7 +44,7 @@ reference** по своей подсистеме; README в корне — эт�
 | [skill-tool-architecture.md](skill-tool-architecture.md) | Контракт Skill ↔ Tool: что разрешено, что запрещено |
 | [skill-tool-inventory.md](skill-tool-inventory.md) | Текущее состояние всех skill/tool и история удалённых |
 | [legal_summarizer_question_pipeline.md](legal_summarizer_question_pipeline.md) | Конвейер question-mode навыка `legal_summarizer` |
-| [SKILL_AUTHORING.md](SKILL_AUTHORING.md) | **Пошаговый гайд**: как создать свой skill (структура, SKILL.md, регистрация в project.json, runtime API, best practices, anti-patterns, DoD) |
+| [SKILL_AUTHORING.md](SKILL_AUTHORING.md) | **Пошаговый гайд**: как создать свой skill (структура, SKILL.md, регистрация в config.json, runtime API, best practices, anti-patterns, DoD) |
 | [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) | **Нормативный контракт**: принципы, invariant'ы, anti-patterns, decision-чеклист (цель, не «as-is») |
 
 ### Подсистемы
@@ -68,13 +68,13 @@ reference** по своей подсистеме; README в корне — эт�
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | `ApplicationContext`, поток инициализации, `lib/services`, `MessageExchange`, LLM-клиент, утилиты, дерево проекта |
 | [DATABASE.md](DATABASE.md) | Единый пул соединений, универсальный слой данных, конфигурация навыка, DDL, границы P0 |
-| [VECTOR_INDEXES.md](VECTOR_INDEXES.md) | Векторная подсистема: `project.json` → `storage_table` → DuckDB-снапшот → in-memory FAISS, `tools/build_vectors.py`, edge-cases |
+| [VECTOR_INDEXES.md](VECTOR_INDEXES.md) | Векторная подсистема: `config.json` → `storage_table` → DuckDB-снапшот → in-memory FAISS, `tools/build_vectors.py`, edge-cases |
 | [INTERNAL_API.md](INTERNAL_API.md) | `tools.exec`, кастомные `workspace/tools/*.py`, CLI-режимы, `tools/`, добавление настроек |
 | [TESTING.md](TESTING.md) | Запуск тестов, контрактные тесты nanobot API, live e2e |
 
 ### Архив
 
-[`_archive/`](_archive/) — исторические process/baseline/audit-артефакты:
+[`openspec/changes/archive/`](../openspec/changes/archive/) — исторические process/baseline/audit-артефакты:
 проектные планы рефакторингов, инвентаризации OpenSpec-миграции, baseline'ы
 `legal_summarizer`, черновики анализа `history_search` / event logging.
 **Не актуальная документация** — на состояние кода не ссылаться; история
@@ -94,7 +94,7 @@ reference** по своей подсистеме; README в корне — эт�
 - `docs/architecture/` — каталоги инвентарей (генерируются из кода) и `decisions/`.
 - `docs/*-architecture.md` — архитектурные контракты (skill/tool).
 - `docs/*-inventory.md` — инвентаризация компонентов.
-- `docs/_archive/` — исторические process/baseline/audit-заметки (не актуальны).
+- `openspec/changes/archive/` — исторические process/baseline/audit-заметки (не актуальны).
 
 Все ссылки между документами — относительные (`./SKILL.md`, `../README.md`).
 

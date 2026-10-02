@@ -7,7 +7,7 @@
 
 ```mermaid
 flowchart LR
-    CFG["project.json<br/>gateway.vector.index.indexes"] --> BL["tools/build_vectors.py<br/>чанкование + эмбеддинг"]
+    CFG["config.json<br/>gateway.vector.index.indexes"] --> BL["tools/build_vectors.py<br/>чанкование + эмбеддинг"]
     SRC["Источники<br/>(table из конфига)"] --> BL
     BL --> PG["PG: storage_table<br/>сырые эмбеддинги"]
     PG --> LOAD["CacheLoadService<br/>разовая загрузка"]
@@ -40,12 +40,12 @@ DDL: `sql/audit_analyzer/create_oarb_audit_vectors.sql`. Таблица
 (`sql/vectors/*` на новых инстансах не применяются).
 
 Путь к файлу DuckDB-кэша: `resolve_cache_path()` в
-`lib/core/application_context.py` — `project.json::gateway.cache.local_path`
+`lib/core/application_context.py` — `config.json::gateway.cache.local_path`
 либо дефолт `~/.cache/nanobot/duckdb/cache.duckdb`.
 
 ## Конфигурация
 
-Единственный источник конфигурации — `project.json`:
+Единственный источник конфигурации — `config.json`:
 
 ```jsonc
 "gateway": {
@@ -76,7 +76,7 @@ DDL: `sql/audit_analyzer/create_oarb_audit_vectors.sql`. Таблица
 
 Модель — `VectorIndexSettings` / `VectorIndexConfig` в
 `lib/core/project_settings.py`; **все ключи `extra="forbid"`** — опечатка в
-`project.json` валит старт с `ConfigurationError`.
+`config.json` валит старт с `ConfigurationError`.
 
 Поля `VectorIndexConfig`:
 
@@ -92,7 +92,7 @@ DDL: `sql/audit_analyzer/create_oarb_audit_vectors.sql`. Таблица
 | `metric` | `cosine \| inner_product \| None` | Метрика FAISS (дефолт `cosine`) |
 | `enabled` | `bool` | `false` — индекс не участвует в сборке и прогреве (дефолт `true`) |
 
-В skill'е (`project.json::skills.<name>.vector_indexes`) объявляется **только
+В skill'е (`config.json::skills.<name>.vector_indexes`) объявляется **только
 имя** индекса (`VectorIndexEntry` со строгим `extra="forbid"`); source-таблица и
 параметры сборки — общий runtime-конфиг.
 
@@ -102,7 +102,7 @@ DDL: `sql/audit_analyzer/create_oarb_audit_vectors.sql`. Таблица
 base_url `http://localhost:11434/api/embed`, модель `mxbai-embed-large:latest`,
 размерность 1024, http_timeout 60.0, retries 3. Bearer-токен — переменная
 окружения `EMBED_TOKEN` (если не задана — запрос без `Authorization`).
-Секции `gateway.vector.embedding` в `project.json` **нет**.
+Секции `gateway.vector.embedding` в `config.json` **нет**.
 
 ## Индексы текущей инсталляции
 
@@ -113,7 +113,7 @@ base_url `http://localhost:11434/api/embed`, модель `mxbai-embed-large:lat
 | `audit_reports_index` | `oarb.audit_reports` | `full_text, title, report_number, report_date` | `full_text` (chunked 500/80) + `title` | да |
 
 Имена таблиц и индексов — **не константы кода**, а значения текущей
-инсталляции; в других развёртываниях они задаются в `project.json`
+инсталляции; в других развёртываниях они задаются в `config.json`
 (`gateway.vector.index.storage_table`, `gateway.vector.index.indexes.*`,
 `skills.<name>.vector_indexes[*].name`).
 
@@ -127,7 +127,7 @@ base_url `http://localhost:11434/api/embed`, модель `mxbai-embed-large:lat
 | **Только если источник изменился** | `--check` | Сравнивает сигнатуру источника (`COUNT` + `MAX(track_column)`), при diff запускает инкрементальную сборку |
 | **Сводное состояние** | `--status` | Состояние индексов без записи |
 | **Прогнать без записи в БД** | `--dry-run` | План без INSERT/UPDATE |
-| **Отключить индекс** | `"enabled": false` в `project.json` | `build_vectors` и `preload_indexes` его пропускают; вектора остаются |
+| **Отключить индекс** | `"enabled": false` в `config.json` | `build_vectors` и `preload_indexes` его пропускают; вектора остаются |
 | **Удалить вектора индекса** | `DELETE FROM <storage_table> WHERE source = '<index>'` | Поиск вернёт пустую выдачу до пересборки |
 | **Проверить declared vs runtime** | `python tools/check_indexes.py` | Exit 0 — согласовано, 1 — divergence, 2 — инфраструктурная ошибка |
 | **Посмотреть runtime-индексы из навыка** | `python scripts/cli.py --list-indexes` | Список индексов из DuckDB-снапшота + `CURRENT`/`ORPHAN` |
@@ -137,7 +137,7 @@ base_url `http://localhost:11434/api/embed`, модель `mxbai-embed-large:lat
 
 ## Как добавить новый индекс
 
-**1. Опишите индекс в `project.json::gateway.vector.index.indexes.<name>`** и,
+**1. Опишите индекс в `config.json::gateway.vector.index.indexes.<name>`** и,
 если индекс используется конкретным skill'ом, добавьте его имя в
 `skills.<name>.vector_indexes` (`[{"name": "objects_index"}]`).
 
@@ -194,7 +194,7 @@ python tools/build_vectors.py --check                # только если с�
 ### Изменился состав embedding/content-колонок, chunk-параметры или metric
 
 ```bash
-# правка project.json::gateway.vector.index.indexes.<name>
+# правка config.json::gateway.vector.index.indexes.<name>
 python tools/build_vectors.py --index audits_index --full-rebuild
 ```
 
@@ -220,7 +220,7 @@ python tools/build_vectors.py --status          # проверить разме�
 - колонка добавлена/переименована в `embedding_columns`, изменён тип
   (`varchar→text`, `bigint→int`) → `--full-rebuild`;
 - `embedding_columns` ссылается на удалённую колонку → сначала правка
-  `project.json`, затем `--full-rebuild` (иначе ошибка
+  `config.json`, затем `--full-rebuild` (иначе ошибка
   `column "X" does not exist`);
 - `track_column` удалён → индексация перестанет обновляться инкрементально
   (задать новую track-колонку в конфиге).
@@ -264,7 +264,7 @@ DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 
 ### Удалить индекс из конфигурации
 
-Убрать объект из `project.json::gateway.vector.index.indexes` (и из
+Убрать объект из `config.json::gateway.vector.index.indexes` (и из
 `skills.<name>.vector_indexes`, если был). `build_vectors --validate-only`
 покажет расхождение, если ссылки остались.
 
@@ -274,7 +274,7 @@ DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 |-------------|-----------|
 | Удалили вектора (`DELETE`/`TRUNCATE` по `storage_table`) | `python tools/build_vectors.py --full-rebuild` |
 | Удалили/испортили локальный снимок кэша | `python tools/build_vectors.py --full-rebuild` + перезапуск gateway (снимок пересобирается `CacheLoadService` при старте) |
-| Удалили индекс из `project.json` | Вернуть объект, затем `--full-rebuild` |
+| Удалили индекс из `config.json` | Вернуть объект, затем `--full-rebuild` |
 
 ## Сборка одного индекса
 
@@ -359,7 +359,7 @@ provider.search_vector(query, index_name="audits_index", top_k=5, threshold=None
 ## declared vs runtime
 
 `tools/check_indexes.py` — контроль расхождения между декларацией
-(`project.json::gateway.vector.index.indexes`) и runtime (набор `source` в
+(`config.json::gateway.vector.index.indexes`) и runtime (набор `source` в
 DuckDB-снапшоте `storage_table`):
 
 - `MISSING` — индекс объявлен, но векторов нет (поиск вернёт пусто);
@@ -367,7 +367,7 @@ DuckDB-снапшоте `storage_table`):
 - `STALE/INVALID` — устаревшая/повреждённая сигнатура.
 
 Exit codes: `0` — расхождений нет, `1` — расхождение, `2` — инфраструктурная
-ошибка (снапшот недоступен, `project.json` невалиден).
+ошибка (снапшот недоступен, `config.json` невалиден).
 
 `--json` печатает машиночитаемый отчёт (`declared` / `runtime` / `divergence`).
 
@@ -399,8 +399,8 @@ Skill-уровневый список: `python scripts/cli.py --list-indexes` �
 
 | Симптом | Причина | Решение |
 |---------|---------|---------|
-| `--validate-only` ругается на отсутствие колонки | опечатка в `project.json` или DDL-расхождение | сверить `information_schema.columns`, исправить конфиг |
-| `unknown_index` при `--mode vector` | индекс не объявлен в `gateway.vector.index.indexes` | добавить объект в `project.json` и собрать индекс |
+| `--validate-only` ругается на отсутствие колонки | опечатка в `config.json` или DDL-расхождение | сверить `information_schema.columns`, исправить конфиг |
+| `unknown_index` при `--mode vector` | индекс не объявлен в `gateway.vector.index.indexes` | добавить объект в `config.json` и собрать индекс |
 | Поиск возвращает `[]`, `_search_error` пуст | в снапшоте нет строк для `source` | `build_vectors --index <name>`, дождаться sync, `preload_indexes` |
 | `Размерность индекса не совпадает…` | сменилась модель эмбеддинга | `--full-rebuild` после правки `_EMBED_*` |
 | `SIGNATURE_STATUS=STALE` в результатах | изменились параметры сборки | `--full-rebuild` (загрузка не блокируется) |
@@ -412,7 +412,7 @@ Skill-уровневый список: `python scripts/cli.py --list-indexes` �
 ## Миграция с persisted-кеша
 
 Инструкции для перехода со старой схемы (удаление
-`public.agent_vector_index_store`, переход конфигурации в `project.json`) —
+`public.agent_vector_index_store`, переход конфигурации в `config.json`) —
 в [MIGRATION.md](MIGRATION.md). Детали runtime-контракта — в
 [ARCHITECTURE.md](ARCHITECTURE.md) § «Vector-инфраструктура», нормативные
 требования — в `openspec/specs/data/vector-indexes/spec.md`.

@@ -28,10 +28,11 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 (case-insensitive). Имя env-переменной теперь каноническое — `LLM_API_KEY`
 (вместо исторического `MISTRAL_API_KEY`).
 
-### JSONC в `project.json` не парсится
+### JSONC в `profiles/test.jsonc` не парсится
 
 Только `//` и `/* */` поддерживаются. Хэштеги `#` — нет. Кавычки в DSN не должны
-пересекаться с комментариями.
+пересекаться с комментариями. (`config.json` — строгий JSON, комментариев не
+допускает.)
 
 ---
 
@@ -86,7 +87,9 @@ DuckDB `ATTACH ... READ_WRITE` берёт эксклюзивный `flock`, ко
   * **по умолчанию** снимок уходит на `~/.cache/nanobot/duckdb/cache.duckdb` —
     POSIX `fcntl` работает там штатно, проблема исчезает без действий;
   * если хотите хранить снимок в другой локальной директории (например,
-    `/var/lib/nanobot/cache/`) — задайте `gateway.cache.local_path` в `project.json`;
+    `/var/lib/nanobot/cache/`) — путь снимка объявляет платформа,
+    `mcp-platform/platform.json` → `data.snapshot_path` (ключ
+    `gateway.cache.local_path` агента снят);
   * если старт выкидывает `[cache] WARNING: ... is on nfs ...` — путь попал
     на NFS через symlink; см. `_warn_if_cache_path_on_nfs()` в
     `lib/core/application_context.py` и уберите NFS из пути.
@@ -112,10 +115,15 @@ DuckDB `ATTACH ... READ_WRITE` берёт эксклюзивный `flock`, ко
 Подсистема бенчмарков качества удалена в фазе 1 миграции
 `enterprise-mcp-platform`: пакет `benchmarks/` (runner, evaluator, scorer,
 loader, reporter, db, hooks, models), скрипты `tools/legal_benchmark.py`,
-`tools/legacy_audit.py`, `tools/test_audit.py`, таблицы
+`tools/test_audit.py`, таблицы
 `agent_benchmark_runs` / `agent_benchmark_results` и секция `benchmark.*`
-в `project.json`. Разделы этого файла про LLM-судью и загрузчик YAML- suites
+в `config.json`. Разделы этого файла про LLM-судью и загрузчик YAML- suites
 больше не применимы.
+
+> `tools/legacy_audit.py` при этом **остался** (файл на диске есть) и к
+> бенчмаркам отношения не имеет: это zero-reference аудит legacy-символов —
+> regression guard с тремя режимами `audit()` / `assert_no_legacy()` / `main()`,
+> сканирующий `lib/`, `workspace/`, `tools/`, `tests/`, `sql/`.
 
 **Не путать** с каталогом `tests/benchmarks/` — он остался: это тесты
 quality-бенчмарков навыка `legal_summarizer` (проверка golden-датасета
@@ -141,14 +149,22 @@ Streamlit-UI удалён в фазе 1 миграции `enterprise-mcp-platfor
 PowerShell интерпретирует `=` по-своему. Используйте кавычки: `"year=2024"` или
 `'{"year":2024}'` (Linux-формат).
 
+### В консоли печатается `?[1m` вместо цвета
+
+`lib/utils/windows_terminal.py` — поддержка Windows-консоли без VT
+(legacy cmd/PowerShell). `?[1m` появляется ровно тогда, когда на хосте выключен
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING`: консоль получает ESC, но не
+интерпретирует последовательность. Кодировка и Rich тут ни при чём — чинит
+именно этот модуль.
+
 ---
 
 ## Тесты
 
 ### Тесты падают на импорте `nanobot`
 
-`nanobot-ai==0.3.0` нужен (закреплён в `requirements.txt`). Проверьте: `pip show nanobot-ai`.
-Если ниже — `pip install --upgrade 'nanobot-ai==0.3.0'`.
+`nanobot-ai==0.3.5` нужен (закреплён в `requirements.txt`). Проверьте: `pip show nanobot-ai`.
+Если ниже — `pip install --upgrade 'nanobot-ai==0.3.5'`.
 
 ---
 
