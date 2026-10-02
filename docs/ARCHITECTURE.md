@@ -128,12 +128,12 @@ flowchart LR
 | Сервис | Мотивация (почему выделен) |
 |--------|---------------------------|
 | `config_service.py` | Дубликат `_load_runtime_config` + `SETTINGS`-аксессора между gateway и cli. Pre-resolve `${PROVIDER_API_KEY}` от .secrets.env (см. ниже). |
-| `session_storage.py` | Выбор `PGSessionManager` / `SessionManager` (auto / postgres / file) с поддержкой `session_manager.json` override. |
-| `runtime_patcher.py` | Все 12 monkey-patch'ей upstream `nanobot.agent.loop.AgentLoop` в одном классе с fallback при изменении API nanobot. Применяется через `apply_all()` из `ApplicationContext.create()`. **НЕ** занимается регистрацией project tools (вынесено в `project_tool_loader.py`). Полный каталог — `docs/architecture/runtime-patcher-inventory.md`. |
+| `session_storage.py` | Выбор режима хранения сессий (auto / postgres / file) с поддержкой `session_manager.json` override. `postgres` означает включённое холодное зеркало `SessionColdSyncService`; менеджер сессий во всех режимах — класс библиотеки `SessionManager` поверх `SanitizingSessionStore`. |
+| `runtime_patcher.py` | Все 6 monkey-patch'ей upstream `nanobot.agent.loop.AgentLoop` в одном классе с fallback при изменении API nanobot. Применяется через `apply_all()` из `ApplicationContext.create()`. **НЕ** занимается регистрацией project tools (вынесено в `project_tool_loader.py`). Полный каталог — `docs/architecture/runtime-patcher-inventory.md`. |
 | `project_tool_loader.py` | Stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(...) -> ProjectToolsLoadResult`. Вызывается из `ApplicationContext.create()` сразу после `apply_all()` как независимый stage composition root'а. **НЕ** компонент (нет lifecycle/state/config — критерии `openspec/specs/architecture/component-model/spec.md`). |
 | `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
-| ~~`preload_service.py`~~ | **Удалён 2026-10-01.** FAISS preload и `compute_index_health` живут в `mcp-platform/libs/vectors/preload.py`. Прежнее описание: Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычислялся через единый `resolve_cache_path()` — **после фазы 5 (п. 5.8) функция живёт в `lib/services/cache_provider_impl.py`**, а сам сервис больше не вызывается из runtime: снимком владеет capability `data` платформы. Остался для standalone-утилит сборки индексов. |
+| ~~`preload_service.py`~~ | **Удалён 2026-10-01.** FAISS preload и `compute_index_health` живут в `mcp-platform/libs/vectors/preload.py`. Прежнее описание: Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычислялся через единый `resolve_cache_path()` — **после фазы 5 (п. 5.8) функция живёт в `mcp-platform/libs/enterprise_data/snapshot/store.py`**, а сам сервис больше не вызывается из runtime: снимком владеет capability `data` платформы. Standalone-утилит сборки индексов в агенте не осталось — она уехала на платформу (`servers/enterprise/build_index.py`) и снимок не открывает. |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
 | `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает схему из `SKILL.md` (секция «Схема домена», см. `workspace/skills/audit_analyzer/SKILL.md`). |
@@ -338,9 +338,9 @@ dim-«нет данных в кэше», неотличимо от реальн�
 (`store → vdb → cache → files`), без какого-либо указания, что на
 самом деле расхождение есть. Тогда `PreloadService.preload_vector_indexes`
 после прогона считает явное расхождение между **declared** (JSON,
-`config.json::gateway.vector.index.indexes.*`) и **runtime** (DuckDB-снапшот
-таблицы-хранилища `gateway.vector.index.storage_table`,
-`cache_provider_impl.list_runtime_vector_indexes()`), классифицируя каждое
+`config.json::gateway.vector.index.indexes.*`) и **runtime** (снимок DuckDB,
+таблица-хранилище `platform.json → vectors.storage_table`,
+`mcp-platform/libs/vectors/runtime.py::list_runtime_vector_indexes()`), классифицируя каждое
 имя индекса в одну из категорий:
 
   * `missing` — объявлен в JSON, но не найден в снапшоте-хранилище;
@@ -609,8 +609,8 @@ async def _notify(self, session_key, report):
 идти нечему.
 
 **Почему `agent_conversation_messages`, а не `agent_session_messages`:**
-контекст промпта строится из `PGSessionManager` (таблица
-`agent_session_messages`). Если бы заметка попадала туда — она бы
+контекст промпта строится из менеджера сессий (таблица
+`agent_session_messages` в холодном зеркале). Если бы заметка попадала туда — она бы
 съедала токены, которые сжатие только что освободило. Заметка
 видна в чате, но не загружается в LLM-промпт.
 
@@ -1638,11 +1638,11 @@ nanobot/
 │   │   └── infra_registration.py         #     регистрация инфраструктурных ресурсов (vector storage)
 │   ├── services/                         #   сервисный слой
 │   │   ├── config_service.py             #    SETTINGS-аксессор + pre-resolve env + таймауты
-│   │   ├── session_storage.py            #    выбор PGSessionManager / SessionManager
-│   │   ├── runtime_patcher.py            #    12 monkey-patch'ей upstream nanobot.agent.loop.AgentLoop
+│   │   ├── session_storage.py            #    выбор режима хранения сессий + async_save
+│   │   ├── runtime_patcher.py            #    6 monkey-patch'ей upstream nanobot.agent.loop.AgentLoop
 │   │   ├── project_tool_loader.py        #    stateless loader project tools (workspace/tools/*.py)
-│   │   ├── channel_factory.py            #    ChannelManager + Redis/Postgres каналы
-│   │   ├── transcription_service.py      #    openai/groq key/URL/language
+│   │   ├── channel_factory.py            #    ChannelManager + канал PostgreSQL
+│   │   ├── ~~transcription_service.py~~   #     снят: голос разбирает базовый класс библиотеки
 │   │   ├── db_logging_service.py         #    worker, batch INSERT, без JSONL-fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
 │   │   ├── llm_config.py                 #    УДАЛЁН — настройки LLM в mcp-platform/platform.json

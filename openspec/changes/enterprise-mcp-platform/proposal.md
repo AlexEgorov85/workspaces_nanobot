@@ -418,8 +418,36 @@ INSERT INTO agent_gateway_logs
 - `runtime/entrypoints` — **MODIFIED**: однопроцессный агент, без Streamlit.
 - `logging-db` — **MODIFIED**: писатель переезжает в `enterprise-mcp`, форма
   сообщений остаётся в агенте.
-- `data/cache-provider` — **REMOVED** целиком, вместе с
-  `data/vector-indexes` в части снапшота.
+- `data/cache-provider` — **MODIFIED (перенос владения, не удаление)**. Изначально
+  change объявлял спеку REMOVED целиком, но на применении этого не произошло:
+  `openspec/specs/data/cache-provider/spec.md` осталась в дереве, её содержимое
+  переписано под платформенную реальность, а владение подсистемой ушло
+  capability `data`. Нормативная дельта перехода лежит в
+  `specs/data/duckdb-cache/spec.md` — под новым именем capability, которое
+  введено этим же change.
+- `data/vector-indexes` — **MODIFIED (перенос владения, не удаление)**. Ровно
+  та же история: спека осталась, сборка и владение FAISS-индексами уехали в
+  capability `vectors`, дельта — в `specs/data/vectors/spec.md`.
+- `skills/legal-summarizer-query` — **MODIFIED (перенос владения)**. Домен и
+  IPC-контракт уехали в capability `legal_summarizer`, в агенте осталась только
+  регистрация tool'а-обёртки. В этом change дельта под этим именем capability
+  **отсутствует** — пробел фиксируется здесь; до появления `specs/skills/`
+  в change переход не описан формально.
+
+### Расхождение имён capability
+
+Change вводит имена `data/duckdb-cache` и `data/vectors`, тогда как живые спеки
+продолжают называться `data/cache-provider` и `data/vector-indexes`. Имена в
+дельтах и имена в дереве `openspec/specs/` не совпадают, поэтому при архивировании
+change читатель не найдёт `specs/data/duckdb-cache/` и `specs/data/vectors/` там,
+где их искал.
+
+Это следствие того, что удаление старых спек заменили переписыванием на месте:
+перенос состоялся, но под прежними именами. Разрешается либо переименованием
+живых спек в новые имена (тогда раздел `## Capabilities` надо привести к
+`NEW` без оговорок), либо принятием прежних имён как канонических (тогда
+дельты `duckdb-cache`/`vectors` надо переименовать). Выбор за владельцем;
+до него обе стороны описаны выше, чтобы архив не вводил в заблуждение.
 
 ## Impact
 
