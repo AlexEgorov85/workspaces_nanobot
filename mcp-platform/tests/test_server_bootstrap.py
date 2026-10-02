@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,56 @@ async def _call(transport: Any, name: str, arguments: dict[str, Any], meta: Any 
         }
     async with connect(transport) as session:
         return await session.call_tool(name, arguments=arguments, meta=meta)
+
+
+class _FakeCursor:
+    """Курсор поверх заготовленных строк: отвечает как ``psycopg2``."""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+        self.description: list[tuple[str]] | None = None
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        # ``description`` есть только у запроса, который что-то выбирает:
+        # по нему сервис решает, читать строки или нет.
+        self.description = [("table_schema",), ("table_name",)] if sql.lstrip().upper().startswith("SELECT") else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+
+class _FakePool:
+    """Пул PostgreSQL без сервера.
+
+    Подменяется вместо настоящего пула, чтобы операция проходила по
+    настоящему пути — bootstrap, реестр, валидация схемы, конвейер
+    исполнения, — и упиралась только в соединение. ``delay`` нужен, чтобы
+    довести операцию до истечения срока: сам по себе он ничего не проверяет,
+    проверяет его вызывающий тест.
+    """
+
+    def __init__(self, rows: list[tuple[Any, ...]] | None = None, delay: float = 0.0) -> None:
+        self.rows = list(rows or ())
+        self.delay = delay
+
+    def run(self, job: Any) -> Any:
+        if self.delay:
+            time.sleep(self.delay)
+        return job(_FakeConn(self.rows))
+
+
+class _FakeConn:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.rows = rows
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self.rows)
 
 
 def _main_statements() -> list[str]:
@@ -540,6 +591,91 @@ class TestWireContract:
         transport, _, _ = enterprise_server.build()
         result = anyio.run(_call, transport, "log_event", {})
         assert result.isError is True
+
+    def test_health_reports_missing_tables_over_the_wire(self) -> None:
+        """Диагностика отвечает по протоколу, а не только сервисом.
+
+        Сценарий «health» приёмки фазы 10 — это вопрос к серверу по тому же
+        протоколу, по которому приходят боевые вызовы. Проверка сервиса
+        ``DataService.schema_check`` доказывает только исправность метода:
+        операция может не быть зарегистрирована, не иметь схемы или не
+        дойти до ответа, и такой тест останется зелёным.
+
+        Подменяется только пул PostgreSQL: всё остальное — настоящий
+        bootstrap, настоящий реестр и настоящая валидация схемы.
+        """
+        import json
+
+        import anyio
+
+        transport, _, container = enterprise_server.build()
+        container.get("data")._db = _FakePool(  # noqa: SLF001 - подмена пула под провод
+            rows=[("public", "present_table")]
+        )
+
+        result = anyio.run(
+            _call,
+            transport,
+            "schema_check",
+            {"expected": ["public.present_table", "public.absent_table"]},
+        )
+
+        assert not result.isError
+        report = json.loads(result.content[0].text)
+        # Отчёт различает «таблицы нет» и «соединения нет»: при соединении
+        # found=1, а отсутствующая названа поимённо. Схлопывать эти два
+        # состояния в один «ok» здесь нельзя — по нему агент не поймёт,
+        # чинить ему миграцию или сеть.
+        assert report["ok"] is False
+        assert report["missing"] == ["public.absent_table"]
+        assert report["found"] == 1
+        assert report["expected"] == 2
+
+    def test_timeout_is_reported_and_server_survives(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Истёкший срок приходит кодом ``timeout``, а сервер продолжает жить.
+
+        Сценарий «таймаут» приёмки фазы 10. Проверяется именно то, что видит
+        вызывающая сторона: операция, которая не уложилась в срок, обязана
+        вернуть ``timeout`` с признаком повторяемости, а не уронить сервер
+        и не вернуть «успешный» пустой результат.
+
+        Поток исполнителя, который не отменён, всё ещё спал на этом пути,
+        поэтому вызов сразу после таймаута стоял бы в очереди за ним. Проверка
+        живости идёт через discovery (исполнитель не занимает) и через
+        обычный вызов, когда дочерний поток уже отработал.
+        """
+        import anyio
+
+        monkeypatch.setenv("ENTERPRISE_EXEC_TIMEOUT_SEC", "0.05")
+        transport, _, container = enterprise_server.build()
+        pool = _FakePool(rows=[("public", "t")], delay=0.4)
+        container.get("data")._db = pool  # noqa: SLF001 - подмена пула под провод
+
+        started = time.monotonic()
+        result = anyio.run(_call, transport, "schema_check", {"expected": ["public.t"]})
+        elapsed = time.monotonic() - started
+
+        assert result.isError is True
+        assert "timeout" in result.content[0].text
+        assert "Traceback" not in result.content[0].text
+        # Сервер не ждал операцию до конца: срок из настроек есть предел
+        # времени, а не только извещение постфактум.
+        assert elapsed < pool.delay, (
+            f"вызов ждал {elapsed:.2f} с при пределе {pool.delay} с — "
+            "таймаут не прервал исполнение"
+        )
+
+        # Живость: discovery идёт мимо исполнителя и обязан работать сразу.
+        names = {t.name for t in anyio.run(_discover, transport)}
+        assert "schema_check" in names, "после таймаута сервер перестал отвечать"
+
+        # И вызов, когда дочерний поток освободил исполнитель.
+        time.sleep(pool.delay)
+        pool.delay = 0.0
+        alive = anyio.run(_call, transport, "schema_check", {"expected": ["public.t"]})
+        assert not alive.isError, alive.content[0].text
 
 
 class TestSqlglotIsMandatory:
