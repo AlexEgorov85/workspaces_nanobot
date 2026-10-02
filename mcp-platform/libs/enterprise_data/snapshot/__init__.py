@@ -64,6 +64,7 @@ from libs.enterprise_data.snapshot.store import (
     open_snapshot_store,
     reject_unsupported_filesystem,
     resolve_snapshot_path,
+    resolve_snapshot_setting,
     split_table,
 )
 from libs.enterprise_data.snapshot.writer import (
@@ -100,6 +101,7 @@ __all__ = [
     "reject_unsupported_filesystem",
     "resolve_column_specs",
     "resolve_snapshot_path",
+    "resolve_snapshot_setting",
     "rewrite_duck_sql",
     "run_query",
     "split_table",

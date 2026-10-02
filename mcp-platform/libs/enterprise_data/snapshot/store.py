@@ -86,6 +86,16 @@ META_SCHEMA = "__nanobot_meta"
 #: имя добавляется внутри: путь и имя файла конфигурируются раздельно.
 SNAPSHOT_FILENAME = "cache.duckdb"
 
+#: Схемы, которые :meth:`DuckDbSnapshotStore.reset` не трогает.
+#:
+#: ``main`` — умолчание DuckDB: снос этой схемы снёс бы само подключение,
+#: даже с ``CASCADE``. Остальное — служебное, его создаёт сама СУБД, и
+#: ``DROP`` по нему бессмыслен или запрещён. Всё, что сюда не входит, —
+#: пользовательские схемы, то есть ровно то, что загружал загрузчик.
+_SYSTEM_SCHEMAS = frozenset(
+    {"main", "system", "information_schema", "pg_catalog", "temp"}
+)
+
 # DuckDB сообщает держателя блокировки в тексте ошибки, но в разных сборках
 # по-разному: Windows — «File is already open in C:\...\python.exe (PID 1234)»,
 # Linux — «Conflicting lock is held by process with PID 1234». Держатель нужен
@@ -198,6 +208,51 @@ def _normalize_fs_path(path: str) -> str:
     совпала бы — то есть проверка молча превратилась бы в «разрешено всё».
     """
     return path.replace("\\", "/")
+
+
+def resolve_snapshot_setting(raw: str | None, setting_name: str) -> str:
+    """Разобрать объявленный путь снимка: ``~`` → домашний каталог.
+
+    **Зачем.** Без этого в ``platform.json`` приходилось писать путь конкретной
+    машины, а проект этого не допускает: конфигурация переезжает между
+    Windows и Linux, и абсолютный путь на другой машине просто не существует.
+    ``~/.cache/nanobot/duckdb/cache.duckdb`` работает на обеих — на Windows
+    разворачивается в каталог профиля, на Linux — в домашний каталог.
+
+    Разбор живёт здесь, а не в реестре настроек: правило касается только
+    пути снимка, и общее правило «разворачивать ``~`` во всех настройках»
+    задело бы секреты, где ведущая ``~`` — обычный символ пароля.
+
+    Путь **не** делается относительным намеренно. Относительный путь
+    разрешается от текущего каталога процесса, а MCP-сервер запускается с
+    ``cwd = mcp-platform``, а операторская загрузка — откуда угодно. Один и
+    тот же конфиг дал бы два разных кеша в зависимости от того, откуда
+    запустили, то есть появилось бы второе место, решающее, где лежит снимок.
+
+    Args:
+        raw: значение настройки как есть.
+        setting_name: имя настройки для сообщения об ошибке.
+
+    Returns:
+        Развёрнутый путь либо исходная строка, если ``~`` не использован.
+
+    Raises:
+        CacheOpenError: значение начинается с ``~``, но домашний каталог
+            развернуть не удалось. Молча оставить ``~...`` нельзя: DuckDB
+            отвергнет такой путь ошибкой, в которой не сказано, что дело
+            в настройке.
+    """
+    text = str(raw or "").strip()
+    if not text.startswith("~"):
+        return text
+    try:
+        return str(Path(text).expanduser())
+    except (RuntimeError, OSError) as exc:
+        raise CacheOpenError(
+            f"{setting_name}: домашний каталог не разворачивается ({exc}); "
+            f"укажите абсолютный путь",
+            cause=exc,
+        ) from exc
 
 
 def resolve_snapshot_path(
@@ -669,22 +724,32 @@ class DuckDbSnapshotStore(CacheStore):
         return result
 
     def get_stats(self) -> dict[str, Any]:
-        """Снимок состояния хранилища для мониторинга."""
+        """Снимок состояния хранилища для мониторинга.
+
+        Перечисление таблиц идёт по схемам, которые реально есть в файле, а не
+        по схеме по умолчанию. Иначе мониторинг снимка, лежащего в ``oarb``,
+        рапортовал «таблиц нет» — то есть молча врал именно там, где его и
+        читают, чтобы узнать, что снимок живой.
+        """
         with self._read_conn() as conn:
             tables: dict[str, Any] = {}
             vector_sources: dict[str, Any] = {}
             if conn is not None:
                 try:
-                    rows = conn.execute(
-                        "SELECT table_schema, table_name FROM information_schema.tables "
-                        "WHERE table_schema = ? ORDER BY table_name",
-                        [self._schema],
-                    ).fetchall()
-                    for schema, name in rows:
-                        cnt = conn.execute(
-                            f'SELECT COUNT(*) FROM "{schema}"."{name}"'
-                        ).fetchone()[0]
-                        tables[name] = {"rows": cnt}
+                    for schema in self._user_schemas(conn):
+                        rows = conn.execute(
+                            "SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = ? ORDER BY table_name",
+                            [schema],
+                        ).fetchall()
+                        for (name,) in rows:
+                            cnt = conn.execute(
+                                f'SELECT COUNT(*) FROM "{schema}"."{name}"'
+                            ).fetchone()[0]
+                            tables[name] = {
+                                "rows": cnt,
+                                "schema": schema,
+                            }
                 except Exception:  # noqa: BLE001 - статистика не должна ронять вызов
                     pass
                 if self._vector_db_table:
@@ -831,6 +896,64 @@ class DuckDbSnapshotStore(CacheStore):
             except Exception as e:  # noqa: BLE001 - контракт возвращает bool
                 self._record_write_error("replace", table, e)
                 return False
+
+    def reset(self) -> list[str]:
+        """Опустошить снимок: удалить все пользовательские схемы целиком.
+
+        **Зачем это нужно.** Обычная загрузка берёт таблицу целиком
+        (``replace_records``), но **не трогает то, чего больше никто не
+        объявляет**. Проверено опытом: таблица, оставшаяся от прежнего
+        объявления, пережила загрузку и осталась в снимке навсегда. Со
+        временем в базе копится мусор, которого нет ни в одном объявлении,
+        и он виден любому, кто перечислит таблицы снимка.
+
+        Удаление объектов внутри файла, а не файла целиком, — сознательно:
+        файл может быть открыт читателем, и «пересоздать файл» означало бы
+        либо гонку, либо удаление, которого делать нечем.
+
+        Args:
+            (нет)
+
+        Returns:
+            Имена удалённых схем, по алфавиту.
+
+        Raises:
+            ReadOnlyAssertionError: снимок открыт на чтение. Стирание снимка —
+                операция записи, и она законна только на стадии загрузки.
+        """
+        self._assert_writable("reset", "<all schemas>")
+        with self._lock:
+            try:
+                self._open_locked()
+                assert self._conn is not None
+                rows = self._conn.execute(
+                    "SELECT DISTINCT schema_name FROM information_schema.schemata"
+                ).fetchall()
+                # Снимаем только пользовательские схемы: что именно система
+                # не трогает — в :data:`_SYSTEM_SCHEMAS`. ``DISTINCT`` обязателен:
+                # DuckDB отдаёт по одной строке на каталог, поэтому ``main``
+                # приходит трижды, и без него и список удалённых схем, и лог
+                # показали бы одно и то же имя несколько раз.
+                removable = sorted(
+                    str(row[0])
+                    for row in rows
+                    if str(row[0]) not in _SYSTEM_SCHEMAS
+                )
+                for schema in removable:
+                    self._conn.execute(
+                        f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'
+                    )
+                if removable:
+                    self._count_write()
+                logger.info(
+                    "[snapshot_writer] снимок опустошён, схем удалено: %d (%s)",
+                    len(removable),
+                    ", ".join(removable) or "—",
+                )
+                return removable
+            except Exception as exc:  # noqa: BLE001 - отказ должен быть виден
+                self._record_write_error("reset", "<all schemas>", exc)
+                raise
 
     def ensure_schema(
         self,

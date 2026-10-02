@@ -337,9 +337,19 @@ def _snapshot(settings: Settings) -> Any:
     платформе для standalone-утилит (``resolve_snapshot_path``), но не как
     вторая переменная окружения.
     """
-    path = str(settings.get("ENTERPRISE_SNAPSHOT_PATH")).strip()
-    from libs.enterprise_data.snapshot import CacheAccessMode, open_snapshot_store
+    from libs.enterprise_data.snapshot import (
+        CacheAccessMode,
+        open_snapshot_store,
+        resolve_snapshot_setting,
+    )
     from libs.enterprise_data.snapshot.unavailable import UnavailableSnapshot
+
+    # ``~`` разворачивается здесь, а не в реестре: правило касается только
+    # пути снимка, и общее «разворачивать ``~`` во всех настройках» задело бы
+    # секреты, где ведущая ``~`` — обычный символ пароля.
+    path = resolve_snapshot_setting(
+        settings.get("ENTERPRISE_SNAPSHOT_PATH"), "ENTERPRISE_SNAPSHOT_PATH"
+    )
 
     if not path:
         return UnavailableSnapshot(
