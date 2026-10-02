@@ -41,9 +41,16 @@ class _Ctx:
     """Минимальный контекст: сборщику нужны только сервис и каталог."""
 
     def __init__(self, client: Any, tmp_path: Any) -> None:
+        # Имена таблиц берутся из объявления настроек тем же путём, что и в
+        # сборке, а не пишутся здесь: страж test_no_hardcoded_table_names
+        # запрещает зашитое имя, потому что переименование таблицы иначе тихо
+        # расходится с конструктором. Авто-дефолтов в коде нет намеренно.
+        from lib.services.config_service import ConfigService
+
+        section = ConfigService().settings_section("logging").get("db", {})
         self.db_logging_service = DbLoggingService(
-            table_name="agent_gateway_logs",
-            question_runs_table="agent_question_runs",
+            table_name=section["table_name"],
+            question_runs_table=section["question_runs_table"],
         )
         self.enterprise_mcp = client
         self.workspace_dir = tmp_path
