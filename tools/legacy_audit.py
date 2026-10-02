@@ -362,17 +362,19 @@ def assert_no_legacy() -> None:
         if (project_root / rel_path).is_file():
             forbidden_present.append(rel_path)
 
-    # Config-level guard (Этап 11): project.json не должен содержать
-    # legacy-секций.
+    # Config-level guard (Этап 11): в единственном файле настроек не должно
+    # быть legacy-секций. Раньше страж смотрел на ``project.json`` и уходил
+    # по ``if cfg_path.is_file()`` — после выпила того файла он молча
+    # превратился в no-op, то есть секция могла вернуться незамеченной.
     config_legacy: list[str] = []
-    cfg_path = project_root / "project.json"
+    cfg_path = project_root / "config.json"
     if cfg_path.is_file():
         try:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             gw = cfg.get("gateway") or {}
             if isinstance(gw, dict) and "vector_index" in gw:
                 config_legacy.append(
-                    "project.json::gateway.vector_index (legacy → gateway.vector.index)"
+                    "config.json::gateway.vector_index (legacy → gateway.vector.index)"
                 )
         except (OSError, json.JSONDecodeError):
             pass

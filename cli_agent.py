@@ -161,7 +161,17 @@ def _run_vanilla(args: argparse.Namespace) -> None:
         display = DisplayConfig.from_settings(
             ctx.config_service.settings_section("cli")
         )
-        asyncio.run(run_repl(ctx.agent, ctx.config, session=args.session, display=display))
+
+        async def repl() -> None:
+            # Транспорт журнала подключается внутри живого loop. В
+            # ``ctx.start()`` его поднять нечем: ``LoopCallRunner`` требует
+            # работающего event loop, и сессия MCP к нему привязана. Без
+            # этого шага сервис остался бы в состоянии «транспорт не выбран»
+            # и вёл бы локальный след вместо журнала платформы.
+            ctx.attach_log_transport()
+            await run_repl(ctx.agent, ctx.config, session=args.session, display=display)
+
+        asyncio.run(repl())
     finally:
         ctx.stop()
 
@@ -197,6 +207,9 @@ def _run_patched_repl(ctx, args: argparse.Namespace) -> None:
     from lib.cli.display_config import DisplayConfig
 
     async def bg():
+        # Живой loop — единственное место, где можно построить writer
+        # журнала; см. комментарий в ``_run_vanilla``.
+        ctx.attach_log_transport()
         await run_repl(ctx.agent, ctx.config, session=args.session,
                        display=DisplayConfig.from_settings(
                            ctx.config_service.settings_section("cli")),

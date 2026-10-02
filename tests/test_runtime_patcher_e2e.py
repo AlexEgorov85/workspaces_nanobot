@@ -8,8 +8,11 @@
     больше лимитов, — проверяем, что без патча маркер ``… chars
     truncated …`` есть, а после патча его нет (данные целые);
   * реальный ``ReadFileTool`` читает файл больше дефолтного потолка;
-  * ``_save_turn``-обёртка и ``ContextGovernor.normalize_tool_result``
-    пишут **полные** файлы в ``data_store/`` на диск.
+  * upstream ``ContextGovernor.normalize_tool_result`` пишет **полный**
+    вывод в ``.nanobot/tool-results/`` на диск, а ``read_file`` от
+    персиста освобождён (change ``use-upstream-tool-result-persist``:
+    наш патч ``context_governor`` и хук ``ToolResultArchiveHook`` снесены
+    в пользу библиотечного ``maybe_persist_tool_result``).
 
 Каждый тест сам ставит патч и **восстанавливает** изначальное состояние в
 ``finally``, чтобы не влиять на остальной набор.
@@ -25,7 +28,6 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -247,49 +249,85 @@ class TestReadFileE2E:
         assert len(out) >= 200_000
 
 
-class TestContextGovernorE2E:
-    """ContextGovernor.normalize_tool_result persist-путь с реальным файлом."""
 
-    def test_persists_full_content_to_disk(self, tmp_path):
+class TestUpstreamToolResultPersistE2E:
+    """Персист больших результатов tool'ов — против настоящего nanobot 0.3.5.
+
+    Раньше здесь проверялся наш патч ``context_governor`` (write в
+    ``data_store/``). Он снесён: то же делает
+    ``maybe_persist_tool_result`` внутри
+    ``ContextGovernor.normalize_tool_result``. Тесты переписаны на
+    библиотечный путь — иначе после сноса патча механизм остался бы
+    без e2e-покрытия, а именно он (а не патч) теперь отвечает за то,
+    что большой вывод не «съедается».
+    """
+
+    @staticmethod
+    def _cfg(tmp_path: Path, session_key: str, max_chars: int):
+        """Три поля, которые ``normalize_tool_result`` реально читает.
+
+        Берётся ``SimpleNamespace``, а не настоящий
+        ``ContextGovernanceConfig``: конструктор требует живой
+        ``LLMProvider`` и ``ToolRegistry``, а проверять тут нужно только
+        персист-ветку.
+        """
+        return SimpleNamespace(
+            session_key=session_key,
+            workspace=tmp_path,
+            max_tool_result_chars=max_chars,
+        )
+
+    def test_persists_full_content_to_disk(self, tmp_path: Path):
         from nanobot.agent.context_governance import ContextGovernor
 
-        original = ContextGovernor.normalize_tool_result
-        try:
-            settings = _Settings(persist_threshold=5000)
-            ok, detail = RuntimePatcher().patch_context_governor(
-                MagicMock(), settings, tmp_path
-            )
-            assert ok, detail
+        big = "y" * 50_000
+        cfg = self._cfg(tmp_path, "cg-e2e", max_chars=5_000)
 
-            cfg = SimpleNamespace(session_key="cg-e2e", workspace=str(tmp_path))
-            big = "y" * 50_000
-            res = ContextGovernor.normalize_tool_result(cfg, "tid1", "exec", big)
+        res = ContextGovernor.normalize_tool_result(cfg, "tid1", "exec", big)
 
-            assert isinstance(res, str)
-            assert res.startswith("[Result saved to data_store/")
-            results = list((tmp_path / "data_store" / "cache" / "sessions" / "cg-e2e" / "results").iterdir())
-            assert len(results) == 1
-            assert results[0].read_text(encoding="utf-8") == big
-        finally:
-            ContextGovernor.normalize_tool_result = original
+        assert isinstance(res, str)
+        # В историю уходит ссылка, а не сам вывод.
+        assert res != big
+        assert "[tool output persisted]" in res
+        assert "Full output saved to workspace path:" in res
 
-    def test_read_file_is_exempt(self, tmp_path):
+        bucket = tmp_path / ".nanobot" / "tool-results" / "cg-e2e"
+        written = list(bucket.glob("*.txt"))
+        assert len(written) == 1, f"ожидался один файл результата в {bucket}"
+        # Полный, не обрезанный и не превью.
+        assert written[0].read_text(encoding="utf-8") == big
+
+    def test_read_file_is_exempt(self, tmp_path: Path):
+        """``read_file`` не персистится: иначе persist -> read -> persist."""
         from nanobot.agent.context_governance import ContextGovernor
 
-        original = ContextGovernor.normalize_tool_result
-        try:
-            settings = _Settings(persist_threshold=5)
-            ok, detail = RuntimePatcher().patch_context_governor(
-                MagicMock(), settings, tmp_path
-            )
-            assert ok, detail
+        big = "z" * 50_000
+        cfg = self._cfg(tmp_path, "cg-exempt", max_chars=5_000)
 
-            cfg = SimpleNamespace(session_key="cg-exempt", workspace=str(tmp_path))
-            big = "z" * 50_000
-            res = ContextGovernor.normalize_tool_result(cfg, "tid2", "read_file", big)
-            # read_file exempt: возврат как есть, файл не пишется
-            assert res == big
-            results_dir = tmp_path / "data_store" / "cache" / "sessions" / "cg-exempt" / "results"
-            assert not results_dir.exists() or not list(results_dir.iterdir())
-        finally:
-            ContextGovernor.normalize_tool_result = original
+        res = ContextGovernor.normalize_tool_result(cfg, "tid2", "read_file", big)
+
+        assert res == big
+        bucket = tmp_path / ".nanobot" / "tool-results" / "cg-exempt"
+        assert not bucket.exists() or not list(bucket.iterdir())
+
+    def test_small_result_is_untouched(self, tmp_path: Path):
+        """Короткий вывод не персистится и не искажается."""
+        from nanobot.agent.context_governance import ContextGovernor
+
+        small = "короткий вывод"
+        cfg = self._cfg(tmp_path, "cg-small", max_chars=5_000)
+
+        assert ContextGovernor.normalize_tool_result(
+            cfg, "tid3", "exec", small
+        ) == small
+
+    def test_empty_result_is_replaced(self, tmp_path: Path):
+        """``ensure_nonempty_tool_result`` — тоже наша была забота."""
+        from nanobot.agent.context_governance import ContextGovernor
+
+        cfg = self._cfg(tmp_path, "cg-empty", max_chars=5_000)
+
+        res = ContextGovernor.normalize_tool_result(cfg, "tid4", "exec", "")
+
+        assert res != ""
+        assert isinstance(res, str) and res.strip()

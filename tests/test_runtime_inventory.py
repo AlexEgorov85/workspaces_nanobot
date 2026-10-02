@@ -1,6 +1,7 @@
 """Тесты для ``lib/services/runtime_inventory.py``."""
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 
@@ -22,13 +23,13 @@ class TestCanonical:
         ``gateway.repeat_guard.mode`` не выключен.
 
         Проверяется на заведомо плохих данных: убери гейт
-        ``persist_threshold`` из ``_make_tool_result_archive_hook``
-        или ``mode == "off"`` из ``RepeatGuardHook`` — тест упадёт,
+        ``mode == "off"`` из ``RepeatGuardHook`` — тест упадёт,
         и required=False станет неправомерным.
-        """
-        import inspect
 
-        from lib.core.application_context import _make_tool_result_archive_hook
+        Снятый ``ToolResultArchiveHook`` (change
+        ``use-upstream-tool-result-persist``) в каноне больше не значится:
+        персист делает сам upstream.
+        """
         from lib.services.runtime_inventory import canonical_framework_hooks
 
         root = Path(__file__).resolve().parents[1]
@@ -36,10 +37,13 @@ class TestCanonical:
 
         assert "ToolAuditHook" in specs
         assert "TerminalToolPrintHook" in specs
-        # Нативная замена патча save_turn — тоже фреймворковый хук.
-        assert "ToolResultArchiveHook" in specs
         # Защитник от вырожденных циклов (change repeat-guard-hook).
         assert "RepeatGuardHook" in specs
+        # Нативная замена патча save_turn ушла в upstream — хука нет.
+        assert "ToolResultArchiveHook" not in specs, (
+            "хук архивирования удалён в пользу upstream "
+            "maybe_persist_tool_result; возвращать его в канон нельзя"
+        )
 
         for name, spec in specs.items():
             assert (root / spec.source).is_file(), (
@@ -50,14 +54,8 @@ class TestCanonical:
 
         # Ровно те optional, чья опциональность обоснована гейтом.
         optional = {n for n, s in specs.items() if not s.required}
-        assert optional == {"ToolResultArchiveHook", "RepeatGuardHook"}, (
+        assert optional == {"RepeatGuardHook"}, (
             f"неожиданный набор optional framework hooks: {sorted(optional)}"
-        )
-
-        src = inspect.getsource(_make_tool_result_archive_hook)
-        assert "persist_threshold" in src, (
-            "ToolResultArchiveHook помечен required=False, но фабрика "
-            "не гейтится persist_threshold — optionality не обоснована"
         )
 
         from lib.hooks.repeat_guard_hook import RepeatGuardHook
@@ -154,15 +152,18 @@ class TestCanonical:
         for required_name in (
             "assemble_outbound",
             "subagent_logging",
-            "context_governor",
         ):
             assert required_name in names, required_name
 
         # Перенесённые патчи не должны воскреснуть в каноне.
-        for migrated in ("save_turn", "document_text_threshold"):
+        for migrated in (
+            "save_turn",
+            "document_text_threshold",
+            "context_governor",
+        ):
             assert migrated not in names, (
-                f"{migrated} перенесён на нативную точку расширения; "
-                f"в RuntimePatcher его быть не должно"
+                f"{migrated} перенесён на нативную точку расширения / "
+                f"в upstream; в RuntimePatcher его быть не должно"
             )
 
 
@@ -227,9 +228,11 @@ class TestPatchSpecRequiredProjection:
         """Контракт criticality: какие патчи обязаны быть ``required``.
 
         После переноса ``save_turn`` на ``ToolResultArchiveHook`` он
-        перестал быть патчем и убран из набора. Набор остаётся
-        выпиской имён намеренно: это контракт «что подсвечивается в
-        startup-баннере», и его нельзя вывести из ``risk``.
+        перестал быть патчем и убран из набора. Позже и сам хук убран
+        (change ``use-upstream-tool-result-persist``): персист результатов
+        делает upstream. Набор остаётся выпиской имён намеренно: это
+        контракт «что подсвечивается в startup-баннере», и его нельзя
+        вывести из ``risk``.
         Непроизводность ``required`` от ``risk`` проверяет
         ``test_required_projects_from_patch_spec`` (подменяет
         ``patch_specs`` и сверяет проекцию).
@@ -242,8 +245,10 @@ class TestPatchSpecRequiredProjection:
         assert required_names == {
             "assemble_outbound",
             "subagent_logging",
-            "context_governor",
         }, required_names
+
+        # context_governor больше не патч — в обязательных не значится.
+        assert "context_governor" not in required_names
 
     def test_no_hardcoded_required_set(self) -> None:
         """В ``runtime_inventory`` нет локального ``high_risk_required``."""

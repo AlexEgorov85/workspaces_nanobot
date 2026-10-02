@@ -4,12 +4,21 @@
 ``nanobot/cli/agent.py`` (HKUDS/nanobot @ main). Не изобретаем —
 делегируем:
 
-  * ``cli_terminal._init_prompt_session`` / ``_read_interactive_input_async`` /
-    ``_is_exit_command`` / ``_restore_terminal`` / ``_flush_pending_tty_input`` /
+  * ``nanobot.cli.terminal._init_prompt_session`` /
+    ``_read_interactive_input_async`` / ``_is_exit_command`` /
+    ``_restore_terminal`` / ``_flush_pending_tty_input`` /
     ``_print_agent_response`` / ``_print_interactive_response`` /
-    ``_maybe_print_interactive_progress`` / ``_ReasoningBuffer`` —
-    все через ``lib.cli.nanobot_cli_compat.get_repl_helpers()`` (где
-    уже сделана кросс-версионная адаптация для nanobot 0.3.0..0.3.5).
+    ``_maybe_print_interactive_progress`` / ``_sanitize_surrogates`` /
+    ``_ReasoningBuffer`` — прямой импорт из библиотеки;
+  * ``nanobot.cli.runtime_config._model_display`` — оттуда же, но другой
+    модуль (в ``terminal`` его нет).
+
+Кросс-версионной адаптации больше нет: ``requirements.txt`` пинит
+``nanobot-ai==0.3.5`` ровно, и все 11 символов проверены в этой версии
+(см. ``tests/contract/test_nanobot_cli_compat.py``). Прямой импорт
+принципиален: при апгрейде библиотеки отсутствующий символ падает сразу
+и с точным именем, тогда как getattr-обёртка подменяла бы его на
+``lambda: None`` и молча ломала терминал.
 
 Единственное наше расширение: ``turn_wait_timeout`` на
 ``turn_done.wait()`` как safety net — если LLM полностью отказал
@@ -164,36 +173,41 @@ async def run_repl(
         display: DisplayConfig.
         background_task_factory: callable() → Optional[Task].
     """
+    # Upstream helpers REPL — прямой импорт из библиотеки.
+    #
+    # Раньше они добывались через
+    # ``lib.cli.nanobot_cli_compat.get_repl_helpers()``. Слой снят: все 10
+    # символов живут в ``nanobot.cli.terminal``, а ``_model_display`` — в
+    # ``nanobot.cli.runtime_config`` (проверено на зафиксированной в
+    # ``requirements.txt`` версии nanobot 0.3.5). Прямой импорт честнее
+    # getattr-обёртки: отсутствие символа падает сразу и с точным именем,
+    # а не молча подменяется ``lambda: None``.
+    from nanobot import __logo__ as _logo
+    from nanobot import __version__
     from nanobot.bus.events import InboundMessage
     from nanobot.bus.outbound_events import (
         StreamDeltaEvent,
         StreamedResponseEvent,
         StreamEndEvent,
     )
-
-    from lib.cli.nanobot_cli_compat import (
-        get_logo_version,
-        get_repl_helpers,
-        model_display,
+    from nanobot.cli.runtime_config import _model_display
+    from nanobot.cli.terminal import (
+        _flush_pending_tty_input,
+        _init_prompt_session,
+        _is_exit_command,
+        _maybe_print_interactive_progress,
+        _print_agent_response,
+        _print_interactive_response,
+        _read_interactive_input_async,
+        _ReasoningBuffer,
+        _restore_terminal,
+        _sanitize_surrogates,
     )
 
-    # Upstream helpers — все через ``get_repl_helpers`` (см. docs в
-    # ``nanobot_cli_compat.py``).
-    _helpers = get_repl_helpers()
-    _init_prompt_session = _helpers["_init_prompt_session"]
-    _is_exit_command = _helpers["_is_exit_command"]
-    _read_interactive_input_async = _helpers["_read_interactive_input_async"]
-    _restore_terminal = _helpers["_restore_terminal"]
-    _flush_pending_tty_input = _helpers.get(
-        "_flush_pending_tty_input", lambda: None,
-    )
-    _sanitize_surrogates = _helpers["_sanitize_surrogates"]
-    _print_agent_response = _helpers["_print_agent_response"]
-    _print_interactive_response = _helpers["_print_interactive_response"]
-    _maybe_print_interactive_progress = _helpers[
-        "_maybe_print_interactive_progress"
-    ]
-    _ReasoningBuffer = _helpers["_ReasoningBuffer"]
+    def model_display(config) -> tuple[str | None, str | None]:
+        """Модель и тег пресета для баннера (строки выравниваются вправо)."""
+        model, tag = _model_display(config)
+        return (model, tag)
 
     # Upstream ``run_interactive`` создаёт ``StreamRenderer`` на каждый
     # turn. ``StreamRenderer`` — public в upstream ``nanobot.cli.stream``.
@@ -216,9 +230,8 @@ async def run_repl(
     # если хост его не держит — цвета откатятся в plain-текст (без ``?[2m``).
     _warn_no_vt(ensure_console_colors())
 
-    __logo__, __version__ = get_logo_version()
     _model, _preset_tag = model_display(config)
-    _icon = getattr(config.agents.defaults, "bot_icon", None) or __logo__
+    _icon = getattr(config.agents.defaults, "bot_icon", None) or _logo
     console.print(
         f"{_icon} nanobot {__version__} "
         f"Interactive [bold blue]({_model})[/bold blue]{_preset_tag} "

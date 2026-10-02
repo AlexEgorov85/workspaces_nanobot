@@ -28,7 +28,9 @@ def mock_all():
 def _setup_fake_modules():
     sol = types.ModuleType("nanobot")
     sol.agent = types.ModuleType("nanobot.agent")
-    sol.agent.AgentHook = type("AgentHook", (), {})
+    sol.agent.AgentHook = type(
+        "AgentHook", (), {"__init__": lambda self, reraise=False: None}
+    )
     sys.modules["nanobot"] = sol
     sys.modules["nanobot.agent"] = sol.agent
 

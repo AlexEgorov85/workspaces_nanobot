@@ -117,11 +117,17 @@ class TestKnownPatchesRemainDeclared:
     ``assemble_outbound`` — патч, который однажды вычеркнули из канона, оставив
     реализацию и вызов. Список ниже намеренно избыточный: он фиксирует
     ожидаемое состояние, а не выводится из кода.
+
+    ``context_governor`` убран из списка (change
+    ``use-upstream-tool-result-persist``): в nanobot 0.3.5
+    ``ContextGovernor.normalize_tool_result`` сам персистит большие
+    результаты tool'ов, а наш патч писал второй раз в ``data_store/``.
+    Отсутствие в ``EXPECTED`` теперь проверяет ещё и возврат патча обратно
+    в ``_PATCH_SPECS``.
     """
 
     EXPECTED = frozenset({
         "assemble_outbound",
-        "context_governor",
         "exec_limits",
         "exec_timeout_cap",
         "subagent_logging",

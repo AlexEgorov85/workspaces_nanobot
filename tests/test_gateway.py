@@ -32,7 +32,9 @@ def _setup_fake_modules():
     sol = types.ModuleType("nanobot")
     sol.agent = types.ModuleType("nanobot.agent")
     # lib/hooks/* импортируют имена из nanobot.agent при реальном импорте.
-    sol.agent.AgentHook = type("AgentHook", (), {"__init__": lambda self: None})
+    sol.agent.AgentHook = type(
+        "AgentHook", (), {"__init__": lambda self, reraise=False: None}
+    )
     sol.agent.AgentHookContext = MagicMock()
     sol.agent.AgentRunHookContext = MagicMock()
     loop = types.ModuleType("nanobot.agent.loop")
@@ -272,15 +274,16 @@ class TestMain:
         ctx = _get_ctx()
         assert ctx.storage_mode == "file"
 
-    def test_redis_channel_enabled(self):
+    def test_redis_channel_is_not_registered(self):
+        """Каналов один: секция ``channels.redis`` в настройках игнорируется.
+
+        Раньше тест проверял обратное — что Redis-канал поднимается. Пока он
+        существовал, в конфиге можно было включить второй транспорт молча и
+        получить две реализации правил очереди.
+        """
         from config import SETTINGS
 
         SETTINGS.channels = {"redis": {"enabled": True}, "postgres": {"dsn": ""}}
-
-        # Подменяем только redis_channel (lazy import).
-        fake_redis = types.ModuleType("lib.channels.redis_channel")
-        fake_redis.RedisChannel = MagicMock()
-        sys.modules["lib.channels.redis_channel"] = fake_redis
 
         # Делаем ChannelManager().channels — настоящим dict
         from nanobot.channels.manager import ChannelManager
@@ -290,25 +293,21 @@ class TestMain:
         ChannelManager.return_value.enabled_channels = []
 
         from lib.services.channel_factory import ChannelFactory
-        from lib.services.transcription_service import TranscriptionService
 
         ctx = _get_ctx()
-        factory = ChannelFactory(transcription=TranscriptionService(ctx.config))
+        factory = ChannelFactory()
         channels, _ = factory.create_all(
             ctx.config, SETTINGS, ctx.bus, ctx.session_manager
         )
-        assert "redis" in channels.channels
+        assert "redis" not in channels.channels
 
     def test_postgres_channel_enabled_no_dsn_errors(self):
         from config import SETTINGS
 
-        SETTINGS.channels = {"postgres": {"enabled": True, "dsn": ""}, "redis": {"enabled": False}}
+        SETTINGS.channels = {"postgres": {"enabled": True, "dsn": ""}}
 
-        fake_redis = types.ModuleType("lib.channels.redis_channel")
-        fake_redis.RedisChannel = MagicMock()
         fake_pg = types.ModuleType("lib.channels.postgres_channel")
         fake_pg.PostgresChannel = MagicMock()
-        sys.modules["lib.channels.redis_channel"] = fake_redis
         sys.modules["lib.channels.postgres_channel"] = fake_pg
 
         from nanobot.channels.manager import ChannelManager
@@ -318,22 +317,30 @@ class TestMain:
         ChannelManager.return_value.enabled_channels = []
 
         from lib.services.channel_factory import ChannelFactory
-        from lib.services.transcription_service import TranscriptionService
 
         ctx = _get_ctx()
-        factory = ChannelFactory(transcription=TranscriptionService(ctx.config))
+        factory = ChannelFactory()
         channels, messages = factory.create_all(
             ctx.config, SETTINGS, ctx.bus, ctx.session_manager
         )
         assert any("no DSN" in m for m in messages)
 
     def test_persist_threshold_zero_no_patch(self):
+        """Патча персиста результатов tool'ов больше нет — и это не регресс.
+
+        Тест проверял «при ``persist_threshold=0`` патч не применяется»,
+        то есть защищал от тихой правки в рантайме при выключенной фиче.
+        После сноса патча (change ``use-upstream-tool-result-persist``)
+        состояние стало структурно недостижимым: патчить нечего, а порог
+        задаётся публично как ``agents.defaults.max_tool_result_chars``.
+
+        Инвариант переписан, а не удалён: «механизма, который мы сняли, в
+        RuntimePatcher нет» — то же утверждение, что и раньше, только
+        строже и без обращения к удалённому методу.
+        """
         from lib.services.runtime_patcher import RuntimePatcher
 
-        ctx = _get_ctx()
-        # При threshold=0 патч не должен ничего менять. Проверяем через
-        # возвращаемое значение: skipped, не applied.
-        ok, detail = RuntimePatcher().patch_context_governor(
-            ctx.config, ctx.settings, ctx.workspace_dir
+        assert not hasattr(RuntimePatcher, "patch_context_governor"), (
+            "patch_context_governor вернулся: он писал бы результат tool'а "
+            "вторым путём поверх upstream maybe_persist_tool_result"
         )
-        assert not ok

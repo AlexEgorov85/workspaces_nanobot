@@ -131,8 +131,9 @@ class RuntimeHealth:
         """Агрегированные operational stats.
 
         Включает базовый liveness (``started_at``, ``uptime_seconds``).
-        Расширения (``session_cold_sync``, ``llm_observer``,
-        ``pool_*``) добавляются в ``gateway.py`` через композицию —
+        Расширения (``session_cold_sync``, observer'ы провайдера в
+        ``AgentFactory._wrap_provider_snapshot_loader``, ``pool_*``)
+        добавляются в ``gateway.py`` через композицию —
         см. design D-Pool.6 и D20.
         """
         uptime: float | None = None

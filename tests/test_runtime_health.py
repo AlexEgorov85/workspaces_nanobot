@@ -176,6 +176,184 @@ class TestComputeOverallStatus:
         assert compute_overall_status(components) == "NOT_READY"
 
 
+class TestRegisterReadinessChecks:
+    """Реальная проводка ``_register_readiness_checks``.
+
+    Регрессия: гейт по имени класса менеджера сессий
+    (``"PG" in cls or "Postgres" in cls``) не срабатывал НИКОГДА —
+    ``build_session_manager`` возвращает библиотечный ``SessionManager``,
+    не подкласс. Поэтому рабочая система рапортовала NOT_READY. Здоровье
+    обязано определяться пингом по пулу, а required-ness — конфигом.
+    """
+
+    @staticmethod
+    def _ctx(*, channel_on=True, dsn="postgresql://u:p@h:5432/d", storage_mode="file"):
+        from lib.services.runtime_health import RuntimeReadiness
+
+        ctx = MagicMock()
+        ctx.runtime_readiness = RuntimeReadiness()
+        ctx.storage_mode = storage_mode
+        ctx.settings = {
+            "channels": {"postgres": {"enabled": channel_on, "dsn": dsn}}
+        }
+        # Класс БЕЗ ``PG``/``Postgres`` в имени — ровно то, что создаёт
+        # ``build_session_manager``. Старый гейт считал это деградацией.
+        ctx.session_manager = object()
+        return ctx
+
+    @staticmethod
+    def _patch_pool(monkeypatch, *, mode: str):
+        """Подменить ``utils.db._get_manager`` под нужный сценарий.
+
+        Модуль грузится по файловому пути и кладётся в ``sys.modules`` под
+        именем ``utils.db`` на время теста: часть существующих тестов
+        подменяет ``sys.modules["utils.db"]`` голым ``ModuleType`` и НЕ
+        восстанавливает его, поэтому брать модуль из ambient-состояния
+        нельзя — он может оказаться чужой заглушкой без ``_get_manager``.
+
+        Контракт повторяет реальный ``DBManager._submit``: возвращается
+        ``_JobResult`` (у него ``.get``), а НЕ ``_Job``. Мок на ``_Job``
+        воспроизводил бы баг ``_submit(...).result`` вместо контракта.
+        ``get`` бросает ошибку воркера либо возвращает ``None`` по таймауту.
+
+        mode: ``alive`` | ``timeout`` | ``error``.
+        """
+        import importlib.util
+        import sys
+        import uuid
+        from pathlib import Path
+
+        _ws = Path(__file__).resolve().parents[1] / "workspace"
+        if str(_ws) not in sys.path:
+            sys.path.insert(0, str(_ws))
+
+        real = importlib.util.module_from_spec(
+            importlib.util.spec_from_file_location(
+                "utils_db_real_" + uuid.uuid4().hex, _ws / "utils" / "db.py"
+            )
+        )
+        real.__spec__.loader.exec_module(real)
+
+        handle = MagicMock()
+        if mode == "alive":
+            handle.get.return_value = (1,)
+        elif mode == "timeout":
+            handle.get.return_value = None
+        elif mode == "error":
+            handle.get.side_effect = ConnectionRefusedError("PG down")
+        else:  # pragma: no cover - защита от опечатки в тесте
+            raise AssertionError("unknown mode: %r" % mode)
+
+        manager = MagicMock()
+        manager._submit.return_value = handle
+        get_manager = MagicMock(return_value=manager)
+
+        # production-код делает ``from utils.db import _get_manager, _Job``
+        # на момент вызова — значит подменять надо сам sys.modules.
+        monkeypatch.setitem(sys.modules, "utils.db", real)
+        monkeypatch.setattr(real, "_get_manager", get_manager, raising=False)
+        return get_manager
+
+    def test_live_pool_is_up_despite_non_pg_manager_name(self, monkeypatch):
+        """Живая БД + менеджер без PG в имени = UP (а не DOWN)."""
+        from lib.core.application_context import _register_readiness_checks
+
+        self._patch_pool(monkeypatch, mode="alive")
+        ctx = self._ctx()
+        _register_readiness_checks(ctx)
+
+        report = ctx.runtime_readiness.check()
+        assert report.components[0].status == "UP", report.components[0].detail
+        assert report.status == "READY"
+
+    def test_dead_pool_is_down_and_not_ready(self, monkeypatch):
+        """Мёртвая БД при включённом канале = DOWN и NOT_READY."""
+        from lib.core.application_context import _register_readiness_checks
+
+        self._patch_pool(monkeypatch, mode="timeout")
+        ctx = self._ctx()
+        _register_readiness_checks(ctx)
+
+        report = ctx.runtime_readiness.check()
+        assert report.components[0].status == "DOWN"
+        assert report.status == "NOT_READY"
+
+    def test_pg_optional_when_channel_disabled_and_storage_file(self, monkeypatch):
+        """Канал выключен + storage=file, но DSN есть и БД лежит.
+
+        БД не участвует в работе агента, поэтому её недоступность —
+        DEGRADED, а не NOT_READY. Именно это обещает докстринг
+        ``_register_readiness_checks``.
+        """
+        from lib.core.application_context import _register_readiness_checks
+
+        self._patch_pool(monkeypatch, mode="timeout")
+        ctx = self._ctx(
+            channel_on=False,
+            dsn="postgresql://u:p@h:5432/d",
+            storage_mode="file",
+        )
+        _register_readiness_checks(ctx)
+
+        report = ctx.runtime_readiness.check()
+        assert report.components[0].required is False
+        assert report.components[0].status == "DOWN"
+        assert report.status == "DEGRADED"
+
+    def test_pg_required_when_storage_is_postgres(self, monkeypatch):
+        """storage=postgres делает БД required даже при выключенном канале."""
+        from lib.core.application_context import _register_readiness_checks
+
+        self._patch_pool(monkeypatch, mode="timeout")
+        ctx = self._ctx(channel_on=False, dsn="postgresql://u:p@h:5432/d",
+                        storage_mode="postgres")
+        _register_readiness_checks(ctx)
+
+        report = ctx.runtime_readiness.check()
+        assert report.components[0].required is True
+        assert report.status == "NOT_READY"
+
+    def test_absent_pool_not_timed_out_when_pg_unused(self, monkeypatch):
+        """БД не нужна и DSN нет — UP без ping'а, а не 2 с таймаут в DOWN."""
+        from lib.core.application_context import _register_readiness_checks
+
+        get_manager = self._patch_pool(monkeypatch, mode="timeout")
+        ctx = self._ctx(channel_on=False, dsn="", storage_mode="file")
+        _register_readiness_checks(ctx)
+
+        report = ctx.runtime_readiness.check()
+        assert report.components[0].status == "UP"
+        assert report.status == "READY"
+        # пул не дёргали вовсе
+        assert get_manager.call_count == 0
+
+    def test_worker_error_is_reported_as_down(self, monkeypatch):
+        """Ошибка воркера (БД недоступна) = DOWN с её текстом в detail."""
+        from lib.core.application_context import _register_readiness_checks
+
+        self._patch_pool(monkeypatch, mode="error")
+        ctx = self._ctx()
+        _register_readiness_checks(ctx)
+
+        report = ctx.runtime_readiness.check()
+        assert report.components[0].status == "DOWN"
+        assert "PG down" in report.components[0].detail
+        assert report.status == "NOT_READY"
+
+    def test_missing_session_manager_is_down(self, monkeypatch):
+        """Нет менеджера сессий = DOWN даже при живой БД."""
+        from lib.core.application_context import _register_readiness_checks
+
+        self._patch_pool(monkeypatch, mode="alive")
+        ctx = self._ctx()
+        ctx.session_manager = None
+        _register_readiness_checks(ctx)
+
+        report = ctx.runtime_readiness.check()
+        assert report.components[0].status == "DOWN"
+        assert "no session_manager" in report.components[0].detail
+
+
 class TestApplicationContextIntegration:
     """ApplicationContext подключает readiness-проверки."""
 

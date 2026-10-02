@@ -45,6 +45,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from loguru import logger
+
 
 class AgentFactory:
     """Фабрика AgentLoop с консистентно настроенными хуками.
@@ -83,8 +85,10 @@ class AgentFactory:
             config: runtime-конфиг nanobot (объект с ``.agents.defaults``,
                 ``.providers``, ``.channels``, ``.tools``, ``.workspace_path``).
             bus: ``MessageBus`` (см. ``nanobot.bus.queue``) — шина inbound/outbound.
-            session_manager: ``PGSessionManager`` или ``SessionManager``.
-                ``None`` — AgentLoop создаст дефолтный JSONL-менеджер.
+            session_manager: менеджер сессий — класс библиотеки
+                ``nanobot.session.manager.SessionManager`` (у нас поверх
+                ``SanitizingSessionStore``). ``None`` — AgentLoop создаст
+                дефолтный JSONL-менеджер.
             cron_service: ``CronService`` (опционально) — нужен CLI-режиму,
                 в gateway не подключается.
             db_logging_service: ``DbLoggingService`` (опционально) — если
@@ -98,10 +102,13 @@ class AgentFactory:
                 ``None``/``[]`` — только фреймворковые хуки.
             framework_hooks: готовые инстансы дополнительных фреймворковых
                 хуков, которые ``ApplicationContext`` уже собрал, потому что
-                для них нужна конфигурация (сейчас — ``ToolResultArchiveHook``,
-                читающий ``gateway.persist_*``). ``None``/``[]`` — ничего не
+                для них нужна конфигурация. ``None``/``[]`` — ничего не
                 добавлять. Класс НЕ импортируется здесь: фабрика управляет
                 только составом списка, а не тем, откуда хук пришёл.
+                Сейчас список пуст: ``ToolResultArchiveHook`` убран в пользу
+                upstream ``maybe_persist_tool_result`` (change
+                ``use-upstream-tool-result-persist``), а остальные
+                фреймворковые хуки собирает сама фабрика.
 
         Returns:
             ``(agent, hooks, hook_factories)``:
@@ -166,10 +173,9 @@ class AgentFactory:
             hooks = list(project_hooks) + hooks
 
         # Дополнительные фреймворковые хуки, собранные вызывающим кодом
-        # (инстансы уже созданы). Идут последними: ``ToolResultArchiveHook``
-        # ничего не мутирует, но читает результат tool'а и держит
-        # ``after_execute_tool`` — ему важно увидеть то, что вернул runner,
-        # а не то, что подготовили плагины.
+        # (инстансы уже созданы). Идут последними: хук, который читает
+        # результат tool'а, держит ``after_execute_tool`` — ему важно
+        # увидеть то, что вернул runner, а не то, что подготовили плагины.
         if framework_hooks:
             hooks.extend(framework_hooks)
 
@@ -252,15 +258,56 @@ class AgentFactory:
     ) -> Any:
         """Build a ``provider_snapshot_loader`` that attaches the LLM observer.
 
+        ``AgentLoop`` создаёт провайдер внутри ``from_config(...)`` и наружу
+        его не отдаёт, поэтому единственная точка подключения observer'а —
+        обёртка над загрузчиком snapshot'а. На каждом вызове она просит
+        snapshot и подписывает провайдера двумя observer'ами:
+
+          * ``set_llm_call_observer(store.record)`` — учёт вызовов LLM;
+          * ``set_fallback_model_observer(bus)`` — семантика смены модели,
+            только для ``FallbackProvider``.
+
+        Это те же строки, что делает библиотека при штатном запуске
+        gateway (``nanobot/cli/gateway_runtime.py::_observe_provider``), но
+        у нас observer инъецируется, а store опционален.
+
+        Fail-soft: ошибка подписки логируется и не мешает агенту — учёт
+        usage это observability, а не бизнес-критичный путь.
+
         Falls back to ``config.build_provider_snapshot`` when available;
         otherwise returns ``None`` and the upstream default is used.
         """
         base_loader = getattr(config, "build_provider_snapshot", None)
         if base_loader is None:
             return None
-        from lib.services.llm_observer import wrap_provider_snapshot_loader
 
-        return wrap_provider_snapshot_loader(base_loader, usage_store, bus=bus)
+        def _wrapped(*, preset_name: str | None = None, **kwargs: Any) -> Any:
+            snapshot = base_loader(preset_name=preset_name, **kwargs)
+            if snapshot is None:
+                return snapshot
+            provider = getattr(snapshot, "provider", None)
+            if provider is None:
+                return snapshot
+            if usage_store is not None:
+                try:
+                    provider.set_llm_call_observer(usage_store.record)
+                except Exception as exc:
+                    logger.warning(
+                        "LLMUsageStore observer failed to attach: {}", exc
+                    )
+            if bus is not None:
+                try:
+                    from nanobot.providers.fallback_provider import FallbackProvider
+
+                    if isinstance(provider, FallbackProvider):
+                        provider.set_fallback_model_observer(bus)
+                except Exception as exc:
+                    logger.warning(
+                        "Fallback model observer failed to attach: {}", exc
+                    )
+            return snapshot
+
+        return _wrapped
 
     @staticmethod
     def _read_repeat_guard_settings(settings: Any) -> Any:

@@ -150,7 +150,7 @@ class _MissingConfigKeys(SchemaValidationError):
         for k in self.missing_config_keys:
             lines.append(f"  - {k}")
         lines.append(
-            "Подсказка: определите ключи в project.json "
+            "Подсказка: определите ключи в config.json "
             "в секциях channels.postgres.* / logging.db.*"
         )
         return "\n".join(lines)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import contextlib
 import os
 import sys
@@ -210,12 +211,115 @@ async def _connect_enterprise_mcp(ctx) -> None:
     """
     client = getattr(ctx, "enterprise_mcp", None)
     if client is None:
+        console.print(
+            "[yellow]○[/yellow] enterprise-mcp: не объявлен "
+            "(раздел gateway.agent.enterprise_mcp выключен) — "
+            "инструменты данных ответят структурной ошибкой"
+        )
         return
-    operations = await client.list_operations()
+
+    try:
+        operations = await client.list_operations()
+    except Exception as exc:
+        # Именно этот вывод спасает при разборе инцидента: без него
+        # ``GatewayRunner`` сообщает только «Gateway exited unexpectedly,
+        # restarting in 1.0s», и причина — не поднявшаяся платформа —
+        # не читается ни в одном логе.
+        console.print(
+            f"[red]✗ enterprise-mcp: НЕ ПОДНЯЛСЯ[/red] — {type(exc).__name__}: {exc}"
+        )
+        console.print(
+            "[red]  проверьте: mcp-platform/platform.json, "
+            "mcp-platform/.secrets.env, доступность python и БД[/red]"
+        )
+        raise
+
     console.print(
         f"[green]✓[/green] enterprise-mcp: {len(operations)} операций, "
         "процесс поднят"
     )
+    await _report_enterprise_mcp_health(ctx, client)
+
+
+async def _report_enterprise_mcp_health(ctx, client) -> None:
+    """Сводка по capability платформы сразу после рукопожатия.
+
+    Процесс может подняться и при этом быть частично нерабочим: индексы
+    не собрались, снимок недоступен, реестр скриптов пуст. Такое состояние
+    раньше не было видно нигде — в логе есть только сырой stderr дочернего
+    процесса, а вердикт «MCP поднят» ничего не говорил про данные.
+
+    Проверки дешёвые и локальные (без обращений к внешним API): по одной
+    операции на ``vectors``, ``data`` и ``audit``. Отказ проверки НЕ роняет
+    старт — платформа отвечает, а неполнота одного capability разбирается
+    отдельно и не должна выглядеть как «шлюз не поднялся».
+    """
+    from lib.services.enterprise_mcp_client import CallIdentity
+
+    # Идентичность обязательна для платформы (require_call_meta), но это не
+    # пользовательский оборот: подставляем служебную, чтобы health-проба
+    # не создавала запись в agent_question_runs от имени живого запроса.
+    identity = CallIdentity(
+        session_id="startup:gateway", user_id="startup:health"
+    ).with_request_id("startup-enterprise-mcp-health")
+
+    probes = (
+        ("vectors", "list_indexes", lambda d: _indexes_line(d)),
+        ("data", "schema_check", lambda d: _schema_line(d)),
+        ("audit", "list_scripts", lambda d: _scripts_line(d)),
+    )
+
+    for capability, operation, render in probes:
+        try:
+            raw = await asyncio.wait_for(
+                client.call(operation, arguments={}, identity=identity),
+                timeout=20.0,
+            )
+            line = render(json.loads(raw))
+        except asyncio.TimeoutError:
+            line = "[red]проба не ответила за 20 с[/red]"
+        except Exception as exc:  # noqa: BLE001
+            line = f"[red]{type(exc).__name__}: {exc}[/red]"
+        console.print(f"    [dim]·[/dim] {capability:<8} {line}")
+
+
+def _indexes_line(data: dict) -> str:
+    """``3/3 индекса ready (10, 100, 10 векторов)``."""
+    indexes = data.get("indexes") or []
+    if not indexes:
+        return "[yellow]индексы не объявлены[/yellow]"
+    ready = [i for i in indexes if i.get("state") == "ready"]
+    counts = ", ".join(str(i.get("vector_count", "?")) for i in indexes)
+    if len(ready) != len(indexes):
+        bad = ", ".join(
+            "%s=%s" % (i.get("index_name"), i.get("state") or "unknown")
+            for i in indexes
+            if i.get("state") != "ready"
+        )
+        return f"[red]{len(ready)}/{len(indexes)} ready ({bad})[/red]"
+    return f"{len(ready)}/{len(indexes)} ready (векторов: {counts})"
+
+
+def _schema_line(data: dict) -> str:
+    """``7/7 таблиц на месте`` либо список отсутствующих."""
+    if data.get("ok"):
+        return f"{data.get('found')}/{data.get('expected')} таблиц на месте"
+    missing = ", ".join(str(t) for t in (data.get("missing") or [])) or "неизвестно"
+    return (
+        "[red]не хватает таблиц: %s (найдено %s/%s)[/red]"
+        % (missing, data.get("found"), data.get("expected"))
+    )
+
+
+def _scripts_line(data: dict) -> str:
+    """Сколько предопределённых скриптов доступно capability ``audit``."""
+    count = data.get("count")
+    if count is None:
+        scripts = data.get("scripts")
+        count = len(scripts) if isinstance(scripts, list) else 0
+    if not count:
+        return "[yellow]реестр скриптов пуст — будет только generate_sql[/yellow]"
+    return f"{count} скриптов в реестре"
 
 
 async def _run(ctx) -> None:
@@ -223,7 +327,6 @@ async def _run(ctx) -> None:
     from lib.services.channel_factory import ChannelFactory
 
     channel_factory = ChannelFactory(
-        transcription=ctx.transcription_service,
         print_worker_activity=_gateway_print_worker_activity(),
         db_logging_service=ctx.db_logging_service,
     )
@@ -237,12 +340,17 @@ async def _run(ctx) -> None:
     # (п. 5.8): снимком и FAISS-индексами владеет платформа, у которой свои
     # capability ``data`` и ``vectors`` и своя точка их подготовки.
 
-    # enterprise-mcp поднимается ДО каналов и ДО работы агента: его процесс —
-    # единственный владелец пула PostgreSQL и единственный, кто даёт модели
-    # три входа к данным. Проверка не декоративная — подъём ленивый, а
-    # отказ тогда обнаруживался бы посреди оборота, и «платформа лежит»
-    # выглядел бы как «агент работает».
+    # enterprise-mcp поднимается ДО каналов и ДО работы агента: его процесс — единственный
+    # владелец пула PostgreSQL и единственный, кто даёт модели три входа к данным. Проверка
+    # не декоративная — подъём ленивый, а отказ тогда обнаруживался бы посреди оборота, и
+    # «платформа лежит» выглядел бы как «агент работает».
     await _connect_enterprise_mcp(ctx)
+
+    # Транспорт журнала подключается ЗДЕСЬ, а не в ``ctx.start()``: ``start()`` выполняется
+    # вне event loop, где мост ``LoopCallRunner`` построить не на чем, и сервис молча ушёл бы
+    # писать ``INSERT`` сам — пул записи журнала остался бы в руках агента. Второй вызов
+    # снимает отметку «транспорт не выбран», установленную в ``start()``.
+    ctx.attach_log_transport()
 
     try:
         channels_task = asyncio.create_task(channels.start_all())

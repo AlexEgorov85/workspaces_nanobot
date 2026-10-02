@@ -126,5 +126,4 @@ def _allowed_hook_names() -> frozenset[str]:
     return frozenset({
         "session_file_redirect_hook",
         "recent_files_hook",
-        "debug_stream_diag",
     })

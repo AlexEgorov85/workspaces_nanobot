@@ -71,7 +71,7 @@ def _resolve_enable_kwargs(
     нет, отвергается ``TypeError``. Это делает ``profile=`` (и опечатки
     вроде ``enable_aduit=``) явной ошибкой вместо молчаливого игнора.
     ``profile`` намеренно отсутствует: у него нет migration path в
-    ``project.json`` — это не deprecated API, а состояние ``SETTINGS``,
+    ``config.json`` — это не deprecated API, а состояние ``SETTINGS``,
     определённое ДО ``create()``.
 
     Production code MUST NOT передавать эти kwargs напрямую —
@@ -104,7 +104,7 @@ def _resolve_enable_kwargs(
         if key in DEPRECATED_ENABLE_KWARGS:
             warnings.warn(
                 f"ApplicationContext.create({key}={value!r}) is deprecated; "
-                f"configure gateway.{key} in project.json instead. "
+                f"configure gateway.{key} in config.json instead. "
                 "This compatibility boundary will be removed by change "
                 "remove-deprecated-enable-kwargs.",
                 DeprecationWarning,
@@ -171,7 +171,6 @@ class ApplicationContext:
     runtime_patcher: Any = None
     runtime_health: Any = None
     runtime_readiness: Any = None
-    transcription_service: Any = None
     session_storage_service: Any = None
 
     # Per-turn hook factories (для DatabaseLoggingHook и т.п.), которые
@@ -254,14 +253,6 @@ class ApplicationContext:
         ctx.enable_cron = bool(enable_kwargs["enable_cron"])
         ctx.print_llm_calls = bool(enable_kwargs["print_llm_calls"])
 
-        # Сбросить ``TableRegistry`` — это singleton, и при повторном
-        # ``create()`` в одном процессе (тесты, gateway-reload, gateway
-        # перезапуск конфига) старые регистрации остались бы и смешались
-        # с новыми. ``_init_cache_runtime`` и ``_auto_register_skills``
-        # ниже заполнят реестр заново.
-        from lib.services.table_registry import table_registry
-        table_registry.clear()
-
         ctx.config_service = _make_config_service(
             ctx.script_dir, ctx.workspace_dir, settings_override=ctx_settings
         )
@@ -337,16 +328,13 @@ class ApplicationContext:
         # в ``start()`` lifecycle.
         ctx.session_cold_sync_service = _make_session_cold_sync_service(ctx)
 
-        # 5. cache runtime: загрузка (READ_WRITE) -> close -> чтение (READ_ONLY)
-        if ctx.enable_audit:
-            # Реестр остаётся (п. 5.6): он описывает состав снимка, который
-            # теперь читает capability ``data``. Сама загрузка снимка в агент
-            # ушла вместе с обвязкой (п. 5.8).
-            _auto_register_skills(ctx)
-            _register_infra_resources(ctx)
+        # 5. Реестр ресурсов удалён: писателей не осталось.
+        #    Последним читателем был ``CacheLoadService``, ушедший на
+        #    платформу 2026-10-01 вместе с кластером снимка. Состав снимка
+        #    объявляет ``mcp-platform/platform.json`` — там же, где им
+        #    владеют и читают.
 
-        # 6. BusFactory + AgentFactory
-        from lib.core.bus_factory import BusFactory
+        # 6. MessageBus + AgentFactory
         from lib.services.db_logging_bus import (
             make_inbound_logger,
             make_outbound_logger,
@@ -361,11 +349,7 @@ class ApplicationContext:
             inbound_logger = make_inbound_logger(ctx.db_logging_service, agent_id)
             outbound_logger = make_outbound_logger(ctx.db_logging_service, agent_id)
 
-        bus_factory = BusFactory(
-            inbound_logger=inbound_logger,
-            outbound_logger=outbound_logger,
-        )
-        ctx.bus = bus_factory.create()
+        ctx.bus = _create_bus(inbound_logger, outbound_logger)
 
         from lib.core.agent_factory import AgentFactory
 
@@ -398,15 +382,6 @@ class ApplicationContext:
         except Exception as exc:
             logger.warning("hook_loader.scan_and_register failed: %s", exc)
 
-        # ToolResultArchiveHook — фреймворковый хук, заменяющий патч
-        # ``save_turn`` (фаза 6, п. 6.2). Архивирует большие результаты
-        # tool'ов в момент их возврата (``AgentHook.after_execute_tool``).
-        # Гейт тот же, что был у патча: ``gateway.persist_threshold <= 0`` —
-        # фича выключена, хук создаётся, но ничего не архивирует.
-        # Создаётся ДО ``agent_factory.create``, чтобы попасть в
-        # ``ctx.hooks`` и быть частью общего CompositeHook.
-        tool_result_archive_hook = _make_tool_result_archive_hook(ctx)
-
         agent_factory = AgentFactory()
         ctx.agent, ctx.hooks, ctx.hook_factories = agent_factory.create(
             ctx.config,
@@ -417,14 +392,9 @@ class ApplicationContext:
             agent_id=agent_id,
             settings=ctx.settings,
             project_hooks=project_hooks or None,
-            framework_hooks=[tool_result_archive_hook]
-            if tool_result_archive_hook is not None
-            else None,
             print_llm_calls=ctx.print_llm_calls,
             usage_store=ctx.usage_store,
         )
-
-        ctx.tool_result_archive_hook = tool_result_archive_hook
 
         # ToolAuditHook — фреймворковый, входит в ``ctx.hooks`` последним
         # (после плагинов). Нужен RuntimePatcher'у для внедрения аудита.
@@ -441,7 +411,7 @@ class ApplicationContext:
 
         # 6b. RuntimeHealth / RuntimeReadiness — operational status.
         # Health: пульс процесса (liveness). Readiness: PG/duckdb/vector.
-        # Регистрируется ПОСЛЕ хуков и bus_factory, потому что readiness
+        # Регистрируется ПОСЛЕ хуков и сборки шины, потому что readiness
         # проверяет состояние уже созданных сервисов.
         from lib.services.runtime_health import (
             RuntimeHealth,
@@ -517,8 +487,6 @@ class ApplicationContext:
         _emit_project_tools_inventory_banner(project_tools_result)
 
         # 8. Помощники
-        ctx.transcription_service = _make_transcription(ctx.config)
-
         ctx.runtime_health.mark_started()
         return ctx
 
@@ -526,15 +494,23 @@ class ApplicationContext:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _attach_log_transport(self) -> None:
+    def attach_log_transport(self) -> None:
         """Перевести запись журнала на ``enterprise-mcp`` (change
         ``enterprise-mcp-platform``, фаза 7).
 
-        Без этого шага сервис молча шёл бы прежней дорогой: писал ``INSERT``
-        сам, пул записи в PostgreSQL оставался в руках агента, и фаза выглядела
-        бы сделанной по тестам, не будучи сделанной в проде. Поэтому неудача
-        здесь громкая, а не тихая: нет клиента - понятно, нет живого loop -
-        тоже понятно, и обе причины попадают в лог.
+        Зовётся **дважды**, и это не дублирование:
+
+        1. Из ``start()`` — вне event loop. Живой loop и сессия MCP на этом
+           шаге ещё не существуют, мост ``LoopCallRunner`` построить не на чем,
+           поэтому подключается только локальный след, а сервис помечается
+           ``transport_pending``: писать напрямую в этот промежуток нельзя,
+           иначе возврат пула записи в руки агента случился бы молча.
+        2. Из живого loop (``gateway._run``, ``cli_agent``) — сразу после
+           подъёма сессии ``enterprise-mcp``. Вот здесь и появляется writer,
+           и с этого момента журнал идёт операцией ``log_events``.
+
+        Второй вызов отключает первое состояние, поэтому счётчики не
+        учитываются дважды.
 
         Локальный fallback подключается всегда, независимо от клиента: он
         нужен именно тогда, когда писать некуда.
@@ -564,8 +540,13 @@ class ApplicationContext:
 
         client = getattr(self, "enterprise_mcp", None)
         if client is None:
+            # Раздел выключен по решению оператора: писать напрямую —
+            # законное состояние, а не незавершённая миграция.
             if fallback is not None:
-                service.attach_transport(mcp_writer=None, fallback_sink=fallback)
+                service.attach_transport(
+                    mcp_writer=None, fallback_sink=fallback,
+                    transport_pending=False,
+                )
             logger.info(
                 "enterprise-mcp не объявлен: журнал пишется напрямую в БД, "
                 "локальный fallback подключён"
@@ -579,11 +560,17 @@ class ApplicationContext:
         except RuntimeError:
             loop = None
         if loop is None:
+            # Живой loop ещё не поднят. Это НЕ «писать напрямую»: решение
+            # о транспорте не принято, и принять его предстоит в том же
+            # цикле, где поднимается сессия enterprise-mcp.
             if fallback is not None:
-                service.attach_transport(mcp_writer=None, fallback_sink=fallback)
+                service.attach_transport(
+                    mcp_writer=None, fallback_sink=fallback,
+                    transport_pending=True,
+                )
             logger.warning(
-                "нет живого event loop: журнал пишется напрямую в БД, "
-                "операция log_events не используется"
+                "нет живого event loop: транспорт журнала не выбран, запись "
+                "ждёт подключения в цикле (log_events пока не используется)"
             )
             return
 
@@ -591,11 +578,17 @@ class ApplicationContext:
 
         try:
             writer = McpLogWriter(call=client.call, run=LoopCallRunner(loop=loop))
-            service.attach_transport(mcp_writer=writer, fallback_sink=fallback)
+            service.attach_transport(
+                mcp_writer=writer, fallback_sink=fallback,
+                transport_pending=False,
+            )
         except Exception as exc:  # noqa: BLE001 - лог не должен ронять старт
             logger.warning("транспорт журнала через MCP не подключён: %s", exc)
             if fallback is not None:
-                service.attach_transport(mcp_writer=None, fallback_sink=fallback)
+                service.attach_transport(
+                    mcp_writer=None, fallback_sink=fallback,
+                    transport_pending=False,
+                )
             return
         logger.info("журнал агента пишется через enterprise-mcp (log_events)")
 
@@ -663,7 +656,12 @@ class ApplicationContext:
         if self.db_logging_service is not None:
             self.db_logging_service.start()
             self._shutdown.register("db_logging_service", self.db_logging_service)
-            self._attach_log_transport()
+            # Первый из двух вызовов: живого loop на этом шаге ещё нет,
+            # поэтому подключается только локальный след, а транспорт
+            # помечается невыбранным. Окончательный writer ставится из
+            # живого loop — см. ``attach_log_transport`` и его вызов
+            # в ``gateway._run`` / ``cli_agent``.
+            self.attach_log_transport()
 
         # Загрузка кэша уже выполнена в composition root
         # (``_init_cache_runtime``): это разовая синхронная операция, у неё
@@ -687,18 +685,27 @@ class ApplicationContext:
         # Финальный readiness snapshot для startup-лога.
         if self.runtime_readiness is not None:
             report = self.runtime_readiness.check()
-            logger.info(
-                "Readiness: %s | components=%s",
-                report.status,
-                ", ".join(
-                    f"{c.name}={'UP' if c.status == 'UP' else 'DOWN'}"
-                    for c in report.components
-                ),
-            )
+            # Этот модуль логирует через stdlib ``logging``, а gateway
+            # настраивает только loguru — stdlib-INFO до потока не доходит.
+            # Поэтому итог и разбор компонентов уходят в WARNING: оператор
+            # обязан видеть, КАКОЙ компонент DOWN и ПОЧЕМУ, а не только
+            # факт ``NOT_READY``.
+            breakdown = "; ".join(
+                "%s=%s%s" % (
+                    c.name,
+                    "UP" if c.status == "UP" else "DOWN",
+                    (" (%s)" % c.detail) if c.detail else "",
+                )
+                for c in report.components
+            ) or "no components"
             if report.status == "NOT_READY":
                 logger.warning(
-                    "Required dependencies are down; gateway starts in NOT_READY state"
+                    "Required dependencies are down; gateway starts in NOT_READY "
+                    "state | components: %s",
+                    breakdown,
                 )
+            else:
+                logger.warning("Readiness: %s | components: %s", report.status, breakdown)
 
     def stop(self) -> None:
         """Корректно остановить все фоновые сервисы."""
@@ -1117,9 +1124,19 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
     """Зарегистрировать проверки зависимостей для RuntimeReadiness.
 
     Профили:
-      * ``postgres`` — required. Если БД доступна — UP. Если storage
-        fallback на file-mode — DOWN (НЕ NOT_READY, потому что система
-        работает, но в degraded mode).
+      * ``postgres`` — **required только когда БД реально участвует в
+        работе**: включён postgres-канал ИЛИ storage работает в режиме
+        ``postgres``. Если канал выключен и storage в file-режиме, БД не
+        нужна, и её недоступность — DEGRADED, а не NOT_READY.
+
+    Здоровье определяется **реальным ping'ом по пулу**, а не именем класса
+    менеджера сессий. Имя класса как признак непригодно принципиально:
+    ``lib.session.pg_session_manager.build_session_manager`` возвращает
+    библиотечный ``SessionManager`` (не подкласс), а ``install_async_save``
+    возвращает тот же объект. Поэтому гейт ``"PG" in cls or "Postgres" in
+    cls`` не срабатывал НИКОГДА, и при полностью рабочей системе readiness
+    оставался NOT_READY, а код пинга ниже гейта был недостижим.
+
     Проверки ``duckdb_cache`` и ``vector_search`` сняты в фазе 5 (п. 5.8):
     они читали состояние снимка, которого в агенте больше нет. Оставить их
     было бы хуже, чем убрать — компонент, которого нет, всегда DOWN, то есть
@@ -1133,25 +1150,38 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
         ComponentStatus,
     )
 
+    # Required-ness — следствие конфигурации, а не константа: ``register``
+    # фиксирует флаг навсегда, сменить его на каждый ``check()`` нельзя.
+    _pg_cfg = (getattr(ctx, "settings", None) or {}).get("channels", {}).get("postgres", {})
+    _pg_channel_on = bool(_pg_cfg.get("enabled", False))
+    _pg_dsn = str(_pg_cfg.get("dsn") or "").strip()
+    _pg_required = _pg_channel_on or getattr(ctx, "storage_mode", "") == "postgres"
+
+    def _detail(extra: str = "") -> str:
+        parts = ["storage_mode=%s" % getattr(ctx, "storage_mode", "?")]
+        if extra:
+            parts.append(extra)
+        return ", ".join(parts)
+
     def check_postgres() -> ComponentStatus | None:
         sm = getattr(ctx, "session_manager", None)
         if sm is None:
             return ComponentStatus(
-                name="postgres", required=True, status="DOWN",
+                name="postgres", required=_pg_required, status="DOWN",
                 detail="no session_manager",
             )
-        # Проверяем тип storage. PGSessionManager — есть PG; file fallback — DOWN.
-        cls = type(sm).__name__
-        if not ("PG" in cls or "Postgres" in cls):
+        # БД по конфигурации не нужна и DSN не задан — пинговать нечего,
+        # и ждать 2 с таймаута на заведомо отсутствующем пуле незачем.
+        if not _pg_required and not _pg_dsn:
             return ComponentStatus(
-                name="postgres", required=True, status="DOWN",
-                detail=f"storage degraded to {cls}",
+                name="postgres", required=False, status="UP",
+                detail=_detail("pg not required (channel disabled, storage=file)"),
             )
-        # Реальный ping через пул соединений, а не только тип storage-класса.
-        # Используем прямой submit с таймаутом, чтобы при недоступном PG
-        # readiness-чек не зависал на внутренних backoff-ретраях воркера
-        # (psycopg2.connect + connect_max_retries могут занять десятки секунд,
-        # а ``fetch().get()`` блокирует навсегда).
+        # Реальный ping через пул соединений — единственный честный признак
+        # здоровья. Используем прямой submit с таймаутом, чтобы при
+        # недоступном PG readiness-чек не зависал на внутренних backoff-ретраях
+        # воркера (psycopg2.connect + connect_max_retries могут занять
+        # десятки секунд, а ``fetch().get()`` блокирует навсегда).
         try:
             import sys
             from pathlib import Path
@@ -1166,21 +1196,30 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
                     cur.execute("SELECT 1")
                     return cur.fetchone()
 
-            job = _get_manager()._submit(_Job(_ping, tag="readiness.postgres"))
-            result = job.result.get(timeout=2.0)
+            # ``_submit`` возвращает сам ``_JobResult`` (у него и есть
+            # ``.get``); ``_Job.result`` — это тот же объект, так что
+            # ``_submit(...).result`` даёт AttributeError. ``get`` бросает
+            # ошибку воркера и возвращает ``None`` по таймауту.
+            pending = _get_manager()._submit(_Job(_ping, tag="readiness.postgres"))
+            result = pending.get(timeout=2.0)
             if result is None:
                 return ComponentStatus(
-                    name="postgres", required=True, status="DOWN",
-                    detail="pg ping timeout (2s)",
+                    name="postgres", required=_pg_required, status="DOWN",
+                    detail=_detail("pg ping timeout (2s)"),
                 )
-            return None  # UP без detail
+            return ComponentStatus(
+                name="postgres", required=_pg_required, status="UP",
+                detail=_detail(),
+            )
         except Exception as exc:
             return ComponentStatus(
-                name="postgres", required=True, status="DOWN",
-                detail=f"pg ping failed: {type(exc).__name__}: {exc}",
+                name="postgres", required=_pg_required, status="DOWN",
+                detail=_detail(f"pg ping failed: {type(exc).__name__}: {exc}"),
             )
 
-    ctx.runtime_readiness.register("postgres", check_postgres, required=True)
+    ctx.runtime_readiness.register(
+        "postgres", check_postgres, required=_pg_required
+    )
 
 
 def _make_config_service(
@@ -1224,65 +1263,6 @@ def _resolve_agent_id(config: Any) -> str:
 #: Дефолт лимита длины результата tool'а, если runtime-конфиг его не задал.
 #: Совпадает с дефолтом nanobot ``AgentLoop.max_tool_result_chars``.
 _DEFAULT_MAX_TOOL_RESULT_CHARS = 16_000
-
-
-def _make_tool_result_archive_hook(ctx: ApplicationContext) -> Any | None:
-    """Собрать ``ToolResultArchiveHook`` — нативную замену патча ``save_turn``.
-
-    Нативная замена ``RuntimePatcher.patch_save_turn`` (change
-    ``enterprise-mcp-platform``, фаза 6, п. 6.2): большие результаты
-    инструментов пишутся в ``data_store/`` целиком вместо усечения в истории.
-
-    Гейт прежний и осознанно тот же, что был у патча:
-    ``gateway.persist_threshold <= 0`` — фича выключена, хук не создаётся.
-    Это важно для инвентаря: выключенная фича не должна попадать в
-    ``ctx.hooks``, иначе ``diff_hooks`` покажет лишний хук.
-
-    Args:
-        ctx: контекст приложения (нужны ``workspace_dir`` и
-            ``config_service`` для чтения секции ``gateway``).
-
-    Returns:
-        Готовый хук либо ``None``, если фича выключена или класс
-        недоступен (битое окружение — не повод ронять старт агента).
-    """
-    try:
-        from lib.hooks.tool_result_archive_hook import ToolResultArchiveHook
-    except Exception as exc:
-        logger.warning("ToolResultArchiveHook unavailable: %s", exc)
-        return None
-
-    try:
-        gw = ctx.config_service.settings_section("gateway")
-    except Exception as exc:
-        logger.warning("gateway section unreadable, persisting tool results off: %s", exc)
-        return None
-    if not isinstance(gw, dict):
-        return None
-
-    persist_threshold = int(gw.get("persist_threshold", 0) or 0)
-    if persist_threshold <= 0:
-        return None
-
-    max_files = int(gw.get("persist_max_files", 100) or 100)
-    max_age_hours = int(gw.get("persist_max_age_hours", 0) or 0)
-
-    # ``max_tool_result_chars`` берём из runtime-конфига, а не с готового
-    # агента: хук создаётся ДО ``AgentFactory.create``, но тот же лимит
-    # потом получит и AgentLoop. Так порог архива и порог усечения
-    # в истории остаются одной величиной.
-    char_limit = _DEFAULT_MAX_TOOL_RESULT_CHARS
-    defaults = getattr(getattr(ctx.config, "agents", None), "defaults", None)
-    configured = getattr(defaults, "max_tool_result_chars", None)
-    if isinstance(configured, int) and configured > 0:
-        char_limit = configured
-
-    return ToolResultArchiveHook(
-        str(ctx.workspace_dir),
-        char_limit=char_limit,
-        max_files=max_files,
-        max_age_hours=max_age_hours,
-    )
 
 
 def _make_db_logging(ctx: ApplicationContext) -> Any | None:
@@ -1358,53 +1338,6 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
     )
 
 
-def _auto_register_skills(ctx: ApplicationContext) -> None:
-    """Зарегистрировать skills из ``project.json::skills.*`` в ``table_registry``.
-
-    Делегирует ``lib.core.skill_registration.register_skill_from_config``.
-    """
-    from lib.core.skill_registration import register_skill_from_config
-
-    skills = ctx.config_service.settings_section("skills") or {}
-    if not isinstance(skills, dict):
-        return
-
-    for name, cfg in skills.items():
-        register_skill_from_config(name, cfg)
-
-
-_INFRA_KEY_VECTOR_STORAGE = "vector_index.storage"
-
-
-def _register_infra_resources(ctx: ApplicationContext) -> None:
-    """Зарегистрировать инфраструктурные ресурсы runtime'а.
-
-    Делегирует ``lib.core.infra_registration`` — общую логику для runtime
-    и standalone-утилит (``tools/build_vectors.py``).
-
-    Какие индексы строить и из каких source-таблиц — описывается в
-    ``project.json::gateway.vector.index.indexes`` (см.
-    ``VectorIndexSettings.indexes`` и ``read_vector_index_config``).
-
-    Embedding-параметры платформенные, отдельная регистрация не нужна.
-    """
-    from lib.core.infra_registration import register_vector_storage
-
-    register_vector_storage()
-
-
-def _make_transcription(config: Any) -> Any:
-    """Создать ``TranscriptionService`` для настройки Postgres-канала.
-
-    ``TranscriptionService`` достаёт API-ключ/URL/язык провайдера
-    (``openai`` / ``groq``) из ``config.channels.transcription_provider``
-    и ``config.providers.*.api_key``.
-    """
-    from lib.services.transcription_service import TranscriptionService
-
-    return TranscriptionService(config)
-
-
 def _make_enterprise_mcp(settings: Any, ctx: Any = None) -> Any:
     """Создать клиента к MCP-серверу ``enterprise-mcp``.
 
@@ -1412,7 +1345,7 @@ def _make_enterprise_mcp(settings: Any, ctx: Any = None) -> Any:
     ошибка: без него агент работает, но потребители, которым нужен
     сервер, отвечают структурной ошибкой вместо падения на старте.
 
-    Ничего сверх ``project.json → enterprise_mcp`` здесь не передаётся.
+    Ничего сверх ``config.json → gateway.agent.enterprise_mcp`` здесь не передаётся.
     Путь к снимку и объявления индексов раньше уходили в процесс сервера
     переменными окружения; они живут в ``mcp-platform/platform.json``, и
     экспорт не просто дублировал их, а молча затирал файловое значение —
@@ -1485,7 +1418,7 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
     )
 
     # Имена таблиц — обязательные ключи конфигурации: литерал в коде означал бы
-    # вторую копию объявления, которая молча разойдётся с project.json/профилем.
+    # вторую копию объявления, которая молча разойдётся с config.json/профилем.
     schema = get_setting("channels", "postgres", "schema", default="public")
     meta_table = require_setting("channels", "postgres", "meta_table")
     messages_table = require_setting("channels", "postgres", "messages_table")
@@ -1517,11 +1450,57 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
     )
 
 
+def _wrap_bus_publish(bus: Any, method: str, log: Any) -> None:
+    """Подменить ``bus.<method>`` на async-обёртку ``await log(); await original()``.
+
+    Оригинальный метод сохраняется в замыкании. Если ``log`` бросит
+    исключение — оно глотается, оригинальный метод всё равно зовётся.
+    Это критично: иначе один сломанный логгер положил бы шину сообщений.
+    """
+    original = getattr(bus, method)
+
+    async def _wrapper(msg: Any) -> None:
+        try:
+            await log(msg)
+        except Exception:
+            pass
+        await original(msg)
+
+    setattr(bus, method, _wrapper)
+
+
+def _create_bus(inbound_logger: Any, outbound_logger: Any) -> Any:
+    """Создать ``MessageBus`` и обернуть публикации логгерами.
+
+    ``MessageBus`` — класс библиотеки (``nanobot.bus.queue``): через неё
+    каналы публикуют входящие сообщения, а ``AgentLoop`` — исходящие.
+    Хуков на публикацию у неё нет, поэтому логирование входящих/исходящих
+    подключается подменой двух методов на async-обёртки.
+
+    Отдельный модуль-фабрика для этого не нужен: вся сборка — создать шину
+    и, если логгеры заданы, подменить два метода.
+    """
+    from nanobot.bus.queue import MessageBus
+
+    bus = MessageBus()
+    if inbound_logger is not None:
+        _wrap_bus_publish(bus, "publish_inbound", inbound_logger)
+    if outbound_logger is not None:
+        _wrap_bus_publish(bus, "publish_outbound", outbound_logger)
+    return bus
+
+
 def _make_usage_store(ctx: ApplicationContext) -> Any | None:
     """Создать ``LLMUsageStore`` (upstream nanobot) по конфигу.
 
     Конфиг — ``gateway.usage_store.*`` (``sqlite_path``,
     ``enabled``). Возвращает ``None`` если отключено.
+
+    Хранилище — штатный синглтон библиотеки
+    (``nanobot.llm_usage.get_llm_usage_store``): путь по умолчанию,
+    потокобезопасный кеш и создание объекта — его забота. Наш код передаёт
+    путь, только если он задан явно, и тогда сам создаёт каталог: в отличие
+    от синглтона, мы обязаны учесть ``sqlite_path`` из конфига.
 
     См. спеку ``openspec/specs/storage/usage-store/spec.md``.
     """
@@ -1531,9 +1510,26 @@ def _make_usage_store(ctx: ApplicationContext) -> Any | None:
         )
     except Exception:
         usage_cfg = None
-    from lib.services.llm_usage_store_factory import create_usage_store
+    if not usage_cfg or not usage_cfg.get("enabled", True):
+        return None
 
-    return create_usage_store(usage_cfg)
+    raw_path = usage_cfg.get("sqlite_path")
+    try:
+        from nanobot.llm_usage import get_llm_usage_store
+
+        if not raw_path:
+            return get_llm_usage_store()
+        from pathlib import Path
+
+        sqlite_path = Path(str(raw_path)).expanduser()
+        sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        return get_llm_usage_store(sqlite_path)
+    except Exception as exc:
+        logger.warning(
+            "LLMUsageStore unavailable ({}); observer will not be attached",
+            exc,
+        )
+        return None
 
 
 # ----------------------------------------------------------------------

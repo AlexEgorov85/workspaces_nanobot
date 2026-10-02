@@ -33,7 +33,15 @@ def full_fake_modules(tmp_path):
         sol.agent = types.ModuleType("nanobot.agent")
         loop = types.ModuleType("nanobot.agent.loop")
         hook = types.ModuleType("nanobot.agent.hook")
-        hook.AgentHook = type("AgentHook", (), {})
+        # Подпись повторяет настоящую ``AgentHook.__init__(reraise=False)``.
+        # Раньше здесь был пустой ``type("AgentHook", (), {})``, и любой хук с
+        # ``super().__init__(reraise=True)`` (RepeatGuardHook) падал с
+        # ``TypeError`` — но только когда этот тест шёл первым и мок успевал
+        # подвязаться раньше настоящего класса. Порядок тестов менял результат,
+        # а не поведение кода.
+        hook.AgentHook = type(
+            "AgentHook", (), {"__init__": lambda self, reraise=False: None}
+        )
         hook.AgentHookContext = type("AgentHookContext", (), {})
         hook.AgentRunHookContext = type("AgentRunHookContext", (), {})
         # ``workspace/hooks/session_file_redirect_hook`` и ``lib/hooks/*``
@@ -178,7 +186,6 @@ def full_fake_modules(tmp_path):
         # lib.services
         for name in [
             "lib.session.pg_session_manager",
-            "lib.channels.redis_channel",
             "lib.channels.postgres_channel",
         ]:
             m = types.ModuleType(name)
@@ -249,7 +256,6 @@ class TestCreate:
         assert ctx.hooks
         assert ctx.tool_audit_hook in ctx.hooks
         assert ctx.runtime_patcher is not None
-        assert ctx.transcription_service is not None
         assert ctx.db_logging_service is None
         # Снимком агент не владеет (фаза 5, п. 5.8): полей cache_* на
         # контексте больше нет, и их отсутствие — часть контракта, а не
@@ -390,46 +396,6 @@ class TestCreate:
         assert names.index("SessionFileRedirectHook") < names.index("ToolAuditHook"), (
             "SessionFileRedirectHook должен идти раньше ToolAuditHook, "
             f"но порядок: {names}"
-        )
-
-
-class TestTableRegistryReset:
-    """``ApplicationContext.create(role='gateway', )`` сбрасывает singleton
-    ``table_registry`` в начале, чтобы при повторном создании context
-    в одном процессе (например, в тестах) не утекали ресурсы
-    от предыдущего context.
-
-    Без фикса: после первой ``create()`` с skill "A" вторая ``create()``
-    с skill "B" видела ресурсы обоих.
-    """
-
-    def test_create_resets_table_registry(self, full_fake_modules):
-        from lib.core.application_context import ApplicationContext
-        from lib.services.table_registry import (
-            SkillRegistration,
-            TableResource,
-            table_registry,
-        )
-
-        table_registry.register(
-            SkillRegistration(
-                name="leftover_skill",
-                resources=(TableResource(name="public.leftover"),),
-            )
-        )
-        assert "leftover_skill" in table_registry.names()
-
-        script = Path(__file__).resolve().parent.parent
-        ApplicationContext.create(role='gateway', 
-            script_dir=script,
-            workspace_dir=script / "workspace",
-            enable_db_logging=False,
-            enable_audit=False,
-        )
-
-        assert "leftover_skill" not in table_registry.names(), (
-            "ApplicationContext.create(role='gateway', ) должен сбрасывать TableRegistry "
-            "в начале; остались ресурсы от предыдущего context"
         )
 
 

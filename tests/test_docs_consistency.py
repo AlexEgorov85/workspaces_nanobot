@@ -12,7 +12,7 @@ Maintenance»). Каждое нарушение — регрессия: код �
    ``workspace/tools/doc_index_search.py``).
 2. ``README.md`` описывает `audit_analyzer` как CLI-based skill
    (реальность: `workspace/skills/audit_analyzer/scripts/cli.py` активен).
-3. ``project.json`` не содержит дублирующихся ключей в секциях
+3. `config.json` не содержит дублирующихся ключей в секциях
    верхнего уровня (двойной ``duckdb_query`` в ``gateway``).
 4. Все ссылки в ``.md`` файлах (относительные) ведут на существующие
    файлы.
@@ -102,17 +102,21 @@ def test_readme_md_describes_the_live_audit_analyzer_entrypoint() -> None:
         )
 
 
-def test_project_json_no_duplicate_keys() -> None:
-    """project.json не должен содержать дублирующихся ключей.
+def test_config_json_no_duplicate_keys() -> None:
+    """``config.json`` не должен содержать дублирующихся ключей.
 
     Проверяем дубли **внутри одного объекта**: RFC 8259 допускает
     повторяющиеся члены как синтаксис, но при штатном парсинге последний
     экземпляр побеждает, что маскирует merge-артефакты (например, был
     двойной ``"duckdb_query"`` внутри ``gateway``).
+
+    Раньше страж смотрел на ``project.json``. Секции того файла переехали в
+    ``config.json``, и проверка прежнего пути молча выключалась бы
+    (``if not path.is_file(): return``) — то есть перестала бы охранять
+    ровно то, ради чего писалась.
     """
-    path = _PROJECT_ROOT / "project.json"
-    if not path.is_file():
-        return
+    path = _PROJECT_ROOT / "config.json"
+    assert path.is_file(), "config.json обязателен: это единственный файл настроек"
     text = path.read_text(encoding="utf-8")
     cleaned = _strip_jsonc_comments(text)
 
@@ -129,13 +133,11 @@ def test_project_json_no_duplicate_keys() -> None:
 
     try:
         json.loads(cleaned, object_pairs_hook=detect)
-    except json.JSONDecodeError:
-        return
+    except json.JSONDecodeError as exc:
+        pytest.fail(f"config.json не разбирается: {exc}")
 
     flat = sorted({k for sub in dups for k in sub})
-    assert not flat, (
-        f"project.json содержит дублирующиеся ключи: {flat}"
-    )
+    assert not flat, f"config.json содержит дублирующиеся ключи: {flat}"
 
 
 @pytest.mark.skip(

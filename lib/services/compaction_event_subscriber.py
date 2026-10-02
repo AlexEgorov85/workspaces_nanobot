@@ -10,8 +10,7 @@
 
 Контракт:
 
-  * handler-функции канала (``postgres_channel.send``,
-    ``redis_channel.send``)
+  * handler-функции канала (``postgres_channel.send``)
     **должны** вызвать ``CompactionEventSubscriber.feed(outbound)``
     перед обработкой события: фильтр-логика общая, SRP не нарушается
     (канал по-прежнему не знает о бизнес-логике компакции).

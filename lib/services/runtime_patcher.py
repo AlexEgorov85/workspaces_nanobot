@@ -2,9 +2,7 @@
 
 Устраняет дублирование между gateway.py и cli_agent.py:
 
-  1. ``patch_context_governor`` — большие результаты инструментов выгружаются
-     в ``data_store/`` (ContextGovernor.normalize_tool_result) — было в gateway;
-  2. ``patch_subagent_logging`` — БД-логирование подагентов: их tool-события,
+  1. ``patch_subagent_logging`` — БД-логирование подагентов: их tool-события,
      итог запуска (``subagent_run_finished``) и история пишутся в
      ``DbLoggingService`` и ``session_manager`` (SubagentManager использует
      внутренний ``_SubagentHook``, который иначе пишет только debug в loguru).
@@ -13,11 +11,12 @@
 нативные точки расширения — здесь их больше нет, и второй реализации
 механизма тоже нет:
 
-  * ``save_turn`` → ``lib/hooks/tool_result_archive_hook.py``
-    (``AgentHook.after_execute_tool``);
+  * ``save_turn`` → upstream
+    ``nanobot.utils.helpers.maybe_persist_tool_result``;
   * ``document_text_threshold`` → ``workspace/tools/document_read.py``
     (нативный tool, порог в его собственном коде);
-  * ``session_content_cleanup`` → ``PGSessionManager.save``;
+  * ``session_content_cleanup`` → ``SanitizingSessionStore.save``
+    (``lib/session/pg_session_manager.py``);
   * ``async_save`` → обёртка в ``lib/services/session_storage.py``;
   * ``session_dir_watch`` → удалён целиком (диагностика расследована);
   * ``turn_delivery_fail`` → ``lib/services/turn_delivery_factory.py``
@@ -27,6 +26,18 @@
     оборота, на которое можно перевести ``_final_turn``/``media``, см.
     ``docs/architecture/runtime-patcher-inventory.md`` и ADR
     ``docs/architecture/decisions/turn-delivery-public-extension.md``.
+
+``context_governor`` — тоже ушёл в upstream (change
+``use-upstream-tool-result-persist``). В nanobot 0.3.5
+``ContextGovernor.normalize_tool_result``
+(``nanobot/agent/context_governance.py:709-759``) делает построчно то же,
+что делал патч: ``ensure_nonempty_tool_result`` → исключение для
+``read_file`` (``TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS``, строка 69) →
+``maybe_persist_tool_result`` с публично настраиваемым порогом
+``agents.defaults.max_tool_result_chars`` (``config/schema.py:131``).
+Наш патч, хук ``ToolResultArchiveHook`` и upstream писали один и тот же
+результат в три разных места тремя разными маркерами; остаётся ровно
+одна реализация — библиотечная.
 
 Регистрация кастомных tool'ов из ``workspace/tools/*.py`` — в отдельном
 loader'е: ``lib/services/project_tool_loader.py::register_project_tools``;
@@ -72,29 +83,6 @@ def _session_key_of(msg: Any) -> str:
     """
     key = getattr(msg, "session_key", None)
     return key if isinstance(key, str) else ""
-
-
-def _resolve_media_path(media_paths: list[str], basename: str) -> str:
-    """Найти путь в ``media_paths`` по совпадению с ``basename``.
-
-    Используется патчем ``patch_document_text_threshold`` для маркера
-    ``read at <path>``: когда текст документа обрезан, агент должен
-    иметь возможность прочитать файл сам. Возвращает первый путь,
-    чей ``Path(p).name`` совпадает с ``basename`` (точное совпадение,
-    без нормализации — имена файлов в проекте уникальны в пределах
-    одного сообщения). Если совпадения нет — возвращает ``""``.
-    """
-    if not basename:
-        return ""
-    for p in media_paths or []:
-        if not isinstance(p, str) or not p:
-            continue
-        try:
-            if Path(p).name == basename:
-                return p
-        except (OSError, ValueError):
-            continue
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -259,17 +247,6 @@ class PatchSpec:
 
 
 _PATCH_SPECS: dict[str, PatchSpec] = {
-    "context_governor": PatchSpec(
-        name="context_governor",
-        purpose="выгружать большие результаты инструментов в data_store/ "
-                "вместо заглушки обрезки",
-        nanobot_target="nanobot.agent.context_governance.ContextGovernor"
-                       ".normalize_tool_result",
-        reason="nanobot режет вывод инструментов по умолчанию и теряет данные",
-        alternatives_checked="config-ключи не покрывают кастомный persist-каталог",
-        risk="medium",
-        required=True,
-    ),
     "exec_limits": PatchSpec(
         name="exec_limits",
         purpose="сделать лимиты вывода exec-инструмента конфигурируемыми",
@@ -355,16 +332,16 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
 
 
 _SKIPPABLE_REASONS: frozenset[str] = frozenset({
+    # Конфигуративный skip: патч сознательно не применился, это НЕ сбой.
+    # Отсутствие upstream-атрибута сюда НЕ входит намеренно: это дрейф API
+    # библиотеки, и он обязан попадать в ``failed``, чтобы баннер запуска
+    # его показал. Закреплено tests/test_runtime_patcher.py::
+    # TestPatchReportClassification::test_missing_attr_is_failed.
     "agent is None",
-    "persist_threshold <= 0",
     "exec_max_output_chars <= 0",
+    "exec_timeout_cap_sec <= 0",
     "read_file_max_chars <= 0",
     "db_logging_service is None",
-    "agent.auto_compact is missing",
-    "agent.commands is missing",
-    "auto_compact is missing",
-    "auto_compact.check_expired is missing",
-    "agent.sessions is missing",
     "exec_session/shell module not loaded",
     "filesystem/search module not loaded",
 })
@@ -378,8 +355,6 @@ def _classify_skip(detail: str) -> bool:
     ``False`` = failed.
     """
     if detail in _SKIPPABLE_REASONS:
-        return True
-    if detail.startswith("idle compact enabled"):
         return True
     if detail.startswith("[INTERNAL_FAILED]"):
         return False
@@ -420,10 +395,10 @@ class PatchReport:
         Формат:
             Runtime patches
             ----------------
-            ✓ context_governor
-            ✓ save_turn
-            ⚠ idle_guard skipped: idle compact enabled (ttl=180)
-            ✗ compact_tracking failed: import failed: ...
+            ✓ assemble_outbound
+            ✓ subagent_logging
+            ⚠ exec_timeout_cap skipped: exec_timeout_cap_sec <= 0
+            ✗ tool_limits failed: read_file_max_chars is None
 
         При наличии ``specs`` добавляется строка ``(purpose: ...)`` под
         каждым failed, чтобы оператор сразу видел, зачем патч был нужен.
@@ -502,10 +477,10 @@ class RuntimePatcher:
         """Применить все патчи и вернуть отчёт.
 
         Args:
-            config: runtime-конфиг nanobot (для ``session_key`` в патче).
+            config: runtime-конфиг nanobot.
             settings: ``SETTINGS`` (или его ``.gateway`` секция) — для
-                ``persist_threshold``/``persist_max_files``/``persist_max_age_hours``.
-            workspace_dir: ``Path`` — корень workspace (для ``data_store/``).
+                ``tool_result_limits`` и ``error_messages``.
+            workspace_dir: ``Path`` — корень workspace.
             agent: ``AgentLoop`` (для ``patch_assemble_outbound``).
             tool_audit_hook: ``ToolAuditHook`` (для ``patch_assemble_outbound``).
             recent_files_hook: ``RecentFilesHook`` (опционально, для
@@ -524,8 +499,6 @@ class RuntimePatcher:
             ``PatchReport`` со списками ``applied`` / ``skipped`` (с причиной).
         """
         report = PatchReport()
-        self._record(report, "context_governor", self.patch_context_governor(
-            config, settings, workspace_dir))
         self._record(report, "exec_limits", self.patch_exec_limits(settings))
         self._record(report, "exec_timeout_cap", self.patch_exec_timeout_cap(settings))
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
@@ -566,121 +539,6 @@ class RuntimePatcher:
             report.skipped.append((name, detail))
         else:
             report.failed.append((name, detail))
-
-    @staticmethod
-    def _format_workspace_hint(workspace_dir: Any) -> str:
-        """Краткая подсказка с путём до workspace в лог-сообщении.
-
-        Используется в логах отдельных патчей, чтобы оператор сразу видел,
-        к какому workspace они относятся. Если пути нет — пустая строка.
-        """
-        if not workspace_dir:
-            return ""
-        from pathlib import Path as _P
-
-        path = _P(workspace_dir)
-        tools_dir = path / "tools"
-        if not tools_dir.is_dir():
-            return f"(searched: {tools_dir} — not found)"
-        count = sum(
-            1 for f in tools_dir.glob("*.py") if not f.name.startswith("_")
-        )
-        plural = "module" if count == 1 else "modules"
-        return f"scanned {tools_dir} ({count} {plural})"
-
-    
-
-    # ------------------------------------------------------------------
-    # Патч 1: ContextGovernor.normalize_tool_result
-    # ------------------------------------------------------------------
-
-    def patch_context_governor(
-        self, config: Any, settings: Any, workspace_dir: Any
-    ) -> tuple[bool, str]:
-        """Выгружать большие результаты инструментов в data_store/.
-
-        Алгоритм обёртки ``ContextGovernor.normalize_tool_result``:
-
-          1. ``ensure_nonempty_tool_result`` — заменить пустые/None-результаты
-             на осмысленные дефолты (нельзя хранить пустоту в контексте LLM);
-          2. Если ``tool_name`` в ``_EXEMPT_TOOLS = {"read_file"}`` —
-             вернуть как есть (защита от цикла persist → read → persist);
-          3. Сериализовать ``result`` в текст (``str`` напрямую, остальное —
-             через ``json.dumps``);
-          4. Если длина текста > ``persist_threshold`` — сохранить в
-             ``data_store/`` (через ``SessionFileStore``) и вернуть
-             короткую ссылку ``[Result saved to data_store/<path> (<size> KB)]``;
-          5. Иначе — вызвать оригинальный ``normalize_tool_result``.
-
-        Settings читаются из ``settings.gateway.*`` (или эквивалент в
-        dict-форме). При ``persist_threshold <= 0`` патч — no-op (это
-        штатный способ отключить persist-механизм).
-
-        Returns:
-            ``(True, "ContextGovernor.normalize_tool_result patched")``
-            при успехе; ``(False, <причина>)`` при отказе (нет атрибута,
-            API nanobot изменился и т.п.). При отказе патч НЕ применяется,
-            gateway продолжает работу с оригинальным nanobot.
-        """
-        persist_threshold = int(_get(settings, "gateway", "persist_threshold", default=0) or 0)
-        if persist_threshold <= 0:
-            return False, "persist_threshold <= 0"
-
-        max_files = int(_get(settings, "gateway", "persist_max_files", default=100) or 100)
-        max_age_hours = int(_get(settings, "gateway", "persist_max_age_hours", default=0) or 0)
-
-        try:
-            from nanobot.agent.context_governance import ContextGovernor
-            from nanobot.utils.runtime import ensure_nonempty_tool_result
-            from utils.session_file_store import SessionFileStore, prepare_content
-        except Exception as exc:
-            return False, f"import failed: {exc}"
-
-        try:
-            persisted_store = SessionFileStore(
-                workspace_dir / "data_store",
-                max_files=max_files,
-                max_age_hours=max_age_hours,
-            )
-            exempt_tools = frozenset({"read_file"})
-            original = ContextGovernor.normalize_tool_result
-
-            def _normalize_with_persist(config_, tool_call_id, tool_name, result):
-                result = ensure_nonempty_tool_result(tool_name, result)
-                if tool_name in exempt_tools:
-                    return result
-
-                text = None
-                if isinstance(result, str):
-                    text = result
-                elif not isinstance(result, bytes):
-                    try:
-                        text = json.dumps(result, ensure_ascii=False, indent=2)
-                    except (TypeError, ValueError):
-                        pass
-
-                if text is not None and len(text.encode("utf-8")) > persist_threshold:
-                    try:
-                        content, ext = prepare_content(text)
-                        save_info = persisted_store.save(
-                            session_key=config_.session_key or "default",
-                            content=content,
-                            source_tool=tool_name,
-                            ext=ext,
-                        )
-                        return (
-                            f"[Result saved to data_store/"
-                            f"{save_info['path']} ({save_info['size_kb']} KB)]"
-                        )
-                    except OSError:
-                        pass
-
-                return original(config_, tool_call_id, tool_name, result)
-
-            ContextGovernor.normalize_tool_result = staticmethod(_normalize_with_persist)
-            return True, "ContextGovernor.normalize_tool_result patched"
-        except Exception as exc:
-            return False, f"patch failed: {exc}"
 
     @staticmethod
     def _bump_schema_max(cls: Any, names: tuple, maximum: int) -> bool:
@@ -727,8 +585,9 @@ class RuntimePatcher:
 
         Патч поднимает потолки вывода из ``settings.gateway.tool_result_limits``
         и делает их конфигурируемыми. В этом проекте это безопасно для контекста:
-        вывод exec > ``persist_threshold`` и так уходит полным файлом в
-        ``data_store``, а в контекст ставится ссылка (exec не exempt).
+        вывод exec длиннее ``agents.defaults.max_tool_result_chars`` и так
+        уходит полным файлом (upstream ``maybe_persist_tool_result``), а в
+        контекст ставится ссылка (exec не exempt).
 
         Читаемые ключи:
           * ``exec_max_output_chars`` (дефолт 500_000) — потолок ``MAX_OUTPUT_CHARS``;

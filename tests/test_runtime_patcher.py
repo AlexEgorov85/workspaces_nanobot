@@ -12,11 +12,10 @@ from lib.services.runtime_patcher import RuntimePatcher
 
 
 def _settings(gateway_overrides=None, channels=None, **overrides):
-    gw = {
-        "persist_threshold": 0,
-        "persist_max_files": 100,
-        "persist_max_age_hours": 24,
-    }
+    # persist_* больше не читает ни один патч: персист результатов
+    # tool'ов уехал в upstream (change ``use-upstream-tool-result-persist``),
+    # порог — ``agents.defaults.max_tool_result_chars``.
+    gw: dict = {}
     if gateway_overrides is not None:
         gw.update(gateway_overrides)
     else:
@@ -214,73 +213,91 @@ class TestPatchAssembleOutbound:
         assert "missing" in detail
 
 
-class TestPatchContextGovernor:
-    def test_threshold_zero_skipped(self):
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_context_governor(
-            MagicMock(), _settings(), Path("ws")
+class TestContextGovernorPatchIsGone:
+    """Патч `context_governor` снят в пользу upstream.
+
+    В nanobot 0.3.5 `ContextGovernor.normalize_tool_result`
+    (`nanobot/agent/context_governance.py:709-759`) делает построчно то же,
+    что делал патч: `ensure_nonempty_tool_result` -> исключение для
+    `read_file` -> `maybe_persist_tool_result` с публично настраиваемым
+    порогом `agents.defaults.max_tool_result_chars`.
+
+    Держать оба было нельзя не только из-за дублирования: у патча и у
+    upstream РАЗНЫЕ маркеры результата, поэтому наш дедуп-гейт видел в
+    upstream-записи «свежий» результат и персистил его повторно, в третий
+    каталог. Тесты живут на месте патча намеренно: его возвращение снова
+    сделает один результат тройным.
+    """
+
+    def test_patch_method_removed(self):
+        assert not hasattr(RuntimePatcher, "patch_context_governor"), (
+            "patch_context_governor вернулся; он дублирует upstream "
+            "maybe_persist_tool_result и пишет второй раз"
         )
-        assert not ok
-        assert "persist_threshold" in detail
 
-    def test_threshold_positive_patches(self):
-        with patch.dict("sys.modules"):
-            # Подменяем модули, от которых патч зависит
-            governance = types.ModuleType("nanobot.agent.context_governance")
+    def test_patch_absent_from_specs(self):
+        from lib.services.runtime_patcher import _PATCH_SPECS
 
-            class _CG:
-                normalize_tool_result = None
+        assert "context_governor" not in _PATCH_SPECS, (
+            "context_governor остался в _PATCH_SPECS — патч снова будет "
+            "применяться при каждом старте"
+        )
 
-            governance.ContextGovernor = _CG
-            runtime = types.ModuleType("nanobot.utils.runtime")
-            runtime.ensure_nonempty_tool_result = lambda name, result: result
+    def test_patch_not_applied_by_apply_all(self):
+        applied = []
+        patcher = RuntimePatcher()
+        patcher._record = lambda report, name, outcome: applied.append(name)
+        patcher.patch_exec_limits = lambda *a, **k: (True, "ok")
+        patcher.patch_exec_timeout_cap = lambda *a, **k: (True, "ok")
+        patcher.patch_tool_limits = lambda *a, **k: (True, "ok")
+        patcher.patch_assemble_outbound = lambda *a, **k: (True, "ok")
+        patcher.patch_subagent_logging = lambda *a, **k: (True, "ok")
+        patcher.patch_repeat_guard_block = lambda *a, **k: (True, "ok")
 
-            utils = types.ModuleType("utils")
-            utils.session_file_store = types.ModuleType("utils.session_file_store")
-            store = MagicMock()
-            utils.session_file_store.SessionFileStore = MagicMock(return_value=store)
-            store.save.return_value = {"path": "x.txt", "size_kb": 12}
-            utils.session_file_store.prepare_content = lambda text: (text, "txt")
-            sys.modules["nanobot.agent.context_governance"] = governance
-            sys.modules["nanobot.utils.runtime"] = runtime
-            sys.modules["utils"] = utils
-            sys.modules["utils.session_file_store"] = utils.session_file_store
+        patcher.apply_all(
+            MagicMock(), _settings(), Path("ws"),
+            agent=MagicMock(), tool_audit_hook=MagicMock(),
+        )
 
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_context_governor(
-                MagicMock(),
-                _settings(persist_threshold=5),
-                Path("ws"),
+        assert "context_governor" not in applied, applied
+
+    def test_dead_skip_reason_removed(self):
+        from lib.services.runtime_patcher import _SKIPPABLE_REASONS
+
+        assert "persist_threshold <= 0" not in _SKIPPABLE_REASONS, (
+            "мёртвая запись про persist_threshold осталась в _SKIPPABLE_REASONS "
+            "после сноса патча, который её выдавал"
+        )
+
+    def test_no_data_store_write_in_patcher(self):
+        """Patcher больше не персистит результаты tool'ов в data_store/.
+
+        Проверяем поимённо: ни ``SessionFileStore``, ни ``prepare_content``
+        (пара, которой патч писал результат на диск) в модуле не осталось.
+        Проверять «нет вызова ``.save``» нельзя — патчер зовёт
+        ``agent.save``/``session.save`` в других местах, и проверка была бы
+        всегда-зелёной (ложно-отрицательный страж).
+        """
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "lib/services/runtime_patcher.py"
+        ).read_text(encoding="utf-8")
+        for name in ("SessionFileStore", "prepare_content", "data_store/"):
+            assert name not in source, (
+                f"runtime_patcher всё ещё упоминает {name}: персист "
+                "результатов tool'ов уехал в upstream maybe_persist_tool_result"
             )
-            assert ok
-            # Проверяем, что статик-метод заменён и работает
-            fn = _CG.normalize_tool_result
-            config = MagicMock()
-            config.session_key = "k"
-            result = fn(config, "tid", "tool", "x" * 100)
-            assert result.startswith("[Result saved to data_store/")
 
-    def test_import_failure_skipped(self):
-        # Если в sys.modules ничего нет, после импорта lib в нём появятся
-        # реальные nanobot.* и utils.* модули (workspace на sys.path) — но
-        # мы заранее гасим все нужные записи через patch.dict, чтобы
-        # патч не применился к настоящему ContextGovernor.
-        hidden = {
-            "nanobot": None,
-            "nanobot.agent": None,
-            "nanobot.agent.context_governance": None,
-            "nanobot.utils": None,
-            "nanobot.utils.runtime": None,
-            "utils": None,
-            "utils.session_file_store": None,
-        }
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            ok, detail = patcher.patch_context_governor(
-                MagicMock(), _settings(persist_threshold=5), Path("ws")
-            )
-            assert not ok
-            assert "import failed" in detail
+    def test_upstream_still_persists(self):
+        """Снос патча не оставил дыры: персист делает библиотека."""
+        import inspect
+
+        from nanobot.agent.context_governance import ContextGovernor
+
+        src = inspect.getsource(ContextGovernor.normalize_tool_result)
+        assert "maybe_persist_tool_result" in src
+        assert "ensure_nonempty_tool_result" in src
+        assert "TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS" in src
 
 
 class TestPatchExecLimits:
@@ -544,7 +561,7 @@ class TestApplyAll:
 
         patcher = RuntimePatcher()
         report = patcher.apply_all(
-            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
+            MagicMock(), _settings(), Path("ws"), agent, hook,
             db_logging_service=None,
         )
         d = report.to_dict()
@@ -553,7 +570,10 @@ class TestApplyAll:
         # делает RuntimeEventsSubscriber через bus.subscribe.
         assert "context_bridge_seed" not in d["applied"]
         assert "context_bridge_seed" not in d.get("skipped", [])
-        assert any(name == "context_governor" for name, _ in d["skipped"])
+        # context_governor больше не патч: выгрузка результатов делает
+        # сам upstream (nanobot 0.3.5, change use-upstream-tool-result-persist).
+        assert "context_governor" not in d.get("skipped", [])
+        assert "context_governor" not in d["applied"]
         assert any(name == "subagent_logging" for name, _ in d["skipped"])
 
 
@@ -613,10 +633,6 @@ class TestPatchContextBridgeSeed:
 #: прямо запрещено правилом проекта. Поэтому проверяются обе стороны:
 #: старого нет, новое есть.
 REMOVED_PATCHES: dict[str, tuple[str, str] | None] = {
-    "patch_save_turn": (
-        "lib/hooks/tool_result_archive_hook.py",
-        "ToolResultArchiveHook",
-    ),
     "patch_async_session_saves": (
         "lib/services/session_storage.py",
         "install_async_save",
@@ -646,6 +662,31 @@ REMOVED_PATCHES: dict[str, tuple[str, str] | None] = {
 
 #: Удалённые патчи, у которых нативной замены нет by design.
 NO_NATIVE_REPLACEMENT: frozenset[str] = frozenset({"patch_session_dir_watch"})
+
+#: Удалённые патчи, механизм которых живёт В САМОЙ БИБЛИОТЕКЕ.
+#:
+#: Отдельная категория, а не ``REMOVED_PATCHES``: замена лежит не в нашем
+#: дереве, поэтому проверять её надо импортом настоящего nanobot (иначе
+#: тест на «замена есть» проходил бы на файле, которого нет). Смысл
+#: разделения — не дать этим патчам попасть в ``NO_NATIVE_REPLACEMENT``
+#: («замены нет и не надо»): замена есть, просто не наша.
+UPSTREAM_REPLACED_PATCHES: dict[str, tuple[str, str]] = {
+    # change ``use-upstream-tool-result-persist`` (nanobot 0.3.5):
+    # ContextGovernor.normalize_tool_result вызывает
+    # maybe_persist_tool_result с порогом agents.defaults.max_tool_result_chars.
+    "patch_context_governor": (
+        "nanobot.agent.context_governance",
+        "ContextGovernor.normalize_tool_result",
+    ),
+    # Тот же change: ``save_turn`` сначала переехал в локальный
+    # ``ToolResultArchiveHook``, но и он оказался лишним — хук ловил
+    # результат в момент возврата tool'а и персистил его ВТОРЫМ путём
+    # (своим маркером), поверх того же upstream-механизма.
+    "patch_save_turn": (
+        "nanobot.agent.context_governance",
+        "ContextGovernor.normalize_tool_result",
+    ),
+}
 
 
 def _repo_root() -> Path:
@@ -756,25 +797,62 @@ class TestRemovedPatchesHaveNoLiveImplementation:
                     f"{method_name}: нет ни нативной замены, ни пометки "
                     f"в NO_NATIVE_REPLACEMENT"
                 )
+            # Патч с заменой В БИБЛИОТЕКЕ не должен попадать в локальную
+            # таблицу: у него нет файла-замены в нашем дереве.
+            assert method_name not in UPSTREAM_REPLACED_PATCHES, (
+                f"{method_name} объявлен и локальной, и upstream-заменой"
+            )
+
+    def test_upstream_replacements_still_exist_in_library(self):
+        """Механизм из ``UPSTREAM_REPLACED_PATCHES`` живёт в nanobot 0.3.5.
+
+        Проверяется импортом НАСТОЯЩЕГО пакета, а не чтением нашего файла:
+        после сноса патча осталась ровно одна реализация — библиотечная.
+        Если nanobot переедут на версию, где персиста нет, тест упадёт
+        на импорте, и дыра станет видна сразу, а не как «молча пропавший»
+        архив больших результатов.
+        """
+        import importlib
+
+        for method_name, (module_path, symbol) in UPSTREAM_REPLACED_PATCHES.items():
+            assert method_name not in REMOVED_PATCHES, (
+                f"{method_name} объявлен и локальной, и upstream-заменой"
+            )
+            assert method_name not in NO_NATIVE_REPLACEMENT, (
+                f"{method_name}: замена есть (в библиотеке), помечать «by design» "
+                "нельзя — механизм есть, он просто не наш"
+            )
+            module = importlib.import_module(module_path)
+            obj: object = module
+            for part in symbol.split("."):
+                assert hasattr(obj, part), (
+                    f"{method_name}: в {module_path} нет {symbol} — "
+                    "upstream-механизм исчез, верни нативную замену"
+                )
+                obj = getattr(obj, part)
+            assert callable(obj), (
+                f"{method_name}: {symbol} не вызываема"
+            )
 
     def test_save_turn_replacement_covers_both_cases(self):
-        """``ToolResultArchiveHook`` архивирует, но НЕ подменяет контент.
+        """Персист результатов tool'ов полностью принадлежит upstream.
 
-        Фиксирует осознанное ограничение переноса (см. докстринг хука):
-        ``after_execute_tool`` не может изменить то, что уйдёт в историю.
-        Тест ловит регрессию, при которой хук снова начнёт «молча»
-        переписывать содержимое результата.
+        Раньше здесь жил тест на ``ToolResultArchiveHook``: хук архивировал
+        результат, но НЕ подменял контент (``after_execute_tool`` не может
+        изменить то, что уйдёт в историю). Теперь оба пути схлопнуты в
+        ``ContextGovernor.normalize_tool_result``, который и чинит пустые
+        результаты, и заменяет длинные ссылкой — то есть ограничение
+        «архивируем, но не подменяем» устранено в самом месте записи.
         """
-        from lib.hooks.tool_result_archive_hook import (
-            _PERSISTED_PREFIX,
-            ToolResultArchiveHook,
-        )
+        import inspect
 
-        assert hasattr(ToolResultArchiveHook, "after_execute_tool")
-        # Переопределения нет (метод базового AgentHook не считается):
-        # хук не подменяет содержимое, только пишет его на диск.
-        assert "before_execute_tool" not in ToolResultArchiveHook.__dict__
-        assert _PERSISTED_PREFIX.startswith("[Result saved to data_store/")
+        from nanobot.agent.context_governance import ContextGovernor
+
+        src = inspect.getsource(ContextGovernor.normalize_tool_result)
+        # Пустой результат чинится до персиста...
+        assert "ensure_nonempty_tool_result" in src
+        # ...а длинный — заменяется ссылкой (значит, в историю идёт ссылка).
+        assert "maybe_persist_tool_result" in src
 
 
 class TestPatchReportClassification:
@@ -786,9 +864,25 @@ class TestPatchReportClassification:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        RuntimePatcher._record(report, "save_turn", (False, "persist_threshold <= 0"))
-        assert report.skipped == [("save_turn", "persist_threshold <= 0")]
+        RuntimePatcher._record(report, "exec_limits", (False, "exec_max_output_chars <= 0"))
+        assert report.skipped == [("exec_limits", "exec_max_output_chars <= 0")]
         assert report.failed == []
+
+    def test_dead_skip_reason_is_a_real_failure(self):
+        """Причину, которой больше нет в ``_SKIPPABLE_REASONS``, нельзя
+        выдать за «осознанный скип».
+
+        Раньше ``persist_threshold <= 0`` был живым скипом патча
+        ``context_governor``. Патч снят, причина вычищена — и если бы
+        патчер снова выдал её, это был бы реальный сбой (неизвестная
+        причина), а не штатное выключение фичи.
+        """
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(report, "exec_limits", (False, "persist_threshold <= 0"))
+        assert report.skipped == []
+        assert report.failed == [("exec_limits", "persist_threshold <= 0")]
 
     def test_real_failure_goes_to_failed(self):
         from lib.services.runtime_patcher import PatchReport
@@ -806,21 +900,6 @@ class TestPatchReportClassification:
         report = PatchReport()
         RuntimePatcher._record(report, "async_save", (False, "agent is None"))
         assert report.skipped == [("async_save", "agent is None")]
-        assert report.failed == []
-
-    def test_idle_compact_enabled_is_skipped(self):
-        """Сохранено как legacy-причина — некоторые скипы теперь
-        классифицируются по другим правилам, но ``idle compact
-        enabled`` остаётся в ``_SKIPPABLE_REASONS`` для обратной
-        совместимости с PatchSpec.
-        """
-        from lib.services.runtime_patcher import PatchReport
-
-        report = PatchReport()
-        RuntimePatcher._record(
-            report, "idle_guard", (False, "idle compact enabled (ttl=180)"),
-        )
-        assert report.skipped == [("idle_guard", "idle compact enabled (ttl=180)")]
         assert report.failed == []
 
     def test_missing_attr_is_failed(self):
@@ -853,17 +932,17 @@ class TestPatchReportClassification:
         report = PatchReport()
         RuntimePatcher._record(
             report,
-            "save_turn",
+            "subagent_logging",
             (True, "[INTERNAL_FAILED] 3 turns saved: foo; 1 failed: Bar"),
         )
         assert report.failed == [
             (
-                "save_turn",
+                "subagent_logging",
                 "[INTERNAL_FAILED] 3 turns saved: foo; 1 failed: Bar",
             ),
         ]
         assert report.skipped == []
-        assert "save_turn" not in report.applied
+        assert "subagent_logging" not in report.applied
 
     def test_details_recorded_for_every_state(self):
         from lib.services.runtime_patcher import PatchReport
@@ -873,7 +952,7 @@ class TestPatchReportClassification:
             report, "document_text_threshold",
             (True, "reference_non_image_attachments patched"),
         )
-        RuntimePatcher._record(report, "save_turn", (False, "persist_threshold <= 0"))
+        RuntimePatcher._record(report, "exec_limits", (False, "agent is None"))
         RuntimePatcher._record(
             report, "assemble_outbound", (False, "import failed: boom"),
         )
@@ -881,7 +960,7 @@ class TestPatchReportClassification:
             report.details["document_text_threshold"]
             == "reference_non_image_attachments patched"
         )
-        assert report.details["save_turn"] == "persist_threshold <= 0"
+        assert report.details["exec_limits"] == "agent is None"
         assert (
             report.details["assemble_outbound"] == "import failed: boom"
         )
@@ -894,13 +973,13 @@ class TestPatchReportRender:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        report.applied.append("context_governor")
-        report.skipped.append(("exec_limits", "persist_threshold <= 0"))
-        report.failed.append(("turn_delivery_fail", "import failed: boom"))
+        report.applied.append("assemble_outbound")
+        report.skipped.append(("exec_limits", "exec_max_output_chars <= 0"))
+        report.failed.append(("subagent_logging", "import failed: boom"))
         rendered = report.render()
-        assert "✓ context_governor" in rendered
-        assert "⚠ exec_limits skipped: persist_threshold <= 0" in rendered
-        assert "✗ turn_delivery_fail failed: import failed: boom" in rendered
+        assert "✓ assemble_outbound" in rendered
+        assert "⚠ exec_limits skipped: exec_max_output_chars <= 0" in rendered
+        assert "✗ subagent_logging failed: import failed: boom" in rendered
 
     def test_render_includes_spec_purpose_for_failed(self):
         """Правило: ``purpose`` из ``PatchSpec`` попадает в рендер
@@ -1102,7 +1181,7 @@ class TestApplyAllFailed:
 
         patcher = RuntimePatcher()
         report = patcher.apply_all(
-            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
+            MagicMock(), _settings(), Path("ws"), agent, hook,
             db_logging_service=None,
         )
         d = report.to_dict()
@@ -1131,7 +1210,7 @@ class TestApplyAllFailed:
 
         patcher = RuntimePatcher()
         report = patcher.apply_all(
-            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
+            MagicMock(), _settings(), Path("ws"), agent, hook,
             db_logging_service=None,
         )
         assert report.failed == [], f"unexpected failures: {report.failed}"

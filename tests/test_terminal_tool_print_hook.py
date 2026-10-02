@@ -22,7 +22,7 @@ def mock_nanobot_agent():
         nanobot = types.ModuleType("nanobot")
         nanobot.agent = types.ModuleType("nanobot.agent")
         nanobot.agent.AgentHook = type(
-            "AgentHook", (), {"__init__": lambda self: None}
+            "AgentHook", (), {"__init__": lambda self, reraise=False: None}
         )
         nanobot.agent.AgentHookContext = MagicMock()
         sys.modules["nanobot"] = nanobot

@@ -46,50 +46,45 @@ def test_assert_no_legacy_whole_repo() -> None:
     assert_no_legacy()
 
 
-def test_no_legacy_gateway_vector_index_in_project_json() -> None:
-    """Config-level guard: ``gateway.vector_index.*`` запрещён в project.json.
+def test_no_legacy_gateway_vector_index_in_config() -> None:
+    """Config-level guard: ``gateway.vector_index.*`` запрещён в config.json.
 
     Это Type E (config compatibility) — fail-fast через
     ``ConfigurationError`` в ``lib.core.project_settings``. Тест
-    проверяет, что legacy-секция не вернулась в ``project.json``
+    проверяет, что legacy-секция не вернулась в конфиг
     (canonical путь: ``gateway.vector.index.*``).
 
-    Подход: regex-поиск паттерна ``"vector_index"`` внутри секции
-    ``gateway``. JSONC-комментарии (``//`` и ``/* ... */``) удаляются
-    перед поиском.
+    Раньше страж смотрел на ``project.json`` и уходил по
+    ``if not cfg_path.is_file(): return``. После выпила того файла
+    проверка молча превратилась в no-op: секция могла вернуться в любую
+    секцию конфига, и тест остался бы зелёным. Путь переведён на
+    ``config.json`` — единственный файл настроек.
     """
     project_root = Path(__file__).resolve().parents[1]
-    cfg_path = project_root / "project.json"
-    if not cfg_path.is_file():
-        return
+    cfg_path = project_root / "config.json"
+    assert cfg_path.is_file(), "config.json обязателен: это единственный файл настроек"
 
     raw = cfg_path.read_text(encoding="utf-8")
-
-    # Strip line comments (//...) outside of strings.
-    no_line = re.sub(r"(?<!:)//.*$", "", raw, flags=re.MULTILINE)
-    # Strip block comments (/* ... */).
-    no_block = re.sub(r"/\*.*?\*/", "", no_line, flags=re.DOTALL)
 
     # Найти блок "gateway": { ... } верхнего уровня и проверить,
     # что внутри нет "vector_index".
     gw_match = re.search(
         r'"gateway"\s*:\s*\{',
-        no_block,
+        raw,
     )
-    if not gw_match:
-        return
+    assert gw_match, "в config.json нет секции gateway — страж молчал бы вхолостую"
     start = gw_match.end()
     depth = 1
     end = start
-    while end < len(no_block) and depth > 0:
-        ch = no_block[end]
+    while end < len(raw) and depth > 0:
+        ch = raw[end]
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
         end += 1
-    gw_block = no_block[start:end]
+    gw_block = raw[start:end]
     assert '"vector_index"' not in gw_block, (
-        "Legacy config section gateway.vector_index present in project.json; "
+        "Legacy config section gateway.vector_index present in config.json; "
         "migrate to gateway.vector.index.*"
     )

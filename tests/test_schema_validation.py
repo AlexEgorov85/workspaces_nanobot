@@ -119,7 +119,12 @@ class TestSchemaValidationError:
         assert "Отсутствуют ключи:" in text
         assert "profile='prod'" in text
         assert "channels.postgres.table_name" in text
-        assert "project.json" in text
+        # Подсказка обязана называть ЕДИНСТВЕННЫЙ файл настроек. Раньше здесь
+        # было ``project.json``, и тест закреплял именно его — то есть
+        # охранял имя снесённого файла. После выпила project.json подсказка
+        # не должна предлагать править файл, которого в проекте нет.
+        assert "config.json" in text
+        assert "project.json" not in text, "подсказка зовёт снесённый файл"
 
 
 class TestHintForProfile:

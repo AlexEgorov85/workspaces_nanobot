@@ -8,8 +8,7 @@
 - ``LLMCallObserver = Callable[[LLMCallRecord], None]``;
 - fail-open семантика ``record_llm_call`` (или эквивалентного
   upstream-callback);
-- контракт ``wrap_provider_snapshot_loader`` из
-  ``lib.services.llm_observer``.
+- контракт подписки observer'а в ``AgentFactory._wrap_provider_snapshot_loader``.
 
 Тесты MUST падать при несовместимом изменении upstream API —
 это страховка от регрессий при следующих минорных апдейдах nanobot.
@@ -19,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -79,14 +79,16 @@ class TestRecordLLMCallFailOpen:
         record_llm_call(call)
 
 
-class TestWrapProviderSnapshotLoader:
-    """``wrap_provider_snapshot_loader`` из lib.services.llm_observer
-    корректно пробрасывает ``set_llm_call_observer`` в загруженный
-    ``ProviderSnapshot.provider``.
+class TestSnapshotLoaderObserverFanOut:
+    """``AgentFactory._wrap_provider_snapshot_loader`` корректно пробрасывает
+    ``set_llm_call_observer`` в загруженный ``ProviderSnapshot.provider``.
+
+    Обёртка живёт в ``AgentFactory`` инлайном — отдельного модуля у агента
+    больше нет, но контракт (подписка + fail-soft) обязан быть зафиксирован.
     """
 
-    def test_wrap_provider_snapshot_loader_attaches_observer(self, tmp_path: Path) -> None:
-        llm_observer = pytest.importorskip("lib.services.llm_observer")
+    def test_snapshot_loader_attaches_observer(self, tmp_path: Path) -> None:
+        from lib.core.agent_factory import AgentFactory
         from nanobot.llm_usage.store import LLMUsageStore
 
         db = tmp_path / "usage.db"
@@ -109,7 +111,8 @@ class TestWrapProviderSnapshotLoader:
             captured.append(preset_name)
             return _StubSnapshot(_StubProvider())
 
-        wrapped = llm_observer.wrap_provider_snapshot_loader(base_loader, store)
+        config = SimpleNamespace(build_provider_snapshot=base_loader)
+        wrapped = AgentFactory._wrap_provider_snapshot_loader(config, store, None)
 
         snapshot = wrapped(preset_name="test-preset")
         assert snapshot is not None
@@ -120,10 +123,10 @@ class TestWrapProviderSnapshotLoader:
         assert snapshot2.provider.observer == store.record
         store.close()
 
-    def test_wrap_provider_snapshot_loader_fail_soft(self, tmp_path: Path) -> None:
+    def test_snapshot_loader_fail_soft(self, tmp_path: Path) -> None:
         """Если ``set_llm_call_observer`` бросает — обёртка логирует WARNING
         и возвращает snapshot без observer (агент продолжает работать)."""
-        llm_observer = pytest.importorskip("lib.services.llm_observer")
+        from lib.core.agent_factory import AgentFactory
         from nanobot.llm_usage.store import LLMUsageStore
 
         db = tmp_path / "usage-failsoft.db"
@@ -140,7 +143,8 @@ class TestWrapProviderSnapshotLoader:
         def base_loader(*, preset_name=None, **kwargs):
             return _StubSnapshot(_ExplodingProvider())
 
-        wrapped = llm_observer.wrap_provider_snapshot_loader(base_loader, store)
+        config = SimpleNamespace(build_provider_snapshot=base_loader)
+        wrapped = AgentFactory._wrap_provider_snapshot_loader(config, store, None)
         snapshot = wrapped()
         assert snapshot is not None
         assert snapshot.provider is not None
