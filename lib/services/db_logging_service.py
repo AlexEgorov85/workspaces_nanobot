@@ -203,6 +203,8 @@ class DbLoggingService:
         summary_max_chars: int = 200,
         retention_days: int = 0,
         purge_interval_sec: float = 3600.0,
+        mcp_writer: Any | None = None,
+        fallback_sink: Any | None = None,
     ) -> None:
         self._dsn = dsn or ""
         self._table_name = table_name
@@ -218,6 +220,26 @@ class DbLoggingService:
         self._retention_days = int(retention_days)
         self._purge_interval_sec = float(purge_interval_sec)
         self._last_purge = 0.0
+
+        # Транспорт записи. ``None`` — прямая запись в PostgreSQL через
+        # ``utils.db``: это поведение по умолчанию и исторический путь, он
+        # остаётся рабочим, пока журналирование не переведено на платформу
+        # целиком. Заданый ``mcp_writer`` означает, что запись идёт операцией
+        # ``log_events`` и агент пул записи не держит (change
+        # ``enterprise-mcp-platform``, фаза 7).
+        #
+        # Оба пути не смешиваются: transport выбирается при сборке, а не
+        # «попробовать MCP, а не вышло — писать в базу». Такой fallback был бы
+        # вторым владельцем пула записи, которого change и устраняет.
+        self._mcp_writer = mcp_writer
+        self._fallback_sink = fallback_sink
+        if mcp_writer is not None and fallback_sink is not None:
+            # События без полной личности платформа принять не может: операция
+            # ``log_events`` подписывается личностью вызова, а подписать нечего.
+            # Сливать их в transport'ный callback нельзя — он живёт в том же
+            # объекте и не знает про счётчики сервиса. Поэтому подписка
+            # переустанавливается здесь, единственном владельце статистики.
+            mcp_writer.on_unidentified = self._write_fallback
 
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_maxsize)
         self._stop_event = threading.Event()
@@ -239,6 +261,14 @@ class DbLoggingService:
             "last_purged_events": 0,
             "last_purged_runs": 0,
             "written_by_type": {},
+            # Счётчики потерь транспорта (фаза 7). Отдельные от ``failed``:
+            # ``failed`` — это ошибка записи, а здесь событие дошло до
+            # транспорта и было им отвергнуто (нет личности, сервер недоступен,
+            # переполнение его буфера). Приёмка фазы 7 — «счётчик потерь
+            # растёт», и он обязан быть виден в ``get_stats()``.
+            "dropped": 0,
+            "fallback_written": 0,
+            "dropped_by_type": {},
         }
 
         # Индекс «текущий вопрос»: session_key -> контекст вопроса.
@@ -862,6 +892,9 @@ class DbLoggingService:
         """
         if not batch:
             return
+        if self._mcp_writer is not None:
+            self._flush_batch_via_mcp(batch)
+            return
         if not self._dsn:
             self._drop_batch(batch)
             return
@@ -888,6 +921,85 @@ class DbLoggingService:
                 self._stats["failed"] += len(batch)
                 self._stats["last_error"] = f"flush: {exc}"
                 self._stats["connected"] = False
+
+    def _write_fallback(self, events: list[LogEvent]) -> None:
+        """Локальный след для событий, которые платформа принять не может.
+
+        События без ``session_id``/``user_id`` нельзя подписать вызовом, а
+        выдумать им личность — значит записать в чужую сессию. Локальный файл
+        сохраняет их для расследования, а счётчики ``dropped``/``fallback_written``
+        показывают, что журнал неполон.
+
+        Fallback-файл — не второй пул записи и не конкурент платформе: это
+        локальный след на случай отказа, поэтому он и пишется явно, а не
+        прозрачно.
+        """
+        with self._state_lock:
+            self._stats["fallback_written"] += len(events)
+        if self._fallback_sink is not None:
+            self._fallback_sink.write(events)
+
+    def _flush_batch_via_mcp(self, batch: list[LogEvent]) -> None:
+        """Отдать батч платформе операцией ``log_events``.
+
+        Путь фазы 7: агент не формирует ``INSERT`` и не держит пул записи
+        журнала — он спрашивает ``enterprise-mcp``, который пишет в таблицу
+        сам. Транспорт возвращает принятое и потерянное, поэтому статистика
+        обновляется по факту ответа платформы, а не по числу отправленных
+        событий: иначе счётчик потерь всегда был бы нулевым, и приёмка фазы
+        («счётчик потерь растёт») стала бы непроверяемой.
+
+        Исключение transport'а не гасится: потерянный батч обязан быть виден в
+        ``failed``/``last_error``, иначе отказ платформы выглядел бы как тишина.
+        """
+        try:
+            result = self._mcp_writer.write_events(batch)
+        except Exception as exc:
+            with self._state_lock:
+                self._stats["failed"] += len(batch)
+                self._stats["dropped"] += len(batch)
+                self._stats["last_error"] = f"flush mcp: {exc}"
+                self._stats["connected"] = False
+                for etype, count in _count_by_type(batch).items():
+                    self._stats["dropped_by_type"][etype] = (
+                        self._stats["dropped_by_type"].get(etype, 0) + count
+                    )
+            return
+
+        with self._state_lock:
+            if result.accepted:
+                self._stats["written"] += result.accepted
+                self._stats["batch_count"] += 1
+            if result.dropped:
+                self._stats["dropped"] += result.dropped
+            self._stats["connected"] = result.accepted > 0
+            for etype, count in _count_by_type(batch).items():
+                if result.dropped == len(batch):
+                    bucket = "dropped_by_type"
+                else:
+                    bucket = "written_by_type"
+                self._stats[bucket][etype] = (
+                    self._stats[bucket].get(etype, 0) + count
+                )
+
+    def _handle_question_run_via_mcp(self, rec: _QuestionRunRecord) -> None:
+        """Отдать контекст вопроса платформе операцией ``upsert_question_run``.
+
+        Отдельный метод по той же причине, что и ``_flush_batch_via_mcp``:
+        контекст пишется не событием журнала, а отдельной операцией, и смешивать
+        их в одном батче нельзя — они пишутся в разные таблицы.
+        """
+        try:
+            self._mcp_writer.upsert_question_run(rec)
+        except Exception as exc:
+            with self._state_lock:
+                self._stats["failed"] += 1
+                self._stats["last_error"] = f"question_run mcp: {exc}"
+                self._stats["connected"] = False
+            return
+        with self._state_lock:
+            self._stats["question_runs"] += 1
+            self._stats["connected"] = True
 
     def _insert_batch(self, conn: Any, batch: list[LogEvent]) -> None:
         """Выполнить ``execute_batch`` INSERT на данном соединении."""
@@ -922,7 +1034,13 @@ class DbLoggingService:
         Через общий пул ``utils.db``. При неудаче запись выбрасывается
         (``failed++``), JSONL-файл не пишется. При ошибке upsert —
         ``connected = False``.
+
+        При заданном ``mcp_writer`` путь другой: запись уходит платформе
+        операцией ``upsert_question_run`` (см. ``_handle_question_run_via_mcp``).
         """
+        if self._mcp_writer is not None:
+            self._handle_question_run_via_mcp(rec)
+            return
         if not self._dsn:
             with self._state_lock:
                 self._stats["failed"] += 1
