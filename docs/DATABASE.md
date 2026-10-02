@@ -56,17 +56,18 @@
   и gateway может управлять жизненным циклом без побочных эффектов.
 
 **Точка создания провайдера** — `lib/services/cache_provider.py::open_cache_provider(*, mode)`.
-В runtime агента она больше не зовётся: снимком владеет capability `data`
-платформы (фаза 5, п. 5.8). Осталась для standalone-утилит сборки индексов.
-Она сама резолвит путь (`resolve_cache_path()` из
-`lib/services/cache_provider_impl.py`),
-настраивает экземпляр и открывает файл; вызывающий код получает `CacheStore`
-и не знает, какая реализация стоит за интерфейсом. Раньше навык делегировал
-ей через `lib/core/skill_config.build_cache_provider()` (skill-side —
-`scripts/skill_config.build_cache_provider()`), тот же путь использовал
-`tools/build_vectors.py`. **После фазы 9 и 5 ни навык, ни runtime к ней не
-обращаются:** данные аудита идут операциями capability `audit` по MCP, файл
-снимка открывает capability `data` платформы.
+Функции и модуля в агенте больше нет: снимком владеет capability `data` платформы
+(фаза 5, п. 5.8), и точка создания провайдера уехала вместе с ним
+(`mcp-platform/libs/enterprise_data/snapshot/store.py`). Она сама резолвила путь
+(`resolve_cache_path()`), настраивала экземпляр и открывала файл; вызывающий код
+получал `CacheStore` и не знал, какая реализация стоит за интерфейсом. Раньше
+навык делегировал ей через `lib/core/skill_config.build_cache_provider()`
+(skill-side — `scripts/skill_config.build_cache_provider()`), тот же путь
+использовал `tools/build_vectors.py`. **Сейчас к этому пути не обращается
+никто:** ни навык, ни runtime — данные аудита идут операциями capability `audit`
+по MCP, файл снимка открывает capability `data` платформы, а сборку векторов
+делает `mcp-platform/servers/enterprise/build_index.py`, который снимок вообще
+не открывает.
 
 ## 🔌 Единый пул соединений PostgreSQL (`workspace/utils/db.py`)
 
@@ -144,10 +145,9 @@
   секцию и применяет через `set_pool_config()`; `ctx.start()/stop()` вызывают
   `utils.db.start()/shutdown()`.
 
-**Кто ходит в БД через пул:** `DbLoggingService`, `CacheLoadService` (только на
-время стартовой загрузки), `PGSessionManager`, `PostgresChannel`,
-`session_storage` и инструменты. (`streamlit_app.py` тоже ходил, но удалён в
-фазе 1.) Ни один сервис-поток не
+**Кто ходит в БД через пул:** `DbLoggingService`, `SessionColdSyncService`
+(зеркало сессий), `PostgresChannel`, `session_storage` и инструменты.
+(`streamlit_app.py` тоже ходил, но удалён в фазе 1.) Ни один сервис-поток не
 держит собственного psycopg2-соединения — соединение выдаёт пул на время
 запроса/транзакции. Чтение кэша в рабочем режиме пул **не занимает вовсе**:
 это и есть смысл кэша.
@@ -220,32 +220,42 @@ DSN подключается только через `channels.postgres.dsn` в 
 > 2026-10-01 из агента снесены сами модули кластера: `duckdb_cache_store.py`,
 > `cache_provider.py`, `cache_provider_impl.py`, `cache_load_service.py`,
 > `preload_service.py`, `vector_index_service.py`, `lib/utils/duckdb_query.py`,
-> а также `tools/build_vectors.py` и `tools/check_indexes.py` (заменены на
+> `lib/core/skill_config.py`, а также `tools/build_vectors.py` и
+> `tools/check_indexes.py` (заменены на
 > `mcp-platform/servers/enterprise/build_index.py` и операцию `index_stats`).
 > Из `requirements.txt` агента убраны `duckdb`, `faiss-cpu`, `numpy`, `pyarrow`.
-> `TableRegistry`, `skill_registration.py` и `infra_registration.py` остались:
-> они описывают состав снимка, а не способ доступа к нему.
+> `TableRegistry`, `skill_registration.py` и `infra_registration.py` тоже сняты
+> вместе с реестром: состав снимка объявляет capability `data`
+> (`mcp-platform/platform.json → audit.tables`).
 >
-> Прежняя пометка (5.8): В агенте этой
-> подсистемы больше нет: `ApplicationContext` не загружает снимок, не держит
-> провайдер и не прогревает индексы; полей `cache_provider` / `cache_store` /
-> `cache_loader` / `preload_service` на контексте не осталось, а
-> `resolve_cache_path` переехал в `lib/services/cache_provider_impl.py`.
-> Всё, что описано ниже как «сервис агента», теперь выполняет capability
-> `data` платформы. Кластер `lib/services/duckdb_cache_store.py`,
-> `cache_provider.py`, `cache_load_service.py` в дереве агента пока лежит, но
-> не подключён к runtime — он живёт на standalone-утилиты сборки индексов.
-> Полное описание работающей стороны: `mcp-platform/libs/enterprise_data/`.
+> Ниже описан **прежний агентский** жизненный цикл — чтобы читать платформенный
+> контракт и историю миграций. В дереве агента этих модулей нет; каждый
+> упоминаемый класс живёт в платформе под другим именем:
+>
+> | Прежнее имя (агент) | Где живёт сейчас |
+> |---|---|
+> | `cache_provider.py` (`CacheProvider`/`CacheIngestion`/`CacheStore`) | `mcp-platform/libs/enterprise_data/snapshot/contracts.py` |
+> | `duckdb_cache_store.py` (`DuckDbCacheStore`) | `mcp-platform/libs/enterprise_data/snapshot/store.py` |
+> | `cache_load_service.py` (`CacheLoadService`) | `mcp-platform/libs/enterprise_data/loader.py` (`SnapshotLoadService`) |
+> | `cache_provider_impl.py` (общие помощники) | `mcp-platform/libs/vectors/{config,signature,embedding}.py` |
+> | `preload_service.py` | `mcp-platform/libs/vectors/preload.py` + `owner.py` |
+> | `resolve_cache_path()` | `mcp-platform/libs/enterprise_data/snapshot/store.py` |
+>
+> Путь файла снимка объявлен в `mcp-platform/platform.json → data.snapshot_path`;
+> агент его не вычисляет и не переопределяет. `ApplicationContext` снимок не
+> загружает и полей `cache_provider`/`cache_store`/`cache_loader`/`preload_service`
+> на контексте не имеет.
 
 **Кеш — снимок, а не зеркало.** Он наполняется один раз при старте процесса и
 больше не обращается к PostgreSQL. Дельт, фонового поллинга, очереди задач и
 механизма координации писателей не существует. Свежесть обеспечивается
 перезапуском процесса, а не фоном.
 
-Пара сервисов строится в `ApplicationContext._init_cache_runtime`
-(`lib/core/application_context.py`) внутри `create()` — там же, где поднимается
-пул и проверяется схема. Возвращает `(None, None)`, если реестр таблиц пуст или
-нет DSN.
+В прежней агентской сборке пара сервисов строилась в
+`ApplicationContext._init_cache_runtime` (`lib/core/application_context.py`)
+внутри `create()` — там же, где поднимался пул и проверялась схема. Метод
+удалён вместе с кластером: на платформе загрузку снимка запускает capability
+`data`, а не composition root агента.
 
 - **`CacheLoadService`** (`lib/services/cache_load_service.py`) — единственный
   владелец подключения к PostgreSQL и единственный writer. Держит
@@ -273,10 +283,9 @@ DSN подключается только через `channels.postgres.dsn` в 
   снимок). `get_schema()` возвращает исходные PG-типы и комментарии (без них —
   DuckDB-тип из information_schema).
 
-  Путь файла вычисляется через `resolve_cache_path()`
-  (`lib/services/cache_provider_impl.py`; до фазы 5 он жил в
-  `lib/core/application_context.py`) — **единый механизм**, общий для всех
-  потребителей:
+  Путь файла вычислялся через `resolve_cache_path()` (после фазы 5 — в
+  `mcp-platform/libs/enterprise_data/snapshot/store.py`) — **единый механизм**,
+  общий для всех потребителей:
 
   1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
   2. **default** → `~/.cache/nanobot/duckdb/cache.duckdb`.
@@ -422,15 +431,20 @@ legacy-артефакт (см. `docs/VECTOR_INDEXES.md`).
 **Миграция со старой версии:** миграции схемы применяются через
 `python tools/migrate.py --apply` (см. `sql/README.md`). После миграций
 векторы пересобираются:
-`python tools/build_vectors.py --full-rebuild`.
+`python -m servers.enterprise.build_index --full-rebuild` (из каталога
+`mcp-platform`; агентский `tools/build_vectors.py` снят).
 
 ⚠️ Удаление persisted-FAISS-таблицы выполняется **вручную** (шаблон
 `sql/migrations/V003__drop_vector_index_store.sql` через runner — no-op):
 
 ```bash
 psql "$DATABASE_URL" -c "DROP TABLE IF EXISTS public.agent_vector_index_store;"
-python tools/build_vectors.py --full-rebuild
+cd mcp-platform && python -m servers.enterprise.build_index --full-rebuild
 ```
+
+Сборщик пишет вектора в PostgreSQL, а поиск читает их из снимка DuckDB, поэтому
+после пересборки **требуется перезагрузка снимка** — иначе поиск продолжит
+выдавать прежние вектора.
 
 ### Структура (DDL)
 

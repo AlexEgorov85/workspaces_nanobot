@@ -35,15 +35,21 @@
 
 **Автоматические изменения**:
 
-- FAISS-индексы собираются **в памяти** при старте gateway
-  (`PreloadService.preload_vector_indexes`) из DuckDB-снапшота
-  `gateway.vector.index.storage_table`; persisted-артефактов в PG больше нет.
-- `tools/build_vectors.py` пишет векторы в `storage_table` и пересобирает
-  FAISS в памяти; настройки `gateway.vector.index.signature_table` и
-  `config_table` удалены из `VectorIndexSettings` (их наличие в `config.json`
-  — fail-fast на старте).
-- `--list-indexes` (CLI `audit_analyzer`) и `tools/check_indexes.py` читают
-  runtime-состояние из того же снапшота, а не из PG-таблицы.
+- FAISS-индексы строятся **в памяти** процесса платформы, лениво — при первом
+  запросе к индексу (`mcp-platform/libs/vectors/owner.py`), из DuckDB-снапшота
+  `platform.json → vectors.storage_table`; persisted-артефактов в PG больше нет.
+  Прежний прогрев на старте gateway (`PreloadService.preload_vector_indexes`)
+  удалён вместе с агентским кластером.
+- Сборку векторов выполняет `python -m servers.enterprise.build_index` (из
+  `mcp-platform`): он пишет векторы в `storage_table`. Агентский
+  `tools/build_vectors.py`, который дополнительно пересобирал FAISS в памяти,
+  снят 2026-10-01. Настройки `gateway.vector.index.signature_table` и
+  `config_table` удалены из `VectorIndexSettings`.
+- Расхождение декларации и runtime проверяют операции capability `vectors`:
+  `list_indexes` (состояние всех индексов) и `index_stats` (метрики одного).
+  Удалённые `--list-indexes` (CLI `audit_analyzer`) и `tools/check_indexes.py`
+  смотрели на тот же снимок, но в агентском процессе; сейчас это делает
+  платформа.
 - `history_search(session_scope="all")` изолирован по `user_id` (security):
   колонка `agent_gateway_logs.user_id` + индекс `(user_id, "timestamp" DESC)`.
   Семантика `scope="all"` — «все сессии текущего пользователя», а не глобальная
@@ -70,14 +76,23 @@
    checksum (`--verify` → DRIFT). Для отката — `DROP TABLE IF EXISTS ...`
    вручную и `--force` при повторном применении.
 
-2. **Пересобрать векторные индексы**: `python tools/build_vectors.py --full-rebuild`.
-   До пересборки поиск в `--mode vector` вернёт пустую выдачу — runtime
-   получает векторы из снапшота `storage_table`, который наполняется этой
-   командой.
+2. **Пересобрать векторные индексы**: `cd mcp-platform && python -m
+   servers.enterprise.build_index --full-rebuild`. До пересборки поиск вернёт
+   пустую выдачу — runtime получает векторы из снапшота, а он наполняется этой
+   командой. **После пересборки снимок обязательно перезагружается**: сборщик
+   пишет в PostgreSQL, а поиск читает из снимка.
 
-3. **Проверить согласованность декларации и runtime**:
-   `python tools/check_indexes.py` (exit 0 — согласовано, 1 — divergence,
-   2 — инфраструктурная ошибка).
+   ⚠️ Объявление индексов берётся из `mcp-platform/platform.json →
+   vectors.indexes`. В `config.json → gateway.vector.index` оно пока
+   продублировано, и правка одного файла без другого ничего не даст — какой из
+   двух объявлений сносить, решает владелец (см. `VECTOR_INDEXES.md`).
+
+3. **Проверить согласованность декларации и runtime**: операция `list_indexes`
+   (состояние и `declared`/`vector_count` по каждому индексу) либо
+   `index_stats` для одного индекса. Прежний
+   `python tools/check_indexes.py` с кодами возврата 0/1/2 удалён вместе с
+   агентским кластером; разбор `missing`/`orphan`/`stale` живёт в
+   `mcp-platform/libs/vectors/preload.py::compute_index_health`.
 
 4. **Аудит вызовов `history_search`**: агент, полагавшийся на глобальную выдачу
    по `session_scope="all"`, теперь получает события только своего пользователя
@@ -251,10 +266,13 @@ LLM-вызовы в production):
   — секция переименована. Обратной совместимости нет (fail-fast через
   runtime-проверку в `register_vector_storage`).
 - `gateway.vector.embedding` — удалена целиком. Параметры эмбеддера
-  (`base_url`, `model`, `dimension`, `http_timeout_sec`, `retries`)
-  захардкожены модульными константами `_EMBED_*` в
-  `lib/services/cache_provider_impl.py`. Bearer-токен — из переменной
-  окружения `EMBED_TOKEN` (env, не `config.json`).
+  (`api_base`, `path`, `model`, `dimension`, `timeout`, `key`) объявлены в
+  `mcp-platform/platform.json → llm.embed_*` и принадлежат capability `llm`.
+  Захардкоженных модульных констант `_EMBED_*` в коде больше нет: сначала они
+  жили в `lib/services/cache_provider_impl.py`, теперь адрес и модель читает
+  платформенный владелец HTTP-вызова. Bearer-токен — `embed_key` со значением
+  `${EMBED_TOKEN}`, разворачивается из `mcp-platform/.secrets.env` или окружения
+  процесса.
 - `skills.<name>.embedding` — удалена; embedding больше не параметризован по skill'у.
 - `skills.<name>.vector_indexes[].source` — поле `source` больше не нужно.
   Source-таблица (`table`/`pk`/`content_columns`/`embedding_columns`/`track_column`/

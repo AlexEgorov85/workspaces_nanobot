@@ -68,7 +68,7 @@ reference** по своей подсистеме; README в корне — эт�
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | `ApplicationContext`, поток инициализации, `lib/services`, `MessageExchange`, LLM-клиент, утилиты, дерево проекта |
 | [DATABASE.md](DATABASE.md) | Единый пул соединений, универсальный слой данных, конфигурация навыка, DDL, границы P0 |
-| [VECTOR_INDEXES.md](VECTOR_INDEXES.md) | Векторная подсистема: `config.json` → `storage_table` → DuckDB-снапшот → in-memory FAISS, `tools/build_vectors.py`, edge-cases |
+| [VECTOR_INDEXES.md](VECTOR_INDEXES.md) | Векторная подсистема платформы: `platform.json → vectors.indexes` → `storage_table` → снимок DuckDB → in-memory FAISS, `servers/enterprise/build_index.py`, edge-cases |
 | [INTERNAL_API.md](INTERNAL_API.md) | `tools.exec`, кастомные `workspace/tools/*.py`, CLI-режимы, `tools/`, добавление настроек |
 | [TESTING.md](TESTING.md) | Запуск тестов, контрактные тесты nanobot API, live e2e |
 

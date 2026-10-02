@@ -50,10 +50,16 @@
 
 ### Data
 
+> Оба компонента принадлежат платформе (`mcp-platform`), не агенту: capability
+> `data` владеет снимком, capability `vectors` — индексами. Агентских
+> `lib/services/cache_provider.py` и `lib/services/vector_index_service.py`
+> в дереве нет (удалены 2026-10-01 вместе с кластером локального снимка).
+
 | Компонент | Реализация | Спецификация | Статус |
 |-----------|------------|--------------|--------|
-| CacheProvider | `lib/services/cache_provider.py:CacheProvider` | [`data/cache-provider`](data/cache-provider/spec.md) | partial |
-| VectorIndexService | `lib/services/vector_index_service.py:VectorIndexService` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
+| CacheProvider | `mcp-platform/libs/enterprise_data/snapshot/contracts.py:CacheProvider` | [`data/cache-provider`](data/cache-provider/spec.md) | partial |
+| VectorIndexBuilder | `mcp-platform/libs/vectors/builder.py:VectorBuilder` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
+| VectorIndexOwner | `mcp-platform/libs/vectors/owner.py:VectorIndexOwner` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
 
 ### Documentation
 

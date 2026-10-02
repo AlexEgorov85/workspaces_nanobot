@@ -93,7 +93,6 @@ def _embedder(settings: Any) -> Any:
     которая разъедется с платформенной при первой же смене модели.
     """
     from libs.llm.gateway import LlmGateway, set_gateway
-
     from servers.enterprise.capabilities.llm.service.main import LlmService
 
     set_gateway(LlmGateway(settings=settings))
@@ -171,7 +170,10 @@ def main(argv: list[str] | None = None) -> int:
     from libs.enterprise_common.settings import Settings, pool_config
     from libs.enterprise_data import db as pool
     from libs.vectors.builder import VectorBuilder
-    from libs.vectors.config import read_embedding_defaults
+    from libs.vectors.config import (
+        read_embedding_defaults,
+        read_vector_storage_table,
+    )
 
     # Читатели настроек — те же функции, что у сервера. Импорт приватных
     # имён здесь осознанный: альтернатива — второй разбор platform.json,
@@ -199,12 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        storage_table = str(
-            ((config.get("gateway") or {}).get("vector") or {})
-            .get("index", {})
-            .get("storage_table")
-            or ""
-        )
+        storage_table = read_vector_storage_table(config)
         if not storage_table:
             logger.error("не задана vectors.storage_table — некуда писать вектора")
             return 2
