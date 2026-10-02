@@ -130,7 +130,9 @@
   подписка observer'а свёрнута в `AgentFactory._wrap_provider_snapshot_loader`.
 - `PGSessionManager` теперь — тонкий compatibility layer
   (hot-path → `super()`); никаких прямых `INSERT/UPDATE` в
-  `agent_session_meta` / `agent_session_messages`.
+  `agent_session_meta` / `agent_session_messages`. **Позже снят целиком:**
+  подкласс заменён слоем `SanitizingSessionStore` под тем же upstream
+  `SessionManager` (см. `lib/session/README.md`).
 - Добавлены секции `gateway.usage_store.*` и
   `gateway.session_cold_sync.*` в `config.json`.
 - Новые contract tests: `tests/contract/test_session_manager_api.py`,
