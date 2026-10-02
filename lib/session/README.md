@@ -1,34 +1,90 @@
-# PGSessionManager — хранение сессий в PostgreSQL
+# Хранение сессий — `lib/session/`
 
-Замена штатного `SessionManager` (JSONL-файлы) на PostgreSQL/Greenplum.
+> **Класса `PGSessionManager` в проекте нет.** Он существовал как подкласс
+> `SessionManager`, но был снят: PostgreSQL перестал быть основным хранилищем
+> сессий. Ниже — что осталось и как устроено сейчас.
 
-## Зачем
+## Что здесь есть
 
-Стандартный nanobot хранит сессии в `workspace/sessions/*.jsonl`. Это неудобно при:
-- Нескольких репликах gateway (файлы не расшарить)
-- Необходимости анализировать историю через SQL
-- Большом количестве сессий (JSONL не индексирован)
+Модуль `pg_session_manager.py` экспортирует три вещи
+(`lib/session/pg_session_manager.py:109`):
 
-PGSessionManager хранит все данные в двух таблицах и автоматически падает на JSONL при недоступности БД.
+| Символ | Роль |
+|--------|------|
+| `SanitizingSessionStore` | `SessionStore` upstream'а + санитизация NUL на границе записи |
+| `build_session_manager(workspace)` | собирает upstream `SessionManager` поверх этого стора |
+| `clean_session_content` | санитизация одного сообщения |
 
-> **v2.0.0+:** таблицы названы `agent_session_meta` /
-> `agent_session_messages` (единый `agent_`-префикс для таблиц агента).
-> DDL в `sql/session/` — `create_public_agent_session_meta.sql`,
-> `create_public_agent_session_messages.sql`.
+Имя файла осталось историческим.
+
+## Модель хранения
+
+**Hot path — JSONL. PostgreSQL — только cold-storage mirror.**
+
+Менеджер сессий — всегда класс библиотеки `SessionManager`. Своё поведение
+агент добавляет не подклассом, а слоем `SessionStore`
+(`SanitizingSessionStore`), а PostgreSQL обслуживает отдельный фоновый
+`SessionColdSyncService` (`lib/services/session_cold_sync_service.py`).
+
+`storage="postgres"` в конфигурации означает **«холодное зеркало включено»**, а
+не «сессии хранятся в PostgreSQL»: сам `SessionManager` про эти таблицы не
+знает, и в нём их имена не встречаются (`lib/services/session_storage.py:203`).
+Имена таблиц уходят в `SessionColdSyncService`, а их отсутствие — ошибка
+конфигурации, которую фабрика называет сразу, а не роняет позже на старте
+синка.
 
 ## Использование
 
-```python
-from lib.session.pg_session_manager import PGSessionManager
+Прямое создание менеджера — не точка входа рантайма. Им пользуется
+`SessionStorageService.create()` (`lib/services/session_storage.py:112`),
+которая и выбирает режим, и поднимает общий пул. Режимы:
 
-sm = PGSessionManager(
-    workspace=config.workspace_path,
-    dsn="postgresql://user:pass@localhost:5432/nanobot",
-)
-agent = AgentLoop.from_config(config, bus, session_manager=sm)
+| `storage` | Что делает |
+|-----------|-----------|
+| `auto` | `postgres` (зеркало), если задан DSN, иначе `file` |
+| `postgres` | зеркало обязательно; без DSN — `SessionStorageError` |
+| `file` | только JSONL, PostgreSQL не трогается |
+
+Низкоуровневая сборка выглядит так:
+
+```python
+from lib.session.pg_session_manager import build_session_manager
+
+manager = build_session_manager(workspace)   # upstream SessionManager + SanitizingSessionStore
 ```
 
-Имена таблиц настраиваются через `project.json → channels.postgres`:
+## Почему `SanitizingSessionStore` наследует `JsonlSessionStore`
+
+`SessionManager.save_runtime_checkpoint` (строка 1794 в upstream) ускоряет
+оборот только при `self._store is self._jsonl_store`. Обёртка вокруг стора
+молча деградировала бы до полной перезаписи транскрипта на каждом чекпойнте —
+то есть наследование здесь не стилистический выбор, а условие сохранения
+скорости горячего пути.
+
+## Санитизация
+
+`SanitizingSessionStore.save()` сперва прогоняет контент всех сообщений через
+`clean_text` (`workspace/utils/clean_text.py`). Чистятся две формы одного и
+того же невалидного символа:
+
+- настоящий NUL-байт (`0x00`) — PostgreSQL не принимает его в `text`-литералах
+  (`A string literal cannot contain NUL (0x00) characters.`);
+- литеральные escape-последовательности `backslash-u-0000` .. `backslash-u-0003`
+  — psycopg2 трактует их как управляющие символы и падает с
+  `UntranslatableCharacter`.
+
+Попасть они могут из бинарного вывода инструментов (`exec`/`read_file`) или из
+LLM-вывода. Причина не в JSONL, а в PostgreSQL, поэтому чистить надо на
+границе записи, рядом с потребителем.
+
+Раньше эту чистку делал патч `Session.add_message`; теперь санитизация стоит в
+сторе, и отдельный патч не нужен. Вторая точка применения — страховка на
+границе БД, `_sanitize_param` в `utils/db`.
+
+## Имена таблиц
+
+Задаются конфигурацией, авто-дефолтов в коде нет:
+
 ```json
 {
     "channels": {
@@ -39,6 +95,13 @@ agent = AgentLoop.from_config(config, bus, session_manager=sm)
     }
 }
 ```
+
+Источник — `config.json` (не `project.json`: такого файла в проекте нет).
+
+> **v2.0.0+:** таблицы названы `agent_session_meta` / `agent_session_messages`
+> (единый `agent_`-префикс). DDL в `sql/session/` —
+> `create_public_agent_session_meta.sql`,
+> `create_public_agent_session_messages.sql`.
 
 DSN собирается общим `utils.db.resolve_dsn()` из `channels.postgres.{host,port,
 dbname,user}` + `DB_PASSWORD` (или `dsn` override), а не передаётся напрямую.
@@ -90,33 +153,18 @@ psql -d nanobot -f sql/session/create_public_agent_session_messages.sql
 
 Оба скрипта — Greenplum 6.5: `DISTRIBUTED BY (...)`, `pgcrypto`, без FK.
 
-## Graceful degradation
+## Архитектурный инвариант
 
-При любой ошибке БД (отключение, таймаут, недоступность) PGSessionManager автоматически падает на JSONL-файлы через `super()`:
+Ни один runtime-модуль вне `SessionColdSyncService` **не пишет** в
+`agent_session_meta` / `agent_session_messages` напрямую. Проверяется
+`tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables`.
 
-- `_load()` → `super()._load()` — чтение из JSONL
-- `save()` → `super().save()` — запись в JSONL
-- `delete_session()` → `super().delete_session()`
-- `list_sessions()` → `super().list_sessions()`
-
-Логика: `DB_RETRYABLE_ERRORS` (определены в `utils.db`) перехватываются, ошибка логируется, вызывается родительский метод.
-
-## Методы
-
-| Метод | Описание |
-|-------|----------|
-| `get_or_create(key)` | Получить сессию по ключу (из кеша или БД), создать если нет |
-| `save(session)` | Сохранить сессию (UPSERT meta + batch-INSERT сообщений) |
-| `delete_session(key)` | Удалить сессию (сначала messages, потом meta — для GP) |
-| `list_sessions()` | Список сессий с превью первого сообщения |
-| `read_session_file(key)` | Полный payload сессии (meta + все сообщения) |
-| `flush_all()` | Сохранить все закешированные сессии (shutdown gateway) |
-
-## Безопасность
-
-`_quote()` экранирует имена схем и таблиц кавычками. `_validate_ident()` проверяет каждый сегмент: только буквы, цифры, `_` и `$`. При недопустимых символах — `ValueError`.
+Раньше это обеспечивал `PGSessionManager` перехватом `DB_RETRYABLE_ERRORS` и
+переходом в `super()` (graceful degradation «на JSONL»). Теперь переход
+не нужен вовсе: горячий путь и есть JSONL, а падение PostgreSQL означает лишь
+отставание холодного зеркала, а не потерю сессий.
 
 ## Зависимости
 
-- `psycopg2` / `psycopg2-binary`
-- `utils.db` (коннектор с пулом, async/sync, retry)
+- `psycopg2` / `psycopg2-binary` — только для зеркала
+- `utils.db` (пул, retry) — общий с остальными подсистемами

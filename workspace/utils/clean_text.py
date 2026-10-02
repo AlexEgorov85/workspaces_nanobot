@@ -8,8 +8,9 @@ PostgreSQL не принимает настоящий NUL-байт (0x00) в tex
 инструментов (``exec``/``read_file``) или LLM-вывода.
 
 ``clean_text`` — единая точка вычистки. Она применяется:
-  * на источнике — при добавлении сообщения в сессию
-    (патч ``Session.add_message`` в ``lib/services/runtime_patcher.py``);
+  * на границе записи сессии — ``SanitizingSessionStore.save``
+    (``lib/session/pg_session_manager.py``); раньше это делал патч
+    ``Session.add_message``, он снят вместе с переносом санитизации в стор;
   * как страховка на границе БД — ``utils/db`` ``_sanitize_param``.
 """
 

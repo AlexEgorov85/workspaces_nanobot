@@ -65,18 +65,31 @@ Upstream `nanobot.session.manager.SessionManager` через
 
 Hot-path контракт зафиксирован в `tests/contract/test_session_manager_api.py`.
 
-## `PGSessionManager` как compatibility layer
+## Стор сессий: `SanitizingSessionStore`, а не подкласс
 
-`lib/session/pg_session_manager.py` — тонкая обёртка над upstream
-`SessionManager`. Hot-path методы (`get_or_create`, `save`,
-`list_sessions`, `read_session_metadata`, `read_session_file`,
-`delete_session`) делегируются в `super()`. Никаких прямых
-`INSERT/UPDATE` в `agent_session_meta` /
-`agent_session_messages` в hot path.
+`lib/session/pg_session_manager.py` — **не** наследник `SessionManager` и не
+обёртка над PostgreSQL. Класса `PGSessionManager` в проекте нет: он был
+compatibility layer'ом, пока hot path ходил в PG, и снят вместе с переходом на
+гибрид.
 
-Класс сохранён для обратной совместимости 56 call-sites в коде;
-конструкторские параметры (`dsn`, `schema`, `meta_table`,
-`messages_table`) принимаются и пробрасываются в sync-сервис.
+Модуль экспортирует `SanitizingSessionStore`, `build_session_manager`,
+`clean_session_content`. `build_session_manager()` собирает upstream
+`SessionManager` поверх `SanitizingSessionStore` — то есть менеджер остаётся
+классом библиотеки, а поведение агента добавлено слоем `SessionStore`.
+Hot-path методы (`get_or_create`, `save`, `list_sessions`,
+`read_session_metadata`, `read_session_file`, `delete_session`) — целиком
+upstream (JSONL); никаких прямых `INSERT/UPDATE` в `agent_session_meta` /
+`agent_session_messages` от менеджера не происходит и не происходило.
+
+Единственное отличие стора от `JsonlSessionStore` — санитизация NUL при
+записи. Наследование, а не композиция, выбрано из-за
+`SessionManager.save_runtime_checkpoint`: он ускоряет оборот только при
+`self._store is self._jsonl_store`.
+
+Точка выбора режима — `SessionStorageService.create()`
+(`lib/services/session_storage.py`). `storage="postgres"` означает «холодное
+зеркало включено»: имена таблиц проверяются там и уходят в
+`SessionColdSyncService`, а сам `SessionManager` про PostgreSQL не знает.
 
 **Архитектурный инвариант**: ни один runtime-модуль вне
 `SessionColdSyncService` НЕ пишет в `agent_session_meta` /
@@ -215,12 +228,12 @@ sync пропускается для этой сессии (`sync_skipped_stale_
 - `tests/test_session_cold_sync_service.py` — mock-smoke
   `SessionColdSyncService` (включая архитектурный гард
   `test_no_new_pool_created`).
-- `tests/test_pg_session_manager.py` — `PGSessionManager` как
-  compatibility layer (17 тестов: super()-делегирование,
-  no-op методы, docstring-инвариант).
+- `tests/test_pg_session_manager.py` — `SanitizingSessionStore` и
+  `build_session_manager` (18 тестов: санитизация NUL/control-символов, сборка
+  менеджера поверх стора, поведение `clean_session_content`).
 - `tests/test_storage_hybridization.py` — архитектурные гарды
   (no-direct-SQL, no-new-pool, no-DbLoggingService-llm_usage,
-  PGSessionManager docstring).
+  docstring-инвариант).
 - `tests/test_storage_hybridization_factory.py` — mock-smoke
   `_make_usage_store` и `_make_session_cold_sync_service`.
 - `tests/test_storage_hybridization_lifecycle.py` — mock-smoke

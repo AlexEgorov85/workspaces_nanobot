@@ -58,9 +58,10 @@ class ChannelFactory:
                 и других настроек вывода, общих для всех каналов).
             settings: ``SETTINGS`` (для ``channels.postgres.*``).
             bus: ``MessageBus`` (все каналы публикуют сюда).
-            session_manager: ``PGSessionManager``/``SessionManager`` —
-                пробрасывается в ``ChannelManager`` для сохранения
-                истории сообщений.
+            session_manager: менеджер сессий — всегда класс библиотеки
+                ``nanobot.session.manager.SessionManager`` (у нас поверх
+                ``SanitizingSessionStore``); пробрасывается в ``ChannelManager``
+                для сохранения истории сообщений.
 
         Returns:
             ``(channels, messages)`` — менеджер каналов и список

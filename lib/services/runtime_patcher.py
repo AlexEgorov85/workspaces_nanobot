@@ -488,8 +488,10 @@ class RuntimePatcher:
                 в ``OutboundMessage.media``).
             db_logging_service: ``DbLoggingService`` (для ``patch_subagent_logging``;
                 ``None`` — патч пропускается).
-            session_manager: ``SessionManager``/``PGSessionManager`` — для
-                персиста истории подагентов (может быть ``None``).
+            session_manager: менеджер сессий (всегда класс библиотеки
+                ``nanobot.session.manager.SessionManager``, у нас поверх
+                ``SanitizingSessionStore``) — для персиста истории подагентов
+                (может быть ``None``).
 
             Параметр ``cache_store`` снят в фазе 5 (п. 5.8): он был резервом
             «на будущее», ни один патч его не читал, а DI project tools
@@ -917,9 +919,8 @@ class RuntimePatcher:
         try:
             from nanobot.agent.subagent import _SubagentHook
 
-            from lib.hooks.database_logging_hook import DatabaseLoggingHook
+            from lib.hooks.database_logging_hook import DatabaseLoggingHook, _usage_to_dict
             from lib.services.db_logging_service import LogEvent
-            from lib.hooks.database_logging_hook import _usage_to_dict
         except Exception as exc:
             return False, f"import failed: {exc}"
 
@@ -1339,6 +1340,7 @@ class RuntimePatcher:
         """
         try:
             from nanobot.agent.tools import execution as _exec_mod
+
             from lib.hooks.repeat_guard_hook import RepeatGuardBlocked
         except Exception as exc:
             return False, f"import failed: {exc}"

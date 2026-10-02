@@ -128,9 +128,12 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
 ``gateway.*``
 -------------
 
-* ``storage`` — ``auto`` (``PGSessionManager`` при наличии dsn, иначе
-  JSONL) | ``postgres`` (только ``PGSessionManager``, без dsn — ошибка) |
-  ``file`` (только JSONL, dsn игнорируется).
+* ``storage`` — ``auto`` (холодное зеркало PostgreSQL при наличии dsn,
+  иначе только JSONL) | ``postgres`` (зеркало обязательно, без dsn — ошибка) |
+  ``file`` (только JSONL, dsn игнорируется). Менеджер сессий во всех режимах —
+  класс библиотеки ``SessionManager`` поверх ``SanitizingSessionStore``;
+  PostgreSQL обслуживает отдельный ``SessionColdSyncService``, а не сам
+  менеджер.
 * ``tool_result_limits.*`` — потолки вывода инструментов
   (``runtime_patcher.py``); все ключи опциональны.
 * ``compact.*`` — ручное сжатие контекста сессии

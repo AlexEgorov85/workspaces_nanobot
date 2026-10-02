@@ -1274,7 +1274,7 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
       * psycopg2 не импортируется (битое окружение).
 
     DSN берётся из ``channels.postgres.dsn`` (тот же, что для
-    PGSessionManager и PostgresChannel). Резервной записи в JSONL-файл
+    ``SessionColdSyncService`` и PostgresChannel). Резервной записи в JSONL-файл
     нет: при недоступности БД события выбрасываются.
     """
     try:

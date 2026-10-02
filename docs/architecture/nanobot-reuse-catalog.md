@@ -238,8 +238,8 @@ MCP LLM-вызов происходит в отдельном процессе, 
 |---|---|---|
 | 1 | `context_governor` | **удалить** — upstream уже работает |
 | 2 | `save_turn` | **удалить** — следствие (1) |
-| 7 | `async_save` | **удалить** — наш класс `PGSessionManager` |
-| 11 | `session_content_cleanup` | **удалить** — наш класс |
+| 7 | `async_save` | **удалить** — обёртка в `lib/services/session_storage.py` |
+| 11 | `session_content_cleanup` | **удалить** — `SanitizingSessionStore.save` |
 | 8 | `session_dir_watch` | **удалить** — гейт выключен, тестов нет |
 | 10 | `turn_delivery_fail` | **удалить** — подкласс `TurnDeliveryFactory` |
 | 4 | `exec_timeout_cap` | **удалить** — `tools.exec.timeout` уже прокинут + подкласс |
