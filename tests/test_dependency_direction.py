@@ -138,10 +138,17 @@ class TestLibDoesNotImportToolsOrSkills:
         )
 
 
-# Замечание про skills → lib/services:
+# Замечание про skills → lib/services — ИСТОРИЧЕСКОЕ, больше неактуально.
 # Тест нашёл реальное нарушение в workspace/skills/audit_analyzer/scripts/llm.py:13
-# (``from lib.services.llm_client import call_llm``). Это **существующий** код,
-# который надо чинить отдельной задачей (вынести llm_client в workspace/utils
-# или ввести ApplicationContext-aware pattern). Пока не реализовано —
-# строгие проверки skills→lib не активируем, чтобы не сломать CI.
+# (``from lib.services.llm_client import call_llm``). Навык давно ходит в модель
+# через клиент платформы (``libs.enterprise_client.llm``) — это закреплено
+# отдельным стражем в ``tests/test_llm_goes_through_mcp.py``:
+#   * ``test_skill_llm_module_calls_the_platform_client`` требует
+#     ``libs.enterprise_client`` и ЗАПРЕЩАЕТ ``lib.services.llm_client``;
+#   * ``test_skill_llm_module_does_not_read_provider_settings`` запрещает
+#     ``get_llm_config`` / ``resolve_llm_config`` в коде навыка.
+# Нарушение устранено переносом в capability ``llm``, а сам
+# ``lib/services/llm_client.py`` снесён 2026-10-02 — импортировать его больше
+# нечего, поэтому направление skills→lib_services можно вернуть в проверку,
+# когда появятся другие потребители agent-side HTTP-клиентов.
 # class TestSkillsDoNotImportLib: ...  # см. git history

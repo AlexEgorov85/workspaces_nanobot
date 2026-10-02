@@ -43,12 +43,15 @@
 - [x] 0.1 Удалить `workspace/utils/structure_cache.py` — импортирует несуществующий `extract_structure`
 - [x] 0.2 Удалить `tools/extract_office_structure.py` — то же
 - [x] 0.3 Удалить `lib/utils/table_utils.py` + `tests/test_table_utils.py`
-- [ ] 0.4 ~~Удалить `lib/utils/retry.py`~~ — **перенесён в фазу 3** (пункт 3.14).
-      `retry_on_exception` импортируется двумя живыми модулями:
+- [x] 0.4 ~~Удалить `lib/utils/retry.py`~~ — **перенесён в фазу 3** (пункт 3.14),
+      **выполнено 2026-10-02**.
+      `retry_on_exception` импортировался двумя живыми модулями:
       `cache_provider_impl.py:300` (ленивый импорт) и `llm_client.py:28`. Оба
-      уезжают в `mcp-platform/libs/` только в фазе 3, поэтому удалять модуль
-      в фазе 0 нельзя — это оставит два неразрешимых импорта. Дублировать
-      реализаю в двух местах тоже нельзя.
+      уехали: первый — с кластером снимка (фаза 5, 2026-10-01), второй — со
+      сносом мёртвого LLM-кластера (2026-10-02). Дублировать реализацию в
+      двух местах не потребовалось: у платформы своя копия
+      `libs/enterprise_common/retry.py` (единственное определение, страж
+      `mcp-platform/tests/test_retry_shared.py`).
 - [ ] 0.5 Удалить `workspace/skills/audit_analyzer/err1.log` — **заблокировано
       политикой удаления**, файл не отслеживается git. Требуется ручное удаление.
 - [ ] 0.6 Удалить `workspace/data_store/cache/**/*.py` (82 черновых скрипта) —
@@ -459,10 +462,22 @@
       `platform.json` (секция `llm`), поэтому правка модели больше не
       трогает две копии. Ключ из `agents.defaults`/`providers.*` агента в
       окружение сервера больше не попадает.
-- [ ] 3.14 Удалить `lib/utils/retry.py` из агента. **Заблокировано до фазы 5:**
-      единственный оставшийся импортёр — `lib/services/cache_provider_impl.py:300`
-      (ленивый импорт), а он уезжает вместе с кластером снимка. Платформа уже
-      получила свою копию в `libs/enterprise_common/retry.py`
+- [x] 3.14 Удалить `lib/utils/retry.py` из агента. **Выполнено 2026-10-02.**
+      Блокировка снята фазой 5: `lib/services/cache_provider_impl.py:300` уехал
+      вместе с кластером снимка (2026-10-01, остался tombstone
+      `_cache_provider_impl.py`). Последний живой импортёр был
+      `llm_client.py:28` — мёртвый модуль, снесённый в том же заходе вместе с
+      `llm_client.py` / `llm_config.py` / `tests/test_llm_config.py`. Поиск
+      `from lib.utils.retry` по репозиторию даёт **ноль** живых вхождений.
+      Платформа держит единственное определение `retry_on_exception` —
+      `libs/enterprise_common/retry.py` (страж
+      `mcp-platform/tests/test_retry_shared.py`).
+      **BREAKING для внешних импортёров:** `from lib.utils.retry import
+      retry_on_exception` больше не работает.
+      `httpx` из `requirements.txt` **оставлен**: после сноса `llm_client.py`
+      он не нужен коду агента, но требуется 31 модулю самого `nanobot`
+      (включая `providers/openai_compat_provider.py`), поэтому его судьба —
+      вопрос п. 10.3, а не этого пункта.
 
 **Приёмка (как проверялось).** Сквозной прогон через настоящий процесс
 `enterprise-mcp`, живая база и живые провайдеры:

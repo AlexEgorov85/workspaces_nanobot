@@ -145,7 +145,7 @@ def _fingerprint_hash(tool_name: str, canonical: str) -> str:
     ложному срабатыванию, ни к пропуску.
     """
     return hashlib.blake2b(
-        f"{tool_name}\x00{canonical}".encode("utf-8"),
+        f"{tool_name}\x00{canonical}".encode(),
         digest_size=4,
     ).hexdigest()
 

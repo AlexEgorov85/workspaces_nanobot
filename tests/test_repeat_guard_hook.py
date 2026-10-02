@@ -93,7 +93,7 @@ class TestCanonicalArguments:
         )
 
     def test_datetime_is_deterministic(self) -> None:
-        moment = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
+        moment = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
         assert _canonical_arguments({"t": moment}) == _canonical_arguments({"t": moment})
 
     def test_bytes_include_length(self) -> None:

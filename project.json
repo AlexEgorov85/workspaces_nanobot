@@ -190,16 +190,18 @@
       // duckdb_query / vector_search, никакого CLI) секции cli.* и
       // llm.* не нужны:
       //   * cli.* — был для scripts/cli.py (удалён);
-      //   * llm.* — LLM-параметры берутся из общего резолва
-      //     lib.services.llm_config.resolve_llm_config (модель/провайдер
-      //     из agents.defaults, ключи из providers.*).
+      //   * llm.* — LLM-параметры (модель/провайдер/ключ) берёт capability
+      //     llm платформы из mcp-platform/platform.json. Агентская копия
+      //     выбора модели (lib.services.llm_config) снесена 2026-10-02.
     },
 
     // -------------------------------------------------------------------------
     //  legal_summarizer — суммаризация юридических документов (PDF/DOCX/TXT).
-    //  Извлечение текста — workspace.utils.office_files.extract_text;
+    //  Извлечение текста — capability office платформы
+    //  (mcp-platform/libs/office; агентская копия workspace.utils.office_files
+    //  удалена 2026-10-02);
     //  чанкинг — lib.services.text_splitter.split_text;
-    //  LLM-клиент — lib.services.llm_client.call_llm.
+    //  LLM-клиент — клиент платформы libs.enterprise_client.llm.
     //  У skill'а нет PG-таблиц, поэтому tables[] пуст и регистрация в
     //  TableRegistry пропускается автоматически.
     // -------------------------------------------------------------------------

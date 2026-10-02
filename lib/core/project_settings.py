@@ -345,7 +345,7 @@ class LoggingDbSettings(_StrictOptional):
     flush_interval_sec: float | None = Field(default=None, ge=0.5, le=60.0)
 
     @model_validator(mode="after")
-    def _default_flush_interval_sec(self) -> "LoggingDbSettings":
+    def _default_flush_interval_sec(self) -> LoggingDbSettings:
         """Подменить ``None`` на канонический дефолт ``5.0``.
 
         Спека change ``improve-history-search-pagination-and-logging``
@@ -527,8 +527,13 @@ class SkillLlmSettings(_StrictOptional):
     """Секция ``llm`` — execution policy генерации для навыка (необязательно).
 
     Это НЕ выбор модели/провайдера — это runtime-параметры вызова
-    (``temperature``, ``max_tokens``). Выбор модели — в ``config.json``
-    (``agents.defaults.*``). См. ``llm_config.resolve_llm_config()``.
+    (``temperature``, ``max_tokens``). Выбор модели и провайдера агент
+    не знает вовсе: он принадлежит capability ``llm`` платформы
+    (``mcp-platform/libs/llm/config.py::resolve_llm_config``), читается из
+    ``mcp-platform/platform.json`` и попадает в процесс скилла оттуда.
+    Агентская копия этого выбора (``lib/services/llm_config.py``) снесена
+    2026-10-02 — именно она была второй копией, которая разъезжалась с
+    платформенной при первой же смене модели.
     """
 
     max_tokens: int | None = Field(default=None, gt=0)
