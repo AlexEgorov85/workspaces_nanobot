@@ -139,7 +139,10 @@ class UnavailableSnapshot(CacheStore):
     ) -> bool:
         raise self._fail()
 
-    def __enter__(self) -> "UnavailableSnapshot":
+    def reset(self) -> list[str]:
+        raise self._fail()
+
+    def __enter__(self) -> UnavailableSnapshot:
         return self
 
     def __exit__(self, *args: Any) -> None:

@@ -337,6 +337,23 @@ class CacheIngestion(ABC):
         """Привести схему таблицы в соответствие с батчем (DDL при нехватке)."""
         raise NotImplementedError
 
+    @abstractmethod
+    def reset(self) -> list[str]:
+        """Опустошить снимок: удалить все пользовательские схемы целиком.
+
+        ``replace_records`` перезаписывает объявленные таблицы, но то, что
+        осталось от прежнего объявления, переживает загрузку навсегда. Чистая
+        загрузка начинается с этого метода, иначе снимок копит мусор, которого
+        нет ни в одном объявлении.
+
+        Returns:
+            Имена удалённых схем, по алфавиту.
+
+        Raises:
+            ReadOnlyAssertionError: снимок открыт на чтение.
+        """
+        raise NotImplementedError
+
 
 class CacheStore(CacheProvider, CacheIngestion):
     """Полный контракт единственного хранилища снимка: чтение + ingestion.
