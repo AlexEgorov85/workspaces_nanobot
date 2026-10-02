@@ -198,7 +198,7 @@ class AuditAnalyzerQueryTool(Tool):
         except Exception:
             config = cls.config_cls()()
         # Клиент enterprise-mcp — единственный путь к данным аудита. ``None``:
-        # раздел ``enterprise_mcp`` выключен или не задан (project.json). Tool
+        # раздел ``enterprise_mcp`` выключен или не задан (``config.json``). Tool
         # остаётся зарегистрированным и отвечает структурной ошибкой, чтобы
         # модель видела причину, а не «неизвестный инструмент».
         return cls(
@@ -271,8 +271,8 @@ class AuditAnalyzerQueryTool(Tool):
             return self._error(
                 "mcp_unavailable",
                 "Клиент enterprise-mcp не создан: раздел enterprise_mcp выключен "
-                "или не задан (project.json). Данные аудита доступны только "
-                "через него.",
+                "или не задан (config.json → gateway.agent.enterprise_mcp). "
+                "Данные аудита доступны только через него.",
             )
 
         try:

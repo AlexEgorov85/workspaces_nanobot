@@ -358,8 +358,8 @@ class HistorySearchTool(Tool):
             return self._error(
                 "mcp_unavailable",
                 "Клиент enterprise-mcp не создан: раздел enterprise_mcp выключен "
-                "или не задан (project.json). Поиск по журналу выполняется "
-                "только через него.",
+                "или не задан (config.json → gateway.agent.enterprise_mcp). "
+                "Поиск по журналу выполняется только через него.",
             )
 
         # Личность подставляет агент, а не модель: session_scope решает, что

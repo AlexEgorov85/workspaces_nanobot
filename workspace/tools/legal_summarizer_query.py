@@ -155,7 +155,7 @@ class LegalSummarizerQueryTool(Tool):
             config = cls.config_cls()()
         # Клиент enterprise-mcp - единственный путь к состоянию операции.
         # ``None``: раздел ``enterprise_mcp`` выключен или не задан
-        # (project.json). Tool остаётся зарегистрированным и отвечает
+        # (config.json → gateway.agent.enterprise_mcp). Tool остаётся зарегистрированным и отвечает
         # структурной ошибкой, чтобы модель видела причину, а не
         # «неизвестный инструмент».
         return cls(
@@ -201,8 +201,8 @@ class LegalSummarizerQueryTool(Tool):
             return self._error(
                 "mcp_unavailable",
                 "Клиент enterprise-mcp не создан: раздел enterprise_mcp "
-                "выключен или не задан (project.json). Состояние операции "
-                "доступно только через него.",
+                "выключен или не задан (config.json → gateway.agent.enterprise_mcp). "
+                "Состояние операции доступно только через него.",
             )
 
         arguments = {

@@ -170,7 +170,7 @@ async def live_env(live_required):
     try:
         ctx.start()
 
-        channel_factory = ChannelFactory(transcription=ctx.transcription_service)
+        channel_factory = ChannelFactory()
         channels, _messages = channel_factory.create_all(
             ctx.config, ctx.settings, ctx.bus, ctx.session_manager,
         )

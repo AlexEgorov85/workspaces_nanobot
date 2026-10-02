@@ -29,24 +29,3 @@ def decode_jsonb(val: Any) -> dict:
     if isinstance(val, dict):
         return val
     return dict(val) if val else {}
-
-
-def decode_json_list(val: Any) -> list:
-    """Безопасно декодировать JSONB-список из БД в ``list``.
-
-    Принимает:
-      * ``None``/``""`` → ``[]``
-      * ``str`` (JSON) → парсится через ``json.loads``
-      * ``list`` → возвращается как есть
-      * любое другое → ``[]``
-
-    Эквивалент прежнего ``_decode_media_list`` в web-UI — единая точка
-    для чтения JSONB-колонок-списков (например, ``media``).
-    """
-    if val is None:
-        return []
-    if isinstance(val, str):
-        return json.loads(val) if val else []
-    if isinstance(val, list):
-        return val
-    return []

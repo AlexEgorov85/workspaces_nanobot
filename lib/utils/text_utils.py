@@ -1,72 +1,23 @@
-"""Text-и JSON-safe value helpers shared by tools and skills.
+"""Text-хелперы для инструментов и скиллов.
 
-Перенесено из ``workspace/skills/audit_analyzer/scripts/output.py::_sanitize_value``
-без изменения контракта. Дублирование заменено единой реализацией.
+Осталась одна функция: ``truncate_middle``.
+
+``sanitize_value`` (рекурсивная приведение к JSON-совместимому виду) удалена: её
+единственный production-импортёр был ``workspace/skills/audit_analyzer/
+scripts/output.py``, который ушёл на платформу вместе со скиллом, а её собственные
+тесты — единственные оставшиеся вызывающие. Мёртвый код в общем модуле вводит в
+заблуждение: следующий читатель решит, что кто-то приводит значения к JSON-safe,
+и будет полагаться на это там, где вызова нет.
+
+``truncate_middle`` живёт потому, что upstream режет **хвост**
+(``nanobot/utils/helpers.py:371``, ``_TRUNCATED_SUFFIX``), а хвост у JSON и CSV
+несёт данные. Единственный production-импортёр —
+``workspace/tools/history_search_tool.py:84``.
 """
 
 from __future__ import annotations
 
-import decimal
-import math
-import uuid
-from datetime import date, datetime, time, timedelta
-from typing import Any
-
-__all__ = ["sanitize_value", "truncate_middle"]
-
-
-def sanitize_value(obj: Any) -> Any:
-    """Рекурсивно привести объект к JSON-совместимому виду.
-
-    Поддерживает:
-        datetime / date / time → .isoformat()
-        timedelta              → str()
-        Decimal                → float или int
-        UUID                   → str
-        bytes                  → str (utf-8 decode)
-        float (nan/inf)        → None
-        list / tuple / dict    → рекурсивно
-        всё остальное          → str()
-
-    Args:
-        obj: Любой объект.
-
-    Returns:
-        JSON-совместимое значение (None, bool, int, float, str, list, dict).
-    """
-    if obj is None:
-        return None
-    if isinstance(obj, (datetime, date, time)):
-        return obj.isoformat()
-    if isinstance(obj, timedelta):
-        return str(obj)
-    if isinstance(obj, decimal.Decimal):
-        if obj == obj.to_integral_value():
-            return int(obj)
-        return float(obj)
-    if isinstance(obj, uuid.UUID):
-        return str(obj)
-    if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, (int, str, bool)):
-        return obj
-    if isinstance(obj, (list, tuple)):
-        return [sanitize_value(v) for v in obj]
-    if isinstance(obj, dict):
-        return {str(k): sanitize_value(v) for k, v in obj.items()}
-    if hasattr(obj, "isoformat"):
-        try:
-            return obj.isoformat()
-        except Exception:
-            return str(obj)
-    try:
-        return str(obj)
-    except Exception:
-        return repr(obj)
+__all__ = ["truncate_middle"]
 
 
 def truncate_middle(text: str, max_chars: int) -> str:
