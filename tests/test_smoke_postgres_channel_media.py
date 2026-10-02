@@ -1,10 +1,15 @@
-"""Смоук-тест: media должна дойти до mock DB.execute через полный путь:
+"""Смоук-тест: media должна дойти до записи ответа через полный путь:
 
   PostgresChannel.send(outbound_with_media)
-  → exchange.embed → media_sserialize → AW-dict
-  → conn.execute(SET media = %s, ...) ← здесь проверяем
+  → exchange.embed → media-сериализация → AW-dict
+  → аргумент ``media`` операции ``finalize_turn`` ← здесь проверяем
 
-Если media НЕ доходит до БД — тест покажет, на каком этапе потеря.
+Если media НЕ доходит до операции — тест покажет, на каком этапе потеря.
+
+Раньше конечной точкой был ``conn.execute(SET media = %s, ...)``. Теперь
+канал не пишет в PostgreSQL, поэтому «дошла до БД» означает «дошла до
+аргумента операции платформы» — это последняя точка, где файл ещё виден
+до записи.
 """
 
 from __future__ import annotations
@@ -77,30 +82,17 @@ class _FakeSessionFileStore:
 
 @pytest.fixture(autouse=True)
 def mock_db():
-    with patch.dict("sys.modules"), patch("psycopg2.extras.Json", lambda x: x):
+    """Подставной клиент ``enterprise-mcp`` вместо мока ``utils.db``.
+
+    Канал больше не ходит в PostgreSQL, поэтому мокать нечего: вложения
+    наблюдаются как аргументы операций платформы.
+    """
+    with patch.dict("sys.modules"):
         import importlib
-        import types as _types
 
         original_utils = sys.modules.get("utils")
-        db_mod = _types.ModuleType("utils.db")
-        db_mod.async_fetchval = AsyncMock(return_value=None)
-        db_mod.async_execute = AsyncMock()
-        db_mod.async_fetchone = AsyncMock(return_value=None)
-        db_mod.async_fetch = AsyncMock(return_value=[])
-        # transaction должен быть async context manager
-        _txn_cm = MagicMock()
-        _txn_conn = MagicMock()
-        _txn_conn.fetchrow = AsyncMock(return_value=None)
-        _txn_conn.execute = AsyncMock()
-        _txn_cm.__aenter__ = AsyncMock(return_value=_txn_conn)
-        _txn_cm.__aexit__ = AsyncMock(return_value=None)
-        db_mod.async_transaction = MagicMock(return_value=_txn_cm)
-        db_mod.DB_RETRYABLE_ERRORS = (Exception,)
-        sys.modules["utils.db"] = db_mod
-
         if original_utils is not None:
             real_utils_pkg = importlib.import_module("utils")
-            real_utils_pkg.db = db_mod
         else:
             import importlib.util as _iu
             utils_init = _WORKSPACE / "utils" / "__init__.py"
@@ -108,28 +100,28 @@ def mock_db():
             real_utils_pkg = _iu.module_from_spec(spec)
             sys.modules["utils"] = real_utils_pkg
             spec.loader.exec_module(real_utils_pkg)
-            real_utils_pkg.db = db_mod
+        assert real_utils_pkg is not None
 
-        # КРИТИЧНО: postgres_channel импортирует ``async_transaction as transaction``
-        # НА МОМЕНТ ИМПОРТА модуля. Если utils.db в sys.modules уже подменён
-        # к моменту импорта канала — всё ОК. Если нет — нужно
-        # пере-импортировать.
         from utils.session_file_store import SessionFileStore  # noqa: F401
-        # Принудительный re-import postgres_channel: гарантирует, что
-        # ``from utils.db import async_transaction as transaction`` возьмёт
-        # наш mock, а не реальный пул.
-        if "lib.channels.postgres_channel" in sys.modules:
-            del sys.modules["lib.channels.postgres_channel"]
+
+        # Принудительный re-import: если предыдущие тестовые файлы уже
+        # импортировали канал, класс остался связан с другим транспортом.
+        sys.modules.pop("lib.channels.postgres_channel", None)
+
         from lib.channels.postgres_channel import (
             PostgresChannel,
             _decode_jsonb,
         )
 
+        from tests.conftest import FakeEnterpriseMcp
+
+        client = FakeEnterpriseMcp()
+
         yield {
             "PostgresChannel": PostgresChannel,
             "_decode_jsonb": _decode_jsonb,
-            "db": db_mod,
-            "txn_conn": _txn_conn,
+            "db": client,
+            "mcp": client,
             "SessionFileStore": SessionFileStore,
         }
 
@@ -146,31 +138,21 @@ def _make_outbound(content, media, chat_id="chat-1"):
     return msg
 
 
-def _captured_media(db_mod, txn_conn) -> list:
-    """Из всех вызовов db.async_execute ИЛИ txn_conn.execute вытащить
-    аргументы SET media=..."""
+#: Операции платформы, в которые ``send`` кладёт вложения. Порядок важен:
+#: сначала промежуточная доставка (если она была), затем финальная запись.
+_MEDIA_OPERATIONS = ("merge_tool_delivery", "finalize_turn")
+
+
+def _captured_media(client) -> list:
+    """Вытащить ``media`` из всех вызовов операций записи ответа.
+
+    Возвращает список пар ``(операция, значение)`` в порядке вызовов.
+    """
     captured = []
-
-    def _scan(call_args_list, source_name):
-        for call in call_args_list:
-            args = call.args if hasattr(call, "args") else call[0]
-            kwargs = call.kwargs if hasattr(call, "kwargs") else call[1]
-            sql = args[0] if args else kwargs.get("sql", "")
-            if "media" in sql.lower() and "= %s" in sql.lower():
-                # SET content = %s, metadata = %s, buttons = %s, media = %s,
-                # status = %s, updated_at = NOW() WHERE id = %s
-                # args: (sql, content, meta, buttons, media, assistant_id)
-                # media — это args[4].
-                value = args[4] if len(args) >= 5 else (
-                    args[3] if len(args) >= 4 else (
-                        args[-1] if args else kwargs.get("media")
-                    )
-                )
-                captured.append((source_name, value))
-
-    _scan(db_mod.async_execute.call_args_list, "db.async_execute")
-    _scan(txn_conn.execute.call_args_list, "txn_conn.execute")
-    return captured
+    for operation in _MEDIA_OPERATIONS:
+        for call in client.calls_to(operation):
+            captured.append((operation, call["arguments"].get("media")))
+    return [item for item in captured if item[1] is not None]
 
 
 @pytest.mark.asyncio
@@ -180,8 +162,7 @@ async def test_media_with_real_files_reaches_db(mock_db, tmp_path):
     Проверяем: media из OutboundMessage доходит до DB.execute().
     """
     PostgresChannel = mock_db["PostgresChannel"]
-    db = mock_db["db"]
-    txn_conn = mock_db["txn_conn"]
+    client = mock_db["mcp"]
 
     md = tmp_path / "test.md"
     md.write_bytes(b"# test")
@@ -196,7 +177,7 @@ async def test_media_with_real_files_reaches_db(mock_db, tmp_path):
         "max_concurrent": 1,
         "processing_timeout": 10,
     }
-    ch = PostgresChannel(ch_config, MagicMock())
+    ch = PostgresChannel(ch_config, MagicMock(), enterprise_mcp=client)
     ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
 
     msg = _make_outbound(
@@ -206,11 +187,10 @@ async def test_media_with_real_files_reaches_db(mock_db, tmp_path):
 
     await ch.send(msg)
 
-    captured = _captured_media(db, txn_conn)
+    captured = _captured_media(client)
     assert captured, (
-        "media не дошла до БД. db.async_execute calls: "
-        f"{len(db.async_execute.call_args_list)}, "
-        f"txn_conn.execute calls: {len(txn_conn.execute.call_args_list)}"
+        "media не дошла до операции записи ответа. "
+        f"вызваны: {client.operations()}"
     )
     last_source, last_value = captured[-1]
     assert isinstance(last_value, list)
@@ -238,8 +218,7 @@ async def test_media_with_real_files_reaches_db(mock_db, tmp_path):
 async def test_media_round_trip_through_channel(mock_db, tmp_path):
     """Полный round-trip: media пишется в БД, потом читается через poll."""
     PostgresChannel = mock_db["PostgresChannel"]
-    db = mock_db["db"]
-    txn_conn = mock_db["txn_conn"]
+    client = mock_db["mcp"]
 
     md = tmp_path / "report.md"
     md.write_bytes(b"# Real Report\nMore text.")
@@ -252,7 +231,7 @@ async def test_media_round_trip_through_channel(mock_db, tmp_path):
         "max_concurrent": 1,
         "processing_timeout": 10,
     }
-    ch = PostgresChannel(ch_config, MagicMock())
+    ch = PostgresChannel(ch_config, MagicMock(), enterprise_mcp=client)
     ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
 
     msg = _make_outbound("Final", [str(md)])
@@ -263,13 +242,15 @@ async def test_media_round_trip_through_channel(mock_db, tmp_path):
 
     await ch.send(msg)
 
-    captured = _captured_media(db, txn_conn)
-    assert captured, "media не дошла до БД"
-    sources_values = [(s, len(v) if isinstance(v, list) else "NOT_LIST", v if not isinstance(v, list) else f"<list len={len(v)}>") for s, v in captured]
+    captured = _captured_media(client)
+    assert captured, (
+        "media не дошла до операции записи ответа. "
+        f"вызваны: {client.operations()}"
+    )
     _, last_value = captured[-1]
     assert len(last_value) == 1, (
         f"media должна быть 1 элемент, получено {len(last_value)}. "
-        f"Все вызовы: {sources_values}"
+        f"Все вызовы: {captured}"
     )
     md_entry = last_value[0]
     assert md_entry["mime_type"] == "text/markdown"
@@ -298,8 +279,7 @@ async def test_patcher_auto_attach_end_to_end(mock_db, tmp_path):
 
     # Поднимем канал и агент для патча
     PostgresChannel = mock_db["PostgresChannel"]
-    db = mock_db["db"]
-    txn_conn = mock_db["txn_conn"]
+    client = mock_db["mcp"]
 
     ch = PostgresChannel({
         "dsn": "postgresql://localhost:5432/test",
@@ -308,7 +288,7 @@ async def test_patcher_auto_attach_end_to_end(mock_db, tmp_path):
         "flush_interval": 0.1,
         "max_concurrent": 1,
         "processing_timeout": 10,
-    }, MagicMock())
+    }, MagicMock(), enterprise_mcp=client)
     ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
 
     # Агент: имитируем _assemble_outbound, который НЕ кладёт media
@@ -365,8 +345,11 @@ async def test_patcher_auto_attach_end_to_end(mock_db, tmp_path):
     out_msg.reply_to = None
     await ch.send(out_msg)
 
-    captured = _captured_media(db, txn_conn)
-    assert captured, "media не дошла до БД"
+    captured = _captured_media(client)
+    assert captured, (
+        "media не дошла до операции записи ответа. "
+        f"вызваны: {client.operations()}"
+    )
     _, last_value = captured[-1]
     assert len(last_value) == 1
     entry = last_value[0]

@@ -8,7 +8,9 @@ public.agent_conversation_messages как status='cancelled'. Nanobot долже
   3. В _finalize_turn: если user-сообщение стало cancelled ПОКА LLM
      работал — не записывать ответ, освободить ресурсы.
 
-Это юнит-тесты на SQL-логику (через мок utils.db), без реального PG.
+Это юнит-тесты на поведение канала (через подставной клиент
+``enterprise-mcp``), без реального PG и без разбора SQL: проверки структуры
+запросов живут на платформе, в ``mcp-platform/tests/test_data_task_queue.py``.
 Интеграционный тест с реальной PG — в test_user_stop_signal_integration.py
 (требует живой БД, запускается отдельно).
 """
@@ -30,36 +32,18 @@ if _workspace_path not in sys.path:
 
 @pytest.fixture(autouse=True)
 def user_stop_signal_mock_db(tmp_path):
-    """Fake utils.db — моки async_fetch/fetchval/execute/transaction."""
-    with (
-        patch.dict("sys.modules"),
-        patch("psycopg2.extras.Json", lambda x: x),
-    ):
+    """Подставной клиент ``enterprise-mcp`` вместо мока ``utils.db``.
+
+    Канал больше не ходит в PostgreSQL: отмена задачи проверяется операцией
+    ``get_message``, а финализация сама различает «записать» и «отменённую».
+    Проверки SQL-текста уехали на платформу.
+    """
+    with patch.dict("sys.modules"):
         import importlib
-        import types
 
-        def types_fake_db():
-            mod = types.ModuleType("utils.db")
-            mod.async_fetchval = AsyncMock(return_value=None)
-            mod.async_execute = AsyncMock()
-            mod.async_fetchone = AsyncMock(return_value=None)
-            mod.async_fetch = AsyncMock(return_value=[])
-            mod.async_transaction = MagicMock()
-            mod.DB_RETRYABLE_ERRORS = (Exception,)
-            return mod
-
-        # Сохраним оригинальный ``utils`` (настоящий пакет из workspace),
-        # чтобы канал мог импортировать из utils.session_file_store.
         original_utils = sys.modules.get("utils")
-
-        # Создаём фейковый ``utils.db`` (чтобы канал взял наши моки).
-        db_mod = types_fake_db()
-        sys.modules["utils.db"] = db_mod
-
-        # Восстанавливаем настоящий utils как пакет, но подменяем db внутри.
         if original_utils is not None:
             real_utils_pkg = importlib.import_module("utils")
-            real_utils_pkg.db = db_mod
         else:
             import importlib.util as _iu
             utils_init = Path(_workspace_path) / "utils" / "__init__.py"
@@ -67,14 +51,13 @@ def user_stop_signal_mock_db(tmp_path):
             real_utils_pkg = _iu.module_from_spec(spec)
             sys.modules["utils"] = real_utils_pkg
             spec.loader.exec_module(real_utils_pkg)
-            real_utils_pkg.db = db_mod
+        assert real_utils_pkg is not None
 
         from utils.session_file_store import SessionFileStore  # noqa: F401
 
         # Форсируем свежий импорт: если предыдущие тестовые файлы уже
-        # импортировали канал с НАСТОЯЩИМ utils.db, класс остался связан
-        # с реальным пулом — тесты ушли бы в живую БД. Ре-импорт под
-        # фейковым utils.db это исключает.
+        # импортировали канал с настоящим клиентом, класс остался связан
+        # с реальным транспортом. Ре-импорт это исключает.
         sys.modules.pop("lib.channels.postgres_channel", None)
 
         from lib.channels.postgres_channel import (
@@ -82,22 +65,27 @@ def user_stop_signal_mock_db(tmp_path):
             _decode_jsonb,
         )
 
+        from tests.conftest import FakeEnterpriseMcp
+
+        client = FakeEnterpriseMcp()
+
         class _Holder:
             def __init__(self):
                 self.PostgresChannel = PostgresChannel
                 self._decode_jsonb = _decode_jsonb
-                self.db = db_mod
+                self.db = client
+                self.mcp = client
 
             def __iter__(self):
                 yield PostgresChannel
                 yield _decode_jsonb
-                yield db_mod
+                yield client
 
         yield _Holder()
 
 
 def _make_channel(mock_db, **overrides):
-    PostgresChannel, _, _ = mock_db
+    PostgresChannel, _, client = mock_db
     config = {
         "dsn": "postgresql://localhost:5432/test",
         "table_name": runtime_table("conversation_messages"),
@@ -108,7 +96,7 @@ def _make_channel(mock_db, **overrides):
     }
     config.update(overrides)
     bus = MagicMock()
-    return PostgresChannel(config, bus)
+    return PostgresChannel(config, bus, enterprise_mcp=client)
 
 
 class TestClaimOneSkipsCancelled:
@@ -120,24 +108,16 @@ class TestClaimOneSkipsCancelled:
         PostgresChannel, _, db = user_stop_signal_mock_db
         ch = _make_channel(user_stop_signal_mock_db)
 
-        # fetchone возвращает None — SELECT подзапрос не нашёл ничего,
-        # потому что user со status='cancelled' отфильтрован.
-        # (UPDATE ... RETURNING возвращает 0 rows.)
-        # НЕ пересоздаём мок (иначе теряется await_args) — устанавливаем
-        # только return_value на существующем mock'е из фикстуры.
-        db.async_fetchone.return_value = None
-
+        # Платформа не отдала задачу: user со status='cancelled' отфильтрован
+        # на стороне SQL захвата. Канал получает ``None`` и не диспатчит.
         result = await ch._claim_one()
         assert result is None
 
-        # fetchone должен быть вызван с WHERE status != 'cancelled'
-        call_args = db.async_fetchone.await_args
-        assert call_args is not None
-        sql_text = call_args.args[0]
-        assert "status != 'cancelled'" in sql_text, (
-            f"WHERE clause должен содержать status != 'cancelled', "
-            f"получили: {sql_text[:500]}"
-        )
+        # Фильтр ``status != 'cancelled'`` уехал на платформу вместе с
+        # запросом; его структура закреплена в
+        # ``mcp-platform/tests/test_data_task_queue.py::TestClaimTaskSqlStructure``.
+        # Здесь — что канал вообще звал захват.
+        assert db.was_called("claim_task")
 
 
 class TestPollOnceRaceCheck:
@@ -160,9 +140,9 @@ class TestPollOnceRaceCheck:
             "metadata": "{}",
             "created_at": None,
         }
-        db.async_fetchone.return_value = claim_row
+        db.responses["claim_task"] = {"claimed": claim_row}
         # re-check fetchval возвращает 'cancelled'.
-        db.async_fetchval.return_value = "cancelled"
+        db.responses["get_message"] = {"message": {"status": "cancelled"}}
 
         # Подменяем exchange, чтобы не упасть в реальную логику.
         exchange = MagicMock()
@@ -171,16 +151,11 @@ class TestPollOnceRaceCheck:
         result = await ch._poll_once(exchange)
         assert result is False, "cancelled msg должна быть пропущена"
 
-        # В single-режиме _delete_claim — no-op (только worker_pool удаляет
-        # claim). Главное — polling НЕ диспатчил в LLM (мы это проверяем
-        # через result=False) и fetchval был вызван для re-check статуса.
-        assert db.async_fetchval.await_count >= 1, (
-            "re-check fetchval должен быть вызван"
-        )
-        recheck_sql = db.async_fetchval.await_args.args[0]
-        assert "status" in recheck_sql and "WHERE id" in recheck_sql, (
-            f"re-check должен быть SELECT status ... WHERE id; "
-            f"получили: {recheck_sql[:200]}"
+        # Re-check статуса уехал в операцию get_message: она и читает
+        # статус, и не даёт подменной SQL разойтись с реальным захватом.
+        assert db.was_called("get_message"), (
+            "после захвата статус перепроверяется - иначе отмена пришедшая "
+            "между отбором кандидата и захватом будет проигнорирована"
         )
 
     @pytest.mark.asyncio
@@ -202,8 +177,8 @@ class TestPollOnceRaceCheck:
             "metadata": "{}",
             "created_at": None,
         }
-        db.async_fetchone.return_value = claim_row
-        db.async_fetchval.return_value = "processing"
+        db.responses["claim_task"] = {"claimed": claim_row}
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         # _insert_assistant_message возвращает UUID assistant.
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
@@ -223,9 +198,14 @@ class TestFinalizeTurnDropsCancelled:
     """Тест _finalize_turn: drop response если user стал cancelled."""
 
     @pytest.mark.asyncio
-    async def test_finalize_skips_response_for_cancelled_user(self, user_stop_signal_mock_db):
-        """Если user-сообщение стало 'cancelled' во время LLM-обработки —
-        _finalize_turn НЕ пишет ответ и НЕ обновляет user-статус."""
+    async def test_finalize_drops_response_for_cancelled_user(self, user_stop_signal_mock_db):
+        """Отменённая задача: оборот закрывается как отмена, а не как запись.
+
+        Проверку отмены делает платформа внутри ``finalize_turn`` — одной
+        транзакцией с записью ответа. Канал этого не переигрывает: он читает
+        ``outcome`` и, получив ``cancelled_drop``, освобождает слот, не
+        выдавая отменённый ответ за успешный.
+        """
         PostgresChannel, _, db = user_stop_signal_mock_db
         ch = _make_channel(user_stop_signal_mock_db)
 
@@ -236,15 +216,16 @@ class TestFinalizeTurnDropsCancelled:
             "chat_id": "chat-A",
             "source": "metadata",
         })
-        # fetchval для user-status возвращает 'cancelled'.
-        db.async_fetchval.return_value = "cancelled"
+        db.responses["finalize_turn"] = {
+            "outcome": "cancelled_drop",
+            "placeholder_deleted": 1,
+        }
 
-        # _delete_claim и _release_slot — моки для проверки.
         ch._release_slot = MagicMock()
         ch._msg_ctx = {"u-1": {}}
         ch._drop_context_bridge = MagicMock()
+        ch._embed_media_for_db = AsyncMock(return_value=[])
 
-        # OutboundMessage с content+final_turn.
         from nanobot.bus.events import OutboundMessage
         msg = OutboundMessage(
             channel="postgres",
@@ -256,46 +237,32 @@ class TestFinalizeTurnDropsCancelled:
 
         await ch.send(msg)
 
-        # Удаляем assistant-заглушку.
-        # async_execute должен быть вызван с DELETE FROM ... WHERE id = %s AND
-        # role = 'assistant'. Проверяем args (asst-1 в параметре %s).
-        delete_calls = [
-            (str(call.args[0]), call.args[1] if len(call.args) > 1 else None)
-            for call in db.async_execute.await_args_list
-            if "DELETE FROM" in str(call.args[0])
-            and "role = 'assistant'" in str(call.args[0])
-        ]
-        assert len(delete_calls) >= 1, (
-            f"должен быть DELETE assistant placeholder; "
-            f"calls={db.async_execute.await_args_list}"
+        # Закрытие оборота — одна операция, а не «прочитал статус, потом
+        # записал»: разделение оставляло окно, в котором отмена успевала
+        # прийти, а ответ всё равно ложился.
+        assert db.was_called("finalize_turn"), (
+            "оборот закрывается операцией finalize_turn; "
+            f"вызваны: {db.operations()}"
         )
-        # Второй аргумент DELETE — UUID assistant'а.
-        args_with_asst = [
-            args for sql, args in delete_calls if "asst-1" in str(args)
-        ]
-        assert len(args_with_asst) >= 1, (
-            f"asst-1 должен быть в args DELETE; calls={delete_calls}"
+        args = db.last_call("finalize_turn")["arguments"]
+        assert args["user_msg_id"] == "u-1"
+        assert args["assistant_msg_id"] == "asst-1"
+
+        # Никакого отдельного чтения статуса перед записью: отмена решается
+        # внутри той же транзакции.
+        assert not db.was_called("get_message"), (
+            "отмена проверяется внутри finalize_turn; отдельное чтение статуса "
+            "оставляет окно, в котором отмена приходит уже после него"
         )
 
-        # user-статус НЕ должен быть обновлён на 'completed'.
-        # _finalize_turn должен early-return без транзакции.
-        update_user_calls = [
-            str(call.args[0])
-            for call in db.async_execute.await_args_list
-            if "UPDATE" in str(call.args[0])
-            and "u-1" in str(call.args)
-        ]
-        # Может быть _claim DELETE или подобное, но НЕ должно быть UPDATE ... SET status='completed' для user.
-        assert not any("status = 'completed'" in c for c in update_user_calls), (
-            f"user-статус НЕ должен переписываться на completed; calls={update_user_calls}"
-        )
-
-        # _release_slot должен быть вызван (освобождение слота).
+        # Лот всё равно освобождается — иначе слот воркера залипнет.
         ch._release_slot.assert_called_once_with("u-1")
+        # Контекст оборота снят: отменённый ответ не должен остаться в памяти.
+        assert "u-1" not in ch._msg_ctx
 
     @pytest.mark.asyncio
     async def test_finalize_writes_response_for_non_cancelled(self, user_stop_signal_mock_db):
-        """Happy path: user НЕ cancelled — _finalize_turn пишет ответ как обычно."""
+        """Happy path: задача не отменена — ответ уходит через finalize_turn."""
         PostgresChannel, _, db = user_stop_signal_mock_db
         ch = _make_channel(user_stop_signal_mock_db)
 
@@ -305,38 +272,9 @@ class TestFinalizeTurnDropsCancelled:
             "chat_id": "chat-B",
             "source": "metadata",
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["finalize_turn"] = {"outcome": "completed"}
 
-        # Моки для транзакционных операций внутри _finalize_turn.
-        # _finalize_turn использует ``async with transaction() as conn``
-        # — мок этого контекст-менеджера: возвращает объект с методами
-        # fetchrow/execute (как у psycopg2.AsyncConnection).
-        existing_row = {
-            "metadata": "{}",
-            "media": "[]",
-            "content": "",
-        }
-        db.async_fetchone.return_value = existing_row
-        # Контекст-менеджер для ``async with transaction()``.
-        conn_mock = MagicMock()
-        conn_mock.fetchrow = AsyncMock(return_value=existing_row)
-        conn_mock.execute = AsyncMock()
-        tx_mock = MagicMock()
-        tx_mock.__aenter__ = AsyncMock(return_value=conn_mock)
-        tx_mock.__aexit__ = AsyncMock(return_value=None)
-        db.async_transaction.return_value = tx_mock
-
-        # _embed_media_for_db — мок (используется в _finalize_turn).
         ch._embed_media_for_db = AsyncMock(return_value=[])
-        # _reasoning_io_lock — мок (async context manager).
-        from contextlib import asynccontextmanager
-
-        @asynccontextmanager
-        async def _fake_lock():
-            yield
-
-        ch._reasoning_io_lock = _fake_lock()
-        # _delete_claim и _release_slot.
         ch._release_slot = MagicMock()
         ch._msg_ctx = {"u-2": {}}
         ch._drop_context_bridge = MagicMock()
@@ -352,18 +290,10 @@ class TestFinalizeTurnDropsCancelled:
 
         await ch.send(msg)
 
-        # UPDATE ... SET status = 'completed' должен быть в вызовах.
-        # Внутри транзакции UPDATE делается через conn.execute (не
-        # db.async_execute), поэтому проверяем conn_mock.
-        update_calls = [
-            str(call.args[0])
-            for call in conn_mock.execute.await_args_list
-        ]
-        assert any(
-            "status = 'completed'" in c
-            and "WHERE id = %s" in c
-            for c in update_calls
-        ), (
-            f"должен быть UPDATE user SET status='completed'; "
-            f"calls={update_calls}"
-        )
+        args = db.last_call("finalize_turn")["arguments"]
+        assert args["user_msg_id"] == "u-2"
+        assert args["assistant_msg_id"] == "asst-2"
+        assert args["content"] == "done", "ответ должен уйти на платформу целиком"
+
+        ch._release_slot.assert_called_once_with("u-2")
+        assert "u-2" not in ch._msg_ctx, "контекст оборота снимается после записи"

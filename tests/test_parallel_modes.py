@@ -31,39 +31,29 @@ if _workspace_path not in sys.path:
 
 @pytest.fixture
 def mock_db():
-    """Подменить ``utils.db`` и прокинуть ``transaction`` через ``patch``.
+    """Подставной клиент ``enterprise-mcp`` вместо мока ``utils.db``.
 
-    Патчим атрибуты модуля ``lib.channels.postgres_channel`` напрямую, не
-    делая ``importlib.reload`` — это надёжнее при множественных вызовах.
+    Канал больше не пишет SQL: данные задач обслуживает платформа, а канал
+    зовёт её операциями. Патчить больше нечего — атрибутов ``execute``,
+    ``fetchone`` и ``transaction`` у модуля нет, и их возврат означал бы
+    возврат прямого доступа к базе.
     """
     from lib.channels import postgres_channel as pg_mod
 
-    db_mod = types.ModuleType("utils.db")
-    db_mod.async_fetchval = AsyncMock(return_value=None)
-    db_mod.async_execute = AsyncMock()
-    db_mod.async_fetchone = AsyncMock(return_value=None)
-    db_mod.async_fetch = AsyncMock(return_value=[])
-    db_mod.async_transaction = MagicMock()
-    db_mod.DB_RETRYABLE_ERRORS = (Exception,)
+    from tests.conftest import FakeEnterpriseMcp
 
-    with patch.object(pg_mod, "execute", db_mod.async_execute), \
-         patch.object(pg_mod, "fetchone", db_mod.async_fetchone), \
-         patch.object(pg_mod, "fetchval", db_mod.async_fetchval), \
-         patch.object(pg_mod, "fetch", db_mod.async_fetch), \
-         patch.object(pg_mod, "transaction", db_mod.async_transaction), \
-         patch.object(pg_mod, "_decode_jsonb",
-                      lambda x: json.loads(x) if isinstance(x, str) and x else {}):
-        yield db_mod, pg_mod
+    client = FakeEnterpriseMcp()
+    yield client, pg_mod
 
 
-def _make_channel(pg_mod):
+def _make_channel(pg_mod, client=None):
     config = {
         "dsn": "postgresql://u@h/db",
         "schema": "public",
         "table_name": runtime_table("conversation_messages"),
         "max_concurrent": 1,
     }
-    return pg_mod.PostgresChannel(config, MagicMock())
+    return pg_mod.PostgresChannel(config, MagicMock(), enterprise_mcp=client)
 
 
 def _capture_conn(db_mod):
@@ -94,41 +84,44 @@ def _capture_conn(db_mod):
 
 
 class TestClaimOneSqlAudit:
-    """``_claim_one``: SQL не содержит ``agent_worker_claims``."""
+    """``_claim_one``: захват идёт операцией платформы, без таблицы аренды.
 
-    def test_claim_one_returns_row_from_fetchone(self, mock_db):
-        """``_claim_one`` возвращает строку, полученную из ``fetchone``."""
-        db_mod, pg_mod = mock_db
-        ch = _make_channel(pg_mod)
+    Раньше здесь проверялся текст SQL захвата. Теперь его нет и быть не
+    может: канал не импортирует драйвер (см.
+    ``test_single_mode_audit.py::TestChannelHasNoDirectDatabaseAccess``),
+    а структуру SQL проверяет платформа. Здесь — только то, за что отвечает
+    канал: что он зовёт ``claim_task`` и что не зовёт ничего арендного.
+    """
+
+    def test_claim_one_returns_row_from_platform(self, mock_db):
+        """``_claim_one`` возвращает строку, полученную от платформы."""
+        client, pg_mod = mock_db
+        ch = _make_channel(pg_mod, client)
         row = {"id": "msg-1", "chat_id": "chat-1"}
-        db_mod.async_fetchone.return_value = row
+        client.responses["claim_task"] = {"claimed": row}
 
         import asyncio
         result = asyncio.run(ch._claim_one())
         assert result == row
-        db_mod.async_fetchone.assert_called_once()
+        assert client.was_called("claim_task")
 
-    def test_claim_one_uses_update_returning(self, mock_db):
-        """SQL в ``_claim_one`` — ``UPDATE ... RETURNING``, без claims."""
-        db_mod, pg_mod = mock_db
-        ch = _make_channel(pg_mod)
-        _capture_conn(db_mod)
+    def test_claim_one_uses_single_operation(self, mock_db):
+        """Захват — одна операция, а не цепочка SQL-вызовов."""
+        client, pg_mod = mock_db
+        ch = _make_channel(pg_mod, client)
 
         import asyncio
         asyncio.run(ch._claim_one())
 
-        fetchone_calls = db_mod.async_fetchone.call_args_list
-        assert fetchone_calls, "_claim_one не вызвал fetchone"
-        sql = fetchone_calls[0].args[0]
-        assert "agent_worker_claims" not in sql
-        assert "UPDATE" in sql
-        assert "RETURNING" in sql
+        assert client.operations() == ["claim_task"], (
+            f"захват должен быть одной операцией, получено: {client.operations()!r}"
+        )
 
     def test_start_creates_no_lease_task(self, mock_db):
         """``start()`` не создаёт lease-задачу, но создаёт ``_unstick_task``
         (фоновый unstick для отката зависших processing)."""
-        db_mod, pg_mod = mock_db
-        ch = _make_channel(pg_mod)
+        client, pg_mod = mock_db
+        ch = _make_channel(pg_mod, client)
         ch.exchange.start = AsyncMock()
         ch._flush_reasoning_loop = AsyncMock()
         ch._unstick_loop = AsyncMock()  # мокаем чтобы не зацикливаться
@@ -157,24 +150,18 @@ class TestUnstickProcessingInSingle:
     """``_unstick_processing`` возвращает зависшие задачи в пул (без claims)."""
 
     @pytest.mark.asyncio
-    async def test_unstick_processing_updates_status(self, mock_db):
-        db_mod, pg_mod = mock_db
-        ch = _make_channel(pg_mod)
-
-        # Мокаем transaction — возвращает conn
-        conn = MagicMock()
-        conn.fetch = AsyncMock(return_value=[])  # нет зависших
-        conn.execute = AsyncMock()
-        tx_cm = MagicMock()
-        tx_cm.__aenter__ = AsyncMock(return_value=conn)
-        tx_cm.__aexit__ = AsyncMock(return_value=None)
-        db_mod.async_transaction.return_value = tx_cm
+    async def test_unstick_processing_asks_the_platform(self, mock_db):
+        client, pg_mod = mock_db
+        ch = _make_channel(pg_mod, client)
+        client.responses["unstick_tasks"] = {"recovered": []}
 
         recovered = await ch._unstick_processing()
         assert recovered == []
-        # Должен быть fetch (SELECT зависших)
-        conn.fetch.assert_called()
-        # SQL fetch не должен содержать claims
-        for call in conn.fetch.call_args_list:
-            sql = call.args[0]
-            assert "agent_worker_claims" not in sql
+        assert client.was_called("unstick_tasks"), (
+            "откат зависших должен идти операцией unstick_tasks"
+        )
+        # Пороги передаются платформе: счётчик попыток и терминальный
+        # переход считаются там же, где живёт сам счётчик.
+        arguments = client.last_call("unstick_tasks")["arguments"]
+        assert "max_stuck_retries" in arguments
+        assert "processing_timeout_sec" in arguments

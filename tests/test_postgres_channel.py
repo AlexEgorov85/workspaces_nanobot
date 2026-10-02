@@ -14,23 +14,8 @@ _workspace_path = str(_project_root / "workspace")
 if _workspace_path not in sys.path:
     sys.path.insert(0, _workspace_path)
 
-# Build fake module references before any real imports
-_DB_MODULES = {}
-
-
-def _make_fake_db_module():
-    import types
-
-    mod = types.ModuleType("utils.db")
-    # Async API
-    mod.async_fetchval = AsyncMock(return_value=None)
-    mod.async_execute = AsyncMock()
-    mod.async_fetchone = AsyncMock(return_value=None)
-    mod.async_fetch = AsyncMock(return_value=[])
-    mod.async_transaction = MagicMock()
-    mod.DB_RETRYABLE_ERRORS = (Exception,)
-    return mod
-
+# Канал больше не ходит в `utils.db`: его данные обслуживает платформа.
+# Подменяется клиент `enterprise-mcp` - см. `_FakeMcpClient`.
 
 class _FakeSessionFileStore:
     """Заглушка для SessionFileStore в юнит-тестах PostgresChannel.
@@ -66,41 +51,88 @@ class _FakeSessionFileStore:
         return {"path": str(dest), "filename": filename or dest.name, "size": len(raw)}
 
 
+class _FakeMcpClient:
+    """Подставной клиент ``enterprise-mcp`` для юнит-тестов канала.
+
+    Ответы задаются по имени операции, каждое обращение записывается.
+
+    Раньше здесь подменялся ``utils.db``, и тесты утверждали на тексте SQL.
+    Проверять было нечего: текста в канале больше нет, и утверждение вида
+    ``any("UPDATE" in c.args[0] ...)`` проверяло бы отсутствие кода, а не
+    поведение. Теперь проверяется операция и её аргументы - то есть ровно
+    то, за что отвечает канал.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        #: operation -> dict ответа (мержится в {"status": "ok"})
+        self.responses: dict[str, object] = {}
+        #: operation -> исключение, которое она обязана бросить
+        self.errors: dict[str, Exception] = {}
+
+    async def call(self, operation, arguments=None, identity=None):
+        self.calls.append(
+            {
+                "operation": operation,
+                "arguments": dict(arguments or {}),
+                "identity": identity,
+            }
+        )
+        if operation in self.errors:
+            raise self.errors[operation]
+        value = self.responses.get(operation)
+        if callable(value):
+            value = value(dict(arguments or {}))
+        if not isinstance(value, dict):
+            return json.dumps({"status": "ok"})
+        return json.dumps({"status": "ok", **value})
+
+    # -- хелперы для тестов ------------------------------------------------
+
+    def calls_to(self, operation: str) -> list[dict[str, object]]:
+        return [c for c in self.calls if c["operation"] == operation]
+
+    def last_call(self, operation: str) -> dict[str, object]:
+        matching = self.calls_to(operation)
+        assert matching, (
+            f"операция {operation!r} не вызывалась; вызваны: "
+            f"{[c['operation'] for c in self.calls]}"
+        )
+        return matching[-1]
+
+    def was_called(self, operation: str) -> bool:
+        return bool(self.calls_to(operation))
+
+    def identity_of(self, operation: str) -> object:
+        return self.last_call(operation)["identity"]
+
+
 @pytest.fixture(autouse=True)
 def mock_db_and_psycopg(tmp_path):
-    with (
-        patch.dict("sys.modules"),
-        patch("psycopg2.extras.Json", lambda x: x),
-    ):
+    with patch.dict("sys.modules"):
         import importlib
 
-        # Сохраним оригинальный ``utils`` (настоящий пакет из workspace),
-        # чтобы канал мог импортировать из utils.session_file_store.
+        # Канал больше не ходит в ``utils.db``, но по-прежнему импортирует
+        # ``utils.session_file_store``, ``utils.media`` и ``utils.jsonb`` -
+        # они про файлы и разбор, а не про базу.
         original_utils = sys.modules.get("utils")
 
-        # Создаём фейковый ``utils.db`` (чтобы канал взял наши моки).
-        db_mod = types_fake_db()
-        sys.modules["utils.db"] = db_mod
-
-        # Восстанавливаем настоящий utils как пакет, но подменяем db внутри.
         if original_utils is not None:
             real_utils_pkg = importlib.import_module("utils")
-            real_utils_pkg.db = db_mod
         else:
             import importlib.util as _iu
+
             utils_init = Path(_workspace_path) / "utils" / "__init__.py"
             spec = _iu.spec_from_file_location("utils", utils_init)
             real_utils_pkg = _iu.module_from_spec(spec)
             sys.modules["utils"] = real_utils_pkg
             spec.loader.exec_module(real_utils_pkg)
-            real_utils_pkg.db = db_mod
 
         from utils.session_file_store import SessionFileStore  # noqa: F401
 
         # Форсируем свежий импорт: если предыдущие тестовые файлы уже
-        # импортировали канал с НАСТОЯЩИМ utils.db, класс остался связан
-        # с реальным пулом — тесты ушли бы в живую БД (или зависли на
-        # переподключении). Ре-импорт под фейковым utils.db это исключает.
+        # импортировали канал с настоящими зависимостями, класс остался бы
+        # связан с реальным клиентом. Ре-импорт это исключает.
         sys.modules.pop("lib.channels.postgres_channel", None)
 
         from lib.channels.postgres_channel import (
@@ -108,38 +140,27 @@ def mock_db_and_psycopg(tmp_path):
             _decode_jsonb,
         )
 
+        client = _FakeMcpClient()
+
         class _Holder:
             def __init__(self):
                 self.PostgresChannel = PostgresChannel
                 self._decode_jsonb = _decode_jsonb
-                self.db = db_mod
+                self.db = client
+                self.client = client
                 self._file_store_cls = SessionFileStore
 
             def __iter__(self):
                 yield PostgresChannel
                 yield _decode_jsonb
-                yield db_mod
+                yield client
 
         yield _Holder()
 
 
-def types_fake_db():
-    from unittest.mock import AsyncMock, MagicMock
-    import types
-
-    mod = types.ModuleType("utils.db")
-    mod.async_fetchval = AsyncMock(return_value=None)
-    mod.async_execute = AsyncMock()
-    mod.async_fetchone = AsyncMock(return_value=None)
-    mod.async_fetch = AsyncMock(return_value=[])
-    mod.async_transaction = MagicMock()
-    mod.DB_RETRYABLE_ERRORS = (Exception,)
-    return mod
-
-
 def _make_channel(mock_db, **overrides):
     """Helper to create PostgresChannel with mocked config."""
-    PostgresChannel, _decode_jsonb, _ = mock_db
+    PostgresChannel, _decode_jsonb, client = mock_db
     config = {
         "dsn": "postgresql://localhost:5432/test",
         "table_name": runtime_table("conversation_messages"),
@@ -150,7 +171,7 @@ def _make_channel(mock_db, **overrides):
     }
     config.update(overrides)
     bus = MagicMock()
-    return PostgresChannel(config, bus)
+    return PostgresChannel(config, bus, enterprise_mcp=client)
 
 
 class TestDecodeJsonb:
@@ -251,7 +272,9 @@ class TestPostgresChannelInsertAssistantMessage:
     @pytest.mark.asyncio
     async def test_inserts_and_returns_id(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.async_fetchone.return_value = {"id": "new-msg-42"}
+        mock_db.responses["append_assistant_message"] = {
+            "assistant_msg_id": "new-msg-42"
+        }
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         msg_id = await ch._insert_assistant_message("user-1", "chat-1")
@@ -317,8 +340,7 @@ class TestPostgresChannelSend:
     async def test_final_turn_finalizes_and_cleans_ctx(self, mock_db_and_psycopg):
         """Финальный outbound (маркер ``_final_turn``) финализирует оборот."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.async_fetchone.return_value = {"metadata": "{}"}
-        mock_db.async_transaction.return_value.__aenter__.return_value = AsyncMock()
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -342,8 +364,7 @@ class TestPostgresChannelSend:
     async def test_legacy_final_with_latency_ms_finalizes(self, mock_db_and_psycopg):
         """Legacy-финал без ``_final_turn``, но с ``latency_ms`` — финализирует."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.async_fetchone.return_value = {"metadata": "{}"}
-        mock_db.async_transaction.return_value.__aenter__.return_value = AsyncMock()
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -367,9 +388,7 @@ class TestPostgresChannelSend:
     async def test_message_tool_delivery_merges_not_finalizes(self, mock_db_and_psycopg):
         """Промежуточная публикация message(...) merge'ится, слот/клейм не трогаются."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["merge_tool_delivery"] = {"updated": True}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -392,18 +411,19 @@ class TestPostgresChannelSend:
         # ctx не снят, слот/lease не отпущены — оборот продолжается
         assert "m-1" in ch._msg_ctx
         assert "m-1" in ch.exchange.inflight
-        # в assistant-строку дописан content через UPDATE
-        calls = conn.execute.call_args_list
-        assert calls, "UPDATE должен вызываться"
-        assert any("UPDATE" in c.args[0] for c in calls)
+        # Запись идёт операцией merge_tool_delivery, а не UPDATE: слияние
+        # контента и вложений — read-modify-write, и одним UPDATE его
+        # больше не написать.
+        call = mock_db.last_call("merge_tool_delivery")
+        assert call["arguments"]["assistant_msg_id"] == "a-1"
+        assert call["arguments"]["content"] == "Hello from tool"
+        assert not mock_db.was_called("finalize_turn")
 
     @pytest.mark.asyncio
     async def test_plain_text_message_tool_merges(self, mock_db_and_psycopg):
         """message('текст') без media/флагов — тоже merge, а не финал."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": "First"}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["merge_tool_delivery"] = {"updated": True}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -418,9 +438,11 @@ class TestPostgresChannelSend:
 
         await ch.send(msg)
         assert "m-1" in ch._msg_ctx  # не финализировано
-        # content = "First" + "\n\n" + "Second"
-        recorded = conn.execute.call_args.args[1]
-        assert "First" in recorded and "Second" in recorded
+        # Накопление содержимого живёт на платформе: канал передаёт дельту
+        # и не решает, как она склеится с уже накопленным.
+        call = mock_db.last_call("merge_tool_delivery")
+        assert call["arguments"]["content"] == "Second"
+        assert call["arguments"]["assistant_msg_id"] == "a-1"
 
     @pytest.mark.asyncio
     async def test_message_tool_then_final_turn_preserves_content(self, mock_db_and_psycopg):
@@ -431,23 +453,14 @@ class TestPostgresChannelSend:
         пустым content, который шлёт патч ``_assemble_outbound`` при
         подавленном финале) — зафинализировать оборот, сохранив накопленный
         текст и закрыв слот/``_msg_ctx``.
+
+        Сохранение накопленного теперь обеспечивает платформа: пустой
+        ``content`` означает «взять уже накопленное», а не «очистить ответ».
+        Тест проверяет именно этот контракт.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        # Первый fetchrow — при чтении перед merge (пустая заглушка),
-        # второй — при финализации (уже накопленный content).
-        conn.fetchrow.side_effect = [
-            {"metadata": "{}", "media": [], "content": ""},
-            {"metadata": "{}", "media": [], "content": "Hello from tool"},
-        ]
-        written: dict = {}
-
-        def fake_execute(sql, *args):
-            if "status = 'completed'" in sql and "content" in sql:
-                written["final_content"] = args[0]
-
-        conn.execute.side_effect = fake_execute
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["merge_tool_delivery"] = {"updated": True}
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -486,10 +499,13 @@ class TestPostgresChannelSend:
         await ch.send(final_msg)
         assert "m-1" not in ch._msg_ctx  # финализировано
         assert "m-1" not in ch.exchange.inflight
-        # Накопленный merge'ом контент сохранён в финальном UPDATE
-        assert written["final_content"] == "Hello from tool"
-        calls = conn.execute.call_args_list
-        assert any("UPDATE" in c.args[0] and "completed" in c.args[0] for c in calls)
+        # Пустой финальный content - это «взять накопленное», а не «очистить».
+        finalize = mock_db.last_call("finalize_turn")
+        assert finalize["arguments"]["content"] == ""
+        assert finalize["arguments"]["assistant_msg_id"] == "a-1"
+        # Порядок важен: сначала накопление, потом закрытие.
+        operations = [c["operation"] for c in mock_db.calls]
+        assert operations.index("merge_tool_delivery") < operations.index("finalize_turn")
 
 
 class TestPostgresChannelSendDelta:
@@ -509,8 +525,7 @@ class TestPostgresChannelSendDelta:
         ch._stream_buffers["s-1"] = "Final content"
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
 
-        mock_db.async_transaction.return_value.__aenter__.return_value = AsyncMock()
-        mock_db.async_fetchone.return_value = {"metadata": "{}"}
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         await ch.send_delta("chat-1", "", {
             "_stream_end": True,
@@ -700,7 +715,7 @@ class TestPostgresChannelWorkerActivity:
     async def test_report_queue_prints_on_change_only(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
-        mock_db.async_fetchone.return_value = {"pending": 3, "error": 1}
+        mock_db.responses["queue_stats"] = {"pending": 3, "error": 1}
         with patch("lib.channels.postgres_channel.console") as console:
             await ch._report_queue()
             console.print.assert_called_once()
@@ -710,7 +725,7 @@ class TestPostgresChannelWorkerActivity:
             await ch._report_queue()
             assert console.print.call_count == 1
             # изменилось — печатаем
-            mock_db.async_fetchone.return_value = {"pending": 4, "error": 0}
+            mock_db.responses["queue_stats"] = {"pending": 4, "error": 0}
             await ch._report_queue()
             assert console.print.call_count == 2
 
@@ -718,8 +733,9 @@ class TestPostgresChannelWorkerActivity:
     async def test_report_queue_disabled_skips_query(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=False)
-        mock_db.async_fetchone.side_effect = AssertionError("query must be skipped")
-        await ch._report_queue()  # не падает и не ходит в БД
+        mock_db.errors["queue_stats"] = AssertionError("query must be skipped")
+        await ch._report_queue()  # не падает и не ходит к платформе
+        assert not mock_db.was_called("queue_stats")
 
     @pytest.mark.asyncio
     async def test_poll_once_prints_took_task(self, mock_db_and_psycopg):
@@ -788,9 +804,7 @@ class TestPostgresChannelWorkerActivity:
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
 
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}"}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["fail_task"] = {"status": "failed", "retry_count": 6}
 
         ch._msg_chat["m-1"] = "chat-1"
         exchange = MagicMock()
@@ -798,6 +812,7 @@ class TestPostgresChannelWorkerActivity:
         exchange.is_slot_free = lambda: True
         ch.exchange = exchange
 
+        mock_db.responses["fail_task"] = {"status": "error", "retry_count": 1}
         with patch("lib.channels.postgres_channel.console") as console:
             await ch._mark_failed("m-1", "a-1", "dispatch_error")
             console.print.assert_called_once()
@@ -810,10 +825,7 @@ class TestPostgresChannelWorkerActivity:
     async def test_finalize_turn_prints_completed(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
-        mock_db.async_fetchone.return_value = {"metadata": "{}"}
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
         ch._msg_chat["m-1"] = "chat-1"
@@ -872,20 +884,16 @@ class TestPostgresChannelContextWindow:
             "postgres:chat-1",
             {"used": 12345, "limit": 65536, "pct": 0.1883, "model": "MiniMax-M3"},
         )
-        mock_db.async_fetchone.return_value = {"metadata": {"reasoning": "..."}}
 
         await ch._flush_live_context()
 
-        assert mock_db.async_execute.called
-        sql = mock_db.async_execute.call_args.args[0]
-        args = mock_db.async_execute.call_args.args[1:]
-        assert "UPDATE" in sql
-        assert "metadata" in sql
-        meta = args[0]
-        assert meta["context_window"]["used"] == 12345
-        assert meta["context_window"]["limit"] == 65536
-        assert meta["context_window"]["pct"] == 0.1883
-        assert args[1] == "a-1"
+        call = mock_db.last_call("patch_message_metadata")
+        assert call["arguments"]["task_id"] == "a-1"
+        assert call["arguments"]["role"] == "assistant"
+        window = call["arguments"]["patch"]["context_window"]
+        assert window["used"] == 12345
+        assert window["limit"] == 65536
+        assert window["pct"] == 0.1883
 
     @pytest.mark.asyncio
     async def test_flush_live_context_composes_on_the_fly_from_bridge(
@@ -903,35 +911,33 @@ class TestPostgresChannelContextWindow:
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
         seed_context_window("postgres:chat-1", limit=65536, model="MiniMax-M3")
         _store_iteration_usage("postgres:chat-1", {"prompt_tokens": 32768})
-        mock_db.async_fetchone.return_value = {"metadata": {}}
+
 
         await ch._flush_live_context()
 
-        assert mock_db.async_execute.called
-        meta = mock_db.async_execute.call_args.args[1]
-        assert meta["context_window"]["used"] == 32768
-        assert meta["context_window"]["limit"] == 65536
-        assert meta["context_window"]["pct"] == 0.5
+        window = mock_db.last_call("patch_message_metadata")["arguments"]["patch"]["context_window"]
+        assert window["used"] == 32768
+        assert window["limit"] == 65536
+        assert window["pct"] == 0.5
 
     @pytest.mark.asyncio
     async def test_flush_live_context_no_block_no_update(self, mock_db_and_psycopg):
-        """Пустой мост → UPDATE не пишется."""
+        """Пустой мост → платформа не трогается."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_chat = {"m-1": "chat-1"}
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
-        mock_db.async_fetchone.return_value = {"metadata": {}}
+
 
         await ch._flush_live_context()
 
-        mock_db.async_fetchone.assert_not_called()
-        mock_db.async_execute.assert_not_called()
+        assert not mock_db.calls, "платформа не должна трогаться"
 
     @pytest.mark.asyncio
     async def test_flush_live_context_skips_when_no_assistant_msg_id(
         self, mock_db_and_psycopg,
     ):
-        """Нет assistant_msg_id → fetchone/execute не дёргаются."""
+        """Нет assistant_msg_id → платформа не трогается."""
         from lib.hooks.database_logging_hook import _store_context_window
 
         PostgresChannel, _, mock_db = mock_db_and_psycopg
@@ -945,8 +951,7 @@ class TestPostgresChannelContextWindow:
 
         await ch._flush_live_context()
 
-        mock_db.async_fetchone.assert_not_called()
-        mock_db.async_execute.assert_not_called()
+        assert not mock_db.calls, "платформа не должна трогаться"
 
     @pytest.mark.asyncio
     async def test_drop_context_bridge_clears_session(self, mock_db_and_psycopg):
@@ -1032,9 +1037,7 @@ class TestPostgresChannelTurnLifecycle:
     async def test_final_turn_full_lifecycle(self, mock_db_and_psycopg):
         """Тест 1: обычный ``_final_turn`` финал. Все структуры очищены."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1049,16 +1052,13 @@ class TestPostgresChannelTurnLifecycle:
         ))
 
         _assert_local_clean(ch, "m-1", "chat-1")
-        claim_sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any("UPDATE" in s and "completed" in s for s in claim_sqls)
+        assert mock_db.was_called("finalize_turn")
 
     @pytest.mark.asyncio
     async def test_turn_end_finalizes(self, mock_db_and_psycopg):
         """Тест 3: legacy ``_turn_end`` маркер финализирует оборот."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1080,11 +1080,7 @@ class TestPostgresChannelTurnLifecycle:
         Контент непустой → всё завершается штатно.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {
-            "metadata": "{}", "media": [], "content": "",
-        }
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1101,8 +1097,7 @@ class TestPostgresChannelTurnLifecycle:
 
         _assert_local_clean(ch, "m-3", "chat-3")
         assert "s-3" not in ch._stream_buffers
-        claim_sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any("UPDATE" in s and "completed" in s for s in claim_sqls)
+        assert mock_db.was_called("finalize_turn")
 
     @pytest.mark.asyncio
     async def test_stream_end_empty_delta_still_finalizes(self, mock_db_and_psycopg):
@@ -1115,11 +1110,7 @@ class TestPostgresChannelTurnLifecycle:
         в ``processing`` в БД и слот в inflight.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {
-            "metadata": "{}", "media": [], "content": "",
-        }
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1135,11 +1126,7 @@ class TestPostgresChannelTurnLifecycle:
         })
 
         _assert_local_clean(ch, "m-4", "chat-4")
-        claim_sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any(
-            "UPDATE" in s and "completed" in s and "WHERE id = %s" in s
-            for s in claim_sqls
-        ), f"no UPDATE…completed in {claim_sqls}"
+        assert mock_db.was_called("finalize_turn")
 
     @pytest.mark.asyncio
     async def test_final_with_only_answer_id_recovers_user(self, mock_db_and_psycopg):
@@ -1148,26 +1135,33 @@ class TestPostgresChannelTurnLifecycle:
         ``reply_to`` assistant-строки и завершить оборот.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-5", chat_id="chat-5", assistant_msg_id="a-5")
 
-        with patch(
-            "lib.channels.postgres_channel.fetchone",
-            AsyncMock(return_value={"reply_to": "m-5"}),
-        ) as patched:
-            await ch.send(_outbound(
-                content="Final answer",
-                chat_id="chat-5",
-                answer_id="a-5",
-                _final_turn=True,
-            ))
-            assert patched.called
+        # Обратный поиск user_msg_id: платформа отдаёт reply_to по строке
+        # ответа. Раньше здесь патчился ``postgres_channel.fetchone`` -
+        # функции, в канале больше нет.
+        mock_db.responses["get_message"] = {
+            "message": {
+                "id": "a-5",
+                "role": "assistant",
+                "status": "processing",
+                "reply_to": "m-5",
+                "chat_id": "chat-5",
+            },
+        }
+
+        await ch.send(_outbound(
+            content="Final answer",
+            chat_id="chat-5",
+            answer_id="a-5",
+            _final_turn=True,
+        ))
+        assert mock_db.was_called("get_message")
 
         _assert_local_clean(ch, "m-5", "chat-5")
 
@@ -1177,9 +1171,7 @@ class TestPostgresChannelTurnLifecycle:
         no-op — задача должна быть терминально failed, локал очищен.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "retry_count": 5}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["fail_task"] = {"status": "failed", "retry_count": 6}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1222,9 +1214,7 @@ class TestPostgresChannelLifecycleDiagnostics:
         local_released (по одной строке на каждую фазу).
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1256,23 +1246,20 @@ class TestPostgresChannelUnstickProcessing:
     """``_unstick_processing`` возвращает список восстановленных id,
     а ``_unstick_loop`` чистит локал для каждого. Без этого воркер
     мог бы остаться с заполненным ``exchange.inflight`` после того,
-    как БД вернула задачу в ``pending``.
+    как задача вернулась в ``pending``.
 
-    Используем мок БД: ``conn.fetch`` отдаёт зависшие user-строки,
-    ``conn.fetchrow`` для чтения metadata. Тест проверяет:
-      - возвращённый список содержит id восстановленных задач;
-      - DB получает UPDATE status='pending' (retry < max) или 'failed';
-      - ``_unstick_loop`` чистит ``_msg_ctx``, ``exchange.inflight``.
+    Отбор зависших, инкремент счётчика, терминальный переход, правка
+    assistant-строки и зачистка сирот - всё это одна операция
+    ``unstick_tasks``. Канал получает готовый список и не решает, что
+    делать со строкой: терминальный переход и повтор определяются на
+    платформе, где живёт счётчик попыток.
     """
 
     @pytest.mark.asyncio
     async def test_returns_recovered_id_and_clears_local(self, mock_db_and_psycopg):
         """Одна зависшая задача: recovered → local state очищен."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        # _unstick_processing делает fetch → SELECT зависших
-        conn.fetch.return_value = [{"id": "m-stuck", "metadata": "{}"}]
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["unstick_tasks"] = {"recovered": ["m-stuck"]}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         _claim_task(ch, user_msg_id="m-stuck", chat_id="chat-stuck",
@@ -1284,17 +1271,16 @@ class TestPostgresChannelUnstickProcessing:
         # Локал всё ещё не очищен — _unstick_processing только БД трогает.
         # Очистку делает _unstick_loop.
         assert "m-stuck" in ch.exchange.inflight
-        # Но SQL ушёл: UPDATE … status='pending'
-        sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any("status = 'pending'" in s for s in sqls), sqls
+        # Пороги передаются платформе, а не применяются в канале.
+        call = mock_db.last_call("unstick_tasks")
+        assert call["arguments"]["max_stuck_retries"] == ch._max_stuck_retries
+        assert call["arguments"]["processing_timeout_sec"] == ch._processing_timeout
 
     @pytest.mark.asyncio
     async def test_unstick_loop_clears_local_for_recovered(self, mock_db_and_psycopg):
         """``_unstick_loop`` после ``_unstick_processing`` чистит локал."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetch.return_value = [{"id": "m-loop", "metadata": "{}"}]
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["unstick_tasks"] = {"recovered": ["m-loop"]}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         _claim_task(ch, user_msg_id="m-loop", chat_id="chat-loop",
@@ -1312,14 +1298,14 @@ class TestPostgresChannelUnstickProcessing:
 
     @pytest.mark.asyncio
     async def test_terminal_failed_after_max_retries(self, mock_db_and_psycopg):
-        """retry_count >= max_stuck_retries → status='failed' (терминал)."""
+        """Терминальный переход определяет платформа, а не канал.
+
+        Раньше канал сам считал ``retry_count`` и выбирал между 'pending' и
+        'failed'. Теперь это сделано в той же транзакции, что и счётчик, -
+        иначе два конкурирующих прохода записали бы одинаковый счётчик.
+        """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        # retry_count в metadata = max_stuck_retries → после +1 уже failed
-        conn.fetch.return_value = [
-            {"id": "m-term", "metadata": {"retry_count": 2}},
-        ]
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["unstick_tasks"] = {"recovered": ["m-term"]}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db), max_stuck_retries=3,
@@ -1327,8 +1313,9 @@ class TestPostgresChannelUnstickProcessing:
 
         recovered = await ch._unstick_processing()
         assert recovered == ["m-term"]
-        sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any("status = 'failed'" in s for s in sqls), sqls
+        assert mock_db.last_call("unstick_tasks")["arguments"][
+            "max_stuck_retries"
+        ] == 3
 
 
 class TestPostgresChannelMarkFailed:
@@ -1341,9 +1328,7 @@ class TestPostgresChannelMarkFailed:
     async def test_dispatch_error_marks_error_and_clears_local(self, mock_db_and_psycopg):
         """``_mark_failed(reason='dispatch_error')`` → DB error, локал чист."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"metadata": "{}"}
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["fail_task"] = {"status": "error", "retry_count": 1}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         _claim_task(ch, user_msg_id="m-d", chat_id="chat-d",
@@ -1352,19 +1337,17 @@ class TestPostgresChannelMarkFailed:
         await ch._mark_failed("m-d", "a-d", "dispatch_error")
 
         _assert_local_clean(ch, "m-d", "chat-d")
-        sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any("status = 'error'" in s for s in sqls), sqls
+        # Статус приходит от платформы: она же увеличивала счётчик.
+        call = mock_db.last_call("fail_task")
+        assert call["arguments"]["user_msg_id"] == "m-d"
+        assert call["arguments"]["assistant_msg_id"] == "a-d"
+        assert call["arguments"]["reason"] == "dispatch_error"
 
     @pytest.mark.asyncio
     async def test_mark_failed_after_max_retries_is_terminal(self, mock_db_and_psycopg):
         """retry_count >= max → terminal failed, локал чист."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        # metadata уже содержит retry_count = max
-        conn.fetchrow.return_value = {
-            "metadata": {"retry_count": 3},
-        }
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+        mock_db.responses["fail_task"] = {"status": "failed", "retry_count": 4}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db), max_stuck_retries=3,
@@ -1375,16 +1358,14 @@ class TestPostgresChannelMarkFailed:
         await ch._mark_failed("m-t", "a-t", "write_error")
 
         _assert_local_clean(ch, "m-t", "chat-t")
-        sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any("status = 'failed'" in s for s in sqls), sqls
+        # Порог уходит на платформу вместе с обеими строками оборота.
+        call = mock_db.last_call("fail_task")
+        assert call["arguments"]["max_stuck_retries"] == 3
 
     @pytest.mark.asyncio
     async def test_mark_failed_unknown_user_does_not_crash(self, mock_db_and_psycopg):
         """Вызов с неизвестным ``user_msg_id`` — локал уже пуст, не падает."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        conn = AsyncMock()
-        conn.fetchrow.return_value = None  # строка не найдена в БД
-        mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         await ch._mark_failed("ghost", None, "write_error")

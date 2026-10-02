@@ -19,6 +19,27 @@ stream_end с пустым delta / восстановление по answer_id) 
   S4 — final с потерянным ``origin_message_id`` (только ``answer_id``);
   S5 — финал на сообщении, которое воркер ещё не начал обрабатывать
        (имитация orphan через прямой INSERT в ``processing``).
+
+ТЕКУЩЕЕ СОСТОЯНИЕ: сценарии не запускаются, см. ``_platform_client``.
+
+После перевода канала на MCP он больше не пишет в PostgreSQL: и захват
+задачи, и финализация оборота — операции capability ``data`` платформы.
+Тест, собирающий ``PostgresChannel`` без клиента платформы, проверял бы
+путь, которого в рантайме нет, и его утверждения о статусах строк были бы
+неисполнимы в принципе.
+
+Чтобы сценарии заработали, нужен живой контур:
+  1. ``NANOBOT_INTEGRATION=1`` и доступный ``DATABASE_URL``;
+  2. профиль платформы, у которого ``task_table`` указывает на СЛУЖЕБНУЮ
+     таблицу этого теста (иначе операции писали бы в боевой
+     ``agent_conversation_messages``) — оверлей объявляется в
+     ``mcp-platform/platform.json → profiles.<имя>``, а имя передаётся
+     клиенту через ``--profile``;
+  3. поднятый по этому профилю процесс ``enterprise-mcp``.
+
+Пока такого контура нет, сценарии пропускаются с этой же причиной в отчёте.
+Пропуск здесь честнее падения: он не выглядит как дефект канала, но и не
+выдаёт себя за покрытие.
 """
 
 from __future__ import annotations
@@ -45,6 +66,20 @@ if _workspace_path not in sys.path:
 # DSN / схема
 # ---------------------------------------------------------------------------
 
+#: Ворота запуска. Тест поднимает реальную схему в PostgreSQL и сам её
+#: удаляет, поэтому включается только осознанно: ``NANOBOT_INTEGRATION=1``.
+#: Внутренние прогоны выставляют ``0`` (см. ``tests/test_memory_guard.py``),
+#: и без этой проверки файл падал бы в каждом полном прогоне там, где DSN
+#: объявлен в конфиге, а сервера нет.
+_INTEGRATION_ENV = "NANOBOT_INTEGRATION"
+
+#: Профиль платформы, чей ``task_table`` указывает на служебную таблицу
+#: этого теста. Объявляется в ``mcp-platform/platform.json → profiles.<имя>``.
+#: Без него операции писали бы в боевую таблицу — а это хуже, чем пропуск.
+_INTEGRATION_PROFILE_ENV = "NANOBOT_INTEGRATION_PROFILE"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
 
 def _resolve_dsn() -> str:
     dsn = os.environ.get("DATABASE_URL") or ""
@@ -57,6 +92,26 @@ def _resolve_dsn() -> str:
         return pg.get("dsn") or ""
     except Exception:
         return ""
+
+
+def _reachable_dsn() -> str:
+    """DSN, до которого действительно можно достучаться.
+
+    Наличие DSN в конфиге ничего не говорит о живости сервера: конфиг
+    боевой, а PostgreSQL на машине может быть не поднят. Отличать «не
+    настроено» от «настроено, но сервера нет» обязан сам тест — иначе
+    прогон без базы выглядит как дефект канала.
+    """
+    dsn = _resolve_dsn()
+    if not dsn:
+        pytest.skip("DATABASE_URL не задан; integration-тест пропущен")
+    try:
+        conn = _connect(dsn)
+    except Exception as exc:  # noqa: BLE001 - причина уходит в отчёт pytest
+        pytest.skip(f"PostgreSQL по DSN недоступен ({exc.__class__.__name__}); пропуск")
+    else:
+        conn.close()
+    return dsn
 
 
 def _connect(dsn: str):
@@ -104,14 +159,51 @@ CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (
 
 @pytest.fixture(scope="module")
 def test_schema():
-    dsn = _resolve_dsn()
-    if not dsn:
-        pytest.skip("DATABASE_URL не задан; integration-тест пропущен")
+    if os.environ.get(_INTEGRATION_ENV, "").strip().lower() not in _TRUTHY:
+        pytest.skip(f"{_INTEGRATION_ENV} не выставлен — тест не запускается по умолчанию")
+    dsn = _reachable_dsn()
     schema = f"test_pg_lifecycle_{uuid.uuid4().hex[:8]}"
     _exec(dsn, f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
     _exec(dsn, _MSG_DDL.format(schema=schema, table=_MSG_TABLE))
     yield dsn, schema
     _exec(dsn, f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+@pytest.fixture(scope="module")
+def platform_client():
+    """Клиент ``enterprise-mcp``, привязанный к служебной таблице теста.
+
+    Канал не пишет в PostgreSQL напрямую: без клиента платформы его
+    сценарии неисполнимы, и падение было бы дефектом не жизненного пути.
+    Требуется профиль с ``task_table`` этой таблицы — иначе тест писал бы
+    в боевые строки.
+    """
+    profile = os.environ.get(_INTEGRATION_PROFILE_ENV, "").strip()
+    if not profile:
+        pytest.skip(
+            f"{_INTEGRATION_PROFILE_ENV} не задан: нужен профиль платформы, "
+            "у которого task_table указывает на служебную таблицу теста "
+            f"(схема test_pg_lifecycle_*, таблица {_MSG_TABLE}) — иначе "
+            "операции записали бы в боевую agent_conversation_messages"
+        )
+    from lib.services.enterprise_mcp_client import (
+        EnterpriseMcpSettings,
+        client_from_settings,
+    )
+    from config import SETTINGS
+
+    declared = (SETTINGS.get("gateway", {}).get("agent", {}) or {}).get(
+        "enterprise_mcp"
+    ) or {}
+    try:
+        client = client_from_settings(EnterpriseMcpSettings(**declared))
+        client.call("schema_check", {})
+    except Exception as exc:  # noqa: BLE001 - причина уходит в отчёт pytest
+        pytest.skip(
+            f"enterprise-mcp по профилю {profile!r} не поднялся "
+            f"({exc.__class__.__name__}: {exc})"
+        )
+    yield client
 
 
 def _insert_user(dsn, schema, chat_id, content, status="pending"):
@@ -155,7 +247,7 @@ def _row(dsn, schema, table, msg_id):
     return rows[0] if rows else None
 
 
-def _make_channel(test_schema, max_concurrent=1):
+def _make_channel(test_schema, platform_client, max_concurrent=1):
     dsn, schema = test_schema
     from lib.channels.postgres_channel import PostgresChannel
     from nanobot.bus.queue import MessageBus
@@ -172,6 +264,7 @@ def _make_channel(test_schema, max_concurrent=1):
             "unstick_interval": 999.0,
         },
         MessageBus(),
+        enterprise_mcp=platform_client,
     )
     return ch
 
@@ -220,10 +313,10 @@ async def _run_turn(ch, ds, schema, user_msg_id, chat_id, assistant_msg_id, fina
     assert a["status"] == "completed", a
 
 
-async def test_s1_regular_final(test_schema):
+async def test_s1_regular_final(test_schema, platform_client):
     """S1: обычный ``_final_turn`` финал."""
     ds, schema = test_schema
-    ch = _make_channel(test_schema)
+    ch = _make_channel(test_schema, platform_client)
 
     user_id = _insert_user(ds, schema, "chat-s1", "Q1")
     assistant_id = _insert_assistant(ds, schema, "chat-s1", user_id)
@@ -241,10 +334,10 @@ async def test_s1_regular_final(test_schema):
     assert _row(ds, schema, runtime_table("conversation_messages"), assistant_id)["content"] == "Answer S1"
 
 
-async def test_s2_streaming_final_with_buffer(test_schema):
+async def test_s2_streaming_final_with_buffer(test_schema, platform_client):
     """S2: стрим + ``stream_end=True`` с накопленным буфером."""
     ds, schema = test_schema
-    ch = _make_channel(test_schema)
+    ch = _make_channel(test_schema, platform_client)
 
     user_id = _insert_user(ds, schema, "chat-s2", "Q2")
     assistant_id = _insert_assistant(ds, schema, "chat-s2", user_id)
@@ -268,10 +361,10 @@ async def test_s2_streaming_final_with_buffer(test_schema):
     assert a["content"] == "Hello world"
 
 
-async def test_s3_stream_end_empty_delta(test_schema):
+async def test_s3_stream_end_empty_delta(test_schema, platform_client):
     """S3: ``stream_end=True`` с пустым delta. Раньше ломалось."""
     ds, schema = test_schema
-    ch = _make_channel(test_schema)
+    ch = _make_channel(test_schema, platform_client)
 
     user_id = _insert_user(ds, schema, "chat-s3", "Q3")
     assistant_id = _insert_assistant(ds, schema, "chat-s3", user_id)
@@ -286,13 +379,13 @@ async def test_s3_stream_end_empty_delta(test_schema):
     await _run_turn(ch, ds, schema, user_id, "chat-s3", assistant_id, fin)
 
 
-async def test_s4_final_with_only_answer_id(test_schema):
+async def test_s4_final_with_only_answer_id(test_schema, platform_client):
     """S4: финал без ``origin_message_id``, только ``answer_id``.
 
     Канал должен восстановить user_id через SELECT assistant.reply_to.
     """
     ds, schema = test_schema
-    ch = _make_channel(test_schema)
+    ch = _make_channel(test_schema, platform_client)
 
     user_id = _insert_user(ds, schema, "chat-s4", "Q4")
     assistant_id = _insert_assistant(ds, schema, "chat-s4", user_id)
@@ -309,14 +402,14 @@ async def test_s4_final_with_only_answer_id(test_schema):
     await _run_turn(ch, ds, schema, user_id, "chat-s4", assistant_id, fin)
 
 
-async def test_s5_polling_continues_after_finishes(test_schema):
+async def test_s5_polling_continues_after_finishes(test_schema, platform_client):
     """S5: после серии финалов polling не зависает, новые задачи берутся.
 
     Это главный acceptance criterion: ``exchange.inflight`` пуст после
     любого финала, поэтому следующий ``_poll_once`` возьмёт новую задачу.
     """
     ds, schema = test_schema
-    ch = _make_channel(test_schema, max_concurrent=1)
+    ch = _make_channel(test_schema, platform_client, max_concurrent=1)
 
     scenarios = ["Q1", "Q2", "Q3", "Q4"]
 
@@ -372,7 +465,7 @@ async def test_s5_polling_continues_after_finishes(test_schema):
 # ---------------------------------------------------------------------------
 
 
-async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema):
+async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema, platform_client):
     """Главный критерий приёмки фикса lifecycle deadlock.
 
     Сценарий:
@@ -391,7 +484,7 @@ async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema):
     from nanobot.bus.events import OutboundMessage
 
     ds, schema = test_schema
-    ch = _make_channel(test_schema, max_concurrent=2)
+    ch = _make_channel(test_schema, platform_client, max_concurrent=2)
 
     # 1. Вставить 5 user-задач в разных чатах.
     n_questions = 5

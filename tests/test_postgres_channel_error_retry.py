@@ -1,34 +1,25 @@
-"""Регрессия: повторяемая ошибка задачи должна возвращаться в пул.
+"""Повторяемая ошибка задачи должна возвращаться в пул.
 
-Два предсуществующих дефекта, закрытых вместе:
+Дефект, который этот файл закрывает, был в SQL захвата: подзапрос выбирал
+задачу и по ``status='error'`` с истёкшим backoff'ом, но внешний ``WHERE``
+требовал ``status = 'pending'`` и отсекал её. Обещание ``_mark_failed``
+«задача вернётся в пул после ``error_retry_delay``» не выполнялось никогда:
+задача оставалась в ``error`` навсегда, а ``retry_count`` рос вхолостую.
 
-1. **Ветка повтора ``status='error'`` была недостижимой.** Подзапрос
-   ``_claim_one`` выбирал задачу и по ``status='error'`` с истёкшим backoff'ом,
-   но внешний ``WHERE`` требовал ``status = 'pending'`` и отсекал её. Обещание
-   ``_mark_failed`` «задача вернётся в пул после ``error_retry_delay``» не
-   выполнялось никогда: задача оставалась в ``error`` навсегда, а
-   ``retry_count`` рос вхолостую.
+**SQL захвата уехал на платформу** (``claim_task``), поэтому проверки его
+структуры живут теперь в ``mcp-platform/tests/test_data_task_queue.py`` —
+у них один источник правды, а не два, расходящихся копиями. Здесь остаётся
+то, за что отвечает канал: он обязан передать платформе backoff и список
+priority-команд, иначе ветка повтора выключается на его стороне.
 
-2. **Позиционные параметры расходились с порядком плейсхолдеров.** После
-   починки backoff нужен в двух местах SQL, и список priority-команд стоит
-   между ними. Любая перестановка здесь — не синтаксическая ошибка, а тихая
-   подмена: ``error_retry_delay`` попал бы в ``ANY(%s)``, и priority-путь
-   отсекался бы всегда.
-
-Тест проверяет **структуру SQL**, а не текст целиком: полный текст меняется
-при каждой правке, и тест, сравнивающий его посимвольно, через месяц
-превращается в либо зелёную ложь, либо в красный шум.
-
-Почему не «просто проверить, что есть подстрока»: подзапрос всегда содержал
-``status = 'error'``, и такая проверка была бы зелёной и на сломанном коде.
-Поэтому проверяется именно **внешний** ``WHERE`` — та часть, которая на
-сломанном коде и отсекала задачу.
+Раньше тесты читали текст SQL канала. Это проверяло не поведение, а наличие
+строк в исходнике: любая переформулировка запроса ломала тест, не меняя
+ничего в рантайме, и наоборот — SQL мог уехать на платформу вместе с
+дефектом, а тесты оставались зелёными.
 """
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -47,31 +38,48 @@ if _WORKSPACE_PATH not in sys.path:
 #: дефолт: тест, зависящий от дефолта, ломается вместе с дефолтом и молчит.
 BACKOFF_SEC = 42
 
-#: Строки, по которым видно, что внешний WHERE не схлопнут до одного статуса.
-_OUTER_ERROR_BRANCH = re.compile(r"status\s*=\s*'error'", re.IGNORECASE)
+
+class _FakeMcpClient:
+    """Подставной клиент ``enterprise-mcp``: операции и их аргументы."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.responses: dict[str, object] = {}
+
+    async def call(self, operation, arguments=None, identity=None):
+        self.calls.append(
+            {
+                "operation": operation,
+                "arguments": dict(arguments or {}),
+                "identity": identity,
+            }
+        )
+        value = self.responses.get(operation)
+        if not isinstance(value, dict):
+            return '{"status": "ok"}'
+        import json
+
+        return json.dumps({"status": "ok", **value})
+
+    def last_call(self, operation: str) -> dict[str, object]:
+        matching = [c for c in self.calls if c["operation"] == operation]
+        assert matching, (
+            f"операция {operation!r} не вызывалась; вызваны: "
+            f"{[c['operation'] for c in self.calls]}"
+        )
+        return matching[-1]
 
 
 @pytest.fixture(autouse=True)
 def error_retry_mock_db():
-    """Fake ``utils.db`` — моки async_fetchone/fetchval/execute/transaction."""
-    with patch.dict("sys.modules"), patch("psycopg2.extras.Json", lambda x: x):
-        def types_fake_db():
-            mod = ModuleType("utils.db")
-            mod.async_fetchval = AsyncMock(return_value=None)
-            mod.async_execute = AsyncMock()
-            mod.async_fetchone = AsyncMock(return_value=None)
-            mod.async_fetch = AsyncMock(return_value=[])
-            mod.async_transaction = MagicMock()
-            mod.DB_RETRYABLE_ERRORS = (Exception,)
-            return mod
+    """Подставной клиент MCP вместо бывшего мока ``utils.db``."""
+    with patch.dict("sys.modules"):
+        import importlib
+        import importlib.util
 
         original_utils = sys.modules.get("utils")
-        db_mod = types_fake_db()
-        sys.modules["utils.db"] = db_mod
-
         if original_utils is not None:
             real_utils_pkg = importlib.import_module("utils")
-            real_utils_pkg.db = db_mod
         else:
             spec = importlib.util.spec_from_file_location(
                 "utils", Path(_WORKSPACE_PATH) / "utils" / "__init__.py"
@@ -79,7 +87,7 @@ def error_retry_mock_db():
             real_utils_pkg = importlib.util.module_from_spec(spec)
             sys.modules["utils"] = real_utils_pkg
             spec.loader.exec_module(real_utils_pkg)
-            real_utils_pkg.db = db_mod
+        assert real_utils_pkg is not None
 
         for name in (
             "lib.channels.postgres_channel",
@@ -89,14 +97,17 @@ def error_retry_mock_db():
 
         from lib.channels.postgres_channel import PostgresChannel
 
+        client = _FakeMcpClient()
+
         class _Holder:
             def __init__(self):
                 self.PostgresChannel = PostgresChannel
-                self.db = db_mod
+                self.db = client
+                self.client = client
 
             def __iter__(self):
                 yield PostgresChannel
-                yield db_mod
+                yield client
 
         yield _Holder()
 
@@ -115,157 +126,66 @@ def _make_channel(holder, **overrides):
         "_print_db_activity": False,
     }
     config.update(overrides)
-    return PostgresChannel(config, MagicMock())
+    return PostgresChannel(config, MagicMock(), enterprise_mcp=holder.db)
 
 
-def _outer_where(sql_text: str) -> str:
-    """Внешний ``WHERE`` запроса: часть после закрытия подзапроса.
+class TestBackoffReachesThePlatform:
+    """Канал передаёт backoff операции — иначе ветка повтора выключена.
 
-    Подзапрос закрывается ``LIMIT 1`` + ``)``; всё до ``RETURNING`` после
-    этого — условия на саму строку задачи.
+    Раньше backoff подставлялся в текст SQL канала. Теперь он уходит
+    аргументом, и «забыть его» не падает, а молча возвращает задачу в
+    ``error`` навсегда — ровно тот дефект, ради которого файл и написан.
     """
-    assert "LIMIT 1" in sql_text, f"в SQL нет подзапроса выбора: {sql_text!r}"
-    tail = sql_text.split("LIMIT 1", 1)[1]
-    end = tail.find("RETURNING")
-    assert end != -1, f"в SQL нет RETURNING: {sql_text!r}"
-    return tail[:end]
-
-
-class TestErrorRetryIsReachable:
-    """Внешний ``WHERE`` обязан допускать повтор, а не только ``pending``."""
 
     @pytest.mark.asyncio
-    async def test_outer_where_admits_error_retry(self, error_retry_mock_db):
-        """Главная регрессия.
-
-        На сломанном коде здесь внешний ``WHERE`` был ``AND status = 'pending'``,
-        и задача в ``error`` не могла быть захвачена никогда — независимо от
-        истёкшего backoff'а.
-        """
+    async def test_backoff_is_passed_once_as_a_named_argument(
+        self, error_retry_mock_db
+    ):
         ch = _make_channel(error_retry_mock_db)
-        error_retry_mock_db.db.async_fetchone.return_value = None
 
         await ch._claim_one()
 
-        sql_text = error_retry_mock_db.db.async_fetchone.await_args.args[0]
-        outer = _outer_where(sql_text)
-        assert _OUTER_ERROR_BRANCH.search(outer), (
-            "внешний WHERE не допускает status='error': задача, помеченная "
-            f"_mark_failed как повторяемая, останется в error навсегда. "
-            f"Внешний WHERE: {outer!r}"
+        arguments = error_retry_mock_db.db.last_call("claim_task")["arguments"]
+        assert arguments["error_retry_delay_sec"] == BACKOFF_SEC, (
+            f"backoff не доехал до платформы: {arguments!r}"
         )
 
     @pytest.mark.asyncio
-    async def test_outer_where_is_not_narrowed_to_pending(self, error_retry_mock_db):
-        """Анти-утверждение к предыдущему тесту.
-
-        «Есть ``status='error'``» и «внешний WHERE не схлопнут» — разные
-        утверждения, но дефект выглядит одинаково. Этот тест ловит именно
-        схлопывание: голое ``AND status = 'pending'`` отдельной строкой во
-        внешнем WHERE означает сужение подзапроса.
-        """
+    async def test_priority_list_is_passed_through(self, error_retry_mock_db):
         ch = _make_channel(error_retry_mock_db)
-        error_retry_mock_db.db.async_fetchone.return_value = None
-
-        await ch._claim_one()
-
-        sql_text = error_retry_mock_db.db.async_fetchone.await_args.args[0]
-        outer = _outer_where(sql_text)
-        assert not re.search(r"AND status\s*=\s*'pending'\s*\n", outer), (
-            "внешний WHERE схлопнут до status='pending' отдельной строкой — "
-            f"подзапрос сужен, ветка повтора снова недостижима. WHERE: {outer!r}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_outer_where_keeps_cancelled_guard(self, error_retry_mock_db):
-        """Починка не должна была снять user_stop_signal: отмена — не захват."""
-        ch = _make_channel(error_retry_mock_db)
-        error_retry_mock_db.db.async_fetchone.return_value = None
-
-        await ch._claim_one()
-
-        sql_text = error_retry_mock_db.db.async_fetchone.await_args.args[0]
-        outer = _outer_where(sql_text)
-        assert "status != 'cancelled'" in outer, (
-            f"во внешнем WHERE потеряна защита от cancelled: {outer!r}"
-        )
-
-
-class TestParameterOrder:
-    """Плейсхолдеры и позиционные параметры обязаны совпадать по порядку."""
-
-    @pytest.mark.asyncio
-    async def test_placeholder_count_matches_params(self, error_retry_mock_db):
-        """Число ``%s`` в SQL равно числу переданных параметров.
-
-        Это инвариант, а не деталь реализации: лишний или недостающий
-        параметр в PostgreSQL — ошибка исполнения, а переставленный —
-        тихая подмена значения в другом плейсхолдере.
-        """
-        ch = _make_channel(error_retry_mock_db)
-        error_retry_mock_db.db.async_fetchone.return_value = None
-
-        await ch._claim_one()
-
-        args = error_retry_mock_db.db.async_fetchone.await_args.args
-        sql_text, params = args[0], args[1:]
-        assert sql_text.count("%s") == len(params), (
-            f"плейсхолдеров {sql_text.count('%s')}, параметров {len(params)}: {params!r}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_backoff_passed_for_both_conditions(self, error_retry_mock_db):
-        """Backoff нужен и подзапросу, и внешнему WHERE — значит передаётся дважды."""
-        ch = _make_channel(error_retry_mock_db)
-        error_retry_mock_db.db.async_fetchone.return_value = None
-
-        await ch._claim_one()
-
-        params = error_retry_mock_db.db.async_fetchone.await_args.args[1:]
-        assert params == (BACKOFF_SEC, BACKOFF_SEC), (
-            f"ожидался backoff дважды, получены параметры {params!r}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_priority_order_is_backoff_list_backoff(self, error_retry_mock_db):
-        """Список priority-команд стоит **между** двумя backoff'ами.
-
-        Порядок соответствует порядку плейсхолдеров в тексте SQL. Перестановка
-        здесь не падает — она подставляет число в ``ANY(%s)``, и весь
-        priority-путь молча перестаёт видеть задачи.
-        """
-        ch = _make_channel(error_retry_mock_db)
-        error_retry_mock_db.db.async_fetchone.return_value = None
 
         await ch._claim_one(priority_contents=("/stop", "/restart"))
 
-        args = error_retry_mock_db.db.async_fetchone.await_args.args
-        sql_text, params = args[0], args[1:]
-        assert sql_text.count("%s") == len(params), (
-            f"плейсхолдеров {sql_text.count('%s')}, параметров {len(params)}: {params!r}"
-        )
-        assert params == (BACKOFF_SEC, ["/stop", "/restart"], BACKOFF_SEC), (
-            "порядок параметров нарушен: ожидалось "
-            f"({BACKOFF_SEC}, ['/stop', '/restart'], {BACKOFF_SEC}), получено {params!r}"
-        )
+        arguments = error_retry_mock_db.db.last_call("claim_task")["arguments"]
+        assert arguments["priority_contents"] == ["/stop", "/restart"]
 
     @pytest.mark.asyncio
-    async def test_priority_clause_stays_inside_subquery_only(self, error_retry_mock_db):
-        """``content = ANY(%s)`` остаётся фильтром подзапроса выбора задачи.
+    async def test_absent_priority_is_not_an_empty_filter(
+        self, error_retry_mock_db
+    ):
+        """Пустой список ≠ «взять только пустые тексты».
 
-        Если фильтр уедет во внешний ``WHERE``, он начнёт запрещать UPDATE
-        строк, выбранных подзапросом по другой причине, и приоритетная
-        команда перестанет доходить вовсе.
+        Канал шлёт ``None``, а не ``[]``: платформа трактует ``[]`` как
+        «ничего не захватывать», и очередь встала бы молча.
         """
         ch = _make_channel(error_retry_mock_db)
-        error_retry_mock_db.db.async_fetchone.return_value = None
 
-        await ch._claim_one(priority_contents=("/stop",))
+        await ch._claim_one(priority_contents=None)
 
-        sql_text = error_retry_mock_db.db.async_fetchone.await_args.args[0]
-        outer = _outer_where(sql_text)
-        assert "content = ANY(%s)" not in outer, (
-            f"priority-фильтр уехал во внешний WHERE: {outer!r}"
+        arguments = error_retry_mock_db.db.last_call("claim_task")["arguments"]
+        assert arguments["priority_contents"] is None
+
+    @pytest.mark.asyncio
+    async def test_claim_is_signed_as_a_service_call(self, error_retry_mock_db):
+        """Захват идёт вне оборота — личность служебная, не пользовательская."""
+        ch = _make_channel(error_retry_mock_db)
+
+        await ch._claim_one()
+
+        identity = error_retry_mock_db.db.last_call("claim_task")["identity"]
+        assert identity is not None
+        assert identity.session_id.startswith("task-worker:"), (
+            f"захват подписан сессией, которой нет: {identity.session_id!r}"
         )
 
 
@@ -299,7 +219,7 @@ class TestCompactionSubscriberLogging:
         ch._compaction_event_subscriber = failing
 
         msg = MagicMock(spec=OutboundMessage)
-        msg.event = object()  # любое не-NNone событие уходит в подписчика
+        msg.event = object()  # любое не-None событие уходит в подписчика
         msg.metadata = {}
 
         # Не должно бросать: ошибка подписчика — его проблема, не транспорта.

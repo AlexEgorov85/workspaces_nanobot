@@ -120,18 +120,44 @@ class _SqlRecorder:
         cm.__aexit__ = AsyncMock(return_value=None)
         return cm
 
+class _OpRecorder:
+    """Собирает **все** операции, отправленные каналом платформе.
+
+    Раньше здесь собирался текст SQL из перехваченного ``utils.db``.
+    Теперь у канала нет SQL вообще: единственный путь к данным задач -
+    операции ``enterprise-mcp``, и регрессионный гард формулируется в
+    этих терминах.
+    """
+
+    def __init__(self) -> None:
+        from tests.conftest import FakeEnterpriseMcp
+
+        self.client = FakeEnterpriseMcp()
+        self._start = 0
+
+    def reset(self) -> None:
+        self._start = len(self.client.calls)
+
+    @property
+    def operations(self) -> list[str]:
+        return [str(c["operation"]) for c in self.client.calls[self._start:]]
+
     def assert_no_claims_access(self, context: str = "") -> None:
-        """Assert: ни один захваченный SQL не содержит agent_worker_claims."""
-        bad = [sql for sql in self.sql if "agent_worker_claims" in sql]
+        """Ни одна операция не должна обслуживать таблицу аренды.
+
+        Протокол аренды снят, а вместе с переездом канала на платформу
+        вопрос стал структурным: аренды в списке операций быть не может,
+        потому что нет ни такого SQL, ни такого сервиса. Проверка остаётся
+        как регресс-гард на случай возврата.
+        """
+        forbidden = {"claim_worker_task", "renew_claim", "release_claim"}
+        bad = [op for op in self.operations if op in forbidden]
         if bad:
             pytest.fail(
-                f"Найден SQL к agent_worker_claims "
-                f"({context}):\n" + "\n---\n".join(bad)
+                f"вызваны операции аренды ({context}): {bad!r}"
             )
 
 
-# Стаб для Any в аннотации _wrap_transaction
-from typing import Any  # noqa: E402
 from config import runtime_table  # noqa: F401
 
 
@@ -142,11 +168,10 @@ from config import runtime_table  # noqa: F401
 
 @pytest.fixture
 def recorder():
-    """Fixture: создать рекордер и PostgresChannel."""
-    rec = _SqlRecorder()
+    """Рекордер операций и ``PostgresChannel`` с подставным клиентом."""
+    rec = _OpRecorder()
 
     from lib.channels import postgres_channel as pg_mod
-    rec.attach(pg_mod)
 
     config = {
         "dsn": "postgresql://u@h/db",
@@ -154,11 +179,59 @@ def recorder():
         "table_name": runtime_table("conversation_messages"),
         "max_concurrent": 1,
     }
-    ch = pg_mod.PostgresChannel(config, MagicMock())
+    ch = pg_mod.PostgresChannel(
+        config, MagicMock(), enterprise_mcp=rec.client
+    )
 
     yield rec, ch
 
-    rec.detach()
+
+class TestChannelHasNoDirectDatabaseAccess:
+    """Структурный гард: у канала нет пути в PostgreSQL.
+
+    Раньше это был набор проверок «здесь не такой-то SQL». Теперь канал не
+    импортирует драйвер и не знает про ``utils.db``, поэтому гарантия
+    структурная: вернуть SQL к таблице аренды можно, только вернув
+    зависимость, и это будет видно здесь, а не в семи разных местах
+    с пустым списком SQL.
+    """
+
+    def test_module_does_not_import_utils_db(self):
+        import ast
+        from pathlib import Path
+
+        from lib.channels import postgres_channel as pg_mod
+
+        tree = ast.parse(Path(pg_mod.__file__).read_text(encoding="utf-8"))
+        offenders = [
+            node.module or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        ]
+        assert not any(m.startswith("utils.db") for m in offenders), (
+            f"канал снова импортирует utils.db: {offenders!r}"
+        )
+
+    def test_module_does_not_import_psycopg(self):
+        import ast
+        from pathlib import Path
+
+        from lib.channels import postgres_channel as pg_mod
+
+        tree = ast.parse(Path(pg_mod.__file__).read_text(encoding="utf-8"))
+        offenders = [
+            (node.module or "")
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        ] + [
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        ]
+        assert not any(m.startswith("psycopg") for m in offenders), (
+            f"канал снова импортирует драйвер: {offenders!r}"
+        )
 
 
 class TestSingleModeHotPath:
@@ -185,11 +258,10 @@ class TestSingleModeHotPath:
 
     @pytest.mark.asyncio
     async def test_claim_one_returns_row_from_update_returning(self, recorder):
-        """``_claim_one`` возвращает строку, полученную из ``UPDATE ... RETURNING``."""
+        """``_claim_one`` возвращает строку, полученную от платформы."""
         rec, ch = recorder
         rec.reset()
 
-        from lib.channels import postgres_channel as pg_mod
         row = {
             "id": "msg-1",
             "chat_id": "chat-1",
@@ -199,10 +271,10 @@ class TestSingleModeHotPath:
             "metadata": "{}",
             "created_at": None,
         }
-        with patch.object(pg_mod, "fetchone", AsyncMock(return_value=row)):
-            result = await ch._claim_one()
+        rec.client.responses["claim_task"] = {"claimed": row}
+        result = await ch._claim_one()
         assert result == row
-        rec.assert_no_claims_access("in _claim_one → UPDATE ... RETURNING")
+        rec.assert_no_claims_access("in _claim_one")
 
     @pytest.mark.asyncio
     async def test_poll_inbound_uses_single_claim(self, recorder):
@@ -274,9 +346,7 @@ class TestSingleModeFullLifecycle:
         ch._print_worker_activity = False
         rec.reset()
 
-        # Симулируем user-сообщение через _claim_one
-        # (patch'нем fetchone чтобы вернул задачу).
-        from lib.channels import postgres_channel as pg_mod
+        # Симулируем user-сообщение через _claim_one: платформа отдаёт задачу.
         row = {
             "id": "msg-1",
             "chat_id": "chat-1",
@@ -286,20 +356,18 @@ class TestSingleModeFullLifecycle:
             "metadata": "{}",
             "created_at": None,
         }
-        # _claim_one через fetchone
-        with patch.object(pg_mod, "fetchone", AsyncMock(return_value=row)):
-            claimed_row = await ch._claim_one()
-        rec.reset()  # сбрасываем claim SQL — дальше проверяем только finalize/failed
+        rec.client.responses["claim_task"] = {"claimed": row}
+        claimed_row = await ch._claim_one()
+        rec.reset()  # дальше проверяем только finalize/failed
 
         assert claimed_row is not None
 
         # Симулируем finalize через _finalize_turn
-        # Подменяем всё что нужно для транзакции + reasoning_io_lock
+        rec.client.responses["finalize_turn"] = {"outcome": "completed"}
         ch._reasoning_buffers = {}
         ch._msg_ctx = {"msg-1": {"assistant_msg_id": "assistant-1"}}
         ch._msg_chat = {"msg-1": "chat-1"}
         ch.exchange.add_inflight("msg-1")
-        ch._reasoning_io_lock = asyncio.Lock()
 
         # OutboundMessage мокаем
         outbound = MagicMock()

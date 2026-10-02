@@ -32,32 +32,19 @@ if _workspace_path not in sys.path:
 
 @pytest.fixture(autouse=True)
 def priority_polling_mock_db(tmp_path):
-    """Fake utils.db — моки async_fetch/fetchval/execute/transaction."""
-    with (
-        patch.dict("sys.modules"),
-        patch("psycopg2.extras.Json", lambda x: x),
-    ):
-        import importlib
-        import types
+    """Подменяет транспорт канала: двойник клиента ``enterprise-mcp``.
 
-        def types_fake_db():
-            mod = ModuleType("utils.db")
-            mod.async_fetchval = AsyncMock(return_value=None)
-            mod.async_execute = AsyncMock()
-            mod.async_fetchone = AsyncMock(return_value=None)
-            mod.async_fetch = AsyncMock(return_value=[])
-            mod.async_transaction = MagicMock()
-            mod.DB_RETRYABLE_ERRORS = (Exception,)
-            return mod
+    Раньше здесь подменялся ``utils.db``. Канал больше не ходит в PostgreSQL -
+    данные задач обслуживает платформа, - поэтому и нужен двойник клиента, а
+    не мок драйвера. Проверки приоритетного захвата переехали на проверку
+    аргументов операции: текста SQL в канале больше нет.
+    """
+    with patch.dict("sys.modules"):
+        import importlib
 
         original_utils = sys.modules.get("utils")
-
-        db_mod = types_fake_db()
-        sys.modules["utils.db"] = db_mod
-
         if original_utils is not None:
             real_utils_pkg = importlib.import_module("utils")
-            real_utils_pkg.db = db_mod
         else:
             import importlib.util as _iu
             utils_init = Path(_workspace_path) / "utils" / "__init__.py"
@@ -65,7 +52,6 @@ def priority_polling_mock_db(tmp_path):
             real_utils_pkg = _iu.module_from_spec(spec)
             sys.modules["utils"] = real_utils_pkg
             spec.loader.exec_module(real_utils_pkg)
-            real_utils_pkg.db = db_mod
 
         from utils.session_file_store import SessionFileStore  # noqa: F401
 
@@ -78,24 +64,29 @@ def priority_polling_mock_db(tmp_path):
         )
         from lib.channels.postgres_channel import PostgresChannel
 
+        from tests.conftest import FakeEnterpriseMcp
+
+        client = FakeEnterpriseMcp()
+
         class _Holder:
             def __init__(self):
                 self.PostgresChannel = PostgresChannel
                 self.MessageExchange = MessageExchange
                 self.priority_command_contents = priority_command_contents
-                self.db = db_mod
+                self.db = client
+                self.mcp = client
 
             def __iter__(self):
                 yield PostgresChannel
                 yield MessageExchange
                 yield priority_command_contents
-                yield db_mod
+                yield client
 
         yield _Holder()
 
 
 def _make_channel(mock_db, **overrides):
-    PostgresChannel, _, _, _ = mock_db
+    PostgresChannel, _, _, client = mock_db
     config = {
         "dsn": "postgresql://localhost:5432/test",
         "table_name": runtime_table("conversation_messages"),
@@ -108,34 +99,29 @@ def _make_channel(mock_db, **overrides):
     }
     config.update(overrides)
     bus = MagicMock()
-    return PostgresChannel(config, bus)
+    return PostgresChannel(config, bus, enterprise_mcp=client)
 
 
 class TestClaimOnePriorityFilter:
-    """``_claim_one(priority_contents=...)`` фильтрует по списку команд."""
+    """``_claim_one(priority_contents=...)`` передаёт список команд платформе.
+
+    Проверяется аргумент операции, а не текст SQL: фильтр построен на
+    платформе (его структура закреплена в
+    ``mcp-platform/tests/test_data_task_queue.py::TestClaimTaskSqlStructure``),
+    и держать здесь копию проверки чужого запроса было бы враньём.
+    """
 
     @pytest.mark.asyncio
-    async def test_priority_filter_added_to_where(self, priority_polling_mock_db):
+    async def test_priority_filter_reaches_the_platform(self, priority_polling_mock_db):
         PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
-        db.async_fetchone.return_value = None
-
         await ch._claim_one(priority_contents=("/stop", "/restart"))
 
-        sql_text = db.async_fetchone.await_args.args[0]
-        assert "AND content = ANY(%s)" in sql_text, (
-            f"WHERE должен содержать фильтр AND content = ANY(%s); "
-            f"получили: {sql_text[:500]}"
-        )
-
-        params = db.async_fetchone.await_args.args[1:]
-        # params содержит error_retry_delay (int) и list priority commands
-        list_params = [p for p in params if isinstance(p, (list, tuple))]
-        assert any(
-            list(p) == ["/stop", "/restart"] for p in list_params
-        ), (
-            f"priority commands должны быть в параметрах SQL; получили: {params}"
+        arguments = db.last_call("claim_task")["arguments"]
+        assert arguments["priority_contents"] == ["/stop", "/restart"], (
+            "список priority-команд не доехал до платформы: "
+            f"{arguments!r}"
         )
 
     @pytest.mark.asyncio
@@ -143,14 +129,13 @@ class TestClaimOnePriorityFilter:
         PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
-        db.async_fetchone.return_value = None
-
         await ch._claim_one()
 
-        sql_text = db.async_fetchone.await_args.args[0]
-        assert "AND content = ANY(%s)" not in sql_text, (
-            f"обычный claim НЕ должен содержать content-фильтр; "
-            f"получили: {sql_text[:500]}"
+        arguments = db.last_call("claim_task")["arguments"]
+        # ``None``, а не ``[]``: платформа трактует пустой список как «не
+        # захватывать ничего», и обычная очередь встала бы молча.
+        assert arguments["priority_contents"] is None, (
+            f"обычный claim не должен нести priority-фильтр: {arguments!r}"
         )
 
 
@@ -171,7 +156,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -199,7 +184,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -226,7 +211,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._handle_message = AsyncMock()
 
@@ -251,7 +236,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -277,7 +262,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
 
         ch._claimed_ids.add("m-stop")
@@ -307,7 +292,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._release_slot = MagicMock()
 
@@ -330,7 +315,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "cancelled"
+        db.responses["get_message"] = {"message": {"status": "cancelled"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -371,7 +356,7 @@ class TestPollPriorityInbound:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -416,7 +401,7 @@ class TestPriorityRaceConditions:
             "created_at": None,
         })
         # re-check fetchval возвращает 'cancelled' (race window).
-        db.async_fetchval.return_value = "cancelled"
+        db.responses["get_message"] = {"message": {"status": "cancelled"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -444,7 +429,7 @@ class TestPriorityRaceConditions:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -472,7 +457,7 @@ class TestPriorityRaceConditions:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock(side_effect=RuntimeError("boom"))
         ch._mark_failed = AsyncMock()
 
@@ -501,7 +486,7 @@ class TestPriorityRaceConditions:
             "metadata": "{}",
             "created_at": None,
         })
-        db.async_fetchval.return_value = "processing"
+        db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._release_slot = MagicMock()
 

@@ -94,3 +94,78 @@ TEST_TABLE_2 = "test.violations"
 TEST_VECTOR_TABLE = "test.audit_vectors"
 
 
+# =============================================================================
+# Подставной клиент enterprise-mcp
+# =============================================================================
+
+
+class FakeEnterpriseMcp:
+    """Двойник клиента ``enterprise-mcp`` для юнит-тестов.
+
+    Канал больше не ходит в PostgreSQL: данные задач обслуживает платформа, а
+    канал зовёт её операциями. Поэтому тестам нужен не мок ``utils.db``, а
+    двойник клиента — иначе каждый вызов операции падал бы с «нет клиента».
+
+    Ответы задаются по имени операции, каждое обращение записывается:
+
+        mcp.responses["claim_task"] = {"claimed": {...}}
+        mcp.last_call("finalize_turn")["arguments"]["content"]
+
+    Пустой ответ по умолчанию означает «операция отработала вхолостую»:
+    ``claim_task`` без ``claimed`` — очередь пуста, ``finalize_turn`` без
+    ``outcome`` — не отменённый оборот. Это осознанный выбор: молчаливый
+    дефолт удобнее, но заставил бы каждый тест объявлять то, что ему
+    безразлично.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.responses: dict[str, object] = {}
+        self.errors: dict[str, Exception] = {}
+
+    async def call(self, operation, arguments=None, identity=None):
+        self.calls.append(
+            {
+                "operation": operation,
+                "arguments": dict(arguments or {}),
+                "identity": identity,
+            }
+        )
+        if operation in self.errors:
+            raise self.errors[operation]
+        value = self.responses.get(operation)
+        if callable(value):
+            value = value(dict(arguments or {}))
+        import json
+
+        if not isinstance(value, dict):
+            return json.dumps({"status": "ok"})
+        return json.dumps({"status": "ok", **value})
+
+    def calls_to(self, operation: str) -> list[dict[str, object]]:
+        return [c for c in self.calls if c["operation"] == operation]
+
+    def last_call(self, operation: str) -> dict[str, object]:
+        matching = self.calls_to(operation)
+        assert matching, (
+            f"операция {operation!r} не вызывалась; вызваны: "
+            f"{[c['operation'] for c in self.calls]}"
+        )
+        return matching[-1]
+
+    def was_called(self, operation: str) -> bool:
+        return bool(self.calls_to(operation))
+
+    def operations(self) -> list[str]:
+        return [str(c["operation"]) for c in self.calls]
+
+    def reset(self) -> None:
+        self.calls.clear()
+
+
+@pytest.fixture
+def fake_enterprise_mcp() -> FakeEnterpriseMcp:
+    """Готовый двойник клиента для тестов, строящих ``PostgresChannel``."""
+    return FakeEnterpriseMcp()
+
+
