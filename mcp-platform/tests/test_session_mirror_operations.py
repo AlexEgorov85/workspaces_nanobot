@@ -75,12 +75,19 @@ class MirrorCursor:
     def execute(self, sql: str, params: object = None) -> None:
         self._conn.statements.append((sql, params))
         self._last_sql = sql
-        self.rowcount = 0
         upper = sql.upper()
         if upper.lstrip().startswith(("SELECT", "UPDATE")):
             self.description = [("c1",)]
         else:
             self.description = None
+        # Сколько строк изменил UPDATE. Реальная БД возвращает число
+        # совпавших с WHERE строк, и mirror_session на нём и решает: писать
+        # UPDATE-ом или вставлять. Подставной курсор берёт это число у
+        # соединения — иначе ветка INSERT срабатывала бы всегда.
+        self.rowcount = (
+            self._conn.update_rowcount if upper.lstrip().startswith("UPDATE")
+            else 0
+        )
 
     def fetchone(self) -> tuple[object, ...] | None:
         if "RETURNING" in self._last_sql.upper() and self._conn.returning:
@@ -98,7 +105,12 @@ class MirrorCursor:
 
 
 class MirrorConn:
-    def __init__(self, rows: list[tuple[object, ...]] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[tuple[object, ...]] | None = None,
+        *,
+        update_rowcount: int | None = None,
+    ) -> None:
         self.rows = list(rows or [])
         # Строки, которые вернёт ``RETURNING``: их нет на диске, они и есть
         # результат записи, поэтому в общий список строк чтения их класть
@@ -106,6 +118,11 @@ class MirrorConn:
         self.returning: list[tuple[object, ...]] = []
         self.statements: list[tuple[str, object]] = []
         self.bulk: list[dict[str, object]] = []
+        # По умолчанию UPDATE считается совпавшим с той строкой, которую тест
+        # подготовил для чтения: пустой список строк — это «сессии в зеркале
+        # нет», то есть UPDATE ничего не изменит и должна сработать вставка.
+        self.update_rowcount = int(bool(self.rows)) if update_rowcount is None \
+            else update_rowcount
 
     def cursor(self) -> MirrorCursor:
         return MirrorCursor(self)
@@ -117,8 +134,10 @@ class MirrorConn:
 def _fake_db(
     rows: list[tuple[object, ...]] | None = None,
     returning: list[tuple[object, ...]] | None = None,
+    *,
+    update_rowcount: int | None = None,
 ) -> ModuleType:
-    conn = MirrorConn(rows)
+    conn = MirrorConn(rows, update_rowcount=update_rowcount)
     conn.returning = list(returning or [])
     module = ModuleType("fake_db")
     module.conn = conn  # type: ignore[attr-defined]
@@ -146,9 +165,10 @@ def _service(
     rows: list[tuple[object, ...]] | None = None,
     *,
     returning: list[tuple[object, ...]] | None = None,
+    update_rowcount: int | None = None,
     **kwargs: object,
 ) -> DataService:
-    db = _fake_db(rows, returning)
+    db = _fake_db(rows, returning, update_rowcount=update_rowcount)
     kwargs.setdefault("db", db)
     service = DataService(
         session_meta_table=META_TABLE,
@@ -534,3 +554,88 @@ class TestSensitivity:
     def test_digest_change_is_visible_to_the_verdict(self) -> None:
         equal_stamps = _service([_cold(NOW, "sha-a")])
         assert _mirror(equal_stamps, digest="sha-b")["verdict"] == "updated"
+
+
+# --- запись без ON CONFLICT и без FOR UPDATE ---------------------------------
+#
+# Ядро Greenplum 6.5 — PostgreSQL 9.4. Две конструкции, на которых держалась
+# прежняя запись зеркала, на нём не существуют: ``ON CONFLICT`` (9.5) и
+# ``SELECT ... FOR UPDATE`` как построчная блокировка (на Greenplum — уровня
+# таблицы). Тесты ниже фиксируют не вердикт, а форму записи: вердикт
+# выводится из чтения и остался бы зелёным даже при сломанной записи.
+
+
+class TestWriteIsGreenplumCompatible:
+    def test_existing_row_is_written_by_conditional_update(self) -> None:
+        service = _service([_cold(NOW - timedelta(minutes=5), "sha-old")])
+        _mirror(service)
+        conn = service._test_conn
+        meta_writes = [
+            sql for sql, _ in conn.statements
+            if "agent_session_meta" in sql and sql.upper().startswith(
+                ("UPDATE", "INSERT")
+            )
+        ]
+        assert any(s.upper().startswith("UPDATE") for s in meta_writes), (
+            "существующая строка зеркала обязана перезаписываться UPDATE-ом"
+        )
+        assert not any(s.upper().startswith("INSERT") for s in meta_writes), (
+            "при существующей строке вставлять нечего: INSERT без совпадения "
+            "упал бы на нарушении первичного ключа"
+        )
+
+    def test_missing_row_is_inserted_after_the_update_found_nothing(self) -> None:
+        service = _service()
+        _mirror(service)
+        conn = service._test_conn
+        verbs = [
+            sql.strip().split(None, 1)[0].upper()
+            for sql, _ in conn.statements
+            if "agent_session_meta" in sql and sql.upper().startswith(
+                ("UPDATE", "INSERT")
+            )
+        ]
+        assert verbs == ["UPDATE", "INSERT"], (
+            f"ожидалась попытка UPDATE, затем INSERT, а получено {verbs}"
+        )
+
+    def test_row_vanished_between_read_and_write_is_not_lost(self) -> None:
+        """Строку прочитали, но к моменту записи её удалила уборка той же
+        реплики. Решение обязано принять UPDATE (совпадений нет), а не вывод
+        из прочитанного снимка — иначе запись сессии потерялась бы молча."""
+        service = _service(
+            [_cold(NOW - timedelta(minutes=5), "sha-old")], update_rowcount=0,
+        )
+        _mirror(service)
+        conn = service._test_conn
+        assert conn.sql_of("agent_session_meta"), "зеркало не записано вовсе"
+        assert any(
+            sql.upper().startswith("INSERT") and "agent_session_meta" in sql
+            for sql in conn.sql_of("INSERT")
+        ), "пропавшая строка зеркала не восстановлена вставкой"
+
+    def test_neither_operation_locks_the_table(self) -> None:
+        """``FOR UPDATE`` на Greenplum блокирует уровень таблицы, поэтому
+        зеркальный цикл каждые 30 секунд встал бы на всех читателей метаданных
+        сессий. В исполняемом SQL обеих операций его быть не должно."""
+        mirrored = _service([_cold(NOW - timedelta(minutes=5), "sha-old")])
+        _mirror(mirrored)
+        cleaned = _service([], returning=[(KEY, 2)])
+        cleaned.cleanup_session_mirror(
+            replica_id=REPLICA, present_keys=[],
+            delete_after_missed_cycles=1,
+        )
+        for conn in (mirrored._test_conn, cleaned._test_conn):
+            for sql, _ in conn.statements:
+                assert "FOR UPDATE" not in sql.upper(), (
+                    f"блокировка строки/таблицы вернулась в исполняемый SQL: {sql}"
+                )
+
+    def test_no_upsert_syntax_reached_the_server(self) -> None:
+        service = _service([_cold(NOW - timedelta(minutes=5), "sha-old")])
+        _mirror(service)
+        for sql, _ in service._test_conn.statements:
+            assert "ON CONFLICT" not in sql.upper(), (
+                f"ON CONFLICT появился в PostgreSQL 9.5, ядро Greenplum 6.5 — "
+                f"9.4: {sql}"
+            )

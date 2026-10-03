@@ -132,3 +132,125 @@ class TestV004Bookkeeping:
         sql = v004.sql.upper()
         assert "ADD COLUMN IF NOT EXISTS" in sql
         assert "CREATE INDEX IF NOT EXISTS" in sql
+
+
+# --- совместимость runner'а с Greenplum 6.5 ----------------------------------
+#
+# Реестр миграций — точка, через которую проходит ЛЮБОЕ изменение схемы. Если
+# он не запускается на целевой СУБД, не запускается ничего: ни зеркало сессий,
+# ни составной ключ реплики, ни последующие починки. Поэтому его исполняемый
+# SQL проверяется отдельно от DDL самих миграций.
+
+GP_VERSION = (
+    "PostgreSQL 9.4.26 (Greenplum Database 6.5.29 build commit:abc) "
+    "on x86_64-pc-linux-gnu, compiled by GCC gcc (GCC) 4.8.5, 64-bit"
+)
+PG_VERSION = "PostgreSQL 13.22 (Debian 13.22-1.pgdg120+1) on x86_64-pc-linux-gnu"
+
+
+class _Cursor:
+    """Курсор, отвечающий по тексту запроса, — БД в тестах не поднимается."""
+
+    def __init__(self, conn: "_Conn") -> None:
+        self._conn = conn
+        self.rowcount = 0
+
+    def __enter__(self) -> "_Cursor":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self._conn.statements.append((sql, params))
+        self.rowcount = 0
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        last = self._conn.statements[-1][0]
+        if "version()" in last:
+            return (self._conn.version,)
+        if self._conn.already_stamped:
+            return (1,)
+        return None
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return []
+
+    def close(self) -> None:
+        self._conn.closed += 1
+
+
+class _Conn:
+    def __init__(self, version: str, *, already_stamped: bool = False) -> None:
+        self.version = version
+        self.already_stamped = already_stamped
+        self.statements: list[tuple[str, object]] = []
+        self.commits = 0
+        self.closed = 0
+
+    def cursor(self) -> _Cursor:
+        return _Cursor(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def verbs(self) -> list[str]:
+        return [sql.strip().split(None, 1)[0].upper() for sql, _ in self.statements]
+
+
+def _a_migration() -> migrate.Migration:
+    return migrate.Migration("001", "baseline", Path("V001__baseline.sql"), "abc", "SELECT 1;")
+
+
+class TestTrackingTableOnGreenplum:
+    def test_distribution_clause_is_present_on_greenplum(self) -> None:
+        conn = _Conn(GP_VERSION)
+        migrate.ensure_tracking_table(conn)
+        ddl = " ".join(s for s, _ in conn.statements if "CREATE TABLE" in s)
+        assert "DISTRIBUTED BY (version)" in ddl, (
+            "Greenplum не создаёт таблицу с первичным ключом без ключа "
+            "распределения: без этой клаузы реестр миграций не поднимется и "
+            "не применится ни одна миграция"
+        )
+
+    def test_distribution_clause_is_absent_on_postgres(self) -> None:
+        """Обратная сторона того же решения: ``DISTRIBUTED BY`` — синтаксис
+        Greenplum, обычный PostgreSQL его не понимает и такую таблицу не
+        создаст. Поэтому клауза выбирается по факту движка."""
+        conn = _Conn(PG_VERSION)
+        migrate.ensure_tracking_table(conn)
+        ddl = " ".join(s for s, _ in conn.statements if "CREATE TABLE" in s)
+        assert "PRIMARY KEY" in ddl
+        assert "DISTRIBUTED BY" not in ddl
+
+    def test_engine_is_detected_from_version_not_guessed(self) -> None:
+        assert migrate.is_greenplum(_Conn(GP_VERSION)) is True
+        assert migrate.is_greenplum(_Conn(PG_VERSION)) is False
+
+
+class TestStampHasNoUpsertSyntax:
+    def test_runner_sends_no_upsert_syntax(self) -> None:
+        """``ON CONFLICT`` появился в PostgreSQL 9.5, ядро Greenplum 6.5 — 9.4.
+        На целевой СУБД ``--baseline`` обязан работать, а не падать на синтаксисе."""
+        conn = _Conn(GP_VERSION)
+        migrate.stamp_migration(conn, _a_migration())
+        for sql, _ in conn.statements:
+            assert "ON CONFLICT" not in sql.upper(), (
+                f"ON CONFLICT не поддерживается ядром Greenplum 6.5: {sql}"
+            )
+
+    def test_absent_version_is_checked_then_inserted(self) -> None:
+        conn = _Conn(GP_VERSION, already_stamped=False)
+        migrate.stamp_migration(conn, _a_migration())
+        assert conn.verbs() == ["SELECT", "INSERT"], (
+            "проверка и вставка обязаны идти в этой последовательности: вставка "
+            "без проверки упала бы на нарушении первичного ключа"
+        )
+        assert conn.commits == 1
+
+    def test_present_version_is_not_written_again(self) -> None:
+        conn = _Conn(GP_VERSION, already_stamped=True)
+        migrate.stamp_migration(conn, _a_migration())
+        assert conn.verbs() == ["SELECT"], (
+            "версия уже зарегистрирована — повторная вставка не нужна"
+        )
