@@ -113,7 +113,10 @@ def canonical_plugin_hooks() -> list[HookSpec]:
             name="SessionFileRedirectHook",
             kind="plugin",
             required=True,
-            description="перенаправление файлов сессии в workspace/data_store/cache/sessions/<key>/",
+            description=(
+                "перенаправление создаваемых файлов сессии в files/ каталога "
+                "сессии; корень и раскладку объявляет платформа"
+            ),
             source="workspace/hooks/session_file_redirect_hook.py",
         ),
         HookSpec(
