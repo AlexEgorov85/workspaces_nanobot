@@ -37,6 +37,10 @@ SKIP_DIRS = {
     ".benchmarks", "data_store", "logs", "sessions", "history", "media",
     ".opencode", ".cline", "webui", "cli-apps", "profiles", "prompts",
     "cron", "memory", "docs", "openspec", ".github",
+    # Копия форка соседнего воркера: её файлы — копии тех же модулей, и без
+    # исключения они засчитывались бы как «импортёры», удваивая счётчики
+    # ссылок и пряча настоящие (0 ссылок читается как 2).
+    ".worktrees",
 }
 
 # --- product scope ---------------------------------------------------------
