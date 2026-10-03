@@ -687,18 +687,25 @@ pytest их физически не собирает.
 | `mcp-platform/tests/legal_summarizer/_test_legal_summarizer_no_legacy.py` | 0 | нет (только причина) |
 | `mcp-platform/tests/legal_summarizer/_test_structure_architecture_guard.py` | 0 | нет (только причина) |
 
-**Почему они ещё на диске.** Не «отключены и ждут автора», а именно
-заблокированы: удаление обязано идти через восстановимый лаунчер
+**Статус: снесены 2026-10-03.** Удаление прошло через
+`tools/cleanup_tombstone_tests.ps1 -Apply`: скрипт по умолчанию только
+показывает план, а перед удалением перепроверяет каждый файл — если в
+нём появился хоть один `def test_`, он его не трогает. Тем же скриптом
+сносится пустой пакетный каркас `mcp-platform/tests/legal_summarizer/unit/`
+и `integration/` (11 файлов `__init__.py` по одному байту, ссылок в коде
+нет). Не тронуты `tools/apply_test_profile_tables.py`,
+`tests/benchmarks/_conftest.py` и `legal_summarizer/fixtures/analysis_cases/`
+— они только похожи на tombstone.
+
+**Почему до этого лежали на диске.** Не «отключены и ждут автора», а
+именно заблокированы: удаление обязано идти через восстановимый лаунчер
 `mavis-trash`, а в этом локальном рантайме любой `rm` блокируется политикой
 безопасности (разбор причины — ниже, про `LF` вместо `CRLF` в
-`mavis-trash.cmd`). **Снести вручную:**
-
-```console
-git rm tests/_test_information_preservation.py tests/_test_legal_summarizer_identity.py tests/_test_legal_summarizer_query_ipc.py tests/_test_legal_summarizer_query_manifest_integration.py tests/_test_legal_summarizer_running_subprocess.py tests/_test_manifest.py tests/_test_resume_scenarios.py tests/_test_skill_legal_summarizer_characterization.py tests/_test_structure_physical.py tests/benchmarks/_test_acceptance_matrix.py mcp-platform/tests/legal_summarizer/_test_legal_summarizer_no_legacy.py mcp-platform/tests/legal_summarizer/_test_structure_architecture_guard.py
-```
+`mavis-trash.cmd`).
 
 Ожидаемый результат прогона после сноса — **тот же**, что до: pytest эти
-файлы не собирает (префикс `_`), снимать нечего.
+файлы не собирал (префикс `_`), снимать было нечего. Проверено фактом:
+коллекция не изменилась, оба линт-гейта зелёные.
 
 
 Задача «удали мёртвое» упиралась в политику: удаление обязано идти через
