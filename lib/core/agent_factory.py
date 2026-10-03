@@ -12,7 +12,9 @@
     длительность). Регистрируется как обычный инстанс, потому что
     не хранит состояние, критичное к изоляции между сессиями
     (метрики по session_key используются только как bucket для
-    ``_starts``). Отключается через ``gateway.print_tools=false``.
+    ``_starts``). Флага отключения нет: ключ ``gateway.print_tools`` в
+    ``config.json`` не читается нигде, см. докстринг
+    ``lib/hooks/terminal_tool_print_hook.py``.
 
   * ``DatabaseLoggingHook`` (если передан ``db_logging_service``) —
     НЕ регистрируется как общий инстанс. Вместо этого в ``hook_factories``

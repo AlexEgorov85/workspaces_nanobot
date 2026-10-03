@@ -543,18 +543,18 @@ class SkillLlmSettings(_StrictOptional):
 
 
 class SkillChunkingSettings(_StrictOptional):
-    """Секция ``chunking`` — параметры map-reduce чанкинга для длинных текстов (необязательно).
+    """Секция ``chunking`` — параметры map-reduce чанкинга (необязательно).
 
-    Управляет поведением ``lib.services.text_splitter.split_text``
-    внутри skill'а: для текстов короче ``single_call_threshold`` —
-    один вызов LLM; для длиннее — разбиение с перекрытием.
-    Используется навыком ``legal_summarizer`` (map-reduce LLM).
-    ``text_splitter`` для эмбеддингов живёт отдельно в ``vector.*``.
+    Исторически управляла ``lib.services.text_splitter.split_text`` внутри
+    скилла ``legal_summarizer``: для текстов короче
+    ``single_call_threshold`` — один вызов модели, для длиннее — разбиение с
+    перекрытием. **Оба потребителя сняты** (чанкинг уехал на платформу
+    вместе со скиллом), модель ``text_splitter`` в дереве агента отсутствует,
+    а чанкинг для эмбеддингов живёт на платформе отдельным модулем. Секция
+    сохранена как приём конфигурации, но **PRODUCTION-ЧТЕНИЙ НЕ ИМЕЕТ**.
 
-    Размер чанка управляется через ``chunk_size_input_ratio``
-    (доля от ``agents.defaults.contextWindowTokens``) — это основной
-    источник. ``chunk_size`` — fallback (если ratio не задано или
-    контекстное окно неизвестно).
+    Размер чанка управлялся через ``chunk_size_input_ratio`` (доля от
+    ``agents.defaults.contextWindowTokens``), ``chunk_size`` — fallback.
     """
 
     chunk_size: int | None = Field(default=None, gt=0)
@@ -564,15 +564,16 @@ class SkillChunkingSettings(_StrictOptional):
 
 
 class SkillBriefContextSettings(_StrictOptional):
-    """Секция ``brief_context`` — параметры ``BriefContextBuilder`` (необязательно).
+    """Секция ``brief_context`` — параметры сборки brief-контекста (необязательно).
 
-    Используется навыком ``legal_summarizer``: brief собирает ровно один
-    структурный ``Chunk`` из DocumentStructure + PhysicalDocument.
-    ``max_chars`` рассчитывается динамически из contextWindowTokens и
+    Собирал ровно один структурный чанк из DocumentStructure +
+    PhysicalDocument для скилла ``legal_summarizer``. **Скилл уехал на
+    платформу** вместе с ``lib.core.skill_config.get_brief_context_config``
+    и модулем по этому пути, поэтому секция **PRODUCTION-ЧТЕНИЙ НЕ ИМЕЕТ** и
+    осталась формой совместимости конфигурации.
+
+    ``max_chars`` рассчитывался динамически из contextWindowTokens и
     ``chunking.brief_input_ratio``; эти поля — резервные параметры.
-    Дефолты согласованы с ``BriefContextConfig``
-    в ``workspace/skills/legal_summarizer/scripts/application/brief_context.py``
-    (см. ``lib.core.skill_config.get_brief_context_config``).
     """
 
     max_chars_fallback: int | None = Field(default=None, gt=0)
