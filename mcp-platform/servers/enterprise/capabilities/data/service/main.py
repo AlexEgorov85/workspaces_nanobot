@@ -1621,6 +1621,78 @@ class DataService:
 
         return self.submit(_work, audience=audience)
 
+    def append_history_notice(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        media: list[Any] | None = None,
+        buttons: list[Any] | None = None,
+        task_table: tuple[str, str] | str | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Записать служебную заметку в историю диалога.
+
+        Отдельная операция, а не переиспользование ``append_assistant_message``:
+        у заметки нет ``reply_to`` (она не ответ ни на одну задачу) и сразу
+        ``status='completed'`` — промежуточного состояния у неё не бывает.
+        Обе различия важны для воркера: ``append_assistant_message`` создаёт
+        плейсхолдер, который обязан закрыть ``finalize_turn``, и незакрытый
+        плейсхолдер остаётся висеть в ``processing`` навсегда.
+
+        ``user_id`` не принимается и не пишется: авторство строки задаётся
+        владельцем таблицы, а не вызывающим. Операция не должна давать
+        вызывающему подписать заметку чужим именем — тот же контракт
+        идентичности, что и у остальных операций категории.
+
+        Имя таблицы берётся у платформы, а не у вызывающего. Раньше заметка
+        писалась сервисом агента напрямую по DSN и имени таблицы из его
+        конфига, и при тестовом профиле это означало запись в БОЕВУЮ
+        ``agent_conversation_messages``: оверлей профиля объявлен в двух
+        файлах, и агент его не видел. Теперь единственный носитель имени
+        таблицы — платформа.
+        """
+        self._require_runtime(audience, "append_history_notice")
+        if not chat_id or not str(chat_id).strip():
+            raise InvalidRequestError("append_history_notice: не задан chat_id")
+        if not text or not str(text).strip():
+            raise InvalidRequestError("append_history_notice: пустой текст")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise InvalidRequestError(
+                "append_history_notice: metadata должен быть объектом"
+            )
+        table = _qualified(
+            task_table or self._require_task_table("append_history_notice")
+        )
+        sql = (
+            f"INSERT INTO {table} "
+            "(chat_id, role, content, media, metadata, buttons, "
+            "status, created_at, updated_at) "
+            "VALUES (%s, 'assistant', %s, %s::jsonb, %s::jsonb, "
+            "%s::jsonb, 'completed', NOW(), NOW()) RETURNING id"
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql,
+                    [
+                        chat_id,
+                        text,
+                        json.dumps(media or []),
+                        json.dumps(metadata or {}),
+                        json.dumps(buttons or []),
+                    ],
+                )
+                row = cur.fetchone()
+            return {
+                "message_id": str(row[0]) if row is not None else None,
+                "chat_id": chat_id,
+            }
+
+        return self.submit(_work, audience=audience)
+
     def finalize_turn(
         self,
         user_msg_id: str,
