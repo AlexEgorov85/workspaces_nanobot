@@ -1,10 +1,11 @@
 # runtime/entrypoints Specification
 
 ## Purpose
-Определяет контракт application entrypoint'ов (`cli_agent.py`, `gateway.py`) поверх единого composition root. Оба entrypoint'а вызывают `ApplicationContext.create(role=...)` с одной и той же typed signature; различие только в `role` и опциональных CLI-runtime-флагах. AgentLoop остаётся transport-agnostic: transport (CLI = in-memory bus / gateway = PostgresChannel) живёт ниже AgentLoop, не в нём. Cache runtime — abstract (`CacheProvider` interface), владение sync'ом определяется через PG-level ownership claim через отдельную таблицу `agent_cache_ownership` с фиксированным ownership key `local_cache`. Concrete cache implementation (`DuckDbCacheStore`) находится только в composition root и в разделе concrete adapter; runtime consumers работают только через `CacheProvider` interface.
+Определяет контракт application entrypoint'ов (`cli_agent.py`, `gateway.py`) поверх единого composition root (`lib/core/application_context.py::ApplicationContext`). Оба entrypoint'а вызывают `ApplicationContext.create(role=...)` с одной и той же typed signature; различие только в `role` и опциональных CLI-runtime-флагах. AgentLoop остаётся transport-agnostic: transport (CLI = in-memory bus / gateway = `PostgresChannel`) живёт ниже AgentLoop, не в нём.
+
+Спекой НЕ описывается снятая подсистема. Локальный кэш агента (снимок `cache.duckdb`), его загрузчик, реестр ресурсов, векторный индекс в агенте и слой владения ими удалены; владельцем снимка и всех ресурсов стала capability `data`/`vectors` платформы. Ни одно требование этой спеки не ссылается на них — см. § «Снятые требования» в конце файла, где зафиксировано, чем каждое из них заменено.
 
 ## Scope
-
 `agent` — точки входа и lifecycle агента
 Реализация: `gateway.py`, `cli_agent.py`, `lib/lifecycle/`
 
@@ -12,7 +13,7 @@
 
 ### Requirement: Единая typed signature ApplicationContext.create с role
 
-`ApplicationContext.create(...)` MUST иметь typed signature:
+`ApplicationContext.create(...)` MUST иметь typed signature (`lib/core/application_context.py::ApplicationContext.create`):
 
 ```python
 def create(
@@ -30,7 +31,7 @@ def create(
 
 Параметры `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` MUST NOT присутствовать как именованные параметры в typed signature. Они MAY приниматься ТОЛЬКО через `**kwargs` для backward compat с существующими вызовами.
 
-CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **одной и той же сигнатурой**; различие только в `role` и runtime-флагах (`storage_override`, `session_override` — только из CLI).
+CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **одной и той же сигнатурой**; различие только в `role` и runtime-флагах (`storage_override`, `session_override` — только из CLI, `cli_agent.py:189-194`; gateway передаёт только `role`/`script_dir`/`workspace_dir`, `gateway.py::_entrypoint_main`).
 
 #### Scenario: CLI и gateway используют одну typed signature
 
@@ -44,6 +45,7 @@ CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **од�
 
 - **WHEN** `cli_agent.py` или `gateway.py` стартует
 - **THEN** он MUST вызвать `config._initialize_settings(profile=...)` ДО `ApplicationContext.create(...)`
+  (`gateway.py::_parse_args`, `cli_agent.py:119`)
 - **AND** `ApplicationContext.create(...)` MUST NOT принимать `profile` как параметр
 - **AND** `ApplicationContext.create(..., profile=...)` MUST приводить к `TypeError`
 
@@ -51,6 +53,7 @@ CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **од�
 
 - **WHEN** в `config.json` отсутствуют ключи `gateway.enable_db_logging`, `gateway.enable_audit`, `gateway.enable_cron`, `gateway.print_llm_calls`
 - **THEN** `ApplicationContext.create()` MUST использовать значения: `enable_db_logging=True`, `enable_audit=True`, `enable_cron=False`, `print_llm_calls=False`
+  (дефолты в `lib/core/application_context.py::_resolve_enable_kwargs`)
 
 ### Requirement: Deprecated kwargs с явной compatibility boundary
 
@@ -67,17 +70,29 @@ MUST NOT приниматься `ApplicationContext.create()`; их переда
 параметров. `profile` MUST NOT входить в этот перечень: у него нет
 migration path в `config.json`, и он не является deprecated API.
 
+`DEPRECATED_ENABLE_KWARGS` (`lib/core/application_context.py::DEPRECATED_ENABLE_KWARGS`) MUST оставаться
+allowlist'ом, а не «мягкой» обработкой: любой ключ вне перечня MUST отвергаться
+`TypeError`. Это делает опечатку (`enable_aduit=`) явной ошибкой, а не молчаливым
+игнорированием.
+
 #### Scenario: Deprecated kwargs через **kwargs продолжают работать
 
 - **WHEN** существующий тест вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
 - **THEN** система MUST использовать переданное значение `enable_audit=False`, игнорируя конфиг `gateway.enable_audit`
 - **AND** система MUST логировать `DeprecationWarning` с указанием на новый путь конфигурации
+  (`lib/core/application_context.py::_resolve_enable_kwargs`)
 
 #### Scenario: После remove-deprecated-enable-kwargs — TypeError на deprecated kwargs
 
 - **WHEN** change `remove-deprecated-enable-kwargs` реализован
 - **AND** код вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
 - **THEN** MUST быть поднят `TypeError`
+
+#### Scenario: Ключ вне allowlist'а — TypeError, а не молчание
+
+- **WHEN** код вызывает `ApplicationContext.create(..., enable_aduit=False)`
+- **THEN** MUST быть поднят `TypeError`, называющий принятые имена
+  (`lib/core/application_context.py::_resolve_enable_kwargs`)
 
 #### Scenario: profile не входит в перечень deprecated kwargs
 
@@ -118,9 +133,10 @@ Deprecated compatibility boundary (`DEPRECATED_ENABLE_KWARGS`) предназн�
 
 #### Scenario: ApplicationContext читает профиль из SETTINGS
 
-- **WHEN** `ApplicationContext.create()` выполняется после успешного
+- **WHEN** `ApplicationContext.create()` выполняется после успешной
   `_initialize_settings(profile=...)`
 - **THEN** активный профиль SHALL быть прочитан из `SETTINGS["profile"]`
+  (`lib/core/application_context.py::ApplicationContext.create`)
 - **AND** значение SHALL совпадать с профилем, переданным в
   `_initialize_settings`
 
@@ -149,47 +165,66 @@ Production application entrypoints MUST NOT передавать `profile` в
 
 - **WHEN** `cli_agent.py` стартует
 - **THEN** он MUST вызвать `_initialize_settings` с фиксированным
-  профилем `test` ДО вызова `ApplicationContext.create()`
+  профилем `test` ДО вызова `ApplicationContext.create()` (`cli_agent.py:119`)
 - **AND** вызов `ApplicationContext.create()` SHALL NOT содержать `profile`
 
 ### Requirement: role определяет composition инфраструктуры, не AgentLoop
 
-`role` MUST определять, какие инфраструктурные сервисы создаются внутри `ApplicationContext.create()`. `role` MUST NOT представлять environment, profile, deployment mode, storage ownership или runtime behavior. `role` MUST NOT определять cache producer/consumer status — это ответственность `CacheOwnershipCoordinator`.
+`role` MUST определять, какие инфраструктурные сервисы создаются внутри
+`ApplicationContext.create()` и `ApplicationContext.start()`. `role` MUST NOT
+представлять environment, profile, deployment mode, storage ownership или
+runtime behavior.
 
-| Сервис | `role="gateway"` | `role="cli"` |
-|---|---|---|
-| `AgentLoop` (hooks, runtime patches, skills, tools, memory) | ✅ | ✅ |
-| `DbLoggingService` (если `gateway.enable_db_logging=True`) | ✅ | ✅ |
-| `SessionManager` (поверх `SanitizingSessionStore`) | ✅ | ✅ |
-| `RuntimeEventsSubscriber` | ✅ | ✅ |
-| `RuntimePatcher.apply_all()` | ✅ | ✅ |
-| `CacheProvider` (если `gateway.cache` настроен) | ✅ | ✅ |
-| `CacheOwnershipCoordinator` (если `gateway.cache` настроен) | ✅ | ✅ |
-| concrete cache factory (`DuckDbCacheStore.open(path, mode)`) | ✅ | ✅ |
-| `PostgresChannel` (worker pool) | ✅ | ❌ |
-| `CacheSyncService` (sync — если `enable_audit=True` И OWNER) | ✅ | ✅ (если OWNER) |
-| `CronService` (если `gateway.enable_cron=True`) | ✅ | ❌ |
-| WebSocket port check (вызывается из entrypoint) | ✅ | ❌ |
-| Console I/O (in-memory bus) | ❌ | ✅ |
+| Сервис | Где создаётся | `role="gateway"` | `role="cli"` |
+|---|---|---|---|
+| `AgentLoop` (hooks, runtime patches, skills, tools, memory) | `lib/core/application_context.py::ApplicationContext.create` | ✅ | ✅ |
+| `DbLoggingService` | `lib/core/application_context.py::ApplicationContext.create` / `::start` | ✅ | ✅ |
+| `SessionManager` (поверх `SanitizingSessionStore`) | `lib/core/application_context.py::ApplicationContext.create` | ✅ | ✅ |
+| `RuntimeEventsSubscriber` | `lib/core/application_context.py::ApplicationContext.start` | ✅ | ✅ |
+| `RuntimePatcher.apply_all()` | `lib/core/application_context.py::ApplicationContext.create` (до сборки агента) | ✅ | ✅ |
+| `CronService` (если `gateway.enable_cron=True`) | `lib/core/application_context.py::_make_cron_service` | ✅ | ❌ |
+| `PostgresChannel` | `lib/services/channel_factory.py::ChannelFactory._add_postgres`, из `gateway._run` | ✅ | ❌ |
+| WebSocket port check (вызывается из entrypoint) | `gateway.py::_entrypoint_main` | ✅ | ❌ |
+| Console I/O (in-memory bus) | `lib/cli/console_loop.py` | ❌ | ✅ |
 
-`role` MUST NOT влиять на `AgentLoop` (и его hooks, runtime patches, skills, tools, memory). `role` MAY влиять только на transport-инфраструктуру (PostgresChannel, Console I/O) и entrypoint-specific services (CronService, WebSocket check). **Cache runtime** (`CacheProvider`, concrete implementation, `CacheOwnershipCoordinator`) — shared runtime-resource, открывается в обоих `role="gateway"` и `role="cli"` если `gateway.cache` секция настроена. **Sync runtime** (`CacheSyncService`) — controlled by `gateway.enable_audit`, separate concern.
+`role` MUST NOT влиять на `AgentLoop` (и его hooks, runtime patches, skills,
+tools, memory). `role` MAY влиять только на transport-инфраструктуру и
+entrypoint-specific services.
 
-`role` MUST NOT влиять на `AgentLoop` (и его hooks, runtime patches, skills, tools, memory). `role` MAY влиять только на transport-инфраструктуру (PostgresChannel, Console I/O) и entrypoint-specific services (CronService, WebSocket check). Cache runtime — abstract (`CacheProvider` interface), открывается в обоих `role="gateway"` и `role="cli"` в режиме, определяемом `CacheOwnershipCoordinator`.
+**Границы таблицы, важные для её чтения.** `PostgresChannel` создаётся НЕ
+`ApplicationContext`, а `ChannelFactory.create_all()` внутри `gateway._run`
+(`gateway.py::_run`), и дополнительно требует `channels.postgres.enabled=True`
+и непустого DSN (`lib/services/channel_factory.py::ChannelFactory._add_postgres`) —
+то есть решается конфигом, а не только `role`. `RuntimeEventsSubscriber`
+создаётся в `start()`, а не в `create()`. `DbLoggingService` требует
+`logging.db.enabled=True` и DSN
+(`lib/core/application_context.py::_make_db_logging`) поверх `enable_db_logging`.
+
+Снятые строки прежней версии этой таблицы (кэш-кластер) удалены вместе с ним;
+перечень и замены — в § «Снятые требования».
 
 #### Scenario: role="gateway" создаёт PostgresChannel и CronService
 
 - **WHEN** `gateway.py` вызывает `ApplicationContext.create(role="gateway", ...)`
-- **THEN** `ApplicationContext` MUST создать `PostgresChannel` и зарегистрировать его lifecycle
-- **AND** `ApplicationContext` MUST создать `CronService` если `gateway.enable_cron=True`
-- **AND** gateway-specific pre-startup check `WebSocket port availability` MUST быть вызван ДО `ApplicationContext.start()` из `gateway.py`
+- **THEN** `CronService` MUST быть создан если `gateway.enable_cron=True`
+  (`lib/core/application_context.py::_make_cron_service`, условие в `::create`)
+- **AND** `PostgresChannel` MUST быть создан `ChannelFactory.create_all()`
+  в `gateway._run`, если `channels.postgres.enabled=True` и задан DSN
+  (`gateway.py::_run`, `lib/services/channel_factory.py::ChannelFactory._add_postgres`)
+- **AND** gateway-specific check `WebSocket port availability` MUST быть вызван
+  ДО входа в `GatewayRunner.run_forever(...)` (`gateway.py::_entrypoint_main`)
 
 #### Scenario: role="cli" НЕ создаёт PostgresChannel и CronService
 
 - **WHEN** `cli_agent.py` вызывает `ApplicationContext.create(role="cli", ...)`
-- **THEN** `ApplicationContext` MUST NOT создавать `PostgresChannel`
-- **AND** `ApplicationContext` MUST NOT создавать `CronService` (cron = gateway-only)
+- **THEN** `ApplicationContext` MUST NOT создавать `CronService` (cron = gateway-only)
+  (`lib/core/application_context.py::ApplicationContext.create` — условие требует `role == "gateway"`)
+- **AND** CLI MUST NOT создавать `PostgresChannel`: фабрика каналов в CLI не
+  вызывается вовсе
 - **AND** CLI REPL MUST публиковать сообщения через `bus.publish_inbound(InboundMessage(channel="cli", ...))` напрямую
+  (`lib/cli/console_loop.py:395-403`)
 - **AND** CLI REPL MUST читать outbound через `bus.consume_outbound()`
+  (`lib/cli/console_loop.py:266-270`)
 
 ### Requirement: AgentLoop MUST быть transport-agnostic
 
@@ -198,331 +233,10 @@ Production application entrypoints MUST NOT передавать `profile` в
 #### Scenario: AgentLoop получает одно и то же сообщение независимо от источника
 
 - **WHEN** пользователь вводит сообщение в CLI REPL
-- **THEN** CLI вызывает `bus.publish_inbound(InboundMessage(channel="cli", chat_id="cli:<session>", content=...))` — AgentLoop обрабатывает через bus
+- **THEN** CLI вызывает `bus.publish_inbound(InboundMessage(channel="cli", chat_id=<chat_id>, content=...))`, где `chat_id` — имя сессии из `--session` либо `"direct"`, а ключ сессии получается как `f"{channel}:{chat_id}"` (`lib/cli/console_loop.py:241-243,395-403`) — AgentLoop обрабатывает через bus
 - **WHEN** HTTP-запрос приходит в gateway через `PostgresChannel`
 - **THEN** `PostgresChannel` вызывает `bus.publish_inbound(InboundMessage(channel="postgres", chat_id=..., content=...))` — тот же AgentLoop обрабатывает через bus
 - **AND** AgentLoop MUST вести себя идентично в обоих случаях
-
-### Requirement: CacheOwnershipCoordinator MUST определять режим cache ДО открытия
-
-Cache-snapshot (через concrete adapter — текущая реализация: `<local_path>/cache.duckdb`) MUST быть единым runtime-resource. Режим открытия (`READ_WRITE` или `READ_ONLY`) MUST определяться через `CacheOwnershipCoordinator.try_claim(worker_id)` ДО создания concrete `CacheProvider` implementation.
-
-Lifecycle MUST быть строго:
-
-```text
-1. resolve snapshot path (через resolve_publish_path)
-2. attempt atomic PG ownership claim (CacheOwnershipCoordinator.try_claim → ClaimResult)
-3. determine access mode from ClaimResult:
-   - acquired=True → READ_WRITE (OWNER)
-   - acquired=False → READ_ONLY (READER)
-4. concrete_factory.open(path, mode=ClaimResult.mode) → CacheProvider instance
-   (concrete_factory = `DuckDbCacheStore.open` для текущей реализации; future: `SQLiteCacheStore.open` или эквивалентный)
-5. if ClaimResult.acquired AND gateway.enable_audit=True:
-   create CacheSyncService (only for OWNER in audit mode)
-```
-
-`ApplicationContext` является composition root и MAY использовать concrete factory (например, `DuckDbCacheStore.open(path, mode)`) для сборки текущей реализации `CacheProvider`. После создания runtime:
-
-- `ApplicationContext.cache_provider` MUST иметь тип `CacheProvider`;
-- runtime consumers (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`) MUST зависеть только от `CacheProvider`;
-- concrete implementation MUST NOT использоваться как тип runtime dependency.
-
-Зависимость `ApplicationContext` от `DuckDbCacheStore` допускается ТОЛЬКО в composition code, который создаёт concrete implementation.
-
-#### Scenario: Lifecycle ordering (claim → mode → open → optional sync)
-
-- **WHEN** `ApplicationContext.create()` инициализирует cache runtime
-- **THEN** последовательность MUST быть: `resolve_publish_path(...)` → `coord.try_claim()` → concrete_factory.open(mode=ClaimResult.mode) → (если OWNER И `enable_audit=True`) `CacheSyncService.start()`
-- **AND** concrete factory НЕ ДОЛЖЕН быть вызван до получения `ClaimResult`
-- **AND** `CacheSyncService` MUST NOT быть создан без `ClaimResult.acquired=True`
-- **AND** `CacheSyncService` MUST NOT быть создан если `gateway.enable_audit=False`
-
-### Requirement: Ownership contract — atomic claim + real fencing через advisory lock
-
-Ownership MUST определяться через отдельную таблицу `agent_cache_ownership` в PostgreSQL (НЕ расширение `agent_worker_claims`):
-
-```sql
-CREATE TABLE agent_cache_ownership (
-    resource_key VARCHAR PRIMARY KEY,           -- фиксированное значение: 'local_cache'
-    owner_id VARCHAR NOT NULL,                    -- worker_id текущего владельца
-    generation BIGINT NOT NULL DEFAULT 1,         -- fencing token (starts at 1, монотонно растёт при takeover)
-    acquired_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    last_heartbeat_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMP NOT NULL
-);
-```
-
-**Ownership key** = `'local_cache'` — идентификатор логического cache resource. НЕ per-process, НЕ per-role, НЕ per-storage. Этот ключ НЕ ДОЛЖЕН содержать название СУБД или concrete adapter. MUST быть ровно **один** активный claim на ресурс `local_cache`.
-
-**Generation semantics:** `generation` стартует с 1 при первой вставке строки; инкрементируется на 1 при каждом takeover. Strictly monotonically increasing. Generation — fencing token, а НЕ самостоятельный write barrier.
-
-**`try_claim()` MUST возвращать `ClaimResult`:**
-
-```python
-class ClaimResult:
-    acquired: bool                            # True → мы OWNER; False → другой процесс OWNER
-    generation: int                           # my_generation (если acquired=True) или current_generation (если False)
-    owner_id: str                             # наш worker_id (если acquired=True) или current owner_id (если False)
-    current_owner_id: str | None = None       # для логирования при False
-    current_generation: int | None = None      # для логирования при False
-```
-
-**Atomic claim MUST различать два outcomes:**
-
-1. **Claim acquired → `ClaimResult(acquired=True, generation=N, owner_id=self.worker_id)`.** Процесс получил ownership.
-2. **Claim not acquired → `ClaimResult(acquired=False, current_generation=N, current_owner_id=X)`.** Другой процесс уже владеет ресурсом.
-
-Реализация MAY использовать `INSERT ... ON CONFLICT (resource_key) DO UPDATE ... WHERE agent_cache_ownership.expires_at < NOW() RETURNING ...`. Конкретные PG-детали (например, `(xmax = 0) AS inserted`) — implementation detail, не architectural contract.
-
-PG row-level locking на `INSERT ... ON CONFLICT` гарантирует атомарность: два процесса одновременно делают claim → ровно один получает `acquired=True` (OWNER), остальные получают `acquired=False` (READER).
-
-**Real fencing MUST использовать coordination lock shared между ownership takeover и producer write.** Generation check alone НЕДОСТАТОЧЕН — это TOCTOU race (старый producer проверяет generation → takeover инкрементирует → старый пишет).
-
-Mandatory contract:
-
-```text
-Fencing MUST обеспечивать mutual exclusion между:
-1. Ownership takeover (try_claim() DO UPDATE branch);
-2. Producer mutation critical section (validate generation + execute mutation через CacheProvider).
-
-Рекомендуемый механизм — PG advisory lock:
-
-  BEGIN PG transaction;
-    SELECT pg_advisory_xact_lock(hashtext($resource_key));  -- serialize
-    -- (в try_claim branch: check generation + INSERT/UPDATE; в producer mutation: check generation + execute mutation через CacheProvider)
-  COMMIT;
-
-Lock MUST быть held для полного критического раздела:
-  ownership validation AND corresponding CacheProvider mutation.
-
-PostgreSQL transaction MUST NOT быть committed или closed между шагами ownership validation и execution of mutation.
-
-Если ownership не совпадает:
-- mutation через CacheProvider НЕ выполняется;
-- ownership НЕ изменяется;
-- transaction завершается без producer mutation.
-```
-
-Реализация MAY использовать `pg_advisory_xact_lock(key=hashtext(resource_key))` (автоматически освобождается при COMMIT/ROLLBACK). Альтернативные механизмы с той же семантикой mutual exclusion допустимы.
-
-**Generation НЕ является самостоятельным write barrier.** Только в комбинации с advisory lock generation обеспечивает fencing.
-
-Heartbeat каждые 30 сек (`UPDATE last_heartbeat_at = NOW(), expires_at = NOW() + INTERVAL '60 seconds' WHERE resource_key = $1 AND owner_id = $2 AND generation = $3`). TTL = 60 сек. Stale claim (без heartbeat > 60 сек) MAY быть перехвачен следующим процессом.
-
-**`release()` contract:** MUST удалять ownership ТОЛЬКО если `(resource_key, owner_id, generation)` совпадают. No-op + WARNING при несовпадении.
-
-```sql
-DELETE FROM agent_cache_ownership
-WHERE resource_key = $1 AND owner_id = $2 AND generation = $3
-RETURNING resource_key;
--- Если RETURNING 0 rows → ownership уже не наш → no-op + warning
-```
-
-#### Scenario: Atomic claim — ровно один OWNER при concurrent calls
-
-- **WHEN** два процесса одновременно вызывают `CacheOwnershipCoordinator.try_claim()`
-- **THEN** ровно один MUST получить `ClaimResult(acquired=True)`
-- **AND** остальные MUST получить `ClaimResult(acquired=False)` с `current_owner_id` первого процесса
-- **AND** это гарантируется PG row-level lock на `INSERT ... ON CONFLICT`
-
-#### Scenario: Generation инкрементируется при takeover
-
-- **WHEN** producer A владеет cache с `generation=5`, затем producer A heartbeat expires
-- **AND** producer B вызывает `try_claim()` и получает `ClaimResult(acquired=True)`
-- **THEN** producer B MUST получить `generation=6`
-- **AND** `agent_cache_ownership.generation` MUST быть `6`
-
-#### Scenario: Fencing через advisory lock — старый producer прекращает записи
-
-- **WHEN** producer A хочет выполнить mutation через `CacheProvider`
-- **THEN** producer A MUST атомарно захватить `pg_advisory_xact_lock(hashtext('local_cache'))`
-- **AND** внутри lock MUST проверить `(owner_id=A, generation=my_generation)` match текущему `agent_cache_ownership` row
-- **AND** только при match → execute mutation через `CacheProvider`
-- **AND** при несовпадении (B уже takeover) → lock release при COMMIT → A MUST NOT выполнить mutation
-- **AND** B НЕ МОЖЕТ инкрементировать generation пока A держит lock (PG advisory lock mutual exclusion)
-
-#### Scenario: release() только для matching ownership
-
-- **WHEN** process A владеет cache с `generation=5`
-- **AND** process A вызывает `release()`
-- **THEN** release MUST удалить claim
-- **WHEN** process B (READER) вызывает `release()` с чужими `(owner_id, generation)`
-- **THEN** release MUST быть no-op + WARNING лог
-
-#### Scenario: kill -9 producer — следующий owner открывает существующий cache
-
-- **WHEN** producer-процесс был killed через `kill -9` (no graceful shutdown, no release)
-- **THEN** heartbeat останавливается
-- **AND** через `claim_ttl_seconds` (60 сек) claim становится stale
-- **AND** следующий процесс при старте MAY перехватить ownership через `try_claim()` (получит `generation > previous_generation`)
-- **AND** следующий процесс MUST иметь возможность reopen существующий snapshot файл если cache storage считает его recoverable (acceptance criterion, не конкретный механизм)
-
-### Requirement: CacheProvider API с явным mode + layered architecture
-
-API MUST быть layered:
-
-```text
-CacheOwnershipCoordinator     ← try_claim / heartbeat / release / acquire_write_fence (только ownership)
-        ↓
-CacheAccessMode              ← READ_WRITE / READ_ONLY (enum)
-        ↓
-CacheProvider (ABC)          ← interface: query_sql / search_vector / get_schema / close
-        ↓
-Concrete implementation      ← текущая: DuckDbCacheStore; future: SQLiteCacheStore
-```
-
-**`CacheProvider` MUST NOT иметь метода `open()`.** Это ответственность concrete factory.
-
-Concrete implementation создаётся composition root через concrete factory:
-
-```python
-# для текущей реализации:
-DuckDbCacheStore.open(path, mode) -> CacheProvider
-# для будущей реализации:
-SQLiteCacheStore.open(path, mode) -> CacheProvider
-```
-
-**`ApplicationContext` является composition root** и MAY использовать concrete factory для сборки текущей реализации `CacheProvider`. После создания runtime:
-
-- `ApplicationContext.cache_provider` MUST иметь тип `CacheProvider`;
-- runtime consumers (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`) MUST зависеть только от `CacheProvider`;
-- concrete implementation MUST NOT использоваться как тип runtime dependency.
-
-Зависимость `ApplicationContext` от `DuckDbCacheStore` допускается ТОЛЬКО в composition code, который создаёт concrete implementation.
-
-В `READ_ONLY` режиме все мутации (INSERT/UPDATE/DELETE) MUST быть запрещены через **двухуровневую защиту**:
-1. **Concrete cache adapter MUST открыть storage connection в реальном read-only режиме** (для текущей реализации DuckDB: `duckdb.connect(path, read_only=True)`; для будущей SQLite — соответствующий API). Сам storage engine не позволит мутации.
-2. **`CacheProvider.query_sql(...)` MUST поднять `ReadOnlyAssertionError`** при INSERT/UPDATE/DELETE.
-
-`query_sql()` контракт: MUST принимать только следующие SQL statement types:
-- `SELECT`
-- `INSERT`
-- `UPDATE`
-- `DELETE`
-
-DDL и другие schema-changing statements (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `CREATE INDEX`, `DROP INDEX`) MUST быть отклонены с `UnsupportedSqlError` в любом mode (включая READ_WRITE).
-
-Concrete cache storage MUST reject unsupported network/shared filesystem paths before opening the storage. Для текущей DuckDB implementation NFS/SMB и другие network/shared filesystems MUST быть rejected. Для будущих реализаций правила аналогичны.
-
-#### Scenario: Layered API — ApplicationContext хранит cache через CacheProvider
-
-- **WHEN** `ApplicationContext.create()` создаёт cache runtime
-- **THEN** `ctx.cache_provider` MUST быть типизирован как `CacheProvider` (ABC)
-- **AND** `ctx.cache_provider` MAY быть создан через concrete factory (например, `DuckDbCacheStore.open(path, mode)`) — это composition-time code
-- **AND** `ApplicationContext` MUST NOT содержать `DuckDbCacheStore` (или другую concrete implementation) как поле runtime consumer
-- **AND** runtime consumers (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`) MUST зависеть только от `CacheProvider`
-
-#### Scenario: Concrete factory открывает READ_ONLY cache — реальный read-only connection
-
-- **WHEN** concrete factory (например, `DuckDbCacheStore.open(path, mode=READ_ONLY)`) вызван
-- **THEN** concrete adapter MUST открыть storage connection в реальном read-only режиме (для DuckDB: `duckdb.connect(path, read_only=True)`)
-- **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены storage engine
-
-#### Scenario: Concrete factory открывает READ_ONLY cache — assertion guard
-
-- **WHEN** concrete factory (например, `DuckDbCacheStore.open(mode=READ_ONLY)`) вызван
-- **AND** через `CacheProvider.query_sql(...)` вызывается INSERT/UPDATE/DELETE
-- **THEN** MUST поднять `ReadOnlyAssertionError`
-
-#### Scenario: Concrete factory открывает READ_WRITE cache — мутации разрешены
-
-- **WHEN** concrete factory (например, `DuckDbCacheStore.open(mode=READ_WRITE)`) вызван
-- **THEN** `SELECT`/`INSERT`/`UPDATE`/`DELETE` MUST работать нормально
-
-#### Scenario: query_sql() в READ_WRITE принимает SELECT и DML
-
-- **WHEN** CacheProvider создан в READ_WRITE и `query_sql("SELECT ...")` или `query_sql("INSERT INTO ...")` или `query_sql("UPDATE ...")` или `query_sql("DELETE ...")`
-- **THEN** операция MUST выполниться нормально
-
-#### Scenario: query_sql() в READ_WRITE отклоняет DDL
-
-- **WHEN** CacheProvider создан в READ_WRITE и `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` или `query_sql("ALTER TABLE ...")` или `query_sql("TRUNCATE TABLE ...")` или `query_sql("CREATE INDEX ...")` или `query_sql("DROP INDEX ...")`
-- **THEN** MUST поднять `UnsupportedSqlError` (DDL запрещён даже в READ_WRITE)
-
-#### Scenario: query_sql() в READ_ONLY принимает SELECT
-
-- **WHEN** CacheProvider создан в READ_ONLY и `query_sql("SELECT ...")`
-- **THEN** операция MUST выполниться нормально
-
-#### Scenario: CacheProvider reject NFS path
-
-- **WHEN** `gateway.cache.local_path` указывает на NFS mount или другую network filesystem
-- **THEN** `CacheProvider` MUST fail-fast с явной ошибкой (PID 0 locking errors эмпирически)
-
-### Requirement: CacheSyncService для синхронизации данных
-
-`CacheSyncService` отвечает за синхронизацию данных из PostgreSQL в локальное cache-хранилище. `CacheSyncService` НЕ ДОЛЖЕН зависеть от конкретной реализации `CacheProvider`.
-
-Источник данных синхронизации — PostgreSQL. Destination — локальное cache-хранилище, доступное через `CacheProvider` interface.
-
-`CacheSyncService` НЕ ДОЛЖЕН напрямую импортировать concrete cache implementation (например, `DuckDbCacheStore`). Название и интерфейс сервиса НЕ ДОЛЖНЫ предполагать конкретный тип локального хранилища.
-
-```text
-PostgreSQL
-    │
-    ▼
-CacheSyncService (storage-independent)
-    │
-    ▼
-CacheProvider (interface)
-    │
-    ▼
-concrete implementation (DuckDbCacheStore / SQLiteCacheStore)
-```
-
-**Кто держит fencing boundary (Variant A — фиксировано):**
-
-```text
-CacheOwnershipCoordinator  ← отвечает за ownership и fencing.
-CacheProvider              ← отвечает только за cache access.
-CacheSyncService           ← является producer; ОБЯЗАН использовать
-                              ownership-fenced write boundary
-                              перед каждой mutation.
-CacheProvider              ← НЕ ДОЛЖЕН самостоятельно выполнять
-                              ownership check, heartbeat или takeover.
-```
-
-`CacheSyncService` MUST NOT вызывать mutation CacheProvider в обход fenced write boundary.
-
-Все producer mutations через `CacheSyncService` MUST проходить через ownership-fenced write boundary:
-
-```text
-1. BEGIN PostgreSQL transaction.
-2. Acquire resource-scoped coordination lock.
-3. Read current ownership state.
-4. Verify owner_id + generation.
-5. Execute mutation through CacheProvider.
-6. COMMIT PostgreSQL transaction.
-
-PostgreSQL transaction MUST NOT быть committed или closed между шагами 4 и 5.
-
-Если ownership не совпадает:
-- mutation через CacheProvider НЕ выполняется;
-- ownership НЕ изменяется;
-- transaction завершается без producer mutation.
-```
-
-#### Scenario: sync не может обойти fencing
-
-- **GIVEN** процесс является producer
-- **AND** ownership содержит generation G
-- **WHEN** `CacheSyncService` выполняет mutation
-- **THEN** mutation MUST проходить через fenced write boundary
-- **AND** concrete cache implementation MUST NOT вызываться в обход этого boundary
-
-#### Scenario: ownership generation изменился до выполнения mutation
-
-- **GIVEN** процесс является producer
-- **AND** ownership generation изменился (B сделал takeover) ДО выполнения mutation
-- **WHEN** `CacheSyncService` пытается выполнить mutation
-- **THEN** mutation MUST NOT быть выполнена
-- **AND** `OwnershipLostError` MUST быть поднят
-
-#### Scenario: CacheSyncService storage-agnostic
-
-- **WHEN** `CacheSyncService` выполняет mutation
-- **THEN** он импортирует `CacheProvider` interface, НЕ `DuckDbCacheStore` (или другую concrete реализацию)
-- **AND** замена concrete cache implementation НЕ требует изменений в `CacheSyncService`
 
 ### Requirement: Cron = gateway-only
 
@@ -544,50 +258,116 @@ PostgreSQL transaction MUST NOT быть committed или closed между ша
 
 `gateway._check_websocket_port_available()` MUST оставаться в `gateway.py`. CLI MUST NOT выполнять её.
 
+Функция MUST читать хост и порт из `ctx.config.channels.websocket`, а при
+отсутствии конфигурации использовать дефолты `127.0.0.1` / `8765`
+(`gateway.py::_check_websocket_port_available`). Проверка MUST выполняться до входа в
+`GatewayRunner.run_forever(...)`: после неё перезапуск уже невозможен, потому
+что подъём цикла биндит порт.
+
 #### Scenario: Gateway проверяет занятость WebSocket-порта
 
-- **WHEN** запускается `gateway.py` и порт `127.0.0.1:8765` занят
-- **THEN** gateway MUST exit 1 до подъёма runtime
+- **WHEN** запускается `gateway.py` и порт занят
+- **THEN** gateway MUST завершиться с кодом `1` (`SystemExit(1)`, `gateway.py::_check_websocket_port_available`)
+- **AND** вывод MUST содержать PID процесса-владельца и подсказку по освобождению
+  (`gateway.py::_check_websocket_port_available`)
+- **AND** отказ MUST произойти ДО входа в `GatewayRunner.run_forever(...)`
+  (`gateway.py::_entrypoint_main`)
+
+#### Scenario: Конфигурация WebSocket-порта читается, а не зашита
+
+- **WHEN** в `ctx.config.channels.websocket` заданы `host` и `port`
+- **THEN** проверка MUST использовать именно их, а не дефолтные
+  `127.0.0.1:8765` (`gateway.py::_check_websocket_port_available`)
 
 ### Requirement: CLI-специфичные runtime-параметры
 
-CLI entrypoint MUST принимать runtime-флаги: `--storage` (выбор `storage_mode`: `auto`/`postgres`/`file`), `--session` (имя сессии для `chat_id`).
+CLI entrypoint MUST принимать runtime-флаги: `--storage`/`-S` (выбор
+`storage_mode`: `auto`/`file`/`postgres`, `cli_agent.py:66-67`) и `--session`/`-s`
+(имя сессии для `chat_id`, `cli_agent.py:68`).
+
+CLI также принимает `--patched`/`-P` (холодное зеркало сессий через
+`background_task_factory`) и `--smoke` (печать баннера и runtime-таблицы без
+подъёма REPL). Оба флага MUST NOT менять порядок старта: рукопожатие и
+`attach_log_transport()` MUST выполняться одинаково в обеих ветвях
+(`cli_agent.py:152-178` — обе ветви зовут общий `_run_cli_repl`).
 
 #### Scenario: --storage=file в CLI
 
 - **WHEN** пользователь запускает `cli_agent.py --storage=file`
 - **THEN** `storage_override="file"` MUST передаваться в `ApplicationContext.create(storage_override="file", ...)`
+  (`cli_agent.py:193`)
 - **AND** `SessionStorageService` MUST использовать file-storage
+  (`lib/core/application_context.py::ApplicationContext.create`)
+
+#### Scenario: Ветви --patched и обычная держат один порядок старта
+
+- **WHEN** запускается CLI в любой из ветвей
+- **THEN** обе MUST идти через общий `_run_cli_repl` с одинаковым порядком:
+  рукопожатие → `attach_log_transport()` → REPL (`cli_agent.py:163-178,229-242`)
 
 ### Requirement: Slash-команда /compact в CLI остаётся локальной
 
-CLI MUST обрабатывать `/compact` как локальный shortcut: вызов `ContextCompactionService.compact(session_key, force=True)` напрямую.
+CLI MUST обрабатывать `/compact` как локальный shortcut: вызов `ContextCompactionService.compact(...)` напрямую, минуя шину (`lib/cli/console_loop.py:371-372,132-150`).
 
-#### Scenario: /compact сжимает сессию немедленно
+CLI MUST передавать `force=True`; признак `idle` SHALL определяться самим текстом
+команды (`/compact idle`, `/compact --idle`, `/compact -i`) и по умолчанию быть
+`False` (`lib/cli/console_loop.py:141-145`).
+
+**Граница записи в журнал.** CLI конструирует `ContextCompactionService` без
+`db_logging_service` и без `settings` (`lib/cli/console_loop.py:143`), поэтому на
+CLI-пути событие `agent.compacted` в `agent_gateway_logs` НЕ пишется:
+`try_log_event(None, ...)` возвращает `False` и печатает WARNING
+(`lib/services/context_compaction.py::ContextCompactionService._record_event_log`,
+`lib/services/db_logging_service.py::try_log_event`). Заметка в
+`agent_conversation_messages` на CLI-пути тоже не пишется: `_write_history_notice`
+возвращается рано для любого префикса, кроме `postgres`
+(`lib/services/context_compaction.py::ContextCompactionService._write_history_notice`). Это осознанная граница CLI-пути,
+а не поведение, которое следует «исправить» в спеке: tool `compact_context`
+(`workspace/tools/compact_context.py:136-139`) передаёт `db_logging_service`, и
+запись там работает.
+
+#### Scenario: /compact сжимает сессию локально и без шины
 
 - **WHEN** пользователь в CLI вводит `/compact`
-- **THEN** CLI MUST вызвать `ContextCompactionService.compact(session_key="cli:<session>", idle=True, force=True)` локально
-- **AND** событие `context_compacted` MUST быть записано в `agent_gateway_logs`
+- **THEN** CLI MUST вызвать `ContextCompactionService.compact(session_key=f"{cli_channel}:{chat_id}", idle=<из текста команды>, force=True)` напрямую (`lib/cli/console_loop.py:141-145`)
+- **AND** `force` MUST быть `True` независимо от наличия `idle` во вводе
+
+#### Scenario: Запись в журнал на CLI-пути — известная граница, а не требование
+
+- **WHEN** CLI выполняет `/compact`
+- **THEN** событие `agent.compacted` в `agent_gateway_logs` SHALL NOT появиться:
+  клиент журнала на этом пути не передан, и `try_log_event` возвращает `False`
+  с WARNING
+- **AND** заметка в `agent_conversation_messages` SHALL NOT появиться: префикс
+  ключа сессии не `postgres`
+- **WHEN** то же сжатие выполняет tool `compact_context`
+- **THEN** `agent_gateway_logs` MUST получить `event_type="agent.compacted"`
+  (`lib/services/context_compaction.py::ContextCompactionService._record_event_log`)
 
 ### Requirement: Запрет Streamlit в runtime-коде
 
-`gateway.py`, `cli_agent.py` и весь runtime-код MUST NOT импортировать, спавнить или каким-либо образом инициализировать `streamlit_app` или `streamlit` модуль. Удаление `streamlit_app.py` и `SubprocessManager.spawn_streamlit` — отдельный change `remove-streamlit-runtime`.
+`gateway.py`, `cli_agent.py` и весь runtime-код MUST NOT импортировать, спавнить или каким-либо образом инициализировать `streamlit_app` или `streamlit` модуль.
+
+`streamlit_app.py` и `lib/services/subprocess_manager.py` уже удалены — на диске их
+нет. Имена `SubprocessManager` и `spawn_streamlit` упоминаются здесь только как
+предмет запрета: в `lib/` и `workspace/tools/` упоминаний `streamlit` нет.
+Требование защищает достигнутую цель от возврата, а не ставит задачу.
 
 #### Scenario: runtime-код не импортирует streamlit
 
-- **WHEN** выполняется `grep -r "import streamlit\|from streamlit" lib/ workspace/ tools/`
+- **WHEN** выполняется `grep -r "import streamlit\|from streamlit" lib/ workspace/tools/`
 - **THEN** НЕ ДОЛЖНО быть результатов в runtime-коде
 
 ### Requirement: CLI имеет фиксированный профиль test
 
-`cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать профиль из env. CLI MUST использовать фиксированный профиль `test` при вызове `config._initialize_settings(profile="test")`. Gateway MAY принимать `--profile`.
+`cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать профиль из env. CLI MUST использовать фиксированный профиль `test` при вызове `config._initialize_settings(profile="test")` (`cli_agent.py:117-119`, `CLI_FIXED_PROFILE = "test"`). Отклоняются `--profile`, `-profile` и `-p` (`CLI_REJECTED_FLAGS`, `cli_agent.py`), каждая передача — `ConfigurationError`. Gateway MUST принимать `--profile` из whitelist'а `("prod", "test")` (`gateway.py:_SUPPORTED_PROFILES`) и MUST отклонять иной профиль.
 
-"test" в контексте CLI НЕ означает урезанный runtime: CLI MUST иметь тот же AgentLoop, Skills, Tools, Vector search, Memory, Logging, Prompts, Runtime patches, что и gateway (плюс CacheProvider interface). Различие только в profile (CLI == "test" fixed) и transport (CLI == in-memory bus).
+"test" в контексте CLI НЕ означает урезанный runtime: CLI MUST иметь тот же AgentLoop, Skills, Tools, Memory, Logging, Prompts, Runtime patches, что и gateway. Различие только в profile (CLI == "test" fixed) и transport (CLI == in-memory bus).
 
 #### Scenario: CLI не принимает --profile
 
 - **WHEN** пользователь запускает `python cli_agent.py --profile=test`
-- **THEN** CLI MUST отклонить флаг с `ConfigurationError` и завершиться с кодом 2
+- **THEN** CLI MUST отклонить флаг с `ConfigurationError` и завершиться с кодом 2 (`cli_agent.py:458-462`)
 - **AND** процесс MUST NOT запускать `ApplicationContext`
 
 #### Scenario: CLI hardcodes profile="test"
@@ -612,6 +392,11 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
 - **WHEN** пользователь запускает `python gateway.py --profile=prod` или `--profile=test`
 - **THEN** gateway MUST принять `--profile`
 - **AND** `SETTINGS["profile"]` MUST соответствовать переданному значению
+
+#### Scenario: Профиль вне whitelist'а отклоняется
+
+- **WHEN** пользователь запускает `python gateway.py --profile=staging`
+- **THEN** gateway MUST поднять `ConfigurationError` и завершиться с кодом 2 (`gateway.py::_parse_args`)
 
 ### Requirement: Невозможность поднятия обязательной зависимости обнаруживается на старте
 
@@ -649,6 +434,8 @@ ONLY как путь восстановления оборвавшейся се�
 
 - **WHEN** проверяется место вызова рукопожатия в обоих entrypoint'ах
 - **THEN** вызов MUST находиться внутри корутины, исполняемой `asyncio.run(...)`
+  (`gateway.py::_run` вызывается как `lambda: asyncio.run(_run(ctx))`, `gateway.py::_entrypoint_main`;
+  CLI — `asyncio.run(body())`, `cli_agent.py:246`)
 - **AND** подъём сессии ДО `asyncio.run` SHALL NOT использоваться, потому что
   stdio-сессия привязана к loop, который её поднял, и подъём до loop означал бы
   сессию, закрывающуюся вместе с ним
@@ -656,7 +443,7 @@ ONLY как путь восстановления оборвавшейся се�
 #### Scenario: Сервер поднялся, но операций не отдал
 
 - **WHEN** `list_operations()` завершается пустым набором операций
-- **THEN** это SHALL считаться тем же отказом запуска, что и неотвечающий сервер
+- **THEN** это SHALL считаться тем же отказу запуска, что и неотвечающий сервер
 - **AND** старт SHALL NOT продолжаться «на всякий случай»
 
 ### Requirement: Отказ подъёма — это отказ запуска, а не тихая деградация
@@ -699,7 +486,7 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 **Уточнение формулировки.** Раньше это обосновывалось так: «`GatewayRunner`
 сообщает лишь `Gateway exited unexpectedly, restarting in 1.0s`, и причина не
 читается ни в одном логе». Это неточно: `GatewayRunner` дописывает к уведомлению
-само исключение и его трейс (`"... restarting in %.1fs: %s\n%s"`). Что верно и
+само исключение и его трейс (`lib/lifecycle/gateway_runner.py:103-106`). Что верно и
 что остаётся причиной требования: уведомление называет **перезапуск**, а не
 **упавшую зависимость**, и не даёт подсказки, что проверять. Строка вердикта —
 единственное место, где это сказано.
@@ -716,7 +503,7 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 - **WHEN** рукопожатие в CLI падает
 - **THEN** в вывод SHALL уйти строка с признаком отказа, исходной причиной и
   подсказкой, что проверять
-- **AND** `logger.error` SHALL быть вызван с той же причиной
+- **AND** `logger.error` SHALL быть вызван с той же причиной (`cli_agent.py:362-363`)
   (проверяется `TestCliHandshake::test_reason_is_readable_and_stack_trace_free`
   и `::TestCliHandshake::test_reason_reaches_the_log`)
 
@@ -738,13 +525,13 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
   MUST уходить наверх на своём месте.
 
 В CLI код выхода MUST различать эти случаи: `2` — ошибка конфигурации,
-`1` — не поднялась зависимость. Смешанные коды ломают разбор: по одному числу
-нельзя понять, чинить ли профиль или поднимать процесс.
+`1` — не поднялась зависимость (`cli_agent.py:475-482`). Смешанные коды ломают
+разбор: по одному числу нельзя понять, чинить ли профиль или поднимать процесс.
 
 #### Scenario: Расхождение профиля сохраняет тип конфигурации
 
 - **WHEN** рукопожатие (или сверка имён таблиц) даёт `ConfigurationError`
-- **THEN** тип MUST сохраниться, без заворачивания в `CliStartupError`
+- **THEN** тип MUST сохраниться, без заворачивания в `CliStartupError` (`cli_agent.py:343-352`)
 - **AND** в вывод SHALL уйти строка с признаком `КОНФИГУРАЦИЯ`
   (проверяется `TestCliHandshake::test_profile_mismatch_keeps_configuration_error_type`
   и `::TestHandshakeFailureRefusesStartup::test_profile_mismatch_also_refuses_to_start_channels`)
@@ -752,7 +539,7 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 #### Scenario: Отказ доступности сохраняет исходную причину
 
 - **WHEN** рукопожатие падает с `EnterpriseMcpUnavailable`
-- **THEN** поднятый `CliStartupError` SHALL нести исходный текст причины
+- **THEN** поднятый `CliStartupError` SHALL нести исходный текст причины (`cli_agent.py:364`)
 - **AND** `__cause__` SHALL остаться `EnterpriseMcpUnavailable`
   (проверяется `TestCliHandshake::test_failure_keeps_the_original_cause`)
 
@@ -779,7 +566,8 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 
 Между рукопожатием и `start_all` находится `ctx.attach_log_transport()` —
 построение writer'а журнала поверх живой MCP-сессии. Оно MUST оставаться после
-рукопожатия: writer строится на живой сессии, которой до рукопожатия нет.
+рукопожатия: writer строится на живой сессии, которой до рукопожатия нет
+(`gateway.py::_run`).
 
 #### Scenario: Порядок в исходнике
 
@@ -827,11 +615,11 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 **сверку имён таблиц** (паритет): он жёстко прибит к профилю `test`, оверлей
 объявлен в двух файлах, и расхождение — ровно тот дефект, который сверка ловит
 (агент ждёт `*_test`, платформа пишет в боевые таблицы). Правило сверки
-импортируется у владельца контракта (`gateway._verify_platform_table_alignment`),
-а не копируется: вторая копия разошлась бы с первой при первой же правке.
-Расхождение MUST оставаться `ConfigurationError` (код выхода `2`), а не
-`CliStartupError` (`1`), — иначе опечатка в оверлее выглядит как упавшая
-платформа.
+импортируется у владельца контракта (`cli_agent.py:392` импортирует
+`gateway._verify_platform_table_alignment`), а не копируется: вторая копия
+разошлась бы с первой при первой же правке. Расхождение MUST оставаться
+`ConfigurationError` (код выхода `2`), а не `CliStartupError` (`1`), — иначе
+опечатка в оверлее выглядит как упавшая платформа.
 
 Чего CLI по-прежнему НЕ делает — сводку по всем capability. Интерактивная
 консоль выигрывает от краткости, а список таблиц отдаёт та же проба
@@ -845,7 +633,7 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 
 - **WHEN** запускается CLI
 - **THEN** рукопожатие SHALL наблюдаться раньше REPL и раньше
-  `attach_log_transport()`
+  `attach_log_transport()` (`cli_agent.py:238-240`)
   (проверяется `TestCliOrdering::test_handshake_runs_before_repl_and_transport`
   и `TestCliPatchedBranch::test_patched_branch_reaches_the_repl` — обе ветви
   CLI: `--patched` обязана держать тот же контракт)
@@ -853,7 +641,7 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 #### Scenario: Расхождение имён таблиц на CLI отказывает в запуске кодом 2
 
 - **WHEN** CLI запускается, а имена таблиц агента и платформы расходятся
-- **THEN** SHALL подниматься `ConfigurationError`, а не `CliStartupError`
+- **THEN** SHALL подниматься `ConfigurationError`, а не `CliStartupError` (`cli_agent.py:415-424`)
 - **AND** код выхода SHALL быть `2`, а не `1`
 - **AND** REPL SHALL NOT подниматься ни в обычной ветви, ни в `--patched`
   (проверяется `TestCliTableAlignment::test_profile_mismatch_exits_two_and_is_not_masked_as_one`
@@ -863,7 +651,7 @@ backoff; `main()` в CLI — он печатает в `stderr` и возвращ
 #### Scenario: Трейс только по явному запросу
 
 - **WHEN** `NANOBOT_CLI_TRACEBACK` не установлен
-- **THEN** `stderr` SHALL NOT содержать `Traceback`
+- **THEN** `stderr` SHALL NOT содержать `Traceback` (`cli_agent.py:478-482`)
 - **WHEN** `NANOBOT_CLI_TRACEBACK=1`
 - **THEN** полный трейс SHALL печататься, код выхода SHALL остаться `1`
   (проверяется `TestCliStartupBoundary::test_startup_failure_exits_nonzero_with_reason`
@@ -907,3 +695,24 @@ MUST NOT считаться отказом. Выход SHALL быть явным
 - **AND** при этом расхождение имён таблиц MUST по-прежнему ронять старт
   (проверяется `TestHealthSummary::test_probe_failure_does_not_fail_startup`
   и `::TestHealthSummary::test_misaligned_profile_refuses_to_start`)
+
+## Снятые требования
+
+Раздел нормативной части НЕ содержит требований, и не должен. Ниже — запись о
+том, какие требования сняты чисткой кэш-кластера, **чем они заменены** и где
+живёт замена. Запись существует, чтобы читатель спеки не искал снятое в
+`lib/services/` и не решил, что владение снимком ещё не описано.
+
+| Снятое требование | Чем заменено | Где живёт замена |
+|---|---|---|
+| `CacheOwnershipCoordinator MUST определять режим cache ДО открытия` (claim → mode → open) | Слоя владения нет: в системе один gateway, writer снимка один и известен заранее. Режим доступа к снимку задаёт его владелец | `mcp-platform/libs/enterprise_data/snapshot/contracts.py::CacheAccessMode` |
+| `Ownership contract — atomic claim + real fencing через advisory lock` (таблица `agent_cache_ownership`, `ClaimResult`, `release()`, heartbeat) | Таблицы `agent_cache_ownership` и миграции к ней не существуют; fencing не нужен, потому что takeover'а не бывает | — (контракт снят целиком, замена не требуется) |
+| `CacheProvider API с явным mode + layered architecture` (`open_snapshot`/concrete factory, `ctx.cache_provider`, `ReadOnlyAssertionError`, `UnsupportedSqlError`, `query_sql` DDL-запрет, отвержение NFS) | Интерфейс и режимы живут на платформе. В агенте `CacheProvider`/`ctx.cache_provider` нет и не должно быть: агент не владеет снимком | `mcp-platform/libs/enterprise_data/snapshot/contracts.py::CacheProvider` / `::CacheStore`, реализация `snapshot/store.py::DuckDbSnapshotStore` |
+| `CacheSyncService для синхронизации данных` (fenced write boundary, `OwnershipLostError`) | Синхронизацией занимается capability `data` платформы, у которой один writer | `mcp-platform/libs/enterprise_data/loader.py::SnapshotLoadService` |
+| Строки `CacheProvider` / `CacheOwnershipCoordinator` / `CacheSyncService` / concrete cache factory в таблице composition | Сняты вместе с кэш-кластером; состав таблиц и индексов объявляет платформа | `mcp-platform/platform.json → audit.tables`, `→ vectors.indexes` |
+| Путь снимка в `gateway.cache.local_path` как настройка агента | Путь объявляет платформа; в `config.json` секции `gateway.cache` больше нет | `mcp-platform/platform.json → data.snapshot_path`, резолвится в `snapshot/store.py::resolve_snapshot_path` |
+
+Снятые требования про **вторую СУБД-канал** (`RedisChannel`) и **Streamlit**
+(`SubprocessManager.spawn_streamlit`, `streamlit_app.py`) в таблице composition
+не стояли, но упоминались в `Purpose` прежней редакции; запрет на Streamlit
+сохранён как требование, каналов транспорта остался один — PostgreSQL.

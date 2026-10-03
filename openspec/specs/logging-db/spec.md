@@ -65,6 +65,26 @@ sync service, cache service, channel) обязан
   `log_outbound`, `log_sync_event`,
   `register_request`, `finish_request`) — все
   они внутри зовут `log_event(LogEvent(...))`;
+
+> **Поправка 2026-10-03: `log_error` снят из списка.**
+> Снятая формулировка: «`log_error` — специализированный builder,
+> входящий через `log_event(LogEvent(...))`». Метод удалён из
+> `lib/services/db_logging_service.py` целиком.
+>
+> Основание — не вкусовое решение, а мина на будущее. Имя `error`
+> не входило в канонический словарь платформы
+> (`mcp-platform/libs/enterprise_common/eventing/types.py`), а
+> `data.log_unknown_event_type_policy` переведён в `strict`: первое же
+> возвращение `log_error` уронило бы весь батч, в котором оно лежало,
+> а вызывающий к этому моменту уже получил «принято». Молчаливую
+> потерю соседних событий оборота этот путь уже давал.
+>
+> Вызывающего не было нигде: ни в `lib/`, ни в `workspace/`, ни в
+> `tools/`, ни в точках входа — только в тестах. Проверено статическим
+> сканом и подтверждено замером (см. эталон имён в
+> `tests/test_journal_event_name_alignment.py`, раздел «ИМЕН, КОТОРЫХ
+> ЗДЕСЬ НЕТ»). Снятые тесты: `TestNonBlocking::test_log_error`,
+> `TestNamePopulation::test_error_name_is_error`.
 - `DbLoggingService.try_log_event(svc, log_event,
   producer, event_type)` — единый helper для
   producer'ов (см. Requirement
@@ -94,6 +114,18 @@ Runtime-producers не читают эти значения напрямую.
 - **AND** прямых `INSERT INTO "<schema>"."<table>"`
   в production runtime-коде SHALL NOT быть
   (за пределами `lib/services/db_logging_service.py`).
+
+> **Поправка 2026-10-03: `log_error` в перечне builder'ов больше не
+> существует.** Снятая формулировка: «...или специализированный
+> builder (`log_tool_call`, `log_tool_result`, `log_llm_call`,
+> `log_error`, `log_inbound`, `log_outbound`, `log_sync_event`)».
+> Обоснование снятия — в «Поправке 2026-10-03» к списку разрешённых
+> путей выше (кратко: вызывающего не было нигде, кроме тестов, а имя
+> `error` вне канонического словаря при `strict` роняет батч).
+>
+> Смысл сценария не изменился: перечень стал короче, а требование
+> «никаких прямых `INSERT` помимо `DbLoggingService`» осталось в силе
+> и относится ко всем producer'ам без исключения.
 
 #### Scenario: request_id link сохраняется
 

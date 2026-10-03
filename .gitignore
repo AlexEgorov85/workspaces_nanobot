@@ -139,3 +139,8 @@ htmlcov/
 mcp-platform/.sessions_demo/
 mcp-platform/.tmp_*
 mcp-platform/_live_*.py
+
+# Сеансы живой платформы: пишет каждая рукопожать на старте (проба
+# capability складывает результат в файл). Это состояние прогона, а не
+# исходники: без правила оно попадало бы в индекс и в коммит.
+mcp-platform/.sessions/
