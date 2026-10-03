@@ -91,14 +91,22 @@ SERVER_PATH = PLATFORM_ROOT / "servers" / "enterprise" / "server.py"
 
 @pytest.fixture(autouse=True)
 def _restore_pool_config():
-    """Вернуть глобальную конфигурацию пула: её меняет каждый тест ниже."""
+    """Вернуть глобальную конфигурацию пула: её меняет каждый тест ниже.
+
+    Секция классов возвращается вместе с разделом ``pool``: это тоже
+    глобальная настройка того же владельца, и оставленная после теста, она
+    заставила бы следующий набор считать пул настроенным чужими пределами —
+    аренда модельной работы отказала бы там, где её не отказывали.
+    """
     from libs.enterprise_data import db as data_db
 
     saved = dict(data_db._pool_cfg)
+    saved_classes = {name: dict(values) for name, values in data_db._job_class_cfg.items()}
     try:
         yield
     finally:
         data_db._pool_cfg = saved
+        data_db._job_class_cfg = saved_classes
 
 
 def _pool_cfg() -> dict:
@@ -109,11 +117,15 @@ def _pool_cfg() -> dict:
 
 #: Полный набор ключей пула с нейтральными значениями. Основа для тестовых
 #: файлов: раздел обязан быть полным, иначе реестр откажется его читать.
+#: ``reserved_workers`` здесь ноль, а не два: нейтральный набор не должен
+#: содержать резерв, иначе он не годится для проверки конфигураций с пулом
+#: меньше трёх воркеров.
 POOL_BASE: dict[str, object] = {
     "min_conn": 1,
     "max_conn": 4,
+    "reserved_workers": 0,
     "pool_timeout": 5.0,
-    "queue_maxsize": 10000,
+    "queue_maxsize": 64,
     "reconnect_backoff_sec": 1.0,
     "reconnect_backoff_max_sec": 60.0,
     "connect_max_retries": 5,

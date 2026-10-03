@@ -41,12 +41,18 @@ from typing import Any
 
 import pytest
 
+from libs.enterprise_common.errors import InfrastructureError
 from libs.enterprise_common.eventing.types import (
     PROBE_EVENT_NAMES,
     PROBE_EVENT_PREFIXES,
     TOOL_STARTED,
     is_known,
 )
+from libs.enterprise_data.audience import (
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+)
+from libs.enterprise_data.db import PoolBusyError
 
 from servers.enterprise.capabilities.data.service.main import DataService
 
@@ -96,15 +102,66 @@ class _RecordingPool:
 
     Отдельный класс, а не подмена ``_write_events``: доказательство должно
     быть о том, что дошло до уровня SQL, а не о том, какая функция вызвана.
+
+    Поверхность пула моделируется целиком, потому что сброс журнала ходит в
+    пул без ожидания места (``try_submit``) и пишет одной вставкой
+    (``execute_values_on``). Подставной пул, у которого есть только ``run``,
+    проверял бы не путь сброса, а то, что сервис дойдёт до отказа раньше.
     """
 
     def __init__(self) -> None:
         self.statements: list[tuple[str, Any]] = []
         self.connections = 0
+        #: Партии, ушедшие в журнал одной вставкой: (sql, строки).
+        self.batches: list[tuple[str, list[tuple[Any, ...]]]] = []
+        #: Свободные места. Считаются, а не выдаются всегда: ``try_submit`` не
+        #: ждёт места, и «занято» — обычный исход сброса, а не авария.
+        self.free_workers = 1
+        #: Классы работ, в которых пул выполнял задания.
+        self.audiences: list[str] = []
 
-    def run(self, job: Any) -> Any:
+    def _check(self, audience: str) -> None:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        self.audiences.append(audience)
+
+    def run(self, job: Any, *, audience: str = JOB_AUDIENCE_MODEL) -> Any:
+        self._check(audience)
         self.connections += 1
         return job(_Conn(self.statements))
+
+    def try_submit(self, job: Any, *, audience: str = JOB_AUDIENCE_MODEL) -> Any:
+        self._check(audience)
+        if self.free_workers <= 0:
+            raise PoolBusyError(f"у класса {audience!r} нет свободного места")
+        self.free_workers -= 1
+        self.connections += 1
+        try:
+            return job(_Conn(self.statements))
+        finally:
+            self.free_workers += 1
+
+    def execute_values_on(
+        self,
+        conn: _Conn,
+        sql: str,
+        rows: list[tuple[Any, ...]],
+        *,
+        template: str | None = None,
+        page_size: int = 200,
+    ) -> int:
+        """Партия ложится в журнал одной записью — так и проверяется «куда ушло».
+
+        Строка на партию здесь по существу: возврат к построчной записи занял
+        бы место в пуле на весь обход, и «проба не дошла до БД» снова стало бы
+        неразличимо с «проба не дошла, потому что не было куда».
+        """
+        batch = [tuple(row) for row in rows]
+        self.batches.append((sql, batch))
+        return len(batch)
 
 
 def _journal_table() -> tuple[str, str]:
@@ -135,7 +192,13 @@ def _service(**kwargs: Any) -> tuple[DataService, _RecordingPool]:
 
 
 def _inserts(pool: _RecordingPool) -> list[tuple[str, Any]]:
-    return [row for row in pool.statements if "INSERT INTO" in row[0]]
+    """Партии, дошедшие до журнала: список строк на одну вставку.
+
+    Раньше здесь искались ``INSERT`` среди заявлений курсора. Сброс ходит в
+    пул через ``try_submit`` и пишет одной вставкой, поэтому «куда ушло» —
+    это партия, а не пообъектный след курсора.
+    """
+    return [(sql, rows) for sql, rows in pool.batches if "INSERT INTO" in sql]
 
 
 def _journal_events(pool: _RecordingPool) -> list[str]:
@@ -145,12 +208,13 @@ def _journal_events(pool: _RecordingPool) -> list[str]:
     после ключа строки, ``timestamp`` база подставляет сама.
     """
     out: list[str] = []
-    for _sql, params in _inserts(pool):
-        # Параметры приходят кортежем (в бою — тоже: контракт ``db.execute``
-        # — один параметр на плейсхолдер), и приводить их к списку нельзя:
-        # список в этом месте попадал в санитизацию как единственный параметр.
-        row = params if isinstance(params, (list, tuple)) else [params]
-        out.append(str(row[1]))
+    for _sql, rows in _inserts(pool):
+        for row in rows:
+            # Строка приходит кортежем (в бою — тоже: контракт пакетной
+            # вставки — одна строка на плейсхолдер), и приводить её к списку
+            # нельзя: список в этом месте попадал в санитизацию как единственный
+            # параметр.
+            out.append(str(row[1]))
     return out
 
 

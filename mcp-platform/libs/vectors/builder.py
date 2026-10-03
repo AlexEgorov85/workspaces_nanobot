@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from libs.enterprise_data.audience import JOB_AUDIENCE_RUNTIME
 from libs.vectors.text_splitter import build_chunks
 
 logger = logging.getLogger(__name__)
@@ -160,15 +161,22 @@ class Database(Protocol):
     Структурный тип, а не импорт ``libs.enterprise_data.db``: сборщик не
     обязан знать, кто владеет пулом. В рантайме это
     ``libs.enterprise_data.db`` (тот же пул, что у загрузчика снимка).
+
+    ``audience`` — keyword-only и **обязателен**: без него вызов ушёл бы в
+    класс по умолчанию, то есть в модельную работу. Сборщик занял бы место,
+    объявленное резервом, и его собственный отказ уронил бы сборку. Объявлять
+    keyword в протоколе нужно именно потому, что протокол — это контракт,
+    который обязаны соблюдать живые пулы: следующий implementer, прочитавший
+    бы только подпись, обязан увидеть здесь класс, а не догадаться о нём.
     """
 
-    def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+    def fetch(self, sql: str, *args: Any, audience: str) -> list[dict[str, Any]]:
         ...
 
-    def fetchone(self, sql: str, *args: Any) -> dict[str, Any] | None:
+    def fetchone(self, sql: str, *args: Any, audience: str) -> dict[str, Any] | None:
         ...
 
-    def execute(self, sql: str, *args: Any) -> Any:
+    def execute(self, sql: str, *args: Any, audience: str) -> Any:
         ...
 
 
@@ -503,20 +511,23 @@ class VectorBuilder:
             f'WHERE source = %s AND "table" = %s AND pk_value IS NOT NULL',
             index_name,
             source_table,
+            audience=JOB_AUDIENCE_RUNTIME,
         )
         return {norm_pk(r.get("pk_value")): dict(r) for r in rows or []}
 
     def _source_rows(self, table: str, pk_column: str) -> list[dict[str, Any]]:
         quoted = quote_table(table)
         rows = self._db.fetch(
-            f"SELECT * FROM {quoted} ORDER BY {quote_identifier(pk_column)}"
+            f"SELECT * FROM {quoted} ORDER BY {quote_identifier(pk_column)}",
+            audience=JOB_AUDIENCE_RUNTIME,
         )
         return [dict(r) for r in rows or []]
 
     def _max_track(self, table: str, track_col: str) -> str | None:
         row = self._db.fetchone(
             f"SELECT MAX({quote_identifier(track_col)})::TEXT AS mx "
-            f"FROM {quote_table(table)}"
+            f"FROM {quote_table(table)}",
+            audience=JOB_AUDIENCE_RUNTIME,
         )
         if not row or row.get("mx") in (None, ""):
             return None
@@ -590,6 +601,7 @@ class VectorBuilder:
             chunk["content_hash"],
             chunk["max_src_track"],
             chunk["synced_at"],
+            audience=JOB_AUDIENCE_RUNTIME,
         )
 
     def _delete_where(
@@ -616,7 +628,7 @@ class VectorBuilder:
             sql += " AND content_hash <> %s"
             args.append(keep_hash)
         try:
-            self._db.execute(sql, *args)
+            self._db.execute(sql, *args, audience=JOB_AUDIENCE_RUNTIME)
         except Exception as exc:  # noqa: BLE001 - потеря одной строки не должна ронять сборку
             logger.warning(
                 "[%s] ошибка удаления pk=%s: %s", index_name, pk_value, exc

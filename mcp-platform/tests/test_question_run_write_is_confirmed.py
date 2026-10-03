@@ -38,6 +38,12 @@ from typing import Any
 import pytest
 
 from libs.enterprise_common.errors import InfrastructureError
+
+from libs.enterprise_data.audience import (
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+    JOB_AUDIENCE_RUNTIME,
+)
 from servers.enterprise.capabilities.data.service.main import (
     RUN_CREATED,
     RUN_UPDATED,
@@ -83,8 +89,19 @@ class _WritePool:
 
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
+        #: Классы работ, в которых пул выполнял задания. Объявленное имя
+        #: отвергается: пул, принимающий что угодно, проверил бы только то,
+        #: что SQL правильный, и молча согласился бы на запись прогона в
+        #: классе модели.
+        self.audiences: list[str] = []
 
-    def run(self, job: Any) -> Any:
+    def run(self, job: Any, *, audience: str = JOB_AUDIENCE_MODEL) -> Any:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"run: класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        self.audiences.append(audience)
         import psycopg2
 
         conn = psycopg2.connect(self._dsn, gssencmode="disable")
@@ -435,8 +452,18 @@ class _ScriptedPool:
     def __init__(self, rowcounts: dict[str, int]) -> None:
         self.rowcounts = rowcounts
         self.statements: list[str] = []
+        #: Классы работ, в которых пул выполнял задания: у служебной записи
+        #: прогона свой потолок ожидания, и подставной пул обязан его назвать,
+        #: а не согласиться на любой класс молча.
+        self.audiences: list[str] = []
 
-    def run(self, job: Any) -> Any:
+    def run(self, job: Any, *, audience: str = JOB_AUDIENCE_MODEL) -> Any:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"run: класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        self.audiences.append(audience)
         return job(_ScriptedConn(self.statements, self.rowcounts))
 
 
@@ -460,8 +487,15 @@ class TestRowcountIsTheEvidence:
         assert "req-1" in str(excinfo.value), str(excinfo.value)
 
     def test_existing_row_is_reported_as_updated(self) -> None:
-        service, _ = _scripted_service({"UPDATE": 1, "INSERT": 0})
+        """Итог записи и класс, в котором она выполнена.
+
+        Класс виден на выполненной работе, а не в подписи: запись прогона
+        вопроса — служебная работа платформы, и у неё другой потолок
+        ожидания, чем у работы модели.
+        """
+        service, pool = _scripted_service({"UPDATE": 1, "INSERT": 0})
         assert service.upsert_question_run("req-1") == RUN_UPDATED
+        assert pool.audiences == [JOB_AUDIENCE_RUNTIME], pool.audiences
 
     def test_new_row_is_reported_as_created(self) -> None:
         service, _ = _scripted_service({"UPDATE": 0, "INSERT": 1})

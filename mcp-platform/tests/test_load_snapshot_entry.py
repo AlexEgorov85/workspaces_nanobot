@@ -59,16 +59,56 @@ def _pool_values() -> dict:
     from libs.enterprise_data.db import _POOL_SPEC
 
     defaults = {int: 1, float: 1.0, bool: False}
+    # ``reserved_workers`` по типу синтезировать нельзя: ``int -> 1`` в паре с
+    # ``max_conn = 1`` даёт резерв, съедающий пул целиком, и ``set_pool_config``
+    # отвергает такую конфигурацию на старте. Тест проверяет решение точки входа
+    # (что загружено и что отказано), а не величину резерва, поэтому у него он
+    # нулевой — и это объявлено здесь, а не выведено из типа.
+    explicit = {"reserved_workers": 0}
     return {
-        name: defaults[_POOL_SPEC[key]] for key, name in POOL_SETTING_KEYS.items()
+        name: explicit.get(key, defaults[_POOL_SPEC[key]])
+        for key, name in POOL_SETTING_KEYS.items()
     }
+
+
+def _job_class_values() -> dict[str, object]:
+    """Значения классов работы — по тому же правилу, что и ``_pool_values``.
+
+    Сервер передаёт пулу обе секции: ``pool`` (размер и резерв) и
+    ``job_classes`` (чем этому размеру разрешают ждать). Пока объявлена только
+    первая, подставной реестр отдавал по секции классов пустые значения, и
+    ``set_job_class_config`` останавливал сервер на старте — тест проверял бы
+    не решение точки входа, а собственную неполноту реестра.
+
+    Имена настроек приходят из реестра (``job_class_setting_names``), типы — из
+    контракта класса (``db._JOB_CLASS_SPEC``). Список имён в тесте не
+    выписывается: разошёлся бы с реестром при первом же добавлении ключа.
+    """
+    from libs.enterprise_common.settings import job_class_setting_names
+    from libs.enterprise_data.audience import ALL_AUDIENCES
+    from libs.enterprise_data.db import _JOB_CLASS_SPEC
+
+    keys = tuple(_JOB_CLASS_SPEC)
+    defaults = {int: 1, float: 1.0, bool: True}
+    values: dict[str, object] = {}
+    for audience in sorted(ALL_AUDIENCES):
+        names = job_class_setting_names(audience)
+        # Порядок имён в реестре — это порядок ключей контракта. Расхождение
+        # означало бы, что значение уехало бы не в ту колонку, поэтому оно
+        # обязано быть видно здесь, а не в отказе set_job_class_config.
+        assert len(names) == len(keys), (audience, names, keys)
+        for name, key in zip(names, keys):
+            values[name] = defaults[_JOB_CLASS_SPEC[key]]
+    return values
 
 
 class _Settings:
     """Подставной реестр: неизвестные настройки — пусто, как при отсутствии."""
 
     def __init__(self, **overrides) -> None:
-        self._values = {**_VALUES, **_pool_values(), **overrides}
+        self._values = {
+            **_VALUES, **_pool_values(), **_job_class_values(), **overrides
+        }
 
     def get(self, name: str):
         return self._values.get(name)

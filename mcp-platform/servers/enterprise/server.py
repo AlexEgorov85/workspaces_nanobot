@@ -46,8 +46,11 @@ from libs.enterprise_common.execution.factory import build_execution_layer
 from libs.enterprise_common.loader import build_server, load_registry
 from libs.enterprise_common.registry import ToolRegistry
 from libs.enterprise_common.settings import (
+    POOL_SETTING_KEYS,
     SCRIPTS_REGISTRY_LABEL,
     Settings,
+    job_class_config,
+    job_class_setting_names,
     pool_config,
 )
 
@@ -117,26 +120,60 @@ def _configure_dsn(settings: Settings) -> None:
     configure(str(settings.get("DATABASE_URL")))
 
 
+def _source_note(settings: Settings, names: tuple[str, ...]) -> str:
+    """Откуда применены значения: ``file:platform.json`` либо смесь.
+
+    Одна подпись на раздел, а не по строке на ключ: источник у ключей обычно
+    один, и перечисление одинаковых подписей не читается. Разворачивается он
+    поимённо ровно тогда, когда источники разошлись, — и это единственный
+    случай, в котором оператор не может объяснить «почему применено не то, что
+    объявлено в файле» без лога.
+    """
+    sources = sorted({settings.source(name) for name in names})
+    if len(sources) == 1:
+        return sources[0]
+    return ", ".join(f"{name}={settings.source(name)}" for name in names)
+
+
 def _apply_pool_settings(settings: Settings) -> None:
-    """Передать размеры и таймауты пула его владельцу.
+    """Передать размеры, таймауты и пределы классов их владельцу.
 
     Единственное место платформы, где пул настраивается: значения приходят
     из реестра (окружение > ``platform.json`` > дефолт), а не из словаря в
     коде. До этого вызова пул жил на ``_DEFAULT_POOL``, и изменить его было
     нечем — ни файлом, ни переменной, ничем.
+
+    Применяются обе секции: ``pool`` отвечает за размер и резерв, а
+    ``job_classes`` — за то, чему этот размер разрешает ждать. Пока
+    ``set_job_class_config`` не вызван, воркеры берут любую работу, и
+    объявленный резерв не значит ничего.
     """
-    from libs.enterprise_data.db import set_pool_config
+    from libs.enterprise_data.db import set_job_class_config, set_pool_config
 
     config = pool_config(settings)
     set_pool_config(config)
+    classes = job_class_config(settings)
+    set_job_class_config(classes)
+    shown = ("min_conn", "max_conn", "reserved_workers", "queue_maxsize", "pool_timeout")
     logger.info(
-        "пул соединений: min=%d max=%d очередь=%d таймаут=%s сек (%s)",
+        "пул соединений: min=%d max=%d резерв=%d очередь=%d таймаут=%s сек (%s)",
         config["min_conn"],
         config["max_conn"],
+        config["reserved_workers"],
         config["queue_maxsize"],
         config["pool_timeout"],
-        settings.source("ENTERPRISE_POOL_MAX_CONN"),
+        _source_note(settings, tuple(POOL_SETTING_KEYS[key] for key in shown)),
     )
+    for audience, values in classes.items():
+        logger.info(
+            "класс работы %s: таймаут=%d мс, очередь=%d, ждать=%s сек, аренда=%s (%s)",
+            audience,
+            values["statement_timeout_ms"],
+            values["queue_maxsize"],
+            values["wait_sec"],
+            "да" if values["leases"] else "нет",
+            _source_note(settings, job_class_setting_names(audience)),
+        )
 
 
 def _audit_config(settings: Settings) -> dict[str, Any]:

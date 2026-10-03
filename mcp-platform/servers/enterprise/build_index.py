@@ -158,7 +158,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    settings: Any | None = None,
+) -> int:
+    """Собрать объявленные векторные индексы.
+
+    Args:
+        argv: аргументы командной строки; ``None`` — из ``sys.argv``.
+        settings: реестр настроек. Необязателен для продакшена, но позволяет
+            вызвать функцию из теста **без инфраструктуры**. Без него тест
+            поднял бы пул против настоящей базы и настоящего провайдера,
+            то есть проверял бы не решение точки входа, а их наличие.
+    """
     args = _parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -184,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         _vectors_config,
     )
 
-    settings = Settings()
+    settings = settings if settings is not None else Settings()
     _configure_dsn(settings)
     _apply_pool_settings(settings)
     pool.set_pool_config(pool_config(settings))

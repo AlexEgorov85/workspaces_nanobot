@@ -38,16 +38,30 @@ from types import ModuleType
 from typing import Any
 
 from libs.enterprise_common.errors import InfrastructureError, InvalidRequestError
+from libs.enterprise_data.audience import (
+    JOB_AUDIENCE_MODEL,
+    JOB_AUDIENCE_RUNTIME,
+)
 from libs.enterprise_data.jsonb import decode_jsonb
-from servers.enterprise.capabilities.data.service.writer import DROPPED, EventBuffer
+from servers.enterprise.capabilities.data.service.writer import (
+    DROPPED,
+    EventBuffer,
+    FlushDeferred,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Профили вызывающих. ``model`` — то, что видит агент; ``runtime`` — внутренние
 #: потоки процесса (очередь задач, канал). Права операций различаются по
 #: профилю, а не по имени вызывающего: иначе право на очередь появится у модели.
-AUDIENCE_MODEL = "model"
-AUDIENCE_RUNTIME = "runtime"
+#:
+#: Имена не объявляются здесь, а берутся у ``libs.enterprise_data.audience``:
+#: определение должно быть одно, иначе пул (общий код, не видящий capability)
+#: и capability разойдутся в том, как называется класс работы. Имя в этом
+#: модуле остаётся — его импортируют tool'ы capability, — но значение у него
+#: теперь одно на всех.
+AUDIENCE_MODEL = JOB_AUDIENCE_MODEL
+AUDIENCE_RUNTIME = JOB_AUDIENCE_RUNTIME
 
 #: Набор уровней и правило приведения живут в модели события
 #: (``libs.enterprise_common.eventing.models``) — там же, где ``valid_level``
@@ -660,7 +674,7 @@ class DataService:
             return real_db
         return self._db
 
-    def submit(self, job: Any, *, audience: str = AUDIENCE_RUNTIME) -> Any:
+    def submit(self, job: Any, *, audience: str) -> Any:
         """Блокирующий вход: выполнить задание на воркере пула.
 
         Только работа с данными. Всё, что можно потерять, идёт через ``accept``.
@@ -668,21 +682,38 @@ class DataService:
         Одиночный оператор: воркеры пула подняты в ``autocommit``, поэтому всё,
         что внутри ``job``, — независимые транзакции. Если группу операторов
         нужно увидеть вместе, вход другой — :meth:`submit_transaction`.
+
+        ``audience`` — обязательный параметр **без** значения по умолчанию.
+        Раньше дефолт стоял на ``AUDIENCE_RUNTIME``, а сброс журнала
+        (``_write_events``) аудиторию не передавал вовсе, то есть получал
+        рантайм по счастливой случайности. Обязательный параметр убирает этот
+        сценарий целиком: забыть нельзя, ``TypeError`` на первой же проверке.
+
+        Значение уходит в пул: класс работы — это не только права, но и то, по
+        какой очереди работа пойдёт и какой потолок времени получит. У пула
+        дефолт — модельный класс, и «забытый» класс там дороже объявленного
+        неверно, потому что он заметен (журнал уехал бы в модельную очередь).
         """
         pool = self._pool()
         try:
-            return pool.run(lambda conn: self._guarded(conn, job))
+            return pool.run(
+                lambda conn: self._guarded(conn, job, audience), audience=audience
+            )
         except InfrastructureError:
             raise
         except Exception as exc:  # noqa: BLE001 - наружу уходит доменная ошибка
             raise InfrastructureError(f"задание в пуле не выполнено: {exc}") from exc
 
-    def submit_transaction(self, job: Any, *, audience: str = AUDIENCE_RUNTIME) -> Any:
+    def submit_transaction(self, job: Any, *, audience: str) -> Any:
         """Выполнить задание в одной транзакции: аренда соединения, BEGIN, COMMIT.
 
         Для мест, где атомарность переносит смысл. Перезапись зеркала сессии —
         как раз такое место: удаление прежних сообщений и вставка новых должны
         либо увидеться оба, либо не увидеться никак.
+
+        Про ``audience`` — то же, что в :meth:`submit`: обязателен и без
+        дефолта, потому что аренда соединения занимает место в пуле целиком и
+        промедление здесь дороже, чем у одиночного оператора.
         """
         pool = self._pool()
         run_transaction = getattr(pool, "run_transaction", None)
@@ -692,7 +723,9 @@ class DataService:
                 "группы операторов, а собирать её из независимых нельзя"
             )
         try:
-            return run_transaction(lambda conn: self._guarded(conn, job))
+            return run_transaction(
+                lambda conn: self._guarded(conn, job, audience), audience=audience
+            )
         except InfrastructureError:
             raise
         except Exception as exc:  # noqa: BLE001 - наружу уходит доменная ошибка
@@ -749,15 +782,44 @@ class DataService:
         except ValueError:
             return False
 
-    def _guarded(self, conn: Any, job: Any) -> Any:
-        """Выставить предел стоимости, выполнить, сбросить предел."""
+    def _guarded(self, conn: Any, job: Any, audience: str) -> Any:
+        """Выставить предел стоимости класса, выполнить, сбросить предел.
+
+        Предел берётся по аудитории работы, а не общий на пул: одна работа не
+        должна держать место дольше, чем её класс допускает. Сброс в
+        ``finally`` обязателен в обоих исходах — сессия переиспользуется
+        воркером, и оставленный предел навязал бы его следующей работе.
+        """
+        timeout_ms = self._timeout_for(audience)
         with conn.cursor() as cur:
-            cur.execute(f"SET statement_timeout = {self._statement_timeout_ms}")
+            cur.execute(f"SET statement_timeout = {timeout_ms}")
         try:
             return job(conn)
         finally:
             with conn.cursor() as cur:
                 cur.execute("SET statement_timeout = 0")
+
+    def _timeout_for(self, audience: str) -> int:
+        """Потолок времени работы её класса.
+
+        Значение класса объявляется в ``platform.json → job_classes``, приходит
+        от владельца пула и читается через его функцию: выставлять предел
+        на сессии — дело сервиса, а знать, чем ограничен класс, — дело пула.
+        ``data.statement_timeout_ms`` остаётся значением по умолчанию **для
+        класса, который не объявил своё**; это не второй источник для
+        объявленного класса — объявил, применяется объявленное.
+
+        Импорт внутри функции — по той же причине, по которой ``_pool``
+        импортирует модуль лениво: на верхнем уровне capability не должен
+        тянуть драйвер БД себе при импорте, иначе любая проверка сервиса
+        требует установленной базы.
+        """
+        from libs.enterprise_data.db import statement_timeout_ms
+
+        declared = statement_timeout_ms(audience)
+        if declared is not None:
+            return int(declared)
+        return self._statement_timeout_ms
 
     def start(self) -> None:
         self._buffer.start()
@@ -768,6 +830,12 @@ class DataService:
     def stats(self) -> dict[str, Any]:
         return {
             "event_buffer": self._buffer.stats(),
+            # Счётчики пула, в том числе разбивка по аудиториям: сколько
+            # работы в очереди, сколько выполняется, сколько отклонено и
+            # сколько кого ждёт дольше потолка. Без них вопрос «очередь забили
+            # навыки» нельзя ни подтвердить, ни опровергнуть — а операций у
+            # модели, ходящих в PostgreSQL, с каждым изменением больше.
+            "pool": self._pool_stats(),
             "max_rows": self._max_rows,
             # Применённый порог и число отброшенных по нему. Порог виден
             # именно здесь, а не в аргументах запуска: строка старта должна
@@ -787,6 +855,28 @@ class DataService:
             # и по журналу их не различить.
             "suppressed_probe_events": dict(self._suppressed_probe_events),
         }
+
+    def _pool_stats(self) -> dict[str, Any]:
+        """Счётчики пула, включая разбивку по аудиториям.
+
+        Форму счётчиков задаёт владелец пула: сервис их не считает и не
+        дополняет своим счётом, иначе одна и та же величина была бы посчитана
+        в двух местах и разошлась бы при первом же сравнении.
+
+        Пустой словарь — не «в пуле ничего не происходит», а «счётчиков не
+        дали» (подставной пул в тестах). Поэтому чтение не должно ронять
+        вызов: отчёт спрашивают у сервиса, а не у пула, и ошибка отчёта не
+        должна выглядеть как отказ операции.
+        """
+        pool = self._pool()
+        get_stats = getattr(pool, "get_stats", None)
+        if get_stats is None:
+            return {}
+        try:
+            return dict(get_stats())
+        except Exception as exc:  # noqa: BLE001 - отчёт не роняет вызов
+            logger.warning("счётчики пула не прочитаны: %s", exc)
+            return {}
 
     def _observe_event_type(self, event_type: str, *, where: str) -> None:
         """Учесть тип события: объявлен он в словаре или нет.
@@ -875,18 +965,41 @@ class DataService:
 
     # -- запись журнала -----------------------------------------------------
 
-    def _write_events(self, events: list[dict[str, Any]]) -> None:
+    def _write_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> None:
         """Записать батч событий журнала.
 
-        Батч уходит циклом ``execute`` по одному соединению, а не одним
-        вызовом со списком строк: контракт ``db.execute(sql, *args)`` — один
-        параметр на плейсхолдер. Список строк в этом месте попадал в
-        санитизацию как единственный параметр, ``clean_text`` на нём падал, и
-        сброс молча терял весь батч — операция ``log_event`` отвечала
-        «accepted» и при этом ничего не писала.
+        **Одна вставка на батч.** Раньше строки батча (до
+        ``data.log_batch_size``, то есть до 1024) уходили циклом
+        ``cur.execute``, и воркер пула был занят на всё время обхода: на
+        двух соединениях это половина пула, и журнал конкурировал с запросом
+        модели не за событие, а за место. Теперь это одна пакетная вставка на
+        уже имеющемся соединении job'а, то есть один поход в базу.
+
+        Помощник живёт в ``libs/enterprise_data`` не по вкусу, а по границе
+        владения: драйвером владеет пул, и если бы capability импортировала
+        его сама, она начала бы знать о нём. Публичная ``db.execute_values``
+        для этого не годится — она сама поставила бы работу в пул изнутри
+        job'а, а это заведомый тупик (см. предупреждение в ``db.run``).
+
+        **Постановка неблокирующая.** Места в пуле нет — батч возвращается в
+        буфер целиком и уходит следующим тиком; ждать воркера нельзя, потому
+        что поток сброса — единственный держатель событий журнала, и его
+        ожидание означало бы «журнал не пишется, пока чужое место занято».
+        Переполнение — дроп, а не блокировка — действует для входа буфера и
+        обязано действовать для самого сброса.
 
         Все строки батча идут в одном задании пула, то есть в одной
         транзакции: половина батча в журнале хуже, чем ничего.
+
+        ``audience`` объявлен здесь, как у любой операции, трогающей пул, хотя
+        журнал пишет только рантайм: смена смысла дефолта однажды переставила
+        бы журнал в класс модели молча, и объявление класса в сигнатуре —
+        единственное, что этого не допускает.
         """
         schema, table = self._require_log_table("log_events")
         # Полный конверт события. Список колонок раньше обрывался на девяти
@@ -940,12 +1053,47 @@ class DataService:
         if not rows:
             return
 
-        def _work(conn: Any) -> None:
-            with conn.cursor() as cur:
-                for row in rows:
-                    cur.execute(sql, row)
+        # Помощники берутся у того пула, которым сервис реально пользуется
+        # (``_pool``), а не у модуля напрямую: подставной пул в тестах и есть
+        # пул для этого сервиса, и обойти его значило бы потребовать настоящей
+        # базы для проверки журнала. Отсутствие помощника — отказ с
+        # называнием, как и с ``run_transaction`` выше: молча уйти на
+        # построчную вставку здесь нельзя, это вернуло бы воркер в очередь на
+        # всё время обхода.
+        pool = self._pool()
+        submit_nowait = getattr(pool, "try_submit", None)
+        insert_many = getattr(pool, "execute_values_on", None)
+        if submit_nowait is None or insert_many is None:
+            missing = [
+                name
+                for name, helper in (
+                    ("try_submit", submit_nowait),
+                    ("execute_values_on", insert_many),
+                )
+                if helper is None
+            ]
+            raise InfrastructureError(
+                f"модуль БД не даёт {', '.join(missing)}: батч журнала должен уходить "
+                "одной вставкой и без ожидания свободного воркера, а собирать его "
+                "по одной строке — значит занять место в пуле на весь обход"
+            )
 
-        self.submit(_work)
+        def _work(conn: Any) -> None:
+            insert_many(conn, sql, rows)
+
+        # Отказ пула — ``PoolBusyError`` — переводится на язык буфера: буфер
+        # различает «не записалось сейчас» и «не запишется уже никогда», а
+        # имя ошибки пула знать ему не нужно и незачем.
+        from libs.enterprise_data.db import PoolBusyError
+
+        try:
+            submit_nowait(
+                lambda conn: self._guarded(conn, _work, audience), audience=audience
+            )
+        except PoolBusyError as exc:
+            raise FlushDeferred(
+                f"пул занят, батч журнала ({len(rows)}) вернётся в буфер: {exc}"
+            ) from exc
 
     def log_event(
         self,

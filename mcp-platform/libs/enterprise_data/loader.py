@@ -50,6 +50,7 @@ import psycopg2.extras
 
 from libs.enterprise_common.errors import InfrastructureError
 from libs.enterprise_data import db as default_pool
+from libs.enterprise_data.audience import JOB_AUDIENCE_RUNTIME
 from libs.enterprise_data.snapshot.contracts import CacheStore
 from libs.enterprise_data.snapshot.writer import TABLE_COMMENT_KEY
 
@@ -521,8 +522,15 @@ class SnapshotLoadService:
         return f'"{self._schema}"."{table}"'
 
     def _db_run(self, fn: Callable[[Any], Any]) -> Any:
-        """Выполнить ``fn(conn)`` на свободном соединении внедрённого пула."""
-        return self._pool.run(fn)
+        """Выполнить ``fn(conn)`` на свободном соединении внедрённого пула.
+
+        Класс работы объявляется явно: загрузка снимка — работа самой
+        платформы, идущая при её подъёме, а не вызов модели. Оставлять её
+        классом по умолчанию нельзя: ``load()`` грузит таблицы пулом из
+        нескольких нитей, и при классе ``model`` (очередь на одну работу,
+        ожидания ноль) четвёртая нить получила бы отказ и уронила загрузку.
+        """
+        return self._pool.run(fn, audience=JOB_AUDIENCE_RUNTIME)
 
     def _fetch_all(self, table: str) -> tuple[list[dict[str, Any]], Any]:
         def _work(conn: Any) -> tuple[list[dict[str, Any]], Any]:

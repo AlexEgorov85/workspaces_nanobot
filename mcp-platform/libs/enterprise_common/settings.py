@@ -740,6 +740,11 @@ _s("ENTERPRISE_SESSION_META_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "потолок пула: больше соединений не открывается никогда",
        file_key="pool.max_conn"),
+    _s("ENTERPRISE_POOL_RESERVED_WORKERS", "int", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "воркеров в начале пула, берущих только рантайм-работу: модельная "
+       "работа не занимает их и потому не ждёт их освобождения",
+       file_key="pool.reserved_workers"),
     _s("ENTERPRISE_POOL_TIMEOUT", "float", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "ожидание места в очереди и порог warning'а при ожидании аренды, сек",
@@ -772,6 +777,51 @@ _s("ENTERPRISE_SESSION_META_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "вывод активности db-worker'ов в stderr процесса",
        file_key="pool.print_activity"),
+    # -- классы работ в пуле -------------------------------------------------
+    # Пул один на всех, а ждать готовы не все: работа модели и работа рантайма
+    # делят и очередь, и воркеров, но у них разные пределы. Поэтому у каждой
+    # аудитории своя запись в ``platform.json → job_classes``.
+    #
+    # Здесь объявлены ключи и типы, а не числа: число в коде стало бы вторым
+    # ответом на вопрос «что применяется» и обнулило бы весь смысл раздела
+    # значений из файла. Неполная или лишняя запись — ошибка чтения файла, то
+    # есть сервер не поднимется, а не достроит класс значениями по умолчанию.
+    _s("ENTERPRISE_JOB_CLASS_MODEL_STATEMENT_TIMEOUT_MS", "int", FROM_FILE,
+       OWNER_PLATFORM, "servers/enterprise/server.py:_apply_pool_settings",
+       "потолок statement_timeout для модельной работы, мс; снимается после "
+       "задания, иначе следующий job унаследует чужой",
+       file_key="job_classes.model.statement_timeout_ms"),
+    _s("ENTERPRISE_JOB_CLASS_MODEL_QUEUE_MAXSIZE", "int", FROM_FILE,
+       OWNER_PLATFORM, "servers/enterprise/server.py:_apply_pool_settings",
+       "сколько модельной работы ждёт в своей очереди; переполнение — отказ, "
+       "а не ожидание, потому что ждать больше некого",
+       file_key="job_classes.model.queue_maxsize"),
+    _s("ENTERPRISE_JOB_CLASS_MODEL_WAIT_SEC", "float", FROM_FILE,
+       OWNER_PLATFORM, "servers/enterprise/server.py:_apply_pool_settings",
+       "сколько модельная работа ждёт свободного воркера, сек",
+       file_key="job_classes.model.wait_sec"),
+    _s("ENTERPRISE_JOB_CLASS_MODEL_LEASES", "bool", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "разрешена ли модельная работа в явной транзакции (аренда воркера)",
+       file_key="job_classes.model.leases"),
+    _s("ENTERPRISE_JOB_CLASS_RUNTIME_STATEMENT_TIMEOUT_MS", "int", FROM_FILE,
+       OWNER_PLATFORM, "servers/enterprise/server.py:_apply_pool_settings",
+       "потолок statement_timeout для рантайм-работы, мс; снимается после "
+       "задания, иначе следующий job унаследует чужой",
+       file_key="job_classes.runtime.statement_timeout_ms"),
+    _s("ENTERPRISE_JOB_CLASS_RUNTIME_QUEUE_MAXSIZE", "int", FROM_FILE,
+       OWNER_PLATFORM, "servers/enterprise/server.py:_apply_pool_settings",
+       "сколько рантайм-работы ждёт в своей очереди; переполнение — отказ, "
+       "а не ожидание",
+       file_key="job_classes.runtime.queue_maxsize"),
+    _s("ENTERPRISE_JOB_CLASS_RUNTIME_WAIT_SEC", "float", FROM_FILE,
+       OWNER_PLATFORM, "servers/enterprise/server.py:_apply_pool_settings",
+       "сколько рантайм-работа ждёт свободного воркера или аренды, сек",
+       file_key="job_classes.runtime.wait_sec"),
+    _s("ENTERPRISE_JOB_CLASS_RUNTIME_LEASES", "bool", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_apply_pool_settings",
+       "разрешена ли рантайм-работа в явной транзакции (аренда воркера)",
+       file_key="job_classes.runtime.leases"),
 )
 
 #: Имя -> настройка. Построен один раз; единственный источник правды.
@@ -923,6 +973,19 @@ SHARED_SETTINGS: tuple[str, ...] = (
     "ENTERPRISE_POOL_IDLE_TIMEOUT_SEC",
     "ENTERPRISE_POOL_JOB_MAX_RETRIES",
     "ENTERPRISE_POOL_PRINT_ACTIVITY",
+    "ENTERPRISE_POOL_RESERVED_WORKERS",
+    # Классы работ: как и сам пул, делятся между capability (в базу пишет
+    # `data`, журнал читает `audit`, снимок заливает загрузчик), поэтому
+    # объявлены здесь, а не в секции `data`. Пределы модельной и рантайм-
+    # работы — тоже не дело capability PostgreSQL-очереди.
+    "ENTERPRISE_JOB_CLASS_MODEL_STATEMENT_TIMEOUT_MS",
+    "ENTERPRISE_JOB_CLASS_MODEL_QUEUE_MAXSIZE",
+    "ENTERPRISE_JOB_CLASS_MODEL_WAIT_SEC",
+    "ENTERPRISE_JOB_CLASS_MODEL_LEASES",
+    "ENTERPRISE_JOB_CLASS_RUNTIME_STATEMENT_TIMEOUT_MS",
+    "ENTERPRISE_JOB_CLASS_RUNTIME_QUEUE_MAXSIZE",
+    "ENTERPRISE_JOB_CLASS_RUNTIME_WAIT_SEC",
+    "ENTERPRISE_JOB_CLASS_RUNTIME_LEASES",
     # Слой исполнения операций: платформенный, ни одной capability
     # не принадлежит — порог ответа или таймаут вызова не дело домена.
     "ENTERPRISE_EXEC_MAX_INLINE_BYTES",
@@ -946,7 +1009,13 @@ SHARED_SETTINGS: tuple[str, ...] = (
 #: настройки не является и в реестре не значится: это подстановка к файлу, а не
 #: ещё одна переменная окружения. В списке он по той же причине, что и ``pool``
 #: — пересекает сразу несколько capability, ни одной из них не принадлежит.
-SHARED_SECTIONS: tuple[str, ...] = ("db", "pool", "execution", "profiles")
+#:
+#: ``job_classes`` — по той же причине, что и ``pool``, но с записью на каждую
+#: аудиторию работы: секция вложена (``job_classes.model.wait_sec``), и без её
+#: объявления ключи класса выглядели бы опечатками в файле.
+SHARED_SECTIONS: tuple[str, ...] = (
+    "db", "pool", "job_classes", "execution", "profiles",
+)
 
 #: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуется
 #: :func:`pool_config`: иначе второй список ключей разошёлся бы с первым, и
@@ -954,6 +1023,7 @@ SHARED_SECTIONS: tuple[str, ...] = ("db", "pool", "execution", "profiles")
 POOL_SETTING_KEYS: dict[str, str] = {
     "min_conn": "ENTERPRISE_POOL_MIN_CONN",
     "max_conn": "ENTERPRISE_POOL_MAX_CONN",
+    "reserved_workers": "ENTERPRISE_POOL_RESERVED_WORKERS",
     "pool_timeout": "ENTERPRISE_POOL_TIMEOUT",
     "queue_maxsize": "ENTERPRISE_POOL_QUEUE_MAXSIZE",
     "reconnect_backoff_sec": "ENTERPRISE_POOL_RECONNECT_BACKOFF_SEC",
@@ -968,6 +1038,59 @@ POOL_SETTING_KEYS: dict[str, str] = {
 def pool_config(settings: Settings) -> dict[str, Any]:
     """Разрешённые значения пула в форме ``set_pool_config``."""
     return {key: settings.get(name) for key, name in POOL_SETTING_KEYS.items()}
+
+
+#: Ключ секции классов работ. Собран именем, а не выписывается трижды: ключ
+#: файла, имя настройки и раздел баннера должны называть одно и то же, иначе
+#: вопрос оператора «откуда взялось значение» не имеет ответа.
+JOB_CLASS_SECTION = "job_classes"
+
+
+def job_class_setting_names(audience: str) -> tuple[str, ...]:
+    """Имена настроек класса работы в порядке ключей его записи.
+
+    Нужно читателю, который печатает источник **каждого** применённого
+    значения: собирать имена по шаблону ``ENTERPRISE_JOB_CLASS_...`` в
+    другом файле — значит завести второе место, где написано, как называются
+    настройки класса, и оно разойдётся с реестром при первом же
+    переименовании. Пустой результат — аудитория, которой нет в файле: её
+    тогда ловит чтение файла, а не этот список.
+    """
+    prefix = f"{JOB_CLASS_SECTION}.{audience}."
+    return tuple(s.name for s in SETTINGS if s.key.startswith(prefix))
+
+
+def job_class_config(settings: Settings) -> dict[str, dict[str, Any]]:
+    """Разрешённые значения классов работ в форме ``set_job_class_config``.
+
+    Ключи читаются поимённо, а не через таблицу «ключ файла -> имя
+    настройки»: у каждой аудитории свой набор, и таблица стала бы вторым
+    местом, где этот набор записан. Полноту секции при этом не проверяет
+    читатель, а файл: отсутствующий ключ — ошибка ``FROM_FILE``, лишний —
+    «не настройка платформы». Обе останавливают сервер на старте и называют
+    ключ.
+
+    Новая аудитория обязана получить здесь свою ветку: иначе её значения
+    объявлены были бы, но никто бы их не прочитал.
+    """
+    return {
+        "model": {
+            "statement_timeout_ms": settings.get(
+                "ENTERPRISE_JOB_CLASS_MODEL_STATEMENT_TIMEOUT_MS"
+            ),
+            "queue_maxsize": settings.get("ENTERPRISE_JOB_CLASS_MODEL_QUEUE_MAXSIZE"),
+            "wait_sec": settings.get("ENTERPRISE_JOB_CLASS_MODEL_WAIT_SEC"),
+            "leases": settings.get("ENTERPRISE_JOB_CLASS_MODEL_LEASES"),
+        },
+        "runtime": {
+            "statement_timeout_ms": settings.get(
+                "ENTERPRISE_JOB_CLASS_RUNTIME_STATEMENT_TIMEOUT_MS"
+            ),
+            "queue_maxsize": settings.get("ENTERPRISE_JOB_CLASS_RUNTIME_QUEUE_MAXSIZE"),
+            "wait_sec": settings.get("ENTERPRISE_JOB_CLASS_RUNTIME_WAIT_SEC"),
+            "leases": settings.get("ENTERPRISE_JOB_CLASS_RUNTIME_LEASES"),
+        },
+    }
 
 
 #: capability -> её настройки, для файла и документации.
@@ -996,6 +1119,16 @@ def capabilities_of(setting_name: str) -> tuple[str, ...]:
 BY_FILE_KEY: dict[str, Setting] = {
     s.key: s for s in SETTINGS if s.owner == OWNER_PLATFORM
 }
+
+#: Ключи файла, значение которых — **структура**, а не число и не строка:
+#: список таблиц с метками (``audit.tables``) и объявления индексов
+#: (``vectors.indexes``). Такие ключи не разворачиваются в точечные
+#: настройки: подстановка ключа внутрь значения превратила бы объявление в
+#: набор настроек, которых никто не объявлял, а чтение — в чтение по
+#: придуманному имени.
+STRUCTURED_FILE_KEYS: frozenset[str] = frozenset(
+    s.key for s in SETTINGS if s.kind in ("table_list", "json")
+)
 
 
 def read_secrets(path: Path | None = None) -> dict[str, str]:
@@ -1042,8 +1175,15 @@ def read_secrets(path: Path | None = None) -> dict[str, str]:
     return values
 
 
-def _flatten(raw: dict[str, Any], opaque: frozenset[str] = frozenset()) -> dict[str, Any]:
-    """Развернуть вложенные секции в точечные ключи, один уровень глубины.
+def _flatten(
+    raw: dict[str, Any],
+    opaque: frozenset[str] = STRUCTURED_FILE_KEYS,
+) -> dict[str, Any]:
+    """Развернуть вложенные секции в точечные ключи.
+
+    Глубина не ограничена одним уровнем: ``job_classes.model.wait_sec`` —
+    это запись об одной аудитории внутри секции классов, и второй уровень
+    вложенности у неё настоящий, а не ошибка формы файла.
 
     Ключи, начинающиеся с подчёркивания (``_about``, ``_owner``), —
     комментарии в данных, а не настройки; они пропускаются молча, иначе
@@ -1053,22 +1193,24 @@ def _flatten(raw: dict[str, Any], opaque: frozenset[str] = frozenset()) -> dict[
         opaque: ключи, значение которых — **структура** (список таблиц с
             метками, JSON-объект объявлений индексов). Их не разворачиваем:
             подстановка ключа внутрь значения превратила бы объявление в
-            набор отдельных настроек, которых никто не объявлял.
+            набор отдельных настроек, которых никто не объявлял. Сравнение
+            идёт по полному пути, а не по имени секции: ``vectors.indexes``
+            — вложенный объект, и развернуть его значило бы выдумать
+            настройку на каждый индекс.
     """
     flat: dict[str, Any] = {}
-    for key, value in raw.items():
-        if str(key).startswith("_"):
-            continue
-        if isinstance(value, dict):
-            if str(key) in opaque:
-                flat[str(key)] = value
+
+    def walk(prefix: str, node: dict[str, Any]) -> None:
+        for key, value in node.items():
+            if str(key).startswith("_"):
                 continue
-            for sub, sub_value in value.items():
-                if str(sub).startswith("_"):
-                    continue
-                flat[f"{key}.{sub}"] = sub_value
-        else:
-            flat[str(key)] = value
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict) and path not in opaque:
+                walk(path, value)
+            else:
+                flat[path] = value
+
+    walk("", raw)
     return flat
 
 
@@ -1176,12 +1318,8 @@ def read_platform_file(path: Path | None = None) -> dict[str, Any]:
         raw.pop(reserved, None)
 
     allowed = {s.key for s in settings_owned_by(OWNER_PLATFORM)}
-    structured = frozenset(
-        s.key for s in settings_owned_by(OWNER_PLATFORM)
-        if s.kind in ("table_list", "json")
-    )
     flat: dict[str, Any] = {}
-    for key, value in _flatten(raw, structured).items():
+    for key, value in _flatten(raw).items():
         if key not in allowed:
             raise InfrastructureError(
                 f"{target.name}: {key!r} — не настройка платформы "
