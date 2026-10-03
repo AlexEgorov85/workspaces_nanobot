@@ -41,6 +41,23 @@ class TestRuntimeEnvExport:
         assert os.environ["NANOBOT_PYTHON"] == os.sys.executable
         assert Path(os.environ["NANOBOT_PROJECT_ROOT"]) == PROJECT_ROOT
 
+# --- секция enterprise_mcp в config.json --------------------------------
+
+
+def _load_enterprise_mcp_raw() -> dict:
+    """Секция объявления сервера — как она лежит в файле.
+
+    В корне ``config.json`` её быть не может: корневой объект разбирает
+    схема nanobot, а она отвергает неизвестный ключ верхнего уровня. Поэтому
+    секция живёт под ``gateway.agent.enterprise_mcp`` и поднимается в
+    ``SETTINGS`` функцией ``config._lift_agent_sections`` — здесь читается
+    именно файл, чтобы проверять объявление как оно записано, а не то, что
+    из него получилось после мерджа с профилями.
+    """
+    raw = json.loads((PROJECT_ROOT / "config.json").read_text(encoding="utf-8"))
+    return raw["gateway"]["agent"]["enterprise_mcp"]
+
+
 class TestEnterpriseMcpSection:
     def test_section_exists_and_is_typed(self) -> None:
         section = _load_enterprise_mcp_raw()
