@@ -110,6 +110,86 @@ def _one_worker_pool(wait_sec: float | None = None) -> None:
     _db.set_job_class_config(_classes(classes))
 
 
+def _flexible_places() -> int:
+    """Сколько воркеров берут обе аудитории — столько мест есть у модели."""
+    return int(_POOL_FROM_FILE["max_conn"]) - int(_POOL_FROM_FILE["reserved_workers"])
+
+
+def _assert_pool_shape() -> None:
+    """Пул из файла, пригодный для проверки запаса: мест у модели ровно одно.
+
+    Сценарий ниже держится на двух числах из ``platform.json``: резерв
+    ``reserved_workers`` и ``max_conn``. Если они поменяются, проверять
+    станет нечего, и молча проверить другую конфигурацию хуже, чем упасть.
+    """
+    stats = get_stats()
+    assert stats["workers"] == int(_POOL_FROM_FILE["max_conn"]), "поднялся не весь пул"
+    assert stats["reserved_workers"] == int(_POOL_FROM_FILE["reserved_workers"])
+    assert _flexible_places() == 1, (
+        "сценарий держится на одном гибком месте: при двух и более он не тот"
+    )
+    _db.probe_connections()
+    time.sleep(0.2)
+    assert get_stats()["workers"] == int(_POOL_FROM_FILE["max_conn"])
+
+
+def _wait_until(predicate, what: str, timeout: float = 5.0) -> None:
+    """Дождаться состояния пула вместо фиксированной паузы.
+
+    Фиксированная пауза — это либо медленный тест, либо гонка: состояние
+    пула меняется по событию в чужом потоке, и ждать его надо условием.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"не дождались: {what}; stats={get_stats()}")
+
+
+def _running(audience: str) -> int:
+    return get_stats()["audiences"][audience]["running"]
+
+
+class _Call:
+    """Вызов работы в отдельном потоке, с результатом и отказом на виду.
+
+    Отдельный поток нужен, чтобы занять воркер и отпустить его позже:
+    вызывающий поток на ``run()`` блокируется. Отказ, пойманный потоком,
+    обязан попасть в тест — иначе он ушёл бы в ``threading.excepthook`` и
+    был бы потерян, а прогон молчал бы.
+    """
+
+    def __init__(self, fn, *, audience: str) -> None:  # noqa: ANN001
+        self.result: object = None
+        self.error: BaseException | None = None
+        self._fn = fn
+        self._audience = audience
+        self._thread = threading.Thread(target=self._work, daemon=True)
+
+    def _work(self) -> None:
+        try:
+            self.result = _db.run(self._fn, audience=self._audience)
+        except BaseException as exc:  # noqa: BLE001 — отказ должен попасть в тест
+            self.error = exc
+
+    def start(self) -> _Call:
+        self._thread.start()
+        return self
+
+    def alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def join(self, timeout: float = 10.0) -> None:
+        self._thread.join(timeout)
+        assert not self._thread.is_alive(), "работа не завершилась за отведённое время"
+
+
+def _hold(gate: threading.Event) -> None:
+    """Тело работы, удерживающее воркер, пока гейт не отпустят."""
+    gate.wait(10)
+
+
 class TestWaitSecBoundsPlaceNotResult:
     def test_long_work_beyond_wait_sec_returns_result_once(self) -> None:
         """Работа дольше предела ожидания всё равно возвращает результат.
@@ -138,15 +218,33 @@ class TestWaitSecBoundsPlaceNotResult:
         assert done == ["вставлено"], "работа обязана выполниться ровно один раз"
         assert elapsed >= 0.3, "результат ждали, а не отказались по таймауту"
 
-    def test_model_class_with_zero_wait_returns_result(self) -> None:
-        """Класс с ``wait_sec: 0.0`` тоже возвращает результат.
+    def test_model_class_waits_for_a_place_and_returns_result(self) -> None:
+        """Модельная работа возвращает результат, хотя место она ждёт.
 
-        Ноль означает «не ждать места», а не «не дожидаться работы»: иначе
-        любая работа модели, прошедшая допуск, заканчивалась бы отказом, и
-        неблокирующая постановка не умела бы ничего.
+        Два утверждения, и их важно не смешивать. Механика: предел ожидания —
+        это предел ожидания **места**, а не результата, поэтому работа, взятая
+        воркером, возвращает результат при любом объявленном ``wait_sec``, и
+        ``0.0`` в том числе. Иначе неблокирующая постановка не умела бы
+        ничего. Объявление: в файле модель объявлена с ненулевым ожиданием,
+        потому что мест у неё ровно одно (гибкий воркер, каким заканчивается
+        резерв), и ``0.0`` отказывал бы второму параллельному вызову на
+        ровном месте, пока первый идёт.
+
+        Само свойство «два параллельных вызова не отказывают» проверяется
+        отдельно, на настоящем пуле с резервом.
         """
-        assert _class_wait_sec(JOB_AUDIENCE_MODEL) == 0.0, "модель без ожидания"
+        assert _class_wait_sec(JOB_AUDIENCE_MODEL) > 0.0, (
+            "модель обязана ждать своё место: при 0.0 второй параллельный "
+            "вызов отказывается, пока первый идёт"
+        )
         _one_worker_pool()
+
+        assert try_submit(lambda conn: "ok", audience=JOB_AUDIENCE_MODEL) == "ok"
+
+        # Механика нуля проверяется на классе, объявленном с нулевым ожиданием:
+        # место было, работа взята, результат возвращён — отказа по wait_sec
+        # быть не может даже при объявленном 0.0.
+        _db.set_job_class_config(_classes({JOB_AUDIENCE_MODEL: {"wait_sec": 0.0}}))
 
         assert try_submit(lambda conn: "ok", audience=JOB_AUDIENCE_MODEL) == "ok"
 
@@ -348,3 +446,177 @@ class TestSnapshotLoadDeclaresItsClass:
             "загрузка не должна была уйти в модельный класс и получить отказ"
         )
         assert get_stats()["audiences"][JOB_AUDIENCE_RUNTIME]["rejected"] == 0
+
+
+class TestModelWaitsForItsOwnPlace:
+    """Место у модели одно, и ждать его она вправе.
+
+    Сценарий боевой: резерв занят работой системы, агент зовёт
+    ``history_search`` и ``schema_check`` одновременно. При ``wait_sec: 0.0``
+    у модели не было ни одного свободного места, и второй вызов отказывался
+    ВСЕГДА, пока первый идёт — на живом стенде это и случилось
+    (``PoolBusyError: класс 'model' не влезает за 0.0с``).
+
+    Здесь проверяются три вещи, и они не заменяют друг друга: два вызова
+    проходят, отказ по-прежнему возникает (иначе отказ «починят», убрав его
+    совсем), и резерв по-прежнему не пускает модель на место системы.
+    """
+
+    def test_two_parallel_model_calls_are_both_served(self) -> None:
+        """Два параллельных вызова модели не отказывают ни один.
+
+        Оба зарезервированных воркера заняты длинной работой системы, гибкое
+        место одно. Первый модельный вызов занимает его, второй обязан его
+        дождаться — и оба получают результат.
+        """
+        _assert_pool_shape()
+        reserved = int(_POOL_FROM_FILE["reserved_workers"])
+        settle_sec = 0.3
+
+        # Кто именно какой воркер, известно только по наборам аудиторий: работу
+        # модели способен взять только гибкий воркер, а работу системы — любой.
+        # Поэтому порядок обратный обычному: сначала занимаем гибкое место
+        # работой модели, и только потом кладём работу системы — её уже могут
+        # взять исключительно зарезервированные воркеры, потому что гибкий
+        # занят. Иначе работа системы могла бы лечь на гибкое место, и модель
+        # осталась бы вовсе без места — проверялся бы тогда не тот сценарий.
+        flex_gate = threading.Event()
+        flex = _Call(lambda conn: _hold(flex_gate), audience=JOB_AUDIENCE_MODEL).start()
+        _wait_until(
+            lambda: _running(JOB_AUDIENCE_MODEL) == 1,
+            "гибкое место не занято модельной работой",
+        )
+
+        system_gate = threading.Event()
+        holders = [
+            _Call(lambda conn: _hold(system_gate), audience=JOB_AUDIENCE_RUNTIME).start()
+            for _ in range(reserved)
+        ]
+        _wait_until(
+            lambda: _running(JOB_AUDIENCE_RUNTIME) == reserved,
+            "зарезервированные воркеры не заняты работой системы",
+        )
+
+        # Гибкое место освобождаем: резерв занят системой, место у модели есть.
+        flex_gate.set()
+        flex.join()
+        taken_before = get_stats()["audiences"][JOB_AUDIENCE_MODEL]["taken"]
+
+        # Два модельных вызова одновременно. Первый занимает единственное
+        # гибкое место и держит его, пока второй не дойдёт до ожидания; при
+        # wait_sec: 0.0 второй отказался бы здесь, не дождавшись ничего.
+        first_gate = threading.Event()
+        first = _Call(lambda conn: _hold(first_gate), audience=JOB_AUDIENCE_MODEL)
+        first.start()
+        _wait_until(
+            lambda: _running(JOB_AUDIENCE_MODEL) == 1,
+            "первый модельный вызов не взял гибкое место",
+        )
+
+        second = _Call(lambda conn: "второй", audience=JOB_AUDIENCE_MODEL)
+        second.start()
+        # Пауза, в которой отказ при wait_sec: 0.0 проявился бы сразу: второй
+        # вызов не дождался бы места и упал, не дождавшись конца первого.
+        time.sleep(settle_sec)
+        assert second.error is None, f"второй вызов отказан, не дождавшись: {second.error}"
+        assert first.alive(), "первый вызов должен держать место, пока идёт второй"
+
+        first_gate.set()
+        first.join()
+        second.join()
+
+        try:
+            assert first.error is None, f"первый вызов отказан: {first.error}"
+            assert second.error is None, f"второй вызов отказан: {second.error}"
+            assert second.result == "второй"
+            stats = get_stats()["audiences"][JOB_AUDIENCE_MODEL]
+            assert stats["rejected"] == 0, "ни один модельный вызов не отклонён"
+            # Счётчик taken считает и занятие гибкого места на подготовке, поэтому
+            # сравниваем приращение, а не значение: проверяем ровно два вызова.
+            assert stats["taken"] - taken_before == 2, "оба вызова взяты воркерами"
+            assert stats["running"] == 0, "все модельные работы завершены"
+        finally:
+            system_gate.set()
+            for holder in holders:
+                holder.join()
+
+    def test_model_is_refused_when_its_worker_is_busy_longer_than_wait(self) -> None:
+        """Отказ не убран: воркер занят дольше объявленного ожидания.
+
+        Ждать место — не то же самое, что ждать вечно. Если гибкое место
+        занято дольше ``wait_sec`` модели, вызов обязан отказать: иначе
+        ожидание модели стало бы неограниченным, а это ровно то, что change
+        и убирал.
+
+        Предел здесь подставляется, а не берётся из файла, и в этом суть
+        проверки: она обязана ловить не значение, а САМ отказ. Если бы она
+        зависела от объявленного ``wait_sec``, её легко было бы «починить»
+        вместе с отказом — убрав и то и другое разом, и страж молчал бы.
+        """
+        _assert_pool_shape()
+        limit = 0.2
+        _db.set_job_class_config(_classes({JOB_AUDIENCE_MODEL: {"wait_sec": limit}}))
+
+        gate = threading.Event()
+        holder = _Call(lambda conn: _hold(gate), audience=JOB_AUDIENCE_MODEL).start()
+        _wait_until(
+            lambda: _running(JOB_AUDIENCE_MODEL) == 1,
+            "гибкое место не занято модельной работой",
+        )
+
+        t0 = time.monotonic()
+        with pytest.raises(PoolBusyError) as refused:
+            _db.run(lambda conn: "опоздавший", audience=JOB_AUDIENCE_MODEL)
+        elapsed = time.monotonic() - t0
+
+        gate.set()
+        holder.join()
+
+        assert "pool_busy" in str(refused.value)
+        assert elapsed >= limit, "отказ пришёл раньше объявленного ожидания"
+        stats = get_stats()["audiences"][JOB_AUDIENCE_MODEL]
+        assert stats["rejected"] == 1, "отказ учтён"
+        assert get_stats()["queue_size"] == 0, "отказанная работа не стоит в очереди"
+
+    def test_runtime_work_does_not_wait_for_the_busy_model_worker(self) -> None:
+        """Система не ждёт модель: работа runtime обслуживается немедленно.
+
+        Гибкое место занято модельной работой, а работа системы обслуживает
+        зарезервированный воркер сразу. Именно это объявляет резерв, и
+        ненулевое ожидание модели его не отменяет: ожидание достаётся модели,
+        а не системе.
+
+        Признак — не «прошло быстро», а «обслужено, пока модель ещё шла»:
+        если бы работа системы ждала место модели, она завершилась бы только
+        после ``gate.set()``, то есть после конца модельной работы. Проверка
+        на времени была бы слабее: она замеряет то, что и так быстро.
+        """
+        _assert_pool_shape()
+
+        gate = threading.Event()
+        holder = _Call(lambda conn: _hold(gate), audience=JOB_AUDIENCE_MODEL).start()
+        _wait_until(
+            lambda: _running(JOB_AUDIENCE_MODEL) == 1,
+            "гибкое место не занято модельной работой",
+        )
+
+        # Модельная работа ещё идёт и в этот момент ещё не отпущена.
+        assert holder.alive(), "модельная работа обязана продолжаться"
+        t0 = time.monotonic()
+        result = _db.run(lambda conn: "сработало", audience=JOB_AUDIENCE_RUNTIME)
+        elapsed = time.monotonic() - t0
+        served_while_model_running = _running(JOB_AUDIENCE_MODEL) == 1
+
+        gate.set()
+        holder.join()
+
+        assert result == "сработало", "работа системы обслужена, несмотря на модель"
+        assert served_while_model_running, (
+            "работа системы дождалась конца модельной — система ждёт модель"
+        )
+        assert _running(JOB_AUDIENCE_RUNTIME) == 0
+        assert get_stats()["audiences"][JOB_AUDIENCE_RUNTIME]["rejected"] == 0, (
+            "работа системы не должна отказывать из-за занятой модели"
+        )
+        assert elapsed < 1.0, "работа системы обслужена не сразу"
+

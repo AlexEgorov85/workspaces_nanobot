@@ -81,7 +81,7 @@ def submit_transaction(self, job: Any, *, audience: str) -> Any: ...
 ```json
 "pool": { ..., "reserved_workers": 2 },
 "job_classes": {
-  "model":   { "statement_timeout_ms": 15000, "queue_maxsize": 1,  "wait_sec": 0.0, "leases": false },
+  "model":   { "statement_timeout_ms": 15000, "queue_maxsize": 1,  "wait_sec": 2.0, "leases": false },
   "runtime": { "statement_timeout_ms": 5000,  "queue_maxsize": 64, "wait_sec": 5.0, "leases": true }
 }
 ```
@@ -93,6 +93,13 @@ def submit_transaction(self, job: Any, *, audience: str) -> Any: ...
 Рекомендуемые значения `pool` для этой конфигурации:
 `min_conn: 3`, `max_conn: 3`, `reserved_workers: 2`,
 `pool_timeout: 5.0`, `queue_maxsize: 64`.
+
+`wait_sec` модели ненулевой **намеренно**: мест у модели ровно одно —
+гибкий воркер, каким заканчивается резерв, — и при `0.0` второй
+параллельный модельный вызов отказывался бы, пока первый идёт. Ноль
+ожидания не давал безопасности: резерв уже гарантирует системе два места,
+а `_take_job` никогда не отдаёт работу модели зарезервированному воркеру.
+Очередь модели остаётся на одну работу: гибкий воркер один.
 
 ## Порядок
 

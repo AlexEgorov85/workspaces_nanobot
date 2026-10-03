@@ -715,42 +715,92 @@ class TestPool:
 
     def test_lease_waiter_released_on_shutdown(self, mock_psycopg2):
         """Ждущая транзакция при shutdown не висит вечно — получает
-        RuntimeError, а не блокируется навсегда."""
+        RuntimeError, а не блокируется навсегда.
+
+        Держатель аренды не имеет права пережить тест: освобождая аренду уже
+        после остановки пула, он ткнулся бы в глобальную конфигурацию, которую
+        к тому времени переставили следующие тесты, и отказ ушёл бы в
+        ``threading.excepthook`` мимо прогна. Поэтому он ждёт стоп-сигнала, а
+        тест дожидается потока и проверяет, что тот закончил.
+        """
         mock_psycopg2["set_pool_config"](
             _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0})
         )
+        # Классы объявлены здесь, а не взяты из окружения: у ``_CLASSES`` у
+        # модели ``leases: false``, а этот тест про аренду. Предел ожидания
+        # нужен обоим потокам, но с разных сторон — ждущей аренде с запасом до
+        # shutdown, а освобождению аренды ровно на израсходование предела.
+        mock_psycopg2["set_job_class_config"]({
+            "model": {
+                "statement_timeout_ms": 15000,
+                "queue_maxsize": 1,
+                "wait_sec": 1.0,
+                "leases": True,
+            },
+            "runtime": {
+                "statement_timeout_ms": 5000,
+                "queue_maxsize": 8,
+                "wait_sec": 1.0,
+                "leases": True,
+            },
+        })
         mock_psycopg2["configure"]("dsn")
         _db = mock_psycopg2["_db"]
         mgr = _db._get_manager()
 
         held = threading.Event()
+        # Стоп-сигнал вместо сна: держатель отпускает аренду под присмотром
+        # теста, а не через десять секунд после него.
+        release = threading.Event()
+        keeper_result: list[str] = []
 
         def _keeper():
-            with mock_psycopg2["transaction"]() as conn:
-                conn.execute("UPDATE t SET x=1")
-                held.set()
-                time.sleep(10)
+            try:
+                with mock_psycopg2["transaction"]() as conn:
+                    conn.execute("UPDATE t SET x=1")
+                    held.set()
+                    # Предел — страховка на случай, если тест упал раньше, чем
+                    # подал сигнал: поток обязан умереть сам, без внешнего join.
+                    release.wait(timeout=30)
+            except Exception as exc:
+                # Отказ на освобождении аренды ожидаем, и почему — под проверкой
+                # ниже. Ловить его здесь обязательно: иначе он ушёл бы в
+                # threading.excepthook, и прогон об отказе не узнал бы.
+                keeper_result.append(type(exc).__name__)
 
         t = threading.Thread(target=_keeper, daemon=True)
         t.start()
-        assert held.wait(timeout=5)
+        try:
+            assert held.wait(timeout=5)
 
-        waiter_result = []
+            waiter_result = []
 
-        def _waiter():
-            try:
-                with mock_psycopg2["transaction"]() as conn:
-                    conn.execute("SELECT 1")
-                waiter_result.append("ok")
-            except Exception as exc:
-                waiter_result.append(type(exc).__name__)
+            def _waiter():
+                try:
+                    with mock_psycopg2["transaction"]() as conn:
+                        conn.execute("SELECT 1")
+                    waiter_result.append("ok")
+                except Exception as exc:
+                    waiter_result.append(type(exc).__name__)
 
-        w = threading.Thread(target=_waiter, daemon=True)
-        w.start()
-        time.sleep(0.3)  # waiter уже в queue-ожидании lease
-        mgr.shutdown()
-        w.join(timeout=5)
-        assert waiter_result == ["RuntimeError"]
+            w = threading.Thread(target=_waiter, daemon=True)
+            w.start()
+            time.sleep(0.3)  # waiter уже в queue-ожидании lease
+            mgr.shutdown()
+            w.join(timeout=5)
+            assert waiter_result == ["RuntimeError"]
+        finally:
+            release.set()
+            t.join(timeout=10)
+
+        assert not t.is_alive(), "держатель аренды пережил тест"
+        # Освобождение аренды, пережившей shutdown, отказывается — и это
+        # законно: пул остановлен, воркер, взявший аренду, снят, а допуск
+        # классом теперь один на всех, включая освобождение. Раньше этот отказ
+        # случался через десять секунд после конца теста и всплывал в полном
+        # прогоне как PytestUnhandledThreadExceptionWarning — то есть дефект был
+        # виден только целиком, и никто его не ловил.
+        assert keeper_result == ["PoolBusyError"], keeper_result
 
     def test_unconnected_worker_yields_to_connected(self, mock_psycopg2):
         """Неподключённый воркер не отнимает задачи у подключённых.
