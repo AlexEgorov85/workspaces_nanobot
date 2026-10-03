@@ -201,10 +201,14 @@ class AuditAnalyzerQueryTool(Tool):
         # раздел ``enterprise_mcp`` выключен или не задан (``config.json``). Tool
         # остаётся зарегистрированным и отвечает структурной ошибкой, чтобы
         # модель видела причину, а не «неизвестный инструмент».
+        # ``_db_logging_service`` — с подчёркиванием: именно так его
+        # проставляет ``project_tool_loader`` на ``ctx``. Раньше здесь было
+        # ``db_logging_service``, и ``getattr`` молча возвращал ``None``:
+        # ``request_id_source`` терял связь прогона с ``agent_question_runs``.
         return cls(
             config=config,
             client=getattr(ctx, "_enterprise_mcp", None),
-            request_id_source=getattr(ctx, "db_logging_service", None),
+            request_id_source=getattr(ctx, "_db_logging_service", None),
         )
 
     @property
