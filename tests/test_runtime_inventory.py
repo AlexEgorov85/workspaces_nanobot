@@ -341,23 +341,26 @@ class TestDiffProjectTools:
     def test_missing_required(self) -> None:
         from lib.services.runtime_inventory import diff_project_tools
 
+        # Имена взяты из живого канона, а не выписаны: после сноса
+        # audit_analyzer_query/legal_summarizer_query/history_search фикстуры
+        # на них перестали существовать, и молчаливый «пример» оказался бы
+        # проверкой несуществующего инструмента.
         diff = diff_project_tools(
-            registered=["history_search"],
-            skipped_disabled=["ExampleTool", "legal_summarizer_query"],
+            registered=["document_read"],
+            skipped_disabled=["ExampleTool", "compact_context"],
         )
-        assert "compact_context" in diff["missing_required"]
-        assert "legal_summarizer_query" in diff["disabled_required"]
+        assert "compact_context" in diff["disabled_required"]
 
     def test_failed_listed(self) -> None:
         from lib.services.runtime_inventory import diff_project_tools
 
         diff = diff_project_tools(
-            registered=["compact_context", "history_search"],
+            registered=["document_read"],
             skipped_disabled=["ExampleTool"],
-            failed=["legal_summarizer_query"],
+            failed=["compact_context"],
         )
-        assert "legal_summarizer_query" in diff["missing_required"]
-        assert "legal_summarizer_query" in diff["failed"]
+        assert "compact_context" in diff["missing_required"]
+        assert "compact_context" in diff["failed"]
 
 
 class TestParseProjectToolsDetail:

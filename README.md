@@ -57,12 +57,16 @@ python tools/migrate.py --apply                               # миграции
 > Состояние индексов видно операцией `index_stats` capability `vectors`.
 
 > **Навык `audit_analyzer`** не имеет собственного CLI и не ходит в данные
-> напрямую: агент вызывает инструмент `workspace/tools/audit_analyzer_query.py`,
-> который обращается к capability `audit` платформы enterprise-mcp по MCP.
-> Операции: `list_scripts` (каталог готовых скриптов), `run_script`,
-> `generate_sql` (NL→SQL, запрос строит и проверяет платформа), `vector_search`.
+> напрямую: модель вызывает операции capability `audit` платформы
+> enterprise-mcp как `mcp_enterprise_*` — процесс поднимает штатный
+> MCP-клиент нанобота, объявленный в `config.json → tools.mcpServers`.
+> Операции: `mcp_enterprise_list_scripts` (каталог готовых скриптов),
+> `mcp_enterprise_run_script`, `mcp_enterprise_generate_sql` (NL→SQL, запрос
+> строит и проверяет платформа), `mcp_enterprise_vector_search`.
 > Модель не пишет SQL: белый список таблиц и потолок строк проверяются до
-> выполнения. Внешний контракт — `SKILL.md`.
+> выполнения. Личность вызова подставляет `McpIdentityHook` — самой её
+> передавать не нужно. Внешний контракт — `SKILL.md` и общий контракт вызовов
+> в `workspace/skills/enterprise_mcp/SKILL.md`.
 
 Подробности по каждой команде — в [docs/INTERNAL_API.md](docs/INTERNAL_API.md) и
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

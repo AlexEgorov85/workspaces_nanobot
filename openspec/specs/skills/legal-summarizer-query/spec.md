@@ -1,193 +1,196 @@
 # skills/legal-summarizer-query Specification
 
 ## Purpose
-Описывает контракт read-only follow-up запросов к skill `legal_summarizer`
-через tool `legal_summarizer_query`: IPC-протокол между wrapper и
-`workspace/skills/legal_summarizer/scripts/cli_query.py`, структуру
-диагностики manifest и поведение wrapper при success / domain error /
-process failure.
+
+Контракт read-only follow-up вопросов по уже разобранному юридическому
+документу: capability `legal_summarizer` отвечает на вопрос по `operation_id`,
+не разбирая PDF заново.
+
+Спека описывает поведение capability, а не способ вызова. Граница вызова
+(subprocess между tool'ом агента и CLI) снята вместе с агентской обёрткой
+(change `2026-10-03-mcp-native-tools`, п. D6): домен вызывается в том же
+процессе, модель получает операцию `mcp_enterprise_query_operation`, а
+`cli_query.py` остался оболочкой для ручного запуска.
+
+Общий контракт вызовов — личность, конверт `_execution`, коды отказа —
+описан в `workspace/skills/enterprise_mcp/SKILL.md` и в
+`openspec/specs/runtime/call-contract/spec.md`. Здесь описано только то, что
+операция делает с сохранённым состоянием операции.
 
 ## Scope
 
-`platform` — домен и IPC-контракт уехали в capability `legal_summarizer`; в агенте осталась только регистрация tool'а-обёртки
-Реализация: `mcp-platform/libs/legal_summarizer/`, `workspace/tools/legal_summarizer_query.py`
+`platform` — домен и операция живут в capability `legal_summarizer`; в агенте не
+осталось ни обёртки, ни её регистрации.
+
+Реализация: `mcp-platform/libs/legal_summarizer/`,
+`mcp-platform/servers/enterprise/capabilities/legal_summarizer/`.
+
+Вызов: операция `query_operation`, модели — как
+`mcp_enterprise_query_operation` (объявлена в
+`config.json → tools.mcpServers.enterprise.enabled_tools`).
 
 ## Requirements
 
-### Requirement: Subprocess IPC contract between tool wrapper and CLI query
-The system SHALL define an IPC contract between the `legal_summarizer_query`
-tool wrapper and `cli_query.py` that distinguishes successful responses,
-domain errors, and process failures.
-
-#### Scenario: Successful response
-- **WHEN** `cli_query.py` exits with `returncode = 0` AND writes a
-  parseable JSON value (object, array, scalar) to stdout
-- **THEN** the wrapper SHALL return the parsed JSON payload serialized as
-  a JSON string (UTF-8, ``ensure_ascii=False``, ``default=str``) in the
-  same format as existing successful tool responses
-- **AND** the wrapper SHALL NOT inspect ``status`` on the success path
-  (success-path validation is the responsibility of the CLI, not the
-  wrapper — see design D3 «Сохранить нынешний успешный путь»).
-  Out-of-band malformed payloads with ``returncode = 0`` (empty stdout,
-  stdout not parseable as JSON) trigger the separate ``empty_response``
-  / ``invalid_json`` scenarios below.
-
-#### Scenario: Domain error with structured JSON
-- **WHEN** `cli_query.py` exits with `returncode != 0` AND writes a
-  parseable JSON object whose top-level `status` field equals `"error"`
-- **THEN** the wrapper SHALL return the parsed JSON payload serialized as
-  a JSON string, preserving `error_type`, `message`, and all other
-  structured fields (for example `operation_id`, `version_observed`,
-  `path`)
-- **AND** the wrapper SHALL NOT add its own generic error envelope on
-  top
-
-#### Scenario: Non-error JSON on non-zero exit treated as process failure
-- **WHEN** `cli_query.py` exits with `returncode != 0` AND stdout is
-  parseable JSON that does NOT satisfy the domain-error shape
-  (missing top-level `status`, `status != "error"`, or stdout is a JSON
-  array instead of an object)
-- **THEN** the wrapper SHALL return its own error envelope with
-  `status = "error"` and `error_type = "cli_failed"`
-- **AND** the error message SHALL include the non-zero `returncode` and
-  the first fragment of `stderr` for diagnostics
-- **AND** the wrapper SHALL NOT propagate the unexpected JSON payload to
-  the caller as a success
-
-#### Scenario: Empty stdout on non-zero exit treated as process failure
-- **WHEN** `cli_query.py` exits with `returncode != 0` AND stdout is
-  empty
-- **THEN** the wrapper SHALL return its own error envelope with
-  `status = "error"` and `error_type = "cli_failed"`
-- **AND** the error message SHALL include the non-zero `returncode` and
-  the first fragment of `stderr` for diagnostics
-
-#### Scenario: Empty response on success exit
-- **WHEN** `cli_query.py` exits with `returncode = 0` AND stdout is empty
-- **THEN** the wrapper SHALL return its own error envelope with
-  `status = "error"` and `error_type = "empty_response"`
-
-#### Scenario: Non-JSON on success exit
-- **WHEN** `cli_query.py` exits with `returncode = 0` AND stdout is not
-  parseable as JSON (for example a traceback or a stray text fragment)
-- **THEN** the wrapper SHALL return its own error envelope with
-  `status = "error"` and `error_type = "invalid_json"`
-
 ### Requirement: Manifest diagnostic taxonomy
-The system SHALL distinguish three reasons a manifest is unavailable for
-follow-up queries: missing, corrupted, and unsupported version.
 
-#### Scenario: Manifest file missing
-- **WHEN** `cli_query.py` is invoked for an `operation_id` whose manifest
-  file does not exist on disk
-- **THEN** the wrapper SHALL receive an error envelope with
-  `error_type = "manifest_not_found"` and `status = "error"`
-- **AND** the error envelope SHALL include `operation_id` and a path hint
-  showing where the manifest was expected
+Capability SHALL различать ровно три причины недоступности manifest: файл
+отсутствует, файл повреждён, версия файла не поддерживается.
 
-#### Scenario: Manifest JSON corrupted
-- **WHEN** `cli_query.py` is invoked for an `operation_id` whose manifest
-  file exists but cannot be parsed as valid JSON
-- **THEN** the wrapper SHALL receive an error envelope with
-  `error_type = "manifest_corrupted"` and `status = "error"`
+Домен SHALL сообщать их именами `manifest_not_found` /
+`manifest_corrupted` / `manifest_unsupported_version`, а capability SHALL
+переводить их в коды конверта `not_found` / `internal` /
+`upstream_unavailable` по таблице `_ERROR_CODES` в
+`.../legal_summarizer/service/main.py`.
 
-#### Scenario: Manifest version unsupported
-- **WHEN** `cli_query.py` is invoked for an `operation_id` whose manifest
-  parses as JSON but its `version` field is missing or not equal to the
-  current manifest version
-- **THEN** the wrapper SHALL receive an error envelope with
-  `error_type = "manifest_unsupported_version"` and `status = "error"`
-- **AND** the error envelope SHALL include `version_observed` set to the
-  parsed integer value when the manifest's `version` field can be read as
-  an integer, and to `null` otherwise (including the case where the
-  field is missing or has a non-integer value like `"abc"`)
+Ключи таблицы SHALL совпадать со значениями `cli_query._MANIFEST_ERROR_TYPES`
+буквально: перевод идёт по строке `error_type`, и имя «почти то же самое» молча
+уходит в `internal`.
 
-#### Scenario: Manifest version non-integer
-- **WHEN** `cli_query.py` is invoked for an `operation_id` whose manifest
-  parses as JSON but its `version` field is not coercible to an integer
-  (for example `"abc"` or `["1"]`)
-- **THEN** the wrapper SHALL receive an error envelope with
-  `error_type = "manifest_unsupported_version"` and
-  `version_observed = null`
+`internal` для повреждённого manifest SHALL оставаться осознанным: файл чинит
+владелец состояния, ни «проверь имя», ни «повтори» модели не помогают.
+
+Диагностика SHALL отличать три причины на уровне чтения файла, а не схлопывать
+их в один «не найден» (функция `diagnose_manifest`, значения `reason`:
+`not_found` / `corrupted` / `unsupported_version`).
+
+#### Scenario: Manifest отсутствует
+
+- **WHEN** для указанного `operation_id` файла manifest нет
+- **THEN** домен SHALL сообщить `manifest_not_found`
+- **AND** конверт SHALL нести код `not_found`
+- **AND** payload ответа SHALL NOT быть построен
+
+#### Scenario: Manifest повреждён
+
+- **WHEN** файл manifest существует и не разбирается как валидный JSON
+- **THEN** домен SHALL сообщить `manifest_corrupted`
+- **AND** конверт SHALL нести код `internal`
+
+#### Scenario: Версия manifest не поддерживается
+
+- **WHEN** manifest разбирается, но его `version` не равна текущей (`2`)
+- **THEN** домен SHALL сообщить `manifest_unsupported_version`
+- **AND** конверт SHALL нести код `upstream_unavailable`
+- **AND** текст сообщения SHALL называть наблюдаемую версию
+
+#### Scenario: Версия отсутствует или не приводится к целому
+
+- **WHEN** поле `version` отсутствует либо не приводится к `int`
+- **THEN** домен SHALL сообщить `manifest_unsupported_version`
+- **AND** `version_observed` SHALL быть `null`
+- **AND** конверт SHALL нести код `upstream_unavailable`
+
+#### Scenario: Таблица перевода не разошлась с доменом
+
+- **WHEN** множество ключей `_ERROR_CODES` сравнивается со значениями
+  `cli_query._MANIFEST_ERROR_TYPES`
+- **THEN** множества SHALL совпадать
+- **AND** лишний ключ SHALL считаться ошибкой, а недостающий — молчаливым
+  откатом в `internal`
 
 ### Requirement: Backward compatibility of resume-path manifest loading
-The system SHALL keep the existing `load_manifest()` function in
-`workspace/skills/legal_summarizer/scripts/cache/manifest.py` returning
-`None` for any of the three unavailable cases (missing / corrupted /
-unsupported version) without leaking diagnostics through its return value.
 
-#### Scenario: Resume loader unchanged
-- **WHEN** the resume pipeline of `legal_summarizer` reads a manifest via
-  `load_manifest()`
-- **THEN** the function SHALL continue to return `None` on missing,
-  corrupted, or unsupported-version manifest, exactly as before
-- **AND** the new diagnostic capability SHALL be exposed through a
-  separate function (e.g. `diagnose_manifest`) used only by
-  `cli_query.py`. The diagnostic function SHALL return at most the
-  fields needed to build a CLI error envelope (`reason`, `path`,
-  `version_observed` when applicable) and SHALL NOT return the parsed
-  manifest contents, since those are not needed for diagnostics and may
-  be unavailable when the manifest is corrupted.
+`load_manifest()` в `mcp-platform/libs/legal_summarizer/cache/manifest.py` SHALL
+продолжать возвращать `None` по любой из трёх причин недоступности и SHALL NOT
+протаскивать диагностику через возвращаемое значение.
+
+Диагностика SHALL оставаться отдельной функцией (`diagnose_manifest`), SHALL
+возвращать не больше полей, нужных для построения конверта (`reason`, `path`,
+`version_observed`), и SHALL NOT возвращать разобранное содержимое manifest:
+для повреждённого файла его и не получить, а для конверта оно не нужно.
+
+#### Scenario: Resume-загрузчик не изменился
+
+- **WHEN** resume-конвейер читает manifest через `load_manifest()`
+- **THEN** функция SHALL вернуть `None` при отсутствующем, повреждённом или
+  неподдерживаемом manifest, ровно как прежде
+- **AND** диагностика SHALL быть доступна через отдельную функцию
+- **AND** разобранное содержимое manifest SHALL NOT попадать в результат
+  диагностики
+
+#### Scenario: Manifest исчез между диагностикой и чтением
+
+- **WHEN** диагностика вернула `ok`, а последующая нормализация вернула `None`
+- **THEN** домен SHALL сообщить `manifest_not_found`
+- **AND** сообщение SHALL называть, что файл стал недоступен между чтением и
+  нормализацией
 
 ### Requirement: Documented semantics for chunks_total vs field=chunks
-The system SHALL document that `chunks_total` from the manifest and
-`field=chunks` from the query tool describe different things: the former
-is a logical/planned chunk count, the latter is a list of physical
-partial-result files under `operation/chunks/*.json`.
 
-#### Scenario: Divergence between chunks_total and chunks list is not a bug
-- **WHEN** `cli_query.py --field stats` returns `chunks_total = N` AND
-  `cli_query.py --field chunks` returns a list of length `M` where
-  `N != M`
-- **THEN** the system SHALL treat this as a valid state, not an error
-- **AND** `workspace/skills/legal_summarizer/SKILL.md` SHALL state
-  explicitly that the two are independent sources
+`chunks_total` из manifest и список из `field=chunks` SHALL оставаться
+независимыми источниками: первый — логический/плановый счётчик, посчитанный при
+планировании прогона; второй — список физических файлов
+`<operation>/chunks/*.json`, обрезанных по `max_chunk_summary_chars`.
 
-### Requirement: Wrapper passes through structured error fields unchanged
-The system SHALL preserve every top-level field of the CLI's domain-error
-JSON when propagating it through the tool wrapper.
+Операция SHALL возвращать оба источника независимо и SHALL NOT пытаться их
+согласовать. Расхождение объявлено в
+`mcp-platform/libs/legal_summarizer/skill/SKILL.md` — документ переехал вместе с
+навыком, отдельного `SKILL.md` в агенте для этого больше нет.
 
-#### Scenario: Extra fields survive propagation
-- **WHEN** `cli_query.py` exits with `returncode != 0` AND stdout is a
-  JSON object with `status = "error"` and additional top-level fields
-  such as `operation_id`, `version_observed`, or `path`
-- **THEN** the wrapper's returned JSON string SHALL contain every one of
-  those fields with identical values, and SHALL NOT strip, rename, or
-  rewrap them
+#### Scenario: Расхождение chunks_total и списка chunks — не баг
 
-The system SHALL keep the wrapper's pre-existing error types
-(`timeout`, `cli_not_found`, `subprocess_error`, `empty_response`,
-`invalid_json`) wired to the same code paths after the IPC change.
+- **WHEN** `field=stats` вернул `chunks_total = N`, а `field=chunks` вернул
+  список длины `M`, где `N != M`
+- **THEN** система SHALL считать это допустимым состоянием, а не ошибкой
+- **AND** документ платформы SHALL явно называть два источника независимыми
 
-#### Scenario: Timeout on subprocess
-- **WHEN** `cli_query.py` exceeds `timeout_sec` from
-  `tools.legal_summarizer_query.timeout_sec`
-- **THEN** the wrapper SHALL return `status = "error"` with
-  `error_type = "timeout"` and the same stderr-fragment policy as before
+### Requirement: Success-path schema
 
-#### Scenario: CLI binary missing
-- **WHEN** `cli_query.py` is not found at the resolved absolute path
-- **THEN** the wrapper SHALL return `status = "error"` with
-  `error_type = "cli_not_found"`
+Операция SHALL различать шесть полей — `stats` / `articles` / `chunks` /
+`sections` / `tree` / `all` — и отдавать каждому свою форму. Успешный ответ
+SHALL содержать `status = "ok"` и `field` с запрошенным значением.
 
-#### Scenario: Subprocess cannot start
-- **WHEN** `subprocess.run` raises `OSError` before the child process
-  starts
-- **THEN** the wrapper SHALL return `status = "error"` with
-  `error_type = "subprocess_error"`
+Опубликованная схема строится из сигнатуры обработчика
+(`build_input_schema`): `operation_id` обязателен, `field` — строка **без**
+`enum`, `max_chunk_summary_chars` — целое **без** `minimum` / `maximum`.
+Ограничения на `field` и `max_chunk_summary_chars` проверял argparse снятой
+CLI-обёртки и вместе с ней ушли.
 
-### Requirement: No change to success-path schema
-The system SHALL keep the existing `field` enum, `max_chunk_summary_chars`
-range (`minimum = 100`, `maximum = 10000`, `default = 1500`), and the
-shape of success responses for all fields unchanged.
+**Зафиксированное следствие, а не замысел.** Значение `field`, не совпадающее ни
+с одним из шести, отдаёт ветку `all` целиком — молча, без отказа. Валидация
+лежала на снятой обёртке; спека фиксирует фактическое поведение, чтобы его
+нельзя было прочитать как намерение.
 
-#### Scenario: field=stats success
-- **WHEN** `cli_query.py --field stats` succeeds
-- **THEN** the tool result SHALL contain `status = "ok"`, `field = "stats"`,
-  and the same metric keys as the current `_field_stats` output
+#### Scenario: Обязательный и необязательные параметры
 
-#### Scenario: field=chunks success
-- **WHEN** `cli_query.py --field chunks` succeeds
-- **THEN** the tool result SHALL contain `status = "ok"`, `field = "chunks"`,
-  `chunk_count`, and a `chunks` array with `chunk_id`, `section_id`,
-  `section_path`, `page_start`, `page_end`, `summary` fields
+- **WHEN** строится опубликованная схема операции
+- **THEN** `required` SHALL быть ровно `["operation_id"]`
+- **AND** `operation_id` SHALL быть `{"type": "string"}`
+- **AND** `field` SHALL быть `{"type": "string"}` без `enum`
+- **AND** `max_chunk_summary_chars` SHALL быть `{"type": "integer"}` без границ
+
+#### Scenario: field=stats отдаёт метрики
+
+- **WHEN** вызвано `query_operation` с `field = "stats"` и manifest доступен
+- **THEN** ответ SHALL содержать `status = "ok"` и `field = "stats"`
+- **AND** SHALL присутствовать `operation_id`, `article_count`, `chunks_total`,
+  `sections_total`
+
+#### Scenario: field=chunks отдаёт физические файлы
+
+- **WHEN** вызвано `query_operation` с `field = "chunks"` и manifest доступен
+- **THEN** ответ SHALL содержать `status = "ok"`, `field = "chunks"` и `chunk_count`
+- **AND** каждый элемент `chunks` SHALL иметь `chunk_id`, `section_id`,
+  `section_path`, `page_start`, `page_end`, `summary`
+- **AND** `summary` SHALL быть обрезан по `max_chunk_summary_chars`
+
+#### Scenario: Каждое поле отвечает своей формой
+
+- **WHEN** вызвано `query_operation` с `field` из множества
+  `articles` / `sections` / `tree` / `all`
+- **THEN** ответ SHALL содержать `status = "ok"` и `field` с запрошенным значением
+- **AND** тело SHALL иметь форму, соответствующую этому полю, а не общий JSON
+
+#### Scenario: Неизвестное поле молча отдаёт manifest целиком
+
+- **WHEN** вызвано `query_operation` с `field`, не совпадающим ни с одним из шести
+- **THEN** ответ SHALL содержать `status = "ok"` и `field` с переданным значением
+- **AND** ответ SHALL содержать ключ `manifest` целиком
+- **AND** отказа SHALL NOT быть
+
+#### Scenario: Без сервиса операция не собирается
+
+- **WHEN** сервис `legal_summarizer` отсутствует в контейнере
+- **THEN** загрузка операции SHALL отказать ошибкой сборки
+- **AND** сервер SHALL NOT подняться с операцией, отвечающей отказом на каждый
+  вызов

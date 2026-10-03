@@ -52,11 +52,12 @@
 - опциональные references/prompts (progressive disclosure).
 
 Skill **не владеет данными**: ни снимком, ни индексами, ни моделью. Данные
-обслуживает capability `audit` платформы, и агент доходит до них через tool
-`workspace/tools/audit_analyzer_query.py`. Skill описывает в `SKILL.md`, какую
-операцию и когда звать, — в терминах операций, а не таблиц и не Python-классов.
+обслуживает capability `audit` платформы, и модель доходит до них через
+операции `mcp_enterprise_*` (`config.json → tools.mcpServers`). Skill описывает
+в `SKILL.md`, какую операцию и когда звать, — в терминах операций, а не таблиц
+и не Python-классов.
 
-Skill **не вызывает** Tool программно (`TARGET_ARCHITECTURE.md` §22.2), Tool **не знает** о Skill (§22.1). Связь — через agent runtime: skill описывает capability терминами, агент решает какой tool вызвать.
+Skill **не вызывает** Tool программно (`TARGET_ARCHITECTURE.md` §22.2), Tool **не знает** о Skill (§22.1). Связь — через agent runtime: skill описывает capability терминами, агент решает, какую операцию вызвать.
 
 **Shared infrastructure** (`lib/services`, `lib/core`, `lib/utils`) — общий слой
 проверки, исполнения и хранения, используемый и Skills, и Tools. Наличие
@@ -100,9 +101,14 @@ workspace/skills/<skill_name>/
 > Каноничные примеры «generic, но не agent-facing»: свободный read-only
 > SQL, семантический поиск, NL→SQL для конкретной схемы. Для них Agent-facing
 > Tools (`duckdb_query`, `vector_search`, `nl_sql_generate`) **не создаются**:
-> их заменили операции одного tool'а `audit_analyzer_query` (`run_script`,
-> `generate_sql`, `vector_search`) — см. `docs/skill-tool-architecture.md` §6–§8
+> их заменили операции capability `audit` (`run_script`, `generate_sql`,
+> `vector_search`) — см. `docs/skill-tool-architecture.md` §6–§8
 > и `docs/skill-tool-inventory.md` («Удалённые компоненты»).
+>
+> **Операция вместо Tool — не только про экономию строк.** Обёртка над
+> операцией переписывала её схему и сводила ошибку к своему формату, и модель
+> получала описание, отличное от настоящего. Снятие обёрток оставило у модели
+> `inputSchema` самой платформы (change `2026-10-03-mcp-native-tools`, п. D6).
 
 Если вы сомневаетесь — посмотрите на существующий skill (`audit_analyzer`) как
 референс.
@@ -437,10 +443,10 @@ Pydantic-валидация выполняется на старте в `Applica
 > (`skill_registration.py`) и `infra_registration.py` снесены вместе с ним
 > (фаза 5, 2026-10-01). Живой инвентарь — `docs/skill-tool-inventory.md`.
 
-Единственный вход skill'а к данным аудита — инструмент
-`workspace/tools/audit_analyzer_query.py`, который вызывает операции capability
-`audit` платформы по MCP: `list_scripts`, `run_script`, `generate_sql`,
-`vector_search`. Параметры прогона skill берёт из своей секции
+Единственный вход skill'а к данным аудита — операции capability `audit`
+платформы, объявленные в `config.json → tools.mcpServers` и приходящие как
+`mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}`. Параметры
+прогона skill берёт из своей секции
 `config.json → gateway.agent.skills.<name>`, а к LLM ходит операцией `complete`
 capability `llm`.
 
@@ -485,7 +491,7 @@ capability `llm`. В агенте этого кода больше нет: ни 
 
 | Поверхность | Кто использует | Когда |
 |---|---|---|
-| **Операции capability `audit` по MCP** | `workspace/tools/audit_analyzer_query.py` | Единственный вход к данным аудита: `list_scripts`, `run_script`, `generate_sql`, `vector_search` |
+| **Операции capability `audit` по MCP** | `config.json → tools.mcpServers.enterprise` | Единственный вход к данным аудита: `mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}` |
 | **Операция `complete` capability `llm`** | Клиент платформы `mcp-platform/libs/enterprise_client/llm.py` | Обращение к модели из skill'а, запущенного подпроцессом |
 
 Прямого доступа к данным у skill'а больше нет: снимком владеет capability `data`,
@@ -524,8 +530,12 @@ sys.path.insert(.../skills...)                        # ЗАПРЕЩЕНО
 
 ```python
 from workspace.tools import ...                       # ЗАПРЕЩЕНО
-from workspace.tools.history_search_tool import ...    # ЗАПРЕЩЕНО
+from lib.hooks.mcp_identity_hook import McpIdentityHook   # ЗАПРЕЩЕНО
 ```
+
+Личность вызова подставляет framework-хук `McpIdentityHook` перед вызовом
+операции; skill'у и tool'у (а tool'а, покрывающего capability, больше нет)
+нечего знать про `session_id` / `user_id` / `request_id`.
 
 ### 7.4 Что Tool не должен знать
 
@@ -549,10 +559,10 @@ Skill пишет инструкции в терминах capability, не Pytho
 
 | Capability | Контракт | Конфиг |
 |---|---|---|
-| `audit_analyzer_query`, `operation=list_scripts` | — → каталог допустимых скриптов | `config.json → gateway.agent.skills.audit_analyzer.*` |
-| `audit_analyzer_query`, `operation=run_script` | `{script, params}` → `{status, columns, rows, ...}` | `config.json → gateway.agent.skills.audit_analyzer.*` |
-| `audit_analyzer_query`, `operation=generate_sql` | `{query, context}` → SQL и результат | параметры прогона skill'а |
-| `audit_analyzer_query`, `operation=vector_search` | `{query, index_name}` → `{status, results, ...}` | `mcp-platform/platform.json → vectors.indexes` |
+| `mcp_enterprise_list_scripts` | — → каталог допустимых скриптов | `config.json → tools.mcpServers.enterprise.enabled_tools` |
+| `mcp_enterprise_run_script` | `{script, params}` → `{status, columns, rows, ...}` | там же |
+| `mcp_enterprise_generate_sql` | `{query}` → SQL и результат | там же |
+| `mcp_enterprise_vector_search` | `{query, index_name}` → результаты поиска | `mcp-platform/platform.json → vectors.indexes` |
 | `compact_context` tool | `{session_key, force}` | `config.json → gateway.compact.*` |
 
 Skill-side CLI (`scripts/cli.py` с `--mode predefined|vector|generated_sql`)
@@ -560,7 +570,9 @@ Skill-side CLI (`scripts/cli.py` с `--mode predefined|vector|generated_sql`)
 `duckdb_query` / `vector_search` тоже не создаются: это внутренние операции
 платформы, а не agent-facing capability (границы — в
 `docs/skill-tool-architecture.md` § 6–§8). Новый Tool заводится **только** при
-agent-facing критерии (§1); для добавления — `workspace/tools/history_search_tool.py`.
+agent-facing критерии (§1); образец — `workspace/tools/document_read.py`
+(извлечение текста: платформа отдаёт данные, но не отдаёт готовый текст
+документа — то есть операции здесь не помогут).
 
 ---
 
@@ -612,7 +624,9 @@ agent-facing критерии (§1); для добавления — `workspace/
 | Слой | Тесты |
 |---|---|
 | **Документ skill'а** | `tests/test_audit_analyzer_skill_doc.py` — четыре операции названы с обязательными аргументами, индексы совпадают с `platform.json` в обе стороны, физических имён (таблиц, снимка, движков) нет |
-| **Tool** | `tests/test_audit_analyzer_query_tool.py` — маршрутизация операции, сбор аргументов, личность оборота, ужатие ответа |
+| **Объявление операций** | `tests/test_mcp_platform_declaration.py` — состав `enabled_tools`, минимальный env, флаг `require_call_meta`, равенство имён ключей идентичности файлу платформы |
+| **Подстановка личности** | `tests/test_mcp_identity_hook.py` — инъекция, перебитие присланного моделью, отказ при неполной личности |
+| **Tool** | `tests/test_tools_project_loader.py` — регистрация и баннер инвентаря |
 | **Architecture** | `tests/test_skill_tool_independence.py`, `tests/test_architecture_tool_domain_free.py`, `tests/test_core_infrastructure_independence.py` |
 | **Конфиг и инвентарь** | `tests/test_project_settings.py`, `tests/test_runtime_inventory.py` |
 | **Согласованность документации** | `tests/test_docs_consistency.py`, `tests/test_no_legacy_imports.py` |
@@ -622,35 +636,38 @@ agent-facing критерии (§1); для добавления — `workspace/
 
 ### 9.2 Шаблон теста tool'а навыка
 
-Skill без исполняемого кода тестируется стражем документа, а исполняемая
-часть — tool'ом. Рабочий паттерн — фейковый MCP-клиент из
-`tests/test_audit_analyzer_query_tool.py`: единственный async-метод `call`,
-который записывает имя операции, аргументы и `identity` и возвращает заданный
-JSON. Ни сеть, ни снимок, ни модель в тесте не участвуют.
+**Tool'а, покрывающего capability, у навыка теперь нет** — операции приходят
+модели штатным MCP-клиентом, и тестировать нечего: схема и обработка живут в
+`mcp-platform`, где у платформы свои тесты (`test_audit_capability.py`,
+`test_vectors_*`, `test_data_service.py::TestHistorySearchIsolation`).
+
+Что остаётся тестировать на стороне агента — **собственный** код: хук
+`McpIdentityHook` и объявление операций. Паттерн — подставить контекст оборота
+и проверить словарь аргументов после вызова хука; ни сеть, ни снимок, ни
+модель в таком тесте не участвуют.
 
 ```python
-class _FakeClient:
-    """Клиент, который только запоминает вызов."""
-
-    def __init__(self, reply: str = '{"status": "ok", "row_count": 0, "rows": []}') -> None:
-        self.reply = reply
-        self.calls: list[tuple[str, dict, object]] = []
-
-    async def call(self, operation: str, arguments: dict | None = None, *, identity=None) -> str:
-        self.calls.append((operation, arguments or {}, identity))
-        return self.reply
+params: dict = {"query": "сколько аудитов за 2024"}
+with _sender("alice"):
+    await hook.before_execute_tool(ctx, tool_call, None, params)
+assert params["user_id"] == "alice"          # личность подставлена
+assert "session_id" not in {"q"}             # доменный аргумент не тронут
 ```
 
-Тест проверяет ровно две вещи: **куда ушёл вызов** (имя операции совпадает с
-`operation` модели, аргументы — с подписью операции) и **куда не ушла личность**
-(`session_id`/`user_id`/`request_id` едут в `identity`, а не в аргументы).
+Тест проверяет ровно две вещи: **что подставлено** (три ключа личности на
+месте) и **что не перебито** (значение, присланное моделью, заменено на
+принадлежащее обороту). Второе важнее: в опубликованной схеме таких полей
+нет, поэтому в аргументах они могут прийти только снизу.
+
+Живой образец — `tests/test_mcp_identity_hook.py` и
+`tests/test_mcp_platform_declaration.py`.
 
 ### 9.3 Что НЕ нужно тестировать
 
 Не пишите тестов регистрации (`register.py`, `_ensure_registered()`,
 `tests/test_skill_register.py`): регистрации больше нет (§6), и такой тест
 проверял бы код, которого не существует. Лучше покройте доменную логику
-`scripts/` и границы tool'а.
+навыка и границы его собственного tool'а, если он есть.
 
 ---
 
@@ -664,7 +681,8 @@ pytest tests/test_skill_tool_independence.py          -v
 pytest tests/test_architecture_tool_domain_free.py    -v
 pytest tests/test_core_infrastructure_independence.py -v
 pytest tests/test_audit_analyzer_skill_doc.py         -v
-pytest tests/test_audit_analyzer_query_tool.py        -v
+pytest tests/test_mcp_platform_declaration.py         -v
+pytest tests/test_mcp_identity_hook.py               -v
 ```
 
 Что они проверяют:
@@ -673,7 +691,8 @@ pytest tests/test_audit_analyzer_query_tool.py        -v
 - `test_architecture_tool_domain_free.py` — Tool не содержит audit/домен-строк в коде и описаниях.
 - `test_core_infrastructure_independence.py` — `lib/services` и `lib/utils` не зависят от skills.
 - `test_audit_analyzer_skill_doc.py` — `SKILL.md` описывает реальные операции платформы и не содержит физических имён хранилища.
-- `test_audit_analyzer_query_tool.py` — tool маршрутизирует операции и не выпускает личность оборота в аргументы.
+- `test_mcp_platform_declaration.py` — объявление операций согласовано с платформой, а имена ключей идентичности — с её конвейером.
+- `test_mcp_identity_hook.py` — личность оборота подставляется и не может быть перебита значением из аргументов.
 
 ---
 
@@ -748,7 +767,7 @@ skill'а — `mcp-platform/libs/enterprise_client/llm.py`.
    capability действительно agent-facing — агент выбирает и вызывает её самостоятельно, как
    отдельный шаг плана (§1, TARGET §30 вопрос 11); наличие готовой generic-функции в
    `lib/services` основанием для Tool'а не является.
-5. ☐ Архитектурные тесты `tests/test_skill_tool_independence.py tests/test_architecture_tool_domain_free.py tests/test_core_infrastructure_independence.py tests/test_audit_analyzer_skill_doc.py tests/test_audit_analyzer_query_tool.py` — без падений.
+5. ☐ Архитектурные тесты `tests/test_skill_tool_independence.py tests/test_architecture_tool_domain_free.py tests/test_core_infrastructure_independence.py tests/test_audit_analyzer_skill_doc.py tests/test_mcp_platform_declaration.py tests/test_mcp_identity_hook.py` — без падений.
 6. ☐ `pytest tests/ -q` — без регрессий.
 7. ☐ `python cli_agent.py` стартует без ошибок (smoke).
 8. ☐ Документация обновлена:
@@ -851,7 +870,8 @@ pytest tests/test_skill_tool_independence.py \
        tests/test_architecture_tool_domain_free.py \
        tests/test_core_infrastructure_independence.py \
        tests/test_audit_analyzer_skill_doc.py \
-       tests/test_audit_analyzer_query_tool.py -v
+       tests/test_mcp_platform_declaration.py \
+       tests/test_mcp_identity_hook.py -v
 
 pytest tests/ -q
 python cli_agent.py          # smoke
@@ -867,11 +887,15 @@ python cli_agent.py          # smoke
 - `docs/skill-tool-inventory.md` — текущее состояние skill'ов и tool'ов.
 
 ### Живой код агента
-- `workspace/skills/audit_analyzer/SKILL.md` — рабочий образец навыка.
-- `workspace/tools/audit_analyzer_query.py` — единственный вход к данным аудита.
+- `workspace/skills/audit_analyzer/SKILL.md` — рабочий образец доменного навыка.
+- `workspace/skills/enterprise_mcp/SKILL.md` — рабочий образец навыка-контракта.
+- `config.json → tools.mcpServers.enterprise` — единственный вход к данным аудита
+  (операции `mcp_enterprise_*`).
+- `lib/hooks/mcp_identity_hook.py` — подстановка личности оборота в вызов операции.
 - `workspace/tools/document_read.py` — чтение текста офисных документов.
 - `lib/core/project_settings.py` — формы секции `skills.<name>` (`SkillSettings`, `TableEntry`, `VectorIndexEntry`).
-- `lib/services/enterprise_mcp_client.py` — клиент агента к платформе.
+- `lib/services/enterprise_mcp_client.py` — клиент агента к платформе для фоновых
+  служб (вне оборота модели).
 
 ### Живой код платформы
 - `mcp-platform/platform.json` — объявления capability: `audit` (таблицы),
@@ -884,8 +908,9 @@ python cli_agent.py          # smoke
 - `config.json` — главная карта; секция навыка — `gateway.agent.skills.<name>`.
 
 ### Существующие skill'ы как reference
-- `workspace/skills/audit_analyzer/` — единственный skill в `workspace/skills/`;
-  в каталоге только `SKILL.md` (логика уехала в capability `audit` платформы).
+- `workspace/skills/audit_analyzer/` и `workspace/skills/enterprise_mcp/` — два
+  skill'а в `workspace/skills/`; в каждом только `SKILL.md` (логика уехала в
+  capability платформы).
 - `legal_summarizer` и `office_files` — каталогов в `workspace/skills/` больше нет
   (`legal_summarizer` живёт в capability `legal_summarizer` платформы).
 
@@ -894,7 +919,8 @@ python cli_agent.py          # smoke
 - `tests/test_architecture_tool_domain_free.py`
 - `tests/test_core_infrastructure_independence.py`
 - `tests/test_audit_analyzer_skill_doc.py`
-- `tests/test_audit_analyzer_query_tool.py`
+- `tests/test_mcp_platform_declaration.py`
+- `tests/test_mcp_identity_hook.py`
 - `tests/test_project_settings.py`
 - `tests/test_docs_consistency.py`
 - `tests/test_no_legacy_imports.py`
@@ -902,10 +928,13 @@ python cli_agent.py          # smoke
 
 ### Hooks и runtime
 - `lib/hooks/tool_audit_hook.py` — автоматическая audit trail для всех tool'ов.
-- `workspace/hooks/session_file_redirect_hook.py` — перенаправление файлов в `data_store/cache/sessions/<key>/`.
+- `lib/hooks/mcp_identity_hook.py` — личность вызова для операций платформы.
+- `workspace/hooks/session_file_redirect_hook.py` — перенаправление файлов в каталог сессии.
 - `workspace/hooks/recent_files_hook.py` — автоприкрепление созданных файлов.
-- `workspace/tools/{history_search_tool,legal_summarizer_query,compact_context}.py` — generic tools.
-- `workspace/tools/history_search_tool.py` — образец нового tool'а. (Tools `duckdb_query` / `vector_search` не существуют.)
+- `workspace/tools/{compact_context,document_read}.py` — два оставшихся tool'а.
+  Образец нового tool'а — `document_read.py`: платформа отдаёт данные, но не
+  готовый текст документа, то есть операциями его не закрыть. (Tools
+  `duckdb_query` / `vector_search` не существуют.)
 
 При изменении `TARGET_ARCHITECTURE.md` или `skill-tool-architecture.md`
 синхронизировать этот документ.

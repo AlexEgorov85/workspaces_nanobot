@@ -147,7 +147,14 @@ def canonical_hook_factories() -> list[HookSpec]:
 
 
 def canonical_project_tools() -> list[ToolSpec]:
-    """Project tools из ``workspace/tools/*.py`` (auto-discover)."""
+    """Project tools из ``workspace/tools/*.py`` (auto-discover).
+
+    ``audit_analyzer_query``, ``legal_summarizer_query`` и ``history_search``
+    УДАЛЕНЫ: те же операции модель получает штатным MCP-клиентом как
+    ``mcp_enterprise_*`` с настоящими ``inputSchema`` платформы (change
+    ``2026-10-03-mcp-native-tools``, п. D6). Список ниже — только то, что
+    платформой не покрыто.
+    """
     return [
         ToolSpec(
             name="compact_context",
@@ -155,31 +162,6 @@ def canonical_project_tools() -> list[ToolSpec]:
             required=True,
             description="ручное сжатие контекста (читает gateway.compact.*)",
             config_key="tools.compact_context.enable",
-        ),
-        ToolSpec(
-            name="history_search",
-            module="history_search_tool",
-            required=True,
-            description="generic-поиск по долговечному журналу agent_gateway_logs",
-            config_key="tools.history_search.enable",
-        ),
-        ToolSpec(
-            name="legal_summarizer_query",
-            module="legal_summarizer_query",
-            required=True,
-            description="вопрос-ответ по пакетам документов legal_summarizer",
-            config_key=None,
-        ),
-        ToolSpec(
-            name="audit_analyzer_query",
-            module="audit_analyzer_query",
-            required=True,
-            description=(
-                "доступ к данным аудита через capability audit платформы "
-                "(list_scripts / run_script / generate_sql / vector_search); "
-                "заменяет skill-side scripts/cli.py навыка audit_analyzer"
-            ),
-            config_key="tools.audit_analyzer_query.enable",
         ),
         ToolSpec(
             name="document_read",

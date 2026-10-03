@@ -205,8 +205,8 @@ stderr), если фактический инвентарь расходится
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─ PROJECT TOOLS INVENTORY: critical drift ──────────────────────────────┐
-│ MISSING REQUIRED: legal_summarizer_query                                │
-│ FAILED: legal_summarizer_query                                          │
+│ MISSING REQUIRED: document_read                                         │
+│ FAILED: compact_context                                                 │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 

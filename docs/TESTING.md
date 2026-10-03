@@ -288,33 +288,19 @@ capability'ов, объявленных в `platform.json`, и ни одной �
 
 ## Мёртвые тестовые файлы
 
-`git ls-files -- '*_test_*.py'` даёт 13 строк, но tombstone-заглушками
-тестов являются **12**: тринадцатая (`tools/apply_test_profile_tables.py`) —
-живая утилита, попавшая в выборку из-за подстроки `_test_` в имени.
+Сняты 2026-10-03, реестр — `PENDING-DELETIONS.md` § F. Это были 12
+tombstone-заглушек: код вырезан, остались докстринги с причиной. Снёс их
+`tools/cleanup_tombstone_tests.ps1 -Apply` — скрипт по умолчанию только
+показывает план, а перед удалением перепроверяет каждый файл и не трогает его,
+если в нём появился хоть один `def test_`.
 
-| Файл | `def test_` |
-|---|---|
-| `tests/_test_information_preservation.py` | 0 |
-| `tests/_test_legal_summarizer_identity.py` | 0 |
-| `tests/_test_legal_summarizer_query_ipc.py` | 0 |
-| `tests/_test_legal_summarizer_query_manifest_integration.py` | 0 |
-| `tests/_test_legal_summarizer_running_subprocess.py` | 0 |
-| `tests/_test_manifest.py` | 0 |
-| `tests/_test_resume_scenarios.py` | 0 |
-| `tests/_test_skill_legal_summarizer_characterization.py` | 0 |
-| `tests/_test_structure_physical.py` | 0 |
-| `tests/benchmarks/_test_acceptance_matrix.py` | 0 |
-| `mcp-platform/tests/legal_summarizer/_test_legal_summarizer_no_legacy.py` | 0 |
-| `mcp-platform/tests/legal_summarizer/_test_structure_architecture_guard.py` | 0 |
+**Состояние сейчас:** `git ls-files -- '*_test_*.py'` даёт **1** совпадение —
+`tools/apply_test_profile_tables.py`, живая утилита, попавшая в выборку из-за
+подстроки `_test_` в имени. Tombstone-файлов тестов в репозитории не осталось.
 
-**Все 12 проверены и физически лежат в репозитории** — и в индексе git, и на
-диске. Код из них вырезан, остались докстринги с причиной. Снести вручную
-нельзя было в этом окружении: удаление обязано идти через восстановимый
-лаунчер `mavis-trash`, а `rm` здесь блокируется политикой безопасности.
-Список зафиксирован в `PENDING-DELETIONS.md` § F вместе с готовой командой
-`git rm`. **Прогон на них не влияет:** pytest эти файлы не собирает по
-префиксу `_`, снимать нечего. Утверждать, что они удалены, нельзя — на
-момент написания документа они в дереве.
+**На прогон это не повлияло:** pytest эти файлы не собирал по префиксу `_`,
+снимать было нечего. Проверено фактом — коллекция не изменилась, оба
+линт-гейта зелёные.
 
 ---
 

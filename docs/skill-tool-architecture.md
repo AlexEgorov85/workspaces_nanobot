@@ -349,65 +349,33 @@ Capability может объявить свою метку и находить �
 
 ---
 
-## 11. Контракт `legal_summarizer_query`
+## 11. Контракт доступа к разобранному документу
 
-Tool `legal_summarizer_query` (`workspace/tools/legal_summarizer_query.py`)
-— единственный живой generic-tool, подключённый к конкретному skill'у
-через **subprocess-boundary** (не импорт). Связь Skill↔Tool всё равно
-**через агентский runtime** (§1), но контракт IPC между wrapper и
-`cli_query.py` — отдельная нормативная поверхность.
+Tool `legal_summarizer_query` и IPC-протокол к `cli_query.py` **удалены**;
+§11.1–11.4 описывали вещь, которой в репозитории нет уже в трёх местах сразу:
+сам tool снят (change `2026-10-03-mcp-native-tools`, п. D6), навык
+`workspace/skills/legal_summarizer/` уехал на платформу раньше, а IPC-граница
+(subprocess) исчезла вместе с ним. Таблицы exit code × status и перечень
+manifest-причин описывали протокол, которого больше нет.
 
-### 11.1. IPC-протокол между wrapper и `cli_query.py`
+Что пришло на замену — не Tool, а операция платформы:
 
-| exit code | stdout `status` | семантика |
-| --- | --- | --- |
-| 0 | `"ok"` | success |
-| ≠ 0 | `"error"` (JSON-объект) | domain error (pass-through) |
-| ≠ 0 | что-то иное | process failure → `cli_failed` |
-| 0 | пустой stdout | → `empty_response` |
-| 0 | stdout не JSON | → `invalid_json` |
+| Было (Tool) | Стало (операция) |
+|---|---|
+| `legal_summarizer_query(operation_id, field, max_chunk_summary_chars)` | `mcp_enterprise_query_operation` с той же семантикой полей (`stats` / `articles` / `chunks` / `sections` / `tree` / `all`) |
+| wrapper переводил ошибки CLI в свой JSON | сервер отдаёт закрытый конверт `_execution` / `{"error": {"code", ...}}`; модель читает его напрямую |
+| «область видимости» задавалась аргументом инструмента | область задаётся личностью вызова, модель её не выбирает |
 
-Wrapper НЕ ставит свой envelope поверх domain error: `error_type`,
-`operation_id`, `path`, `version_observed`, `message` доходят до агента
-as is. Это включает три manifest-причины:
+Общий контракт вызовов — `workspace/skills/enterprise_mcp/SKILL.md`.
 
-* `manifest_not_found`
-* `manifest_corrupted`
-* `manifest_unsupported_version`
+**Спека ещё не переведена — это долг.** `openspec/specs/skills/legal-summarizer-query/spec.md`
+по-прежнему описывает снятый tool и IPC к `cli_query.py` как нормативный контракт,
+то есть как действующее требование. Пока она не обновлена, ссылаться на неё как на
+источник истины нельзя: действующий контракт — SKILL выше.
 
-Диагностика `manifest` живёт в `workspace/skills/legal_summarizer/scripts/cache/manifest.py::diagnose_manifest`
-(operation-level API в том же модуле, где `load_manifest`).
+**Что из прежнего §11 осталось в силе как правило, а не как описание.**
+Tool по-прежнему не должен интерпретировать доменную ошибку и не должен
+подменять её своей. Просто «не подменять» теперь означает «не переписывать
+конверт платформы» — обёртки, которая могла бы это сделать, больше нет.
 
-### 11.2. Что Tool НЕ делает
-
-- Tool **не импортирует** skill (это уже общее правило §3).
-- Tool **не интерпретирует** `status` поля CLI — он только пробрасывает
-  dict с `status == "error"` как есть (строгая проверка, не "есть status").
-- Tool **не пытается** выровнять `chunks_total` (manifest) и `chunk_count`
-  (per-chunk файлы) — расхождение документировано, а не правится кодом.
-
-### 11.3. Где контракт зафиксирован
-
-| Документ | Что внутри |
-| --- | --- |
-| `openspec/specs/skills/legal-summarizer-query/spec.md` | нормативная спека (ADDED Requirements, scenarios) |
-| `workspace/skills/legal_summarizer/SKILL.md` § «IPC contract for follow-up queries» | таблица exit code × status × error_type; семантика `chunks_total` vs `chunks` |
-| `workspace/tools/legal_summarizer_query.py` docstring | исчерпывающий список wrapper-уровневых и CLI-pass-through error_type |
-
-### 11.4. Тесты
-
-| Тест | Что проверяет |
-| --- | --- |
-| `tests/test_legal_summarizer_query_ipc.py` | IPC-сценарии между wrapper и CLI через моки `subprocess.run`: success / domain error / process failure / pass-through полей |
-| `tests/test_legal_summarizer_query_manifest_integration.py` | **полный путь** manifest на диске → `cli_query.py` subprocess → wrapper pass-through; три manifest-причины через **реальные** файлы во временной директории |
-| `workspace/skills/legal_summarizer/tests/test_manifest_diagnose.py` | диагностика манифеста: missing / corrupted / version=1 / без version / `version="abc"` |
-| `workspace/skills/legal_summarizer/tests/architecture/test_document_cache_boundaries.py::test_operation_level_manifest_whitelist_enforced` | `diagnose_manifest` живёт в whitelist operation-level API |
-
-Любая попытка:
-
-* ввести ещё один `error_type`-префикс (`cli_manifest_*`) — нарушает
-  нормативную спеку и ломает grep'абельность кода;
-* подменить `status == "error"` на «наличие status» — ломает pass-through
-  контракт и пропускает случайный `exit 1 + {"status":"ok"}`;
-* убрать `diagnose_manifest` из whitelist operation-level API —
-  регрессия архитектурного guard (§10).
+---

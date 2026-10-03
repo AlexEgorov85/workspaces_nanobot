@@ -1,158 +1,133 @@
-"""Тесты архитектурных guard'ов change ``fix-history-search-user-isolation``.
+"""Стражи изоляции ``history_search`` — на её нынешнем месте.
 
-Primary security check — тесты ``TestOperationArgumentsGuard``
-(аргументы операции: ровно одна непустая личность на вызов) в
-``test_history_search_tool.py``. Этот файл — supplementary grep-guard по
-исходнику ``workspace/tools/history_search_tool.py``: страховка от
-случайного возврата unscoped-формы после рефакторинга, не primary check.
+Раньше изоляцию обеспечивал агентский tool: он брал ``session_scope`` от
+модели и строил выборку сам. Снос его (change ``2026-10-03-mcp-native-tools``,
+п. D6) убрал самую опасную часть — **выбор области стал невозможен**: модель
+не может попросить «все сессии», потому что параметра ``session_scope`` у
+операции больше нет, а область задаётся личностью вызова.
+
+Поэтому guard проверяет границу там, где она теперь:
+
+  1. операция не объявляет параметра области видимости;
+  2. обработчик НЕ принимает ``session_id``/``user_id`` аргументами и берёт
+     их из ``ctx`` — иначе модель подставила бы чужие значения;
+  3. у ``DbLoggingService`` нет публичного резолвера чужого identity (этот
+     тест остался без изменений: он касается агента, а не удалённого tool'а).
+
+Это primary-проверка, а не grep-страховка: grep по исходнику удалённого файла
+охранял бы от регрессии кода, которого больше нет.
 """
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
-
-
 _REPO = Path(__file__).resolve().parent.parent
-_HISTORY_SEARCH_TOOL = _REPO / "workspace" / "tools" / "history_search_tool.py"
+_HISTORY_SEARCH = (
+    _REPO
+    / "mcp-platform"
+    / "servers"
+    / "enterprise"
+    / "capabilities"
+    / "data"
+    / "tools"
+    / "history_search.py"
+)
+
+#: Имена, которыми модель когда-либо могла расширить область видимости.
+#: Появление любого из них в сигнатуре операции означает утечку: вызов с
+#: чужим значением прошёл бы в выборку.
+SCOPE_ARGUMENT_NAMES = frozenset(
+    {"session_scope", "scope", "all_sessions", "session_id", "user_id"}
+)
 
 
-class TestHistorySearchSourceGuard:
-    """Supplementary guard: в исходнике ``history_search_tool.py`` нет
-    запрещённых паттернов unscoped-fallback'а. Это страховка от регрессии
-    после рефакторинга, не primary security check (он — в
-    ``TestOperationArgumentsGuard`` через подставной MCP-клиент)."""
+def _handler() -> ast.FunctionDef:
+    """Внутренний обработчик операции."""
+    tree = ast.parse(_HISTORY_SEARCH.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "handle_history_search":
+            return node
+    raise AssertionError("handle_history_search не найден в history_search.py")
 
-    def _strip_comments(self, src: str) -> str:
-        """Убрать комментарии и docstring, чтобы guard не ругался на текст в них."""
-        tree = ast.parse(src)
-        lines = src.splitlines(keepends=True)
 
-        # Соберём множество (start, end) line ranges для docstring'ов.
-        string_ranges: list[tuple[int, int]] = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-                body = getattr(node, "body", None)
-                if body and isinstance(body[0], ast.Expr):
-                    value = body[0].value
-                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                        start = getattr(body[0], "lineno", None) or getattr(
-                            node, "lineno", 1
-                        )
-                        end = body[0].end_lineno or start
-                        string_ranges.append((start, end))
+def _argument_names(func: ast.FunctionDef) -> set[str]:
+    names = {arg.arg for arg in func.args.args}
+    names |= {arg.arg for arg in func.args.kwonlyargs}
+    return names
 
-        # Модульный docstring — отдельная ветка.
-        body = getattr(tree, "body", None)
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)
-        ):
-            string_ranges.append((1, body[0].end_lineno or 1))
 
-        # Соберём строки-комментарии (line numbers, начинающиеся с #).
-        comment_lines: set[int] = set()
-        for i, line in enumerate(lines, 1):
-            if line.lstrip().startswith("#"):
-                comment_lines.add(i)
+def _keyword_value_sources(func: ast.FunctionDef) -> dict[str, str]:
+    """Имя ключевого аргумента → откуда взято значение (исходный вид).
 
-        out_lines: list[str] = []
-        for i, line in enumerate(lines, 1):
-            in_doc = any(start <= i <= end for start, end in string_ranges)
-            if in_doc or i in comment_lines:
-                out_lines.append("\n")  # заменить на пустую строку (line numbers сохранятся)
-            else:
-                out_lines.append(line)
-        return "".join(out_lines)
+    ``service.history_search(session_id=ctx.session_id)`` даёт
+    ``{"session_id": "ctx.session_id"}``; ``session_id=session_key`` дал бы
+    ``"session_key"`` — и вот это уже значение из тела обработчика, то есть
+    потенциально управляемое снаружи.
+    """
+    found: dict[str, str] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                continue
+            found[keyword.arg] = ast.unparse(keyword.value)
+    return found
 
-    def _read_source(self) -> str:
-        return _HISTORY_SEARCH_TOOL.read_text(encoding="utf-8")
 
-    def _read_code_only(self) -> str:
-        return self._strip_comments(self._read_source())
+class TestHistorySearchScopeIsNotModelControlled:
+    def test_operation_declares_no_scope_argument(self):
+        """У модели нет способа попросить область шире своей.
 
-    def test_no_or_session_id_fallback_pattern(self):
-        """В коде НЕТ ``(%s OR session_id = %s)`` — старый unscoped fallback,
-        при котором ``session_scope='all'`` возвращал глобальный набор событий."""
-        src = self._read_code_only()
-        assert "(%s OR session_id = %s)" not in src, (
-            "Запрещённый unscoped-fallback в history_search_tool.py"
-        )
-
-    def test_no_where_true_or_or_true(self):
-        """В коде НЕТ ``WHERE TRUE`` / ``OR TRUE`` — запрещённые
-        паттерны unscoped-выборки."""
-        src = self._read_code_only().upper()
-        assert "WHERE TRUE" not in src
-        assert "OR TRUE" not in src
-
-    def test_no_session_id_like_pattern(self):
-        """В коде НЕТ ``session_id LIKE``."""
-        src = self._read_code_only()
-        assert "session_id LIKE" not in src
-
-    def test_no_is_null_or_user_id_pattern(self):
-        """В коде НЕТ ``IS NULL OR user_id`` — запрещённый unscoped-fallback."""
-        src = self._read_code_only()
-        assert "IS NULL OR user_id" not in src
-
-    def test_no_sender_id_access_outside_helper(self):
-        """``sender_id`` в исходнике — ТОЛЬКО внутри функции
-        ``_current_user_id()`` (инкапсуляция зависимости от nanobot 0.3.0).
-        Иначе — кто угодно может начать резолвить чужой identity из
-        произвольного места.
-
-        Реализация: используем ``ast.NodeVisitor`` с трекингом текущей
-        функции через ``ast.walk`` + ``ast.FunctionDef.scope`` (Python 3.14).
+        Прежний tool принимал ``session_scope`` и сам строил выборку по нему —
+        это и был источник утечки, а не «удобный режим». Параметра больше
+        нет, и возвращаться к нему нельзя.
         """
-        src = self._read_code_only()
-        tree = ast.parse(src)
-
-        # Соберём для каждого ``Attribute(attr='sender_id')`` список
-        # функций, в которых он лежит (через вложенный обход).
-        helper_defined = False
-        sender_id_attrs: list[ast.Attribute] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_current_user_id":
-                helper_defined = True
-                for child in ast.walk(node):
-                    if isinstance(child, ast.Attribute) and child.attr == "sender_id":
-                        sender_id_attrs.append(child)
-                break
-
-        assert helper_defined, "_current_user_id() helper должен быть в файле"
-        # Все ``Attribute(attr='sender_id')`` найденные ОБХОДОМ ВСЕГО файла
-        # должны быть subset'ом того, что найдено внутри ``_current_user_id``.
-        all_sender_id_attrs = [
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.Attribute) and n.attr == "sender_id"
-        ]
-        helper_attrs_set = {(a.lineno, a.col_offset) for a in sender_id_attrs}
-        outside_attrs = [
-            (a.lineno, a.col_offset)
-            for a in all_sender_id_attrs
-            if (a.lineno, a.col_offset) not in helper_attrs_set
-        ]
-        assert not outside_attrs, (
-            f"sender_id должен быть ТОЛЬКО в _current_user_id(), "
-            f"но встретился в: {outside_attrs[:5]}"
+        args = _argument_names(_handler())
+        leaked = args & SCOPE_ARGUMENT_NAMES
+        assert not leaked, (
+            f"операция history_search принимает {sorted(leaked)} — область "
+            "видимости обязана задаваться личностью вызова, а не аргументом"
         )
 
-    def test_no_get_request_user_id_call_outside_db_logging(self):
-        """У ``DbLoggingService`` НЕТ публичного ``get_request_user_id``
-        (или эквивалента). Тест на исходник сервиса — дополнительная
-        страховка (основная — в test_db_logging_service.py)."""
+    def test_identity_comes_from_execution_context(self):
+        """``session_id``/``user_id`` берутся из ``ctx``, а не из аргументов.
+
+        Если бы обработник читал их из аргументов, модель подставила бы чужие
+        значения, а конвейер (он вырезает ключи идентичности по
+        ``LEGACY_IDENTITY_KEYS``) не защитил бы доменный код.
+        """
+        tree = ast.parse(_HISTORY_SEARCH.read_text(encoding="utf-8"))
+        assert isinstance(tree, ast.Module)
+        passed = _keyword_value_sources(_handler())
+        for field in ("session_id", "user_id"):
+            assert field in passed, (
+                f"{field} не передаётся в сервис — изоляция вызова потеряна"
+            )
+            assert passed[field] == f"ctx.{field}", (
+                f"{field} передаётся как {passed[field]!r}, а не из контекста "
+                "выполнения: значение пришло бы от вызывающей стороны"
+            )
+
+
+class TestDbLoggingHasNoPublicIdentityResolver:
+    """У ``DbLoggingService`` нет публичного ``get_request_user_id``.
+
+    Без этого метода ни один компонент агента не может разрезолвить ``user_id``
+    чужой сессии: индекс читается только внутри ``_enqueue`` по совпадению
+    ``request_id``.
+    """
+
+    def test_no_public_identity_resolver(self):
         svc_src = (_REPO / "lib" / "services" / "db_logging_service.py").read_text(
             encoding="utf-8"
         )
-        forbidden = (
+        for pattern in (
             "def get_request_user_id",
             "def lookup_user_id",
             "def resolve_user_id",
-        )
-        for pat in forbidden:
-            assert pat not in svc_src, (
-                f"DbLoggingService не должен иметь публичный метод: {pat}"
+        ):
+            assert pattern not in svc_src, (
+                f"DbLoggingService не должен иметь публичный метод: {pattern}"
             )

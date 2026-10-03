@@ -123,13 +123,13 @@ def test_readme_md_describes_the_live_audit_analyzer_entrypoint() -> None:
         "scripts/cli.py снова появился: если он вернулся как живой код, "
         "README и SKILL.md надо вернуть к описанию CLI, а не инструмента"
     )
-    assert tool_path.is_file(), (
-        "инструмента audit_analyzer_query нет, а навык лишён CLI — "
-        "доступа к данным аудита не осталось"
+    declaration = _PROJECT_ROOT / "config.json"
+    assert '"mcpServers"' in declaration.read_text(encoding="utf-8"), (
+        "платформа не объявлена в tools.mcpServers — доступа к данным аудита "
+        "у модели не осталось"
     )
-    assert "audit_analyzer_query" in text, (
-        "README не называет инструмент, через который агент ходит в данные "
-        "аудита"
+    assert "mcp_enterprise_" in text, (
+        "README не называет операции, через которые агент ходит в данные аудита"
     )
 
     # Живой раздел — до первого «Что нового». Ниже начинается changelog, и
@@ -138,6 +138,15 @@ def test_readme_md_describes_the_live_audit_analyzer_entrypoint() -> None:
     assert "scripts/cli.py" not in live, (
         "живой раздел README всё ещё предлагает удалённый scripts/cli.py"
     )
+    for gone in (
+        "audit_analyzer_query",
+        "legal_summarizer_query",
+        "history_search_tool",
+    ):
+        assert gone not in live, (
+            f"живой раздел README называет снесённый инструмент {gone!r} — "
+            "модель и человек уйдут по несуществующему пути"
+        )
     for gone in ("--mode generated_sql", "--mode predefined", "sql_safety"):
         assert gone not in live, (
             f"живой раздел README упоминает {gone!r} — этого больше нет в коде"

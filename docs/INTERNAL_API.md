@@ -146,7 +146,7 @@ env-переменную для выбора профиля, поэтому ко
 
 Reference: `nanobot/agent/tools/image_generation.py`
 (`ImageGenerationTool` — самый полный пример) и
-`workspace/tools/history_search_tool.py` (минимальный шаблон).
+`workspace/tools/document_read.py` (минимальный шаблон).
 
 ### Где живут tool'ы
 
@@ -283,20 +283,22 @@ foo, bar, baz; skipped: qux (disabled by config)"`.
 | Tool | Файл | Действие | Конфиг |
 |---|---|---|---|
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (config.json) |
-| `history_search` | `workspace/tools/history_search_tool.py` | generic-поиск по журналу `agent_gateway_logs` (переживает context compaction) | `tools.history_search.*` (config.json; если секция не задана — дефолты модели `HistorySearchConfig`) |
-| `legal_summarizer_query` | `workspace/tools/legal_summarizer_query.py` | follow-up по saved `operation_id` для `legal_summarizer` | `tools.legal_summarizer_query.*` (config.json) |
+| ~~`history_search`~~ | ~~`workspace/tools/history_search_tool.py`~~ | **удалён** (change `2026-10-03-mcp-native-tools`, п. D6): то же доступно модели как `mcp_enterprise_history_search`; область видимости задаёт личность вызова, а не аргумент | — |
+| ~~`legal_summarizer_query`~~ | ~~`workspace/tools/legal_summarizer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_query_operation` | — |
+| ~~`audit_analyzer_query`~~ | ~~`workspace/tools/audit_analyzer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}` | — |
+| `document_read` | `workspace/tools/document_read.py` | извлечение текста из офисных документов | `tools.document_read.*` (config.json) |
 
 Tools `duckdb_query` / `vector_search` **не существуют** (см.
-`skill-tool-inventory.md`). Доступ к `audit_analyzer` — только через
-CLI skill'а (`scripts/cli.py --mode predefined`).
+`skill-tool-inventory.md`). Доступ к `audit_analyzer` — через операции
+capability `audit` платформы, отдаваемые модели как `mcp_enterprise_*`.
 
 `audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql`
 **отсутствуют** — они нарушали §3, §22.1, §22.2 TARGET_ARCHITECTURE.md
 (импортировали skill через `importlib`); заменены на:
 
-- predefined — CLI-режим skill'а (`scripts/cli.py --mode predefined`);
-- vector search — CLI-режим skill'а (`scripts/cli.py --mode vector`);
-- NL→SELECT — CLI-режим skill'а (`scripts/cli.py --mode generated_sql`);
+- готовый скрипт — `mcp_enterprise_run_script` (каталог — `mcp_enterprise_list_scripts`);
+- vector search — `mcp_enterprise_vector_search`;
+- NL→SELECT — `mcp_enterprise_generate_sql` (запрос строит и проверяет платформа);
 - runtime-context providers (`providers.py`, инъекция схемы/predefined в system
   prompt) — удалены полностью: схема БД и списки скриптов теперь доступны
   по требованию через `--list-scripts` / `--list-indexes`
@@ -304,48 +306,25 @@ CLI skill'а (`scripts/cli.py --mode predefined`).
 
 ---
 
-## 🚀 CLI навыка: режимы
+## ~~CLI навыка: режимы~~ — раздел удалён
 
-Точка входа: `python scripts/cli.py` (кросс-платформенный).
+CLI навыка (`python scripts/cli.py`, `audit_analyze --mode {predefined,
+generated_sql,vector}`) в репозитории **не существует**: он уехал вместе с
+Python-слоем навыка `audit_analyzer`. Раздел описывал ещё и провайдер кэша
+(`build_cache_provider()`) и путь к снимку (`table_registry.snapshot_path()`) —
+эти модули сняты фазой 5, то есть пересказ был вдвойне мёртвым, и читающий его
+человек уводил бы в два несуществующих места сразу.
 
-```
-audit_analyze --mode {predefined,generated_sql,vector} [опции]
-```
+Доступ к данным аудита теперь один: модель вызывает операции capability
+`audit` платформы как `mcp_enterprise_list_scripts`,
+`mcp_enterprise_run_script`, `mcp_enterprise_generate_sql` и
+`mcp_enterprise_vector_search` (объявление — `config.json → tools.mcpServers`,
+белый список `enabled_tools`). Доменный разбор — в
+`workspace/skills/audit_analyzer/SKILL.md`, общий контракт вызовов — в
+`workspace/skills/enterprise_mcp/SKILL.md`. Личность вызова подставляет
+`McpIdentityHook`; самой её передавать не нужно.
 
-| Режим | Назначение | Ключевые флаги |
-|-------|-----------|----------------|
-| `predefined` | Выполнение готовых SQL-шаблонов из реестра | `--script`, `--params` |
-| `generated_sql` | Генерация SELECT через LLM по текстовому запросу | `--query`, `--context` |
-| `vector` | Семантический поиск по FAISS-индексу | `--query`, `--index-name`, `--top-k`, `--threshold` |
-
-Примеры:
-
-```bash
-# predefined — готовый шаблон с параметрами
-audit_analyze --mode predefined --script violations_by_period --params '{"date_from": "2024-01-01", "date_to": "2024-12-31"}'
-
-# generated_sql — генерация SQL через LLM и выполнение
-audit_analyze --mode generated_sql --query 'сколько аудитов было в 2024 по месяцам'
-
-# vector — топ-3 по схожести
-audit_analyze --mode vector --query 'пожарная безопасность' --index-name audits_index --top-k 3
-
-# vector — всё выше порога 0.7
-audit_analyze --mode vector --query 'статусы аудитов' --index-name audits_index --threshold 0.7
-```
-
-**Как выбирается бэкенд запросов:** CLI строит провайдера
-(`build_cache_provider()`), открывает опубликованный gateway DuckDB-снапшот
-(путь через `table_registry.snapshot_path()`) на чтение и работает по нему.
-Прямого PostgreSQL-бэкенда у CLI нет (см. [DATABASE.md](DATABASE.md)). Кеш создаёт и обновляет
-**gateway** (см. [DATABASE.md](DATABASE.md#-жизненный-цикл-кеша)); CLI про это не знает. Если файла
-кеша нет — CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
-gateway автоматически — запустите его (python gateway.py --profile=prod)».
-
-Векторный поиск — параметр `--index-name` (по умолчанию `audits_index`).
-Строковые параметры predefined-скриптов передаются как есть (после
-валидации `ParameterValidator`), без семантического резолва через векторный
-поиск.
+Причина смены входа: change `2026-10-03-mcp-native-tools`, п. D6.
 
 ---
 

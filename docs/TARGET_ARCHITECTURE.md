@@ -202,9 +202,17 @@ Tool должен быть максимально generic в рамках сво
 
 ```text
 workspace/tools/
-    history_search_tool.py
-    legal_summarizer_query.py
+    compact_context.py
+    document_read.py
 ```
+
+> **Инфраструктурные операции платформы Tools не требуют.** `history_search`
+> и `legal_summarizer_query` были generic-адаптерами, переписывавшими схемы
+> операций и собиравшими область видимости по аргументу модели. Обе сняты
+> (change `2026-10-03-mcp-native-tools`, п. D6): модель получает настоящие
+> операции как `mcp_enterprise_*` с их `inputSchema`, а область поиска задаёт
+> личность вызова, а не параметр. Tool остаётся там, где платформа ничего не
+> покрывает.
 
 В будущем допустимы другие независимые Tools, если они представляют самостоятельную generic capability.
 
@@ -1178,9 +1186,11 @@ workspaces_nanobot/
 +-- workspace/
 |   |
 |   +-- tools/
-|   |   +-- history_search_tool.py
-|   |   +-- legal_summarizer_query.py
 |   |   +-- compact_context.py
+|   |   +-- document_read.py
+|   |   (аудит / документы / журнал — операциями mcp_enterprise_*, объявленными
+|   |    в config.json → tools.mcpServers; адаптеры сняты п. D6 change
+|   |    2026-10-03-mcp-native-tools)
 |   |
 |   +-- skills/
 |       |

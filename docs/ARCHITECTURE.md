@@ -65,7 +65,7 @@ flowchart LR
 - Данные аудита агент берёт операциями capability `audit`, семантический поиск —
   операцией `vector_search` у capability `vectors`. Агентских tool'ов
   `duckdb_query` / `vector_search` в `workspace/tools/` больше нет; вход агента к
-  данным аудита — инструмент `audit_analyzer_query`.
+  данным аудита — операции `mcp_enterprise_*` capability `audit`.
 - Векторные индексы capability `vectors` собирает **лениво**, при первом
   `vector_search`; состояние индекса (`missing` / `building` / `ready` / `error`)
   возвращается в ответе, поэтому «индекс не поднят» наблюдаемо, а не спрятано за
@@ -166,7 +166,7 @@ readiness не входят: снимком и индексами владеет
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
 | ~~`schema_formatter.py`~~ | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Доменную схему теперь знает платформа: её объявляет capability `audit` (`mcp-platform/platform.json` → `audit.tables`) и отдаёт операцией `schema_check`. |
-| ~~`nl_sql_runner.py`~~ | **Удалён** — общая логика NL→SELECT pipeline, равно как и CLI навыка `audit_analyzer` (в `workspace/skills/audit_analyzer/` остался только `SKILL.md`). Замена: SQL к данным аудита формирует агент сам либо операция capability `audit`; доступ к данным даёт инструмент `audit_analyzer_query`. |
+| ~~`nl_sql_runner.py`~~ | **Удалён** — общая логика NL→SELECT pipeline, равно как и CLI навыка `audit_analyzer` (в `workspace/skills/audit_analyzer/` остался только `SKILL.md`). Замена: SQL к данным аудита формирует агент сам либо операция capability `audit`; доступ к данным дают операции `mcp_enterprise_*`, объявленные в `config.json → tools.mcpServers`. |
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
 
@@ -1796,29 +1796,22 @@ nanobot/
 │   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
 │   │   └── debug_stream_diag.py          #     диагностика стриминга
 │   ├── tools/                            # кастомные tool'ы (auto-discover через project_tool_loader.register_project_tools)
-│   │   ├── compact_context.py, history_search_tool.py,
-│   │   │   legal_summarizer_query.py, example.py
+│   │   ├── compact_context.py, document_read.py
+│   │   │   (audit_analyzer_query / legal_summarizer_query / history_search_tool
+│   │   │   удалены: те же операции модель получает как mcp_enterprise_* —
+│   │   │   change 2026-10-03-mcp-native-tools, п. D6)
 │   ├── utils/                            # утилиты workspace
 │   │   ├── db.py, media.py, jsonb.py, session_file_store.py,
-│   │   │   session_key.py, clean_text.py, office_files.py
-│   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
-│   │   ├── SKILL.md                      #   пользовательская документация
-│   │   ├── scripts/
-│   │   │   ├── cli.py                    #   точка входа (python scripts/cli.py ...)
-│   │   │   ├── skill_config.py           #   конфиг из SETTINGS + build_cache_provider()
-│   │   │   ├── generated_sql_mode.py     #   режим generated_sql: LLM → SQL → EXPLAIN → выполнение
-│   │   │   ├── llm.py                    #   LLM-клиент (OpenAI-compatible HTTP)
-│   │   │   ├── output.py                 #   форматирование JSON-вывода
-│   │   │   └── predefined/               #   predefined SQL из PG-реестра (DB-first)
-│   │   │       ├── db_loader.py          #     lookup скриптов в public.agent_predefined_scripts
-│   │   │       ├── mode.py               #     predefined.run() — выполнение через CacheProvider.query_sql
-│   │   │       ├── builder.py, validator.py, models.py  #   ParamDefinition/ScriptDefinition
-│   └── skills/office_files/              # навык: чтение docx/xlsx/xls/pdf/pptx/csv/txt
-│       ├── SKILL.md                      #   пользовательская документация
-│       └── (utils: workspace/utils/office_files.py)
-│
-│       # legal_summarizer — структура scripts:
-│       # см. секцию «legal_summarizer — внутренняя структура» ниже.
+│   │   │   session_key.py, clean_text.py
+│   ├── skills/                           # навыки: в каждом только SKILL.md,
+│   │   │                                 #   вся логика уехала в capability платформы
+│   │   ├── audit_analyzer/SKILL.md       #   запросы к данным аудита
+│   │   └── enterprise_mcp/SKILL.md       #   общий контракт вызовов mcp_enterprise_*
+│   │
+│   │       # Домены legal_summarizer и office_files в агенте не остались:
+│   │       # первый живёт в mcp-platform/libs/legal_summarizer/, второй — в
+│   │       # mcp-platform/libs/office/ (его зовёт tool document_read).
+│   │       # См. секцию «legal_summarizer — где домен живёт сейчас» ниже.
 │
 ├── gateway.py                            #  тонкий оркестратор
 ├── cli_agent.py                          #  тонкий оркестратор
@@ -1827,187 +1820,39 @@ nanobot/
 ```
 
 ---
-## legal_summarizer — внутренняя структура
+## legal_summarizer — где домен живёт сейчас
 
-Структура `workspace/skills/legal_summarizer/scripts/`: вся жилая логика — это
-Python-пакет внутри `scripts/` (корневой `pyproject.toml::pythonpath` включает
-`workspace/skills/legal_summarizer` и `workspace/skills/legal_summarizer/scripts`,
-импорты плоские: `from application.service import ...`, `from document.physical import ...`).
-CLI-обёртки — `cli.py` / `cli_query.py`:
+Раздел описывал внутреннюю структуру `workspace/skills/legal_summarizer/scripts/`:
+Python-пакет, CLI-обёртки `cli.py` / `cli_query.py`, слои `domain/`,
+`document/`, `infrastructure/`. **В агенте этого каталога нет** — навык уехал
+на платформу целиком, и раздел описывал путь, который в дереве агента
+отсутствует уже несколько фаз (change `enterprise-mcp-platform`, фаза 11).
 
-```
-scripts/
-├── cli.py                     # практики CLI (audit query) + разовые операции
-├── cli_query.py               # QA по пакетам документов (tool legal_summarizer_query)
-│
-├── application/               # оркестратор — единственная точка над всем графом:
-│   ├── service.py             #   run / inspect / estimate / quick_estimate / load_text /
-│   │                          #   load_structure / make_operation_id
-│   ├── canonical.py           #   inspect_canonical / run_canonical_pipeline /
-│   │                          #   build_pipeline_result
-│   ├── pipeline_structure.py  #   run_canonical_pipeline impl
-│   ├── brief_context.py       #   BriefContextBuilder.build_brief_chunk
-│   │                          #   (BRIEF CONTRACT: один документ → ровно один Chunk)
-│   ├── brief_compression.py   #   детерминированная weighted компрессия секций
-│   ├── execution_orchestration.py   #   координатор batch-исполнения
-│   ├── context_builder.py     #   построение контекста для reducers
-│   ├── chunk_selection.py     #   выбор Chunk'ов под вопрос
-│   ├── document_io.py         #   чтение/сохранение документов
-│   ├── estimation.py          #   оценочные проходы (без LLM)
-│   ├── inspection.py          #   inspect-режим
-│   ├── manifest_builder.py    #   сборка NormalizedManifest
-│   ├── operation_id.py        #   make_operation_id
-│   ├── question_context.py    #   контекст вопроса (single_context_block)
-│   └── section_index.py       #   индексирование секций
-│
-├── cache/                     # долговечные per-operation-state:
-│   ├── manifest.py            #   NormalizedManifest, resume API
-│   └── document_cache.py      #   document-level кеш хunk'ов (по session_key+document_id)
-│
-├── chunking/                  # чанкинг поверх document-блоков:
-│   ├── chunker.py, chunks.py, order.py, packing.py,
-│   │   importance_score.py, structural_packing.py, _text_helpers.py
-│
-├── document/                  # работа с PhysicalDocument (включая бывший domain/):
-│   ├── loader.py              #   DocumentLoader (PDF/DOCX/TXT)
-│   ├── physical.py            #   PhysicalDocument, block extraction
-│   ├── structure.py           #   DocumentStructure, Block, Chunk (бывший domain/models.py)
-│   ├── identity.py            #   DocumentIdentity (fingerprint = sha256)
-│   ├── numbering.py           #   ArticleNumberingDetector
-│   ├── heading.py, hierarchy.py, list_detection.py,
-│   │   pdf_outline.py, title.py, block_lookup.py,
-│   │   repair.py, validation.py, section_helpers.py,
-│   │   analysis.py, safety_merge.py, block_ownership.py
-│
-├── execution/                 # чистое исполнение batch-плана (выше document):
-│   ├── pipeline.py            #   process_context_batch, run_one_batch_async
-│   ├── hierarchical.py        #   reduce_chunks_hierarchical, reduce_sections_to_document,
-│   │                          #   deterministic_truncate
-│   ├── map_reduce.py          #   flat map-reduce стратегия
-│   └── config.py              #   ExecutionConfig
-│
-├── llm/                       # LLM-клиент + sanitization (лист):
-│   ├── client.py              #   chat(), LLMRunner
-│   ├── calls.py               #   _run_all_calls (single-flight + retry)
-│   ├── prompts.py, prompts_runtime.py
-│   ├── retry.py               #   build_repair_prompt (LLM-driven)
-│   ├── sanitize.py            #   strip_think_blocks, extract_subject
-│   ├── single_flight.py       #   asyncio.Semaphore-based gate
-│   ├── tokens.py              #   token_estimator, TokenBudget, MID_REDUCE_GROUP_SIZE
-│   └── config.py              #   get_chunking_config / get_execution_config / …
-│                              #   (бывший ``skill_config.py``)
-│
-├── output/                    # вывод пользователю:
-│   └── presenter.py           #   prepare_output, build_confirmation_options
-│
-└── planning/                  # выбор стратегии + plan (выше document/retrieval):
-    ├── strategy.py            #   select_strategy (direct / map_flat / map_hierarchical)
-    └── plan.py                #   ExecutionPlan, PlannedBatch
-```
+Переписывать раздел по дереву каталогов бессмысленно: такое дерево описывало бы
+платформу, а не агента. Домен описывается там, где он живёт, — в
+`mcp-platform/docs/`. CLI-обёртки `cli.py` / `cli_query.py` переехали вместе с
+доменом в `mcp-platform/libs/legal_summarizer/`, и платформенный сервис
+(`.../capabilities/legal_summarizer/service/main.py`) вызывает их сам.
 
-Бывшие слои `domain/` и `infrastructure/` упразднены: pure-данные (`identity`,
-`numbering`, `tokens`, конфиги) разложены по слоям-владельцам
-(`document/`, `llm/`, `execution/`), а dev-tooling (архитектурные проверки,
-`assert_no_legacy`) вынесено из production-пакета в корневой `tools/`
-(`tools/architecture_guard.py`, `tools/legacy_audit.py`).
-До этого пакет переезжал дважды: `src/legal_summarizer/` → корень Skill →
-`scripts/` (плоские импорты для CLI).
+Что видит агент:
 
-Граница слоёв (§65, `docs/TARGET_ARCHITECTURE.md`) автоматически
-проверяется в `tests/architecture/test_layer_boundaries.py`: домен
-не может импортировать ничего, документ — retrieval/execution/llm/
-planning, retrieval — execution/llm, planning — llm, execution —
-document/retrieval/llm.
+| Что | Где |
+|---|---|
+| capability `legal_summarizer` | `mcp-platform/libs/legal_summarizer/` (домен), регистрация — `mcp-platform/platform.json` → `legal_summarizer` |
+| Операция follow-up по разобранному документу | `mcp-platform/servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py`, модели — как `mcp_enterprise_query_operation` |
+| Что именно модели видно | `config.json` → `tools.mcpServers.enterprise.enabled_tools` |
+| Контракт вызова | `workspace/skills/enterprise_mcp/SKILL.md` |
 
-### Ключевые invariants (legal_summarizer)
+Операция `query_operation(operation_id, field, max_chunk_summary_chars)` несёт
+ту же семантику полей, что снятый tool: `stats` / `articles` / `chunks` /
+`sections` / `tree` / `all`. Документ заново не разбирается — ответ берётся из
+сохранённого состояния операции, а область видимости задаётся личностью
+вызова, а не аргументом.
 
-- **#4.** Single-call strategy (`strategy="single"`) → ровно 1 LLM call для
-  документов, помещающихся в `single_call_threshold` chars или
-  `TokenBudget.direct_call_tokens` (opt-in через `direct_strategy_min_chars`).
-- **#5.** Map-reduce без opt-in → `len(batches)` map-вызовов + ≥1 reduce-вызов.
-  Opt-in DIRECT переключает на single path для подходящих документов.
-- **#8.** Cache separation: document cache keyed по `(session_key, document_id)` —
-  immutable chunks для follow-up вопросов. Manifest keyed по `operation_id` —
-  mutable state. Разные namespace, не конфликтуют.
-- **#15.** Section reduce вызывается **только** при `should_use_hierarchical_reduce`
-  ИЛИ `select_reduce_strategy == ReduceStrategy.HIERARCHICAL`.
-  Legacy criterion: `count_meaningful_sections >= 3`. Новый criterion:
-  token-budget first, sections second.
-- **#20.** LLM-trim секций заменён на truncation `[:max_chars]`.
-  `section_trim_calls` всегда 0 в stats.
-
-### Brief: всегда ровно один Chunk (BRIEF CONTRACT)
-
-`legal_summarizer --length brief` (default) собирает через
-`application.brief_context.build_brief_chunk` **ровно один**
-`Chunk` — компактное структурное представление всего документа.
-Это **архитектурный инвариант**, а не настройка:
-
-* `len(ctx.chunks) == 1` → `strategy="direct"`, `plan=None`
-  (см. `context_builder.build_execution_context`).
-* Никакого map-reduce, никакого fallback на несколько chunks.
-* Источники: `DocumentAnalysis.physical` и `DocumentAnalysis.structure`
-  напрямую — `analysis.chunks` (canonical) **не используется**.
-
-Структура итогового `chunk.text`:
-
-```text
-DOCUMENT STRUCTURE
-<outline всех значимых structural nodes в pre-order>
-
-DOCUMENT CONTENT
-[Preamble]
-<preamble blocks>
-[<Section heading>]
-<все physical blocks subtree в document order>
-```
-
-`max_chars` рассчитывается **динамически**:
-
-```text
-max_chars = agents.defaults.contextWindowTokens
-          * chunking.brief_input_ratio
-          * brief_context.chars_per_token
-```
-
-Fallback: `brief_context.max_chars_fallback` (если контекстное окно
-неизвестно). Текущие дефолты: 65536 tokens × 0.13 × 3.5 = ~29800 chars.
-
-При превышении `max_chars` сжатие идёт **по тексту секций**
-(`application.brief_compression`):
-
-1. Все headings секций сохраняются.
-2. Document structure (outline) сохраняется с собственным budget
-   (`brief_context.structure_max_chars`).
-3. Тексты сокращаются по безопасной границе
-   (paragraph → newline → sentence → word → hard char).
-4. Сокращённые секции получают явный маркер
-   `[BRIEF: section content truncated]` — LLM понимает, что
-   отсутствие дальнейшего текста не означает, что в документе этого
-   больше нет.
-5. Целые секции никогда не удаляются (даже при переполнении).
-6. Таблицы передаются атомарно (на уровне блока, не строки).
-
-Удалённые legacy-модули: `chunking/importance_brief.py`,
-`chunking/brief_budget.py`, `application/brief_from_analysis.py`.
-Удалённые config-ключи: `chunking.brief_coverage_ratio`,
-`chunking.brief_max_chars_per_chunk`, `chunking.brief_max_input_chars`.
-`retrieval.followup.build_followup_response(mode="brief")` теперь
-raises `NotImplementedError` (brief — chunk-selection concern,
-а не retrieval).
-
-### Opt-in флаги (default OFF для back-compat)
-
-- `chunking_config.direct_strategy_min_chars > 0` → DIRECT strategy для
-  средних документов. Default 0 = старое поведение.
-- `PackingConfig.allow_adjacent_sections=True` → locality-aware packing.
-  Default False = strict section-locality.
-
-### Тесты
-
-`tests/test_resume_scenarios.py` (10 tests),
-`tests/test_information_preservation.py` (10 tests), `tests/benchmarks/test_quality_benchmark.py`
-(12 tests), `tests/benchmarks/test_acceptance_matrix.py` (9 tests).
+**Правило, которое этот раздел отменяет.** Домен, уехавший на платформу, не
+описывается деревом каталогов в архитектуре агента: там нет ни пакетов, ни
+CLI, ни слоёв. В `docs/ARCHITECTURE.md` остаются только **контракты** — что
+агент видит и как зовёт; устройство платформенной части живёт в
+`mcp-platform/docs/` и в самой платформе.
 
 ---
-

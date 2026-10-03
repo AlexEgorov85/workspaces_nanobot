@@ -43,7 +43,20 @@ DATA_SERVICE_MAIN = (
     / "service"
     / "main.py"
 )
-HISTORY_SEARCH_TOOL = REPO_ROOT / "workspace" / "tools" / "history_search_tool.py"
+#: Операция ``history_search`` на платформе. Раньше здесь был агентский tool
+#: ``workspace/tools/history_search_tool.py`` — он удалён (change
+#: ``2026-10-03-mcp-native-tools``, п. D6), и перечисление имён событий ушло
+#: вместе с ним.
+HISTORY_SEARCH_OPERATION = (
+    REPO_ROOT
+    / "mcp-platform"
+    / "servers"
+    / "enterprise"
+    / "capabilities"
+    / "data"
+    / "tools"
+    / "history_search.py"
+)
 
 #: Каталоги агента, в которых событие может быть порождено. ``mcp-platform``
 #: сюда НЕ входит: там свои имена (``tool.*`` пишет конвейер исполнения), и
@@ -375,14 +388,16 @@ def _written_event_type_literals() -> dict[str, list[str]]:
 
 
 def _history_search_event_type_enum() -> set[str]:
-    """Прочитать ``enum`` параметра ``event_type`` из схемы tool'а.
+    """Перечисление имён событий, **видимое модели**, у операции history_search.
 
-    Список лежит в JSON-схеме параметра, то есть в описании, **видимом
-    модели**. Расхождение с журналом здесь опаснее падения: модель
-    отфильтрует по несуществующему имени и получит пустой результат без
-    ошибки, решив, что истории нет.
+    Возвращает пустое множество, если перечисления нет: сейчас параметр
+    ``event_type`` — свободная строка, и модель видит только
+    ``description``. Это не ослабление стража, а смена его предмета: раньше
+    список лежал в JSON-схеме агентского tool'а и мог устареть незаметно.
+    Список, однажды появившись, обязан быть подмножеством эталона — это и
+    проверяет ``TestHistorySearchEnumStaysInSync``.
     """
-    tree = _parse(HISTORY_SEARCH_TOOL)
+    tree = _parse(HISTORY_SEARCH_OPERATION)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Dict):
             continue
@@ -392,11 +407,10 @@ def _history_search_event_type_enum() -> set[str]:
             for inner_key, inner_value in zip(value.keys, value.values):
                 if _string(inner_key) != "enum":
                     continue
-                items = getattr(inner_value, "elts", [])
-                names = {_string(item) for item in items}
+                names = {_string(item) for item in getattr(inner_value, "elts", [])}
                 assert None not in names, "в enum history_search появилось не имя"
                 return {n for n in names if n}
-    raise AssertionError("enum имён событий не найден в схеме history_search")
+    return set()
 
 
 def _empty_outbound_event_types() -> set[str]:
@@ -480,25 +494,37 @@ class TestEtalonIsHonest:
 
 
 class TestHistorySearchEnumStaysInSync:
-    """Тихое место №1: enum имён, видимый модели."""
+    """Имена событий, видимые модели, не могут разойтись с эталоном.
+
+    Предмет стража сместился вместе с операцией: перечисление ушло из
+    агентского tool'а на платформу (``history_search`` объявлена как
+    ``mcp_enterprise_history_search``), и параметр ``event_type`` стал
+    свободной строкой. Пока перечисления нет, проверять нечего — и это само
+    по себе фиксируется: как только кто-то опубликует список имён, страж
+    потребует, чтобы он был подмножеством эталона.
+
+    Что при этом **потеряно** и осознанно: модель больше не видит перечень
+    имён событий и вынуждена брать их из самого журнала. Это цена перехода,
+    а не дефект; отражено в ``openspec/changes/2026-10-03-mcp-native-tools``.
+    """
 
     def test_enum_offers_only_names_the_agent_actually_writes(self):
-        """ГЛАВНЫЙ СТРАЖ. Старое имя, оставшееся в enum после переименования
-        эмиттера, даёт модели фильтр, которому нечему ответить: пустая выдача
-        без ошибки, и модель заключает, что истории нет."""
+        """ГЛАВНЫЙ СТРАЖ. Старое имя, оставшееся в перечислении после
+        переименования эмиттера, даёт модели фильтр, которому нечему ответить:
+        пустая выдача без ошибки, и модель заключает, что истории нет."""
         enum = _history_search_event_type_enum()
         written = set(_written_event_type_literals())
         stale = sorted(enum - written)
         assert not stale, (
             "history_search предлагает имена, которых агент больше не пишет: "
             f"{stale}. Модель отфильтрует по ним и получит пустую выдачу без "
-            "ошибки. Синхронизировать enum с эталоном."
+            "ошибки. Синхронизировать перечисление с эталоном."
         )
 
     def test_enum_comes_from_the_etalon(self):
         enum = _history_search_event_type_enum()
         outside = sorted(enum - set(ETALON))
-        assert not outside, f"в enum history_search имена вне эталона: {outside}"
+        assert not outside, f"в перечислении history_search имена вне эталона: {outside}"
 
 
 class TestPurgeCodeStaysInSync:

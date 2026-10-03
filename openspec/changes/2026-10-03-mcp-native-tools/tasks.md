@@ -65,13 +65,107 @@ Push-Location mcp-platform; python -m pytest -q 2>&1 | Select-Object -Last 5; Po
 
 ## D6. Снос трёх обёрток (требует владельца)
 
-- [ ] 6.1 Удалить с диска `workspace/tools/audit_analyzer_query.py`,
-      `legal_summarizer_query.py`, `history_search_tool.py` (удаление агентом
-      заблокировано политикой — готовится скрипт).
-- [ ] 6.2 Снять из индекса git.
-- [ ] 6.3 Починить гард-тесты, ссылающиеся на удалённые tool'ы (~25 файлов).
-- [ ] 6.4 Обновить живые спеки `tools-history-search` и
-      `skills/legal-summarizer-query` под операции платформы.
+- [x] 6.1 Удалить с диска `workspace/tools/audit_analyzer_query.py`,
+      `legal_summarizer_query.py`, `history_search_tool.py`
+      (`tools/remove_legacy_query_tools.py --apply` — удаление агенту
+      заблокировано политикой).
+- [ ] 6.2 Удалить тесты снесённых инструментов
+      (`tools/remove_legacy_query_tests.py --apply`): четыре файла тестов и две
+      фикстуры бенчмарка. Покрытие не теряется — оно ушло на платформу
+      вместе с кодом: аудит (`test_audit_capability.py` + 12 `test_audit_lib_*`),
+      вектора (7 `test_vectors_*`), `history_search`
+      (`test_data_service.py::TestHistorySearchIsolation` и
+      `::TestHistorySearchFilters`).
+      **Бенчмарк сносится не как дубль:** он измерял ILIKE и ORDER BY в
+      агентском tool'е. Такого SQL в агенте нет; перенос замера на запрос
+      платформы — задача её стороны.
+- [x] 6.3 Починить гард-тесты, ссылающиеся на удалённые tool'ы.
+      Что оказалось правдой на деле: из 28 файлов, где встречаются имена,
+      ломаются девять. Остальные упоминания — фикстуры в тексте или ссылки
+      на прошлое.
+
+  - `lib/services/runtime_inventory.py` — из `canonical_project_tools()` убраны
+    три `ToolSpec`; канон теперь состоит из `compact_context` и
+    `document_read`.
+  - `tests/test_history_search_user_isolation_guards.py` — **переписан, а не
+    удалён.** Прежний guard грефил удалённый tool' на запрещённые SQL-паттерны.
+    Изоляция теперь обеспечена там, где она и живёт: у операции
+    `history_search` нет параметра области видимости, а `session_id`/`user_id`
+    берутся из `ctx`, а не из аргументов. Это строже прежнего grep'а: раньше
+    модель могла попросить `session_scope="all"`, теперь параметра нет вовсе.
+  - `tests/test_journal_event_name_alignment.py` — страж перечисления имён
+    событий переведён на платформенную операцию. **Что при этом потеряно:**
+    модель больше не видит перечень имён и берёт их из самого журнала. Это
+    цена перехода, а не дефект; зафиксировано в докстринге класса.
+  - `tests/test_runtime_inventory.py` — фикстуры diff'а держали имена снесённых
+    инструментов; заменены на живые из канона.
+  - `README.md` и `tests/test_docs_consistency.py` — живой раздел README больше
+    не предлагает удалённый вход; страж проверяет, что он называет
+    `mcp_enterprise_*` и **не** называет снесённых инструментов.
+- [x] 6.4 Документация. Правлено: `AGENTS.md` (включая строку 59 — перечень
+      `workspace/tools/` называл три снесённых файла), `README.md`,
+      `docs/INTERNAL_API.md` (таблица tool'ов + раздел «CLI навыка: режимы»,
+      который был вдвойне мёртвым — кроме CLI он описывал снятые
+      `build_cache_provider()` и `table_registry.snapshot_path()`),
+      `docs/ARCHITECTURE.md`, `docs/skill-tool-inventory.md` (переписан целиком),
+      `docs/SKILL_AUTHORING.md` (~18 мест), `docs/skill-tool-architecture.md`
+      (§11 заменена на «Контракт доступа к разобранному документу»),
+      `docs/TARGET_ARCHITECTURE.md`, `docs/TROUBLESHOOTING.md`,
+      `docs/TESTING.md`, `openspec/specs/OWNERSHIP.md`.
+
+  Отдельно, вне перечисления: `docs/ARCHITECTURE.md` содержал **вымышленное
+  дерево** — блок `skills/audit_analyzer/scripts/` (12 файлов) и
+  `skills/office_files/`, которых в `workspace/skills/` нет уже несколько фаз
+  (там остались `SKILL.md` двух навыков), плюс несуществующий
+  `workspace/utils/office_files.py`. Сверка шла по фактическому списку файлов,
+  а не по правкам: расхождение нашлось потому, что дерево переписывалось по
+  памяти.
+
+  `docs/TESTING.md` § «Мёртвые тестовые файлы» врал в **обратную** сторону:
+  утверждал, что 12 tombstone-заглушек лежат в репозитории, а они уже снесены
+  соседом (`PENDING-DELETIONS.md` § F обновлён, `docs/TESTING.md` — нет).
+
+  **Живые спеки OpenSpec** (решение владельца — переписать, не пометить):
+  обе получили дельту в этом change и обновлены в `openspec/specs/`.
+
+  | Спека | Что сделано |
+  |---|---|
+  | `openspec/specs/skills/legal-summarizer-query/spec.md` | 193 строки, 6 требований → 196 строк, 4 требования. Снят IPC-контракт subprocess'а и wrapper-уровневые коды (`cli_failed`, `cli_not_found`, `subprocess_error`, `empty_response`, `invalid_json`); три требования про manifest переписаны на коды конверта (`not_found` / `internal` / `upstream_unavailable`) |
+  | `openspec/specs/tools-history-search/spec.md` | 759 строк, 22 требования → 506 строк, 17 требований. Снят параметр `session_scope` и оба его режима; изоляция теперь пересечение `session_id ∧ user_id` из контекста вызова; форма ответа `{hits, next_offset, truncated}`; enum типов событий заменён на пространство имён платформы |
+
+  Ни одно из 22 требований старой спеки не потеряно: `session_scope`-пара
+  (2 требования) схлопнута в одно «Scope is the caller session intersected
+  with the caller user», `RequestContext exposes user identity` переехала на
+  хук, `Формат ответа`/`Детерминированный порядок`/`Пустой результат` — в
+  `pagination and ordering` и `response shape`, `history_search is read-only` —
+  в `operation identity and scope`.
+
+  **Зафиксировано в спеке как факт, а не как замысел:** опубликованная схема
+  `query_operation` строится из сигнатуры обработчика, поэтому `field` не имеет
+  `enum`, а `max_chunk_summary_chars` — границ. Проверял это argparse снятой
+  обёртки. Следствие: значение `field`, не совпадающее ни с одним из шести,
+  молча отдаёт ветку `all` целиком, без отказа. Это дефект платформы, не агента.
+
+  **Не трогать:** `CHANGELOG.md`, `PENDING-DELETIONS.md`,
+  `docs/PLAN-SPEC-COMPLETION.md`, `mcp-platform/docs/MIGRATION.md` и
+  `mcp-platform/docs/TARGET-ARCHITECTURE.md` — это пересказ прошлого, а не
+  описание текущего состояния.
+
+  **Осталось за рамками (чужие файлы, трогать нельзя):**
+  - `workspace/TOOLS.md` § `history_search` (стр. 38) и §
+    `legal_summarizer_query` (стр. 279) — модельная инструкция называет оба
+    снятых tool'а. Файл занят соседом (его незакоммиченные правки переименовывают
+    типы событий, и он уже правит § `history_search`).
+  - `mcp-platform/libs/legal_summarizer/skill/SKILL.md` § «IPC contract for
+    follow-up queries» (стр. 203-260) — описывает снятую обёртку, subprocess и
+    ссылается на `workspace/TOOLS.md`; § «Что внутри» описывает layout `scripts/`,
+    которого на платформе нет.
+  - Противоречие в самой платформе: `query_operation` объявлен в
+    `config.json → tools.mcpServers.enterprise.enabled_tools` (то есть виден
+    модели), при этом его модуль помечен `AUDIENCE_RUNTIME` / `runtime-only` с
+    комментарием «а не модель в свободном диалоге», а `list_scripts.py` в
+    10 строках от этого же комментария говорит обратное — «модель зовёт его
+    первой». Константа `AUDIENCE_RUNTIME` при этом нигде не используется.
 
 ## D7. Отдельной задачей, не здесь
 

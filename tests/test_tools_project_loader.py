@@ -539,11 +539,11 @@ class TestProjectToolsInventoryBanner:
         from lib.services.project_tool_loader import ProjectToolsLoadResult
 
         result = ProjectToolsLoadResult(
-            registered=["history_search"],
+            registered=["document_read"],
             disabled=[],
             duplicate=[],
             failed=[],
-            detail="1 project tools registered: history_search",  # legacy
+            detail="1 project tools registered: document_read",  # legacy
             error=None,
         )
 
@@ -551,8 +551,11 @@ class TestProjectToolsInventoryBanner:
 
         captured = capsys.readouterr()
         assert "MISSING REQUIRED:" in captured.err
+        # diff считается по канону, а не печатается списком: зарегистрированный
+        # ``document_read`` в строке отсутствия быть не должен, иначе баннер
+        # показывал бы несуществующий дефект.
         assert "compact_context" in captured.err
-        assert "legal_summarizer_query" in captured.err
+        assert "document_read" not in captured.err
 
     def test_no_inventory_drift_returns_silently(self, capsys):
         """Если drift нет (всё совпадает с canonical) — banner молчит.
