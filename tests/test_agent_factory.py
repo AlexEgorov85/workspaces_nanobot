@@ -59,12 +59,14 @@ class TestAgentFactory:
         assert "session_manager" in kwargs
         assert "hooks" in kwargs
         # Без плагинов: ToolAuditHook + TerminalToolPrintHook +
-        # RepeatGuardHook (регистрируется всегда, даже при mode="off").
-        assert len(kwargs["hooks"]) == 3
+        # RepeatGuardHook (регистрируется всегда, даже при mode="off") +
+        # McpIdentityHook.
+        assert len(kwargs["hooks"]) == 4
         names = [type(h).__name__ for h in kwargs["hooks"]]
         assert "ToolAuditHook" in names
         assert "TerminalToolPrintHook" in names
         assert "RepeatGuardHook" in names
+        assert "McpIdentityHook" in names
 
     def test_passes_session_manager(self, fake_modules):
         from lib.core.agent_factory import AgentFactory
@@ -88,12 +90,16 @@ class TestAgentFactory:
         )
         # Плагины идут ПЕРЕД ToolAuditHook (правки params видны в аудите).
         # Итоговый порядок:
-        #   [PluginA, ToolAuditHook, TerminalToolPrintHook, RepeatGuardHook]
-        assert len(hooks) == 4
+        #   [PluginA, ToolAuditHook, TerminalToolPrintHook, RepeatGuardHook,
+        #    McpIdentityHook]
+        # McpIdentityHook — последний из фреймворковых: аудит должен видеть
+        # аргументы модели, а не инфраструктурные ключи идентичности.
+        assert len(hooks) == 5
         assert hooks[0] is plugin_a
         assert type(hooks[1]).__name__ == "ToolAuditHook"
         assert type(hooks[2]).__name__ == "TerminalToolPrintHook"
         assert type(hooks[3]).__name__ == "RepeatGuardHook"
+        assert type(hooks[4]).__name__ == "McpIdentityHook"
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert kwargs["hooks"] == hooks
 
@@ -114,13 +120,13 @@ class TestAgentFactory:
         from lib.core.agent_factory import AgentFactory
 
         factory = AgentFactory()
-        # Без db_logging_service — три фреймворковых хука
-        # (ToolAuditHook + TerminalToolPrintHook + RepeatGuardHook),
-        # без фабрик оборота.
+        # Без db_logging_service — четыре фреймворковых хука
+        # (ToolAuditHook + TerminalToolPrintHook + RepeatGuardHook +
+        # McpIdentityHook), без фабрик оборота.
         _, hooks, hook_factories = factory.create(
             config=MagicMock(), bus=MagicMock(),
         )
-        assert len(hooks) == 3
+        assert len(hooks) == 4
         assert hook_factories == []
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert kwargs["hook_factories"] == []
@@ -132,8 +138,27 @@ class TestAgentFactory:
             db_logging_service=MagicMock(),
         )
         kwargs = fake_modules["from_config"].call_args.kwargs
-        assert len(kwargs["hooks"]) == 3
+        assert len(kwargs["hooks"]) == 4
         assert len(kwargs["hook_factories"]) == 1
+
+    def test_mcp_identity_hook_gets_logging_service(self, fake_modules):
+        """Хуку нужен индекс журнала: без него нет ``request_id`` в личности.
+
+        Регистрируется общим инстансом, а не через ``hook_factories``: личность
+        читается из контекста конкретного вызова, состояния между оборотами у
+        хука нет — per-turn фабрика была бы лишней.
+        """
+        from lib.core.agent_factory import AgentFactory
+
+        service = MagicMock()
+        _, hooks, hook_factories = AgentFactory().create(
+            config=MagicMock(), bus=MagicMock(), db_logging_service=service,
+        )
+        identity = [h for h in hooks if type(h).__name__ == "McpIdentityHook"]
+        assert len(identity) == 1
+        assert identity[0]._db_logging_service is service
+        # В hook_factories его быть не должно.
+        assert len(hook_factories) == 1
 
     def test_db_logging_factory_creates_per_turn_hook(self, fake_modules):
         from lib.core.agent_factory import AgentFactory
@@ -152,8 +177,9 @@ class TestAgentFactory:
             config=MagicMock(), bus=MagicMock(),
             db_logging_service=service, agent_id="agent-7",
         )
-        # hooks содержит ToolAuditHook + TerminalToolPrintHook + RepeatGuardHook
-        assert len(hooks) == 3
+        # hooks содержит ToolAuditHook + TerminalToolPrintHook +
+        # RepeatGuardHook + McpIdentityHook
+        assert len(hooks) == 4
         assert len(hook_factories) == 1
 
         kwargs = fake_modules["from_config"].call_args.kwargs

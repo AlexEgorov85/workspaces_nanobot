@@ -24,6 +24,12 @@
     вопросы не «путают» события) — см. ``lib/hooks/
     database_logging_hook.py``.
 
+  * ``McpIdentityHook`` — подставляет личность оборота (session_id,
+    user_id, request_id) в аргументы вызовов операций платформы
+    ``mcp_enterprise_*``, объявленных в ``config.json →
+    tools.mcpServers``. Регистрируется общим инстансом: состояния не
+    хранит, личность читается из контекста конкретного вызова.
+
 Семантический патч ``_assemble_outbound`` применяется ``RuntimePatcher``
 после ``create()`` (т.е. на этапе ``ApplicationContext.create`` /
 ``start``). ``AgentFactory`` НЕ делает monkey-patch'ей — только
@@ -168,6 +174,16 @@ class AgentFactory:
                     db_logging_service=db_logging_service,
                 )
             )
+
+        # McpIdentityHook — подставляет личность оборота в аргументы вызовов
+        # операций платформы (``mcp_enterprise_*``). Идёт последним из
+        # фреймворковых: ``ToolAuditHook`` читает аргументы раньше, и в UI
+        # аудита видны Intent'ы модели, а не инфраструктурные ключи, которые
+        # хук добавил под них. Состояния не хранит (личность читается из
+        # контекста вызова), поэтому общий инстанс обслуживает все обороты.
+        mcp_identity_cls = self._import_mcp_identity_hook()
+        if mcp_identity_cls is not None:
+            hooks.append(mcp_identity_cls(db_logging_service=db_logging_service))
 
         # Плагины workspace/hooks/ идут ПЕРЕД ToolAuditHook, чтобы их
         # правки ``params["path"]`` уже были видны в аудите.
@@ -377,6 +393,20 @@ class AgentFactory:
         except Exception:
             return None
         return RepeatGuardHook
+
+    @staticmethod
+    def _import_mcp_identity_hook():
+        """Ленивый импорт ``McpIdentityHook`` из ``lib/hooks/``.
+
+        Опционален по той же причине, что и предыдущие: без него вызовы
+        операций платформы просто не получат личность и будут отвергнуты
+        сервером с ``identity_missing``, но старт агента не ломается.
+        """
+        try:
+            from lib.hooks.mcp_identity_hook import McpIdentityHook
+        except Exception:
+            return None
+        return McpIdentityHook
 
     @staticmethod
     def _build_database_logging_factory(

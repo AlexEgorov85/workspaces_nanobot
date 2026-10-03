@@ -92,6 +92,17 @@ def canonical_framework_hooks() -> list[HookSpec]:
             description="защитник от повторных tool-вызовов (mode off/warn/block)",
             source="lib/hooks/repeat_guard_hook.py",
         ),
+        HookSpec(
+            name="McpIdentityHook",
+            kind="framework",
+            # required=True: хук подключается всегда (импорт терпимый, как у
+            # TerminalToolPrintHook), и без него КАЖДЫЙ вызов операции
+            # платформы уходит без личности и отвергается ``identity_missing``.
+            # Это критичный drift, а не opt-in фича.
+            required=True,
+            description="подстановка личности оборота в аргументы вызовов mcp_enterprise_*",
+            source="lib/hooks/mcp_identity_hook.py",
+        ),
     ]
 
 
