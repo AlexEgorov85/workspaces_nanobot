@@ -21,7 +21,7 @@
   },
   "execution": {
     "_about": "Слой исполнения операций (change enterprise-mcp-platform, фаза 8). Пороги и флаги конвейера: он проходит вокруг каждой операции. Значения по умолчанию живут здесь, а не в коде операций. require_call_meta=true: переходное окно закрыто, идентичность приходит только в params._meta, а ключи в arguments больше не читаются. Возврат false — только вместе с вызывающей стороной, которая метаданные не передаёт.",
-    "max_inline_result_bytes": 5000,
+    "max_inline_result_bytes": 65536,
     "preview_bytes": 2048,
     "execution_timeout_sec": 120.0,
     "persist_large_results": true,
