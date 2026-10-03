@@ -414,6 +414,7 @@ async def _run(ctx) -> None:
         print_worker_activity=_gateway_print_worker_activity(),
         db_logging_service=ctx.db_logging_service,
         enterprise_mcp=ctx.enterprise_mcp,
+        compaction_event_subscriber=ctx.compaction_event_subscriber,
     )
     channels, messages = channel_factory.create_all(
         ctx.config, ctx.settings, ctx.bus, ctx.session_manager,

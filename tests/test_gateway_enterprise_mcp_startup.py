@@ -605,6 +605,11 @@ def _runtime_ctx(log: list[str], client: object) -> types.SimpleNamespace:
     ctx = types.SimpleNamespace(
         enterprise_mcp=client,
         db_logging_service=None,
+        # Поле есть у настоящего ``ApplicationContext``: gateway передаёт его
+        # в ``ChannelFactory``, и без него в заглушке проверка порядка падала
+        # бы на ``AttributeError`` — то есть на устройстве теста, а не на
+        # порядке.
+        compaction_event_subscriber=None,
         config=types.SimpleNamespace(),
         settings={},
         bus=object(),

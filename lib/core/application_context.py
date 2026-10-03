@@ -140,6 +140,14 @@ class ApplicationContext:
 
     # Сервисы (опциональные)
     db_logging_service: Any | None = None
+    #: Сжатие контекста и наблюдение за ним. ``compaction_service`` пишет
+    #: факт сжатия (журнал + заметка в истории через платформу),
+    #: ``compaction_event_subscriber`` — обёртка, которую кормит канал
+    #: событиями ``ContextCompactionEvent``. Оба создаются в ``create()``
+    #: рядом с агентом: сервису нужен агент, а подписчик нужен фабрике
+    #: каналов.
+    compaction_service: Any | None = None
+    compaction_event_subscriber: Any | None = None
     # Поля ``cache_loader`` / ``cache_provider`` / ``cache_store`` сняты в
     # фазе 5 (п. 5.8). Снимком владеет capability ``data`` платформы; второй
     # writer того же файла означал бы, что снимок читают не оттуда, откуда
@@ -485,6 +493,20 @@ class ApplicationContext:
         )
         ctx.project_tools_result = project_tools_result
         _emit_project_tools_inventory_banner(project_tools_result)
+
+        # 7b. Наблюдение за сжатием контекста.
+        #
+        # Собирается ЗДЕСЬ, а не рядом с агентом: сервису нужен и агент, и
+        # клиент платформы, а клиент создаётся на шаг позже. Собранный
+        # раньше, он получил бы ``None`` — и заметки о сжатии перестали бы
+        # писаться молча, без единого признака в логе.
+        #
+        # Раньше подписчик создавался только в ``console_loop`` и в tool'е
+        # ``compact_context``, а в канал никто его не передавал: весь путь
+        # наблюдения за авто-сжатием не выполнялся ни разу — 73 строки
+        # production-кода и 80 строк тестов обслуживали несуществующий путь.
+        ctx.compaction_service = _make_compaction_service(ctx)
+        ctx.compaction_event_subscriber = _make_compaction_subscriber(ctx)
 
         # 8. Помощники
         ctx.runtime_health.mark_started()
@@ -1446,6 +1468,60 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
         stale_tolerance_seconds=stale_tolerance_seconds,
         sync_lag_threshold_seconds=sync_lag_threshold_seconds,
     )
+
+
+def _make_compaction_service(ctx: ApplicationContext) -> Any | None:
+    """Создать ``ContextCompactionService`` — единственную точку сжатия.
+
+    ``None`` — агент не собран (тесты контекста до ``create()``) либо
+    класс недоступен. Это не ошибка: сжатие вызывается из tool'а и CLI,
+    а не из hot-path оборота, и его отсутствие не должно ронять старт.
+
+    Клиент платформы передаётся сразу: объект клиента создаётся в
+    ``create()``, а сессия поднимается позже, при рукопожатии. Заметка о
+    сжатии пишется во время оборота, то есть уже после рукопожатия, и
+    отдельно «дожигать» клиент здесь не нужно.
+    """
+    if getattr(ctx, "agent", None) is None:
+        return None
+    try:
+        from lib.services.context_compaction import ContextCompactionService
+    except Exception as exc:  # noqa: BLE001 - дефект сборки не должен ронять старт
+        logger.warning("ContextCompactionService недоступен: %s", exc)
+        return None
+    try:
+        return ContextCompactionService(
+            ctx.agent,
+            settings=ctx.settings,
+            db_logging_service=ctx.db_logging_service,
+            enterprise_mcp=ctx.enterprise_mcp,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ContextCompactionService не создан: %s", exc)
+        return None
+
+
+def _make_compaction_subscriber(ctx: ApplicationContext) -> Any | None:
+    """Обернуть сервис сжатия в наблюдателя событий канала.
+
+    ``None`` — сервис не создан. Канал в этом случае просто не ловит
+    ``ContextCompactionEvent`` и ведёт себя как обычный транспорт: это
+    штатное состояние для тестов и standalone-запуска.
+    """
+    if ctx.compaction_service is None:
+        return None
+    try:
+        from lib.services.compaction_event_subscriber import (
+            CompactionEventSubscriber,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CompactionEventSubscriber недоступен: %s", exc)
+        return None
+    try:
+        return CompactionEventSubscriber(compaction_service=ctx.compaction_service)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CompactionEventSubscriber не создан: %s", exc)
+        return None
 
 
 def _wrap_bus_publish(bus: Any, method: str, log: Any) -> None:

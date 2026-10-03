@@ -41,6 +41,7 @@ class ChannelFactory:
         print_worker_activity: bool = False,
         db_logging_service: Any | None = None,
         enterprise_mcp: Any | None = None,
+        compaction_event_subscriber: Any | None = None,
     ) -> None:
         self._print_worker_activity = print_worker_activity
         self._db_logging_service = db_logging_service
@@ -49,6 +50,11 @@ class ChannelFactory:
         # владельцем, и второй пул означал бы вторую половину соединений к
         # той же таблице.
         self._enterprise_mcp = enterprise_mcp
+        # Наблюдатель за сжатием. Канал остаётся «тупым» транспортом: он
+        # ловит ``ContextCompactionEvent`` в ``send`` и отдаёт подписчику,
+        # а бизнес-логику сжатия держит сервис. ``None`` — наблюдение
+        # выключено (тесты, standalone), канал просто не ловит событие.
+        self._compaction_event_subscriber = compaction_event_subscriber
 
     def create_all(
         self,
@@ -136,6 +142,7 @@ class ChannelFactory:
             ch_cfg, bus,
             db_logging_service=self._db_logging_service,
             enterprise_mcp=self._enterprise_mcp,
+            compaction_event_subscriber=self._compaction_event_subscriber,
         )
         pg_channel.send_progress = config.channels.send_progress
         pg_channel.send_tool_hints = config.channels.send_tool_hints

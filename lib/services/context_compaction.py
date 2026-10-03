@@ -65,10 +65,18 @@ class ContextCompactionService:
         self, agent: Any, settings: Any = None,
         *,
         db_logging_service: Any = None,
+        enterprise_mcp: Any | None = None,
     ) -> None:
         self.agent = agent
         self._settings = settings
         self._db_logging_service = db_logging_service
+        # Клиент платформы для записи заметки в историю диалога. Раньше
+        # заметка писалась напрямую по DSN и имени таблицы из конфига агента,
+        # то есть в обход оверлея профиля: под тестовым профилем она уходила
+        # в боевую таблицу. ``None`` — платформа выключена по решению
+        # оператора; тогда заметка не пишется вовсе, и это молчание видно
+        # в логе, а не выглядит как запись «куда-то».
+        self._enterprise_mcp = enterprise_mcp
         self._section = _get_setting(settings, "gateway", "compact", default={}) or {}
 
     @property
@@ -513,7 +521,7 @@ class ContextCompactionService:
             )
 
     async def _write_history_notice(self, session_key: str, report: dict) -> None:
-        """Записать заметку о сжатии в ``agent_conversation_messages``.
+        """Записать заметку о сжатии в историю диалога — через платформу.
 
         Поддерживает session_key вида ``postgres:<chat_id>`` — единственный
         канал, у которого есть таблица обмена. Для прочих префиксов
@@ -521,49 +529,50 @@ class ContextCompactionService:
         — выходим без записи: история диалога CLI живёт в REPL-выводе
         и upstream JSONL-сторе ``SessionManager`` (mirror в PG через
         ``SessionColdSyncService``).
+
+        Запись идёт операцией ``append_history_notice`` платформы, а не
+        прямым SQL. Причина не в «чистоте»: имя таблицы задаётся
+        ``platform.json → profiles.<имя>``, и прямой INSERT писал в
+        ``agent_conversation_messages`` из конфига агента. Под тестовым
+        профилем это означало запись в БОЕВУЮ таблицу — успешно и молча.
+
+        Если платформа выключена, заметка не пишется: молчание об этом
+        остаётся в логе, потому что потерять запись в истории диалога
+        молча — хуже, чем не записать её вовсе.
         """
         try:
-            prefix, _, chat_id = (session_key + ":").partition(":")
+            prefix, _, chat_id = session_key.partition(":")
         except Exception:
             return
         if prefix != "postgres" or not chat_id:
             return
-        pg = _get_setting(self._settings, "channels", "postgres", default={}) or {}
-        dsn = pg.get("dsn") or ""
-        if not dsn:
+        # Пространство имён канала и сам чат — разные вещи, а разделитель
+        # один. ``"postgres:chat-1" + ":"`` перед partition'ом оставлял в
+        # id двоеточие, и заметка уезжала в чат ``"chat-1:"``, которого нет:
+        # запись проходила, и её не видел ни один клиент.
+        chat_id = chat_id.strip()
+        if not chat_id:
             return
-        schema = pg.get("schema", "public")
-        table = pg.get("table_name", "")
-        if not table:
+
+        client = self._enterprise_mcp
+        if client is None:
+            logger.warning(
+                "Заметка о сжатии для {} не записана: enterprise-mcp выключен. "
+                "Прямая запись в PostgreSQL больше не выполняется по решению "
+                "оператора — канал общается с БД только через платформу.",
+                session_key,
+            )
             return
 
         text = self.format_report(report)
         try:
-            import asyncio as _asyncio
-
-            from psycopg2.extras import Json
-            from utils.db import configure, execute
-        except Exception as exc:
-            logger.warning("History notice import failed: {}", exc)
-            return
-
-        try:
-            configure(dsn)
-            # ``utils.db.execute`` — sync-функция (docs/INTERNAL_API.md § ``ctx.config``
-            # vs ``ctx._settings_ref``: используем ~тот же threading-обход,
-            # что и для sync-IO в ``postgres_channel``). Без ``asyncio.to_thread``
-            # ``await execute(...)`` падает на ``'str' object can't be awaited``
-            # (execute возвращает command tag, а не корутину).
-            await _asyncio.to_thread(
-                execute,
-                f'INSERT INTO "{schema}"."{table}" '
-                "(chat_id, user_id, role, content, media, metadata, "
-                "buttons, status, created_at, updated_at) "
-                "VALUES (%s, %s, 'assistant', %s, %s, %s, %s, "
-                "'completed', NOW(), NOW())",
-                chat_id, "agent", text,
-                Json([]), Json({"kind": "context_compact", "compact": report}),
-                Json([]),
+            await client.call(
+                "append_history_notice",
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "metadata": {"kind": "context_compact", "compact": report},
+                },
             )
         except Exception as exc:
             logger.warning(
