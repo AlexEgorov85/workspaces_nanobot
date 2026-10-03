@@ -372,3 +372,49 @@ def test_docs_do_not_point_at_removed_agent_modules() -> None:
         + "\n".join(stale[:40])
         + (f"\n... ещё {len(stale) - 40}" if len(stale) > 40 else "")
     )
+
+
+#: Формулировки, которыми помечалась незавершённая работа: «уезжает в фазе N»,
+#: «заблокирован до фазы N». Фазы 4, 5, 9, 10 и 11 позади, поэтому такая строка
+#: в коде — заведомо устаревшее обещание. Находилась дважды: в
+#: ``mcp-platform/libs/llm/client.py`` и ``.../enterprise_common/retry.py``, оба
+#: раза в докстринге, который читают при выборе владельца HTTP-клиента.
+_STALE_PHASE_CLAIM = re.compile(
+    r"(уезжает|уедет|переедет)\s+в\s+фазе\s+\d+"
+    r"|заблокирован\s+до\s+фаз(ы|е)\s+\d+"
+    r"|ещ[её]\s+не\s+удал(ена|ено|ены)",
+    re.IGNORECASE,
+)
+
+_CODE_SKIP = ("mcp-platform/tests/", "tests/", "workspace/data_store/", "openspec/")
+
+
+def test_code_has_no_stale_phase_claims() -> None:
+    """Код не обещает работу, которая уже сделана.
+
+    Строки вида «уезжает в фазе 5» или «заблокирован до фазы 9» пережили
+    сами фазы и остались в докстрингах платформы. Читатель, выбирающий
+    владельца функции, получает из них неверный ответ: работа уже сделана,
+    а текст говорит, что предстоит. Проверяется только код - в документации
+    такие формулировки законны как историческая рамка.
+    """
+    stale: list[str] = []
+    for root in ("lib", "workspace", "mcp-platform", "tools"):
+        base = _PROJECT_ROOT / root
+        if not base.is_dir():
+            continue
+        for f in sorted(base.rglob("*.py")):
+            rel = f.relative_to(_PROJECT_ROOT).as_posix()
+            if "__pycache__" in rel or any(s in rel for s in _CODE_SKIP):
+                continue
+            try:
+                lines = f.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for num, line in enumerate(lines, 1):
+                if _STALE_PHASE_CLAIM.search(line):
+                    stale.append(f"  {rel}:{num}  {line.strip()[:100]}")
+    assert not stale, (
+        "Код обещает незавершённую работу (фазы 4-11 позади):\n"
+        + "\n".join(stale)
+    )
