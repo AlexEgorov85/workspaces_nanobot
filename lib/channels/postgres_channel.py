@@ -61,15 +61,27 @@ def _resolve_sfs_base(media_cache_dir: str | Path) -> Path:
     для ``SessionFileStore``.
 
     ``SessionFileStore(base_dir)`` размещает сессии в
-    ``base_dir/cache/sessions/``. Обычно ``media_cache_dir`` уже указывает
-    ровно на этот каталог (``data_store/cache/sessions``), значит ``base_dir``
-    = ``workspace``. Если задан абсолютный путь или другой относительный —
-    берём его родителя.
+    ``base_dir/cache/sessions/``. Канонический ``media_cache_dir``
+    (``config.json``) — ``data_store/cache/sessions``, то есть ``base_dir``
+    должен быть ``data_store``: снять нужно ОБА компонента, ``cache`` и
+    ``sessions``.
+
+    Раньше снимался только ``sessions``, и база становилась
+    ``data_store/cache``, а стор добавлял ``cache/sessions`` снова — путь
+    раздваивался до ``data_store/cache/cache/sessions``. Каталог хука
+    ``session_file_redirect_hook`` (``data_store/cache/sessions``) и
+    каталог вложений из PostgreSQL не совпадали, и вложения агенту были
+    недоступны.
     """
     p = Path(media_cache_dir)
     if not p.is_absolute():
         p = _WORKSPACE_DIR / media_cache_dir
-    return p.parent if p.name == "sessions" else p
+    parts = p.parts
+    if len(parts) >= 2 and parts[-1] == "sessions" and parts[-2] == "cache":
+        return Path(*parts[:-2])
+    if parts and parts[-1] == "sessions":
+        return p.parent
+    return p
 
 
 class PostgresChannel(BaseChannel):

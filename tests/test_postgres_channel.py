@@ -1372,3 +1372,66 @@ class TestPostgresChannelMarkFailed:
         # никаких локальных хвостов
         assert "ghost" not in ch._msg_ctx
         assert "ghost" not in ch.exchange.inflight
+
+
+# ---------------------------------------------------------------------------
+# Регресс: путь хранилища сессии не должен раздваиваться (БАГ-2).
+#
+# `SessionFileStore(base_dir)` сам дописывает `cache/sessions`. Канонический
+# `channels.postgres.media_cache_dir` — `data_store/cache/sessions`, значит
+# база должна быть `data_store`. Раньше `_resolve_sfs_base` срезал только
+# `sessions`, база становилась `data_store/cache`, и итоговый путь был
+# `data_store/cache/cache/sessions` — не тот, что у
+# `session_file_redirect_hook`, то есть вложения из PostgreSQL агенту были
+# недоступны.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveSfsBase:
+    """`_resolve_sfs_base` обязан вернуть базу, а не готовый каталог сессий."""
+
+    def test_canonical_config_value_does_not_double_cache(self):
+        from lib.channels.postgres_channel import _resolve_sfs_base
+
+        base = _resolve_sfs_base("data_store/cache/sessions")
+        # SessionFileStore добавит `cache/sessions` — результат обязан
+        # совпасть с путём из config.json и с путём хука.
+        assert (base / "cache" / "sessions").parts[-2:] == ("cache", "sessions")
+        assert base.name == "data_store"
+
+    def test_matches_config_json_and_redirect_hook(self):
+        """Три независимых источника обязаны сойтись в одном каталоге."""
+        import json
+
+        from lib.channels.postgres_channel import _WORKSPACE_DIR, _resolve_sfs_base
+
+        cfg = json.loads(
+            (_project_root / "config.json").read_text(encoding="utf-8")
+        )
+        configured = cfg["channels"]["postgres"]["media_cache_dir"]
+        from_store = _resolve_sfs_base(configured) / "cache" / "sessions"
+        # Путь хукa: workspace/data_store/cache/sessions
+        from_hook = _WORKSPACE_DIR / "data_store" / "cache" / "sessions"
+        assert from_store == from_hook, (
+            f"хранилище ({from_store}) и хук ({from_hook}) разошлись"
+        )
+
+    def test_absolute_path_is_handled(self):
+        from lib.channels.postgres_channel import _resolve_sfs_base
+
+        absolute = str(_project_root / "workspace" / "data_store" / "cache" / "sessions")
+        base = _resolve_sfs_base(absolute)
+        assert base.parts[-1] == "data_store"
+
+    def test_sessions_without_cache_component(self):
+        """Путь, оканчивающийся на `sessions` без `cache`, снимает один уровень."""
+        from lib.channels.postgres_channel import _resolve_sfs_base
+
+        base = _resolve_sfs_base("other/sessions")
+        assert base.name == "other"
+
+    def test_path_not_ending_in_sessions_is_untouched(self):
+        from lib.channels.postgres_channel import _resolve_sfs_base
+
+        base = _resolve_sfs_base("data_store/media")
+        assert base.parts[-1] == "media"
