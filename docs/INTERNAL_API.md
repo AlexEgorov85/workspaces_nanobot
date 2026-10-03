@@ -194,8 +194,11 @@ setattr(ctx, "_agent_ref", agent)   # для tool'ов, которым нуже�
 
 * `asyncio.wait_for(...)` — таймаут.
 * Обрезка длинного вывода — общий `ContextGovernor.normalize_tool_result`
-  (патч `patch_context_governor`) с лимитом `gateway.tool_result_limits.*`
-  (см. `config.json` → `gateway.tool_result_limits.*`).
+  (upstream, `nanobot/agent/context_governance.py:709-759`); порог —
+  `agents.defaults.max_tool_result_chars` в `config.json`. Собственных
+  патчей-потолков у нас не осталось: `exec_limits` и `tool_limits` сняты
+  2026-10-03, а секция `gateway.tool_result_limits` удалена из конфига
+  как мёртвая.
 * Sandbox/allow-deny — если tool дёргает subprocess, наследуйте политики
   `tools.exec.*` через явный `subprocess.run` с собственными аргументами.
 

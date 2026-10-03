@@ -5,8 +5,8 @@
 системы, а не фейков/макетов:
 
   * реальный ``ExecTool`` исполняет настоящую команду, выдающую вывод
-    больше лимитов, — проверяем, что без патча маркер ``… chars
-    truncated …`` есть, а после патча его нет (данные целые);
+    больше лимита, — проверяем, что усечение с маркером
+    ``… chars truncated …`` работает на **действующих** дефолтах;
   * реальный ``ReadFileTool`` читает файл больше дефолтного потолка;
   * upstream ``ContextGovernor.normalize_tool_result`` пишет **полный**
     вывод в ``.nanobot/tool-results/`` на диск, а ``read_file`` от
@@ -14,8 +14,12 @@
     наш патч ``context_governor`` и хук ``ToolResultArchiveHook`` снесены
     в пользу библиотечного ``maybe_persist_tool_result``).
 
-Каждый тест сам ставит патч и **восстанавливает** изначальное состояние в
-``finally``, чтобы не влиять на остальной набор.
+Раньше эти тесты доказывали, что патчи ``exec_limits`` / ``tool_limits``
+поднимают потолки. Патчи сняты (решение владельца, 2026-10-03), и тесты
+переписаны на обратное: они фиксируют лимиты, которые действуют теперь,
+потому что после сноса их больше ничем не перекрыть. Каждый тест сам
+фиксирует дефолты библиотеки и **восстанавливает** изначальное состояние
+в ``finally``, чтобы не зависеть от ambient-состояния набора.
 
 Эти тесты требуют запуска настоящих subprocess и потому несколько медленнее
 unit-тестов, но не требуют внешних сервисов (БД/сеть).
@@ -41,8 +45,6 @@ _user_site = r"C:\Users\Алексей\AppData\Roaming\Python\Python314\site-pac
 if _user_site not in sys.path:
     sys.path.insert(0, _user_site)
 
-from lib.services.runtime_patcher import RuntimePatcher  # noqa: E402
-
 
 @pytest.fixture(autouse=True)
 def _auto_seed_context_bridge(monkeypatch):
@@ -67,87 +69,6 @@ def _auto_seed_context_bridge(monkeypatch):
         _CONTEXT_BRIDGE.pop(session_key, None)
 
 
-class _Settings:
-    def __init__(self, **overrides):
-        gw = {
-            "persist_threshold": 0,
-            "persist_max_files": 100,
-            "persist_max_age_hours": 0,
-            "tool_result_limits": {},
-        }
-        gw.update(overrides)
-        self.gateway = gw
-
-
-@contextmanager
-def _patched_exec(settings=None):
-    import nanobot.agent.tools.shell as shell
-    import nanobot.agent.tools.exec_session as es
-
-    orig = [
-        shell.MAX_OUTPUT_CHARS,
-        shell.ExecTool._MAX_OUTPUT,
-        shell.ExecTool.parameters,
-        es.MAX_OUTPUT_CHARS,
-        es.DEFAULT_MAX_OUTPUT_CHARS,
-    ]
-    has_ws = hasattr(es, "WriteStdinTool")
-    if has_ws:
-        orig.append(es.WriteStdinTool.parameters)
-    try:
-        RuntimePatcher().patch_exec_limits(settings or _Settings(
-            persist_threshold=5000,
-            tool_result_limits={
-                "exec_max_output_chars": 500_000,
-                "exec_default_output_chars": 100_000,
-            },
-        ))
-        yield
-    finally:
-        restore = orig[:5]
-        shell.MAX_OUTPUT_CHARS = restore[0]
-        shell.ExecTool._MAX_OUTPUT = restore[1]
-        shell.ExecTool.parameters = restore[2]
-        es.MAX_OUTPUT_CHARS = restore[3]
-        es.DEFAULT_MAX_OUTPUT_CHARS = restore[4]
-        if has_ws:
-            es.WriteStdinTool.parameters = restore[5]
-
-
-@contextmanager
-def _patched_tool_limits(settings=None):
-    from nanobot.agent.tools import filesystem as fs
-    from nanobot.agent.tools import search as srch
-
-    orig = (
-        fs.ReadFileTool._MAX_CHARS,
-        fs.ListDirTool._DEFAULT_MAX,
-        srch._DEFAULT_HEAD_LIMIT,
-        srch._DEFAULT_FILE_HEAD_LIMIT,
-        srch.GrepTool._MAX_FILE_BYTES,
-    )
-    try:
-        RuntimePatcher().patch_tool_limits(settings or _Settings(
-            persist_threshold=5000,
-            tool_result_limits={
-                "read_file_max_chars": 512_000,
-                "grep_head_limit": 500,
-                "grep_file_head_limit": 400,
-                "grep_max_file_bytes": 20_000_000,
-                "list_dir_max_entries": 500,
-            },
-        ))
-        yield
-    finally:
-        (
-            fs.ReadFileTool._MAX_CHARS,
-            fs.ListDirTool._DEFAULT_MAX,
-            srch._DEFAULT_HEAD_LIMIT,
-            srch._DEFAULT_FILE_HEAD_LIMIT,
-            srch.GrepTool._MAX_FILE_BYTES,
-        ) = orig
-
-
 async def _run_exec(tool, command, **kwargs):
     res = await tool.execute(command=command, **kwargs)
     if not isinstance(res, str):
@@ -155,98 +76,191 @@ async def _run_exec(tool, command, **kwargs):
     return res
 
 
+@contextmanager
+def _framework_defaults():
+    """Явно ставит дефолты библиотеки и восстанавливает их в ``finally``.
+
+    После сноса ``exec_limits``/``tool_limits`` эти числа — не украшение, а
+    то, что реально действует. Тест не должен зависеть от того, в каком
+    состоянии остался модуль после другого теста набора.
+    """
+    import nanobot.agent.tools.exec_session as es
+    import nanobot.agent.tools.shell as shell
+    from nanobot.agent.tools import filesystem as fs
+    from nanobot.agent.tools import search as srch
+
+    originals = (
+        shell.MAX_OUTPUT_CHARS, shell.ExecTool._MAX_OUTPUT,
+        es.MAX_OUTPUT_CHARS, es.DEFAULT_MAX_OUTPUT_CHARS,
+        fs.ReadFileTool._MAX_CHARS, fs.ListDirTool._DEFAULT_MAX,
+        srch._DEFAULT_HEAD_LIMIT, srch._DEFAULT_FILE_HEAD_LIMIT,
+        srch.GrepTool._MAX_FILE_BYTES,
+    )
+    try:
+        shell.MAX_OUTPUT_CHARS = 50_000
+        shell.ExecTool._MAX_OUTPUT = 10_000
+        es.MAX_OUTPUT_CHARS = 50_000
+        es.DEFAULT_MAX_OUTPUT_CHARS = 10_000
+        fs.ReadFileTool._MAX_CHARS = 128_000
+        fs.ListDirTool._DEFAULT_MAX = 200
+        srch._DEFAULT_HEAD_LIMIT = 250
+        srch._DEFAULT_FILE_HEAD_LIMIT = 200
+        srch.GrepTool._MAX_FILE_BYTES = 2_000_000
+        yield
+    finally:
+        (
+            shell.MAX_OUTPUT_CHARS, shell.ExecTool._MAX_OUTPUT,
+            es.MAX_OUTPUT_CHARS, es.DEFAULT_MAX_OUTPUT_CHARS,
+            fs.ReadFileTool._MAX_CHARS, fs.ListDirTool._DEFAULT_MAX,
+            srch._DEFAULT_HEAD_LIMIT, srch._DEFAULT_FILE_HEAD_LIMIT,
+            srch.GrepTool._MAX_FILE_BYTES,
+        ) = originals
+
+
 class TestExecToolE2E:
-    """Реальный ExecTool с командой, генерирующей вывод больше лимита."""
+    """Реальный ExecTool с командой, генерирующей вывод больше лимита.
+
+    Патч ``exec_limits`` снят, поэтому действует дефолт библиотеки:
+    ``_MAX_OUTPUT`` = 10 000 (именно он, а не 50 000) и потолок
+    ``MAX_OUTPUT_CHARS`` = 50 000. Раньше эти числа были подняты до
+    100 000 / 500 000, и модель получала вывод на порядок больше.
+    """
 
     def test_truncates_by_default(self, tmp_path):
         from nanobot.agent.tools.shell import ExecTool
-        import nanobot.agent.tools.shell as shell
-        import nanobot.agent.tools.exec_session as es
 
-        # Фиксируем ДЕФОЛТНЫЕ рамки фреймворка явно (не полагаясь на ambient-состояние,
-        # которое может быть уже пропатчено другими тестами набора).
-        orig = (
-            shell.MAX_OUTPUT_CHARS, shell.ExecTool._MAX_OUTPUT,
-            es.MAX_OUTPUT_CHARS, es.DEFAULT_MAX_OUTPUT_CHARS,
-        )
-        try:
-            shell.MAX_OUTPUT_CHARS = 50_000
-            shell.ExecTool._MAX_OUTPUT = 10_000
-            es.MAX_OUTPUT_CHARS = 50_000
-            es.DEFAULT_MAX_OUTPUT_CHARS = 10_000
-
+        with _framework_defaults():
             tool = ExecTool(working_dir=str(tmp_path), timeout=30)
             out = asyncio.run(_run_exec(tool, 'python -c "print(chr(120)*60000)"'))
-        finally:
-            (
-                shell.MAX_OUTPUT_CHARS, shell.ExecTool._MAX_OUTPUT,
-                es.MAX_OUTPUT_CHARS, es.DEFAULT_MAX_OUTPUT_CHARS,
-            ) = orig
 
+        assert "chars truncated" in out
         assert len(out) < 60_000
-        assert "chars truncated" in out
 
-    def test_patch_preserves_full_output(self, tmp_path):
+    def test_default_output_limit_is_10k(self, tmp_path):
+        """Рабочий дефолт — 10K, а не 50K.
+
+        Это самая дорогая деградация после сноса патча: модель, не
+        передавшая ``max_output_chars``, получает в 10 раз меньше текста.
+        Тест существует, чтобы число не «съехало» апгрейдом nanobot
+        незаметно — перекрыть его больше нечем.
+        """
         from nanobot.agent.tools.shell import ExecTool
 
-        tool = ExecTool(working_dir=str(tmp_path), timeout=30)
-        with _patched_exec():
+        with _framework_defaults():
+            tool = ExecTool(working_dir=str(tmp_path), timeout=30)
             out = asyncio.run(_run_exec(tool, 'python -c "print(chr(120)*60000)"'))
-        # 60_000 'x' + перевод строки + служебный хвост '\nExit code: 0'
-        assert len(out) >= 60_000
-        assert "chars truncated" not in out
 
-    def test_truncation_still_works_above_new_ceiling(self, tmp_path):
+        # «голова + хвост»: маркер и служебный хвост сверх лимита.
+        assert "chars truncated" in out
+        assert len(out) < 12_000, (
+            f"вывод exec упёрся в {len(out)} символов при дефолте 10 000 — "
+            "либо дефолт изменился, либо его снова поднял патч"
+        )
+
+    def test_ceiling_truncates_even_above_requested(self, tmp_path):
+        """Потолок 50K режет даже явно запрошенный объём.
+
+        Модель может попросить ``max_output_chars``, но выше 50 000
+        библиотека всё равно усекает: потолок не настраивается.
+        """
         from nanobot.agent.tools.shell import ExecTool
 
-        tool = ExecTool(working_dir=str(tmp_path), timeout=30)
-        with _patched_exec():
-            # 700K символов > нового потолка 500K — механизм усечения жив,
-            # просто срабатывает на большем пороге.
-            out = asyncio.run(_run_exec(tool, 'python -c "print(chr(121)*700000)"'))
+        with _framework_defaults():
+            tool = ExecTool(working_dir=str(tmp_path), timeout=30)
+            out = asyncio.run(
+                _run_exec(
+                    tool, 'python -c "print(chr(121)*700000)"',
+                    max_output_chars=500_000,
+                )
+            )
+
         assert "chars truncated" in out
-        assert len(out) < 700_000
+        assert len(out) < 60_000, (
+            f"вывод {len(out)} символов не упёрся в потолок 50K"
+        )
 
 
 class TestReadFileE2E:
-    """Реальный ReadFileTool с файлом больше дефолтного потолка (128K)."""
+    """Реальный ReadFileTool с файлом больше действующего потолка (128K)."""
 
     def _make_file(self, tmp_path) -> Path:
         p = tmp_path / "big.txt"
         # ~200K байт, 2000 строк: дефолтное чтение (limit=2000) превышает
-        # потолок read_file (128K) и усекается; после патча (512K) — полный вывод.
+        # потолок read_file (128K) и усекается. Патч поднимал потолок до
+        # 512K и файл читался целиком; после сноса — обрезается.
         p.write_text("\n".join("q" * 100 for _ in range(2000)), encoding="utf-8")
         return p
 
     def test_truncates_by_default(self, tmp_path):
         from nanobot.agent.tools.filesystem import ReadFileTool
-        from nanobot.agent.tools import filesystem as fs
 
-        orig = fs.ReadFileTool._MAX_CHARS
-        try:
-            fs.ReadFileTool._MAX_CHARS = 128_000  # дефолт фреймворка (против ambient-патча)
+        with _framework_defaults():
             fn = self._make_file(tmp_path)
             tool = ReadFileTool(workspace=tmp_path)
             out = asyncio.run(tool.execute(path=str(fn)))
-        finally:
-            fs.ReadFileTool._MAX_CHARS = orig
 
         # текст-путь read_file обрывает на потолке и пишет «(Showing lines …)»
         assert "(Showing lines" in out
         assert "(End of file" not in out
         assert len(out) < 200_000
 
-    def test_patch_reads_full_file(self, tmp_path):
+    def test_full_file_is_no_longer_reachable(self, tmp_path):
+        """Файл больше 128K целиком больше не читается.
+
+        Раньше патч поднимал ``_MAX_CHARS`` до 512K, и этот файл
+        возвращался целиком. Теперь — обрезанным по хвосту, и полнота
+        чтения зависит только от построчного ``offset``/``limit``.
+        """
         from nanobot.agent.tools.filesystem import ReadFileTool
 
-        fn = self._make_file(tmp_path)
-        tool = ReadFileTool(workspace=tmp_path)
-        with _patched_tool_limits():
+        with _framework_defaults():
+            fn = self._make_file(tmp_path)
+            tool = ReadFileTool(workspace=tmp_path)
             out = asyncio.run(tool.execute(path=str(fn)))
-        # после поднятия потолка файл прочитан целиком
-        assert "(Showing lines" not in out
-        assert "(End of file" in out
-        assert len(out) >= 200_000
+
+        assert "(End of file" not in out, (
+            "файл на 200K прочитан целиком при потолке 128K — либо "
+            "дефолт изменился, либо его снова поднял патч"
+        )
+
+
+class TestGrepBlindToLargeFilesE2E:
+    """Grep пропускает файлы крупнее 2 МБ — молча, без ошибки.
+
+    Отдельный класс, потому что это единственная регрессия после сноса
+    ``tool_limits``, которая НЕ сопровождается маркером в ответе: grep
+    считает файл в ``skipped_large`` и возвращает пустой результат, а
+    модель читает это как «совпадений нет». Данные были — их не посмотрели.
+    """
+
+    def test_file_above_2mb_is_skipped(self, tmp_path):
+        from nanobot.agent.tools.search import GrepTool
+
+        big = tmp_path / "big.log"
+        # 3 МБ с заведомо искомой строкой в самом начале.
+        big.write_text(
+            "NEEDLE_AT_START\n" + ("x" * 99 + "\n") * 31_000,
+            encoding="utf-8",
+        )
+        assert big.stat().st_size > 2_000_000
+
+        with _framework_defaults():
+            tool = GrepTool(workspace=tmp_path)
+            res = asyncio.run(tool.execute(pattern="NEEDLE_AT_START", path="."))
+
+        rendered = res if isinstance(res, str) else getattr(res, "content", str(res))
+
+        # Уведомление о пропуске ЕСТЬ, но оно в хвосте скобками, а первой
+        # строкой идёт «No matches found» — то есть модель читает результат
+        # как «совпадений нет». Именно поэтому регрессия опасна: данные были,
+        # их не посмотрели, и ошибки при этом не возникает. Это зафиксировано
+        # как ожидаемое поведение, чтобы его изменение апгрейдом nanobot
+        # потребовало явного решения, а не прошло молча.
+        assert rendered.startswith("No matches found for pattern"), rendered[:120]
+        assert "skipped 1 large files" in rendered, (
+            "grep перестал сообщать о пропуске крупных файлов — это лучше "
+            "текущего поведения, но цифры в каталоге патчей надо обновить"
+        )
 
 
 

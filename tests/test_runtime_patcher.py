@@ -247,9 +247,7 @@ class TestContextGovernorPatchIsGone:
         applied = []
         patcher = RuntimePatcher()
         patcher._record = lambda report, name, outcome: applied.append(name)
-        patcher.patch_exec_limits = lambda *a, **k: (True, "ok")
         patcher.patch_exec_timeout_cap = lambda *a, **k: (True, "ok")
-        patcher.patch_tool_limits = lambda *a, **k: (True, "ok")
         patcher.patch_assemble_outbound = lambda *a, **k: (True, "ok")
         patcher.patch_subagent_logging = lambda *a, **k: (True, "ok")
         patcher.patch_repeat_guard_block = lambda *a, **k: (True, "ok")
@@ -300,120 +298,113 @@ class TestContextGovernorPatchIsGone:
         assert "TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS" in src
 
 
-class TestPatchExecLimits:
-    def test_patches_module_constants_and_schema(self):
-        esm = types.ModuleType("nanobot.agent.tools.exec_session")
-        esm.MAX_OUTPUT_CHARS = 50_000
-        esm.DEFAULT_MAX_OUTPUT_CHARS = 10_000
-        esm.WriteStdinTool = type(
-            "WriteStdinTool", (),
-            {"parameters": property(lambda s: {"properties": {
-                "max_output_chars": {"maximum": 50_000},
-                "max_output_tokens": {"maximum": 50_000},
-            }})},
+class TestToolLimitPatchesAreGone:
+    """``exec_limits`` и ``tool_limits`` сняты решением владельца.
+
+    Оба патча поднимали потолки вывода инструментов, которых в nanobot 0.3.5
+    нет в конфигурации, поэтому нативной замены нет by design: лимиты
+    вернулись к дефолтам библиотеки. Тесты живут на месте патчей намеренно —
+    их возвращение снова сделает потолки ненастраиваемыми, и без явного
+    решения владельца это будет молчаливая регрессия.
+
+    Вторая половина класса фиксирует САМИ действующие лимиты. После сноса они
+    больше не перекрываются конфигом, поэтому единственная защита от их тихой
+    смены апгрейдом nanobot — этот тест.
+    """
+
+    def test_patch_methods_removed(self):
+        assert not hasattr(RuntimePatcher, "patch_exec_limits"), (
+            "patch_exec_limits вернулся; потолки вывода exec снова станут "
+            "ненастраиваемыми без записи владельца в каталог патчей"
         )
-        shellm = types.ModuleType("nanobot.agent.tools.shell")
-        shellm.MAX_OUTPUT_CHARS = 50_000
-        shellm.ExecTool = type(
-            "ExecTool", (),
-            {"_MAX_OUTPUT": 10_000, "parameters": property(lambda s: {"properties": {
-                "max_output_chars": {"maximum": 50_000},
-                "max_output_tokens": {"maximum": 50_000},
-            }})},
+        assert not hasattr(RuntimePatcher, "patch_tool_limits"), (
+            "patch_tool_limits вернулся; grep снова перестанет видеть файлы "
+            "крупнее 2 МБ без записи владельца в каталог патчей"
         )
-        hidden = {
-            "nanobot.agent.tools.exec_session": esm,
-            "nanobot.agent.tools.shell": shellm,
-        }
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_exec_limits(_settings())
-            assert ok
-            assert esm.MAX_OUTPUT_CHARS == 500_000
-            assert esm.DEFAULT_MAX_OUTPUT_CHARS == 100_000
-            assert shellm.MAX_OUTPUT_CHARS == 500_000
-            assert shellm.ExecTool._MAX_OUTPUT == 100_000
-            schema = shellm.ExecTool.parameters.fget(shellm.ExecTool)
-            assert schema["properties"]["max_output_chars"]["maximum"] == 500_000
-            schema2 = esm.WriteStdinTool.parameters.fget(esm.WriteStdinTool)
-            assert schema2["properties"]["max_output_tokens"]["maximum"] == 500_000
 
-    def test_custom_limits(self):
-        esm = types.ModuleType("nanobot.agent.tools.exec_session")
-        esm.MAX_OUTPUT_CHARS = 50_000
-        esm.DEFAULT_MAX_OUTPUT_CHARS = 10_000
-        esm.WriteStdinTool = type("WriteStdinTool", (), {"parameters": property(lambda s: {"properties": {}})})
-        shellm = types.ModuleType("nanobot.agent.tools.shell")
-        shellm.MAX_OUTPUT_CHARS = 50_000
-        shellm.ExecTool = type("ExecTool", (), {"_MAX_OUTPUT": 10_000, "parameters": property(lambda s: {"properties": {}})})
-        hidden = {
-            "nanobot.agent.tools.exec_session": esm,
-            "nanobot.agent.tools.shell": shellm,
-        }
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            settings = _settings(tool_result_limits={
-                "exec_max_output_chars": 999_999,
-                "exec_default_output_chars": 88_888,
-            })
-            ok, _ = patcher.patch_exec_limits(settings)
-            assert ok
-            assert esm.MAX_OUTPUT_CHARS == 999_999
-            assert esm.DEFAULT_MAX_OUTPUT_CHARS == 88_888
-            assert shellm.ExecTool._MAX_OUTPUT == 88_888
+    def test_patches_absent_from_specs(self):
+        from lib.services.runtime_patcher import _PATCH_SPECS
 
+        for name in ("exec_limits", "tool_limits"):
+            assert name not in _PATCH_SPECS, (
+                f"{name} остался в _PATCH_SPECS — патч снова будет "
+                "применяться при каждом старте"
+            )
 
-class TestPatchToolLimits:
-    def test_patches_module_limits(self):
-        fsm = types.ModuleType("nanobot.agent.tools.filesystem")
-        fsm.ReadFileTool = type("ReadFileTool", (), {"_MAX_CHARS": 128_000})
-        fsm.ListDirTool = type("ListDirTool", (), {"_DEFAULT_MAX": 200})
-        srm = types.ModuleType("nanobot.agent.tools.search")
-        srm._DEFAULT_HEAD_LIMIT = 250
-        srm._DEFAULT_FILE_HEAD_LIMIT = 200
-        srm.GrepTool = type("GrepTool", (), {"_MAX_FILE_BYTES": 5_000_000})
-        hidden = {
-            "nanobot.agent.tools.filesystem": fsm,
-            "nanobot.agent.tools.search": srm,
-        }
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_tool_limits(_settings())
-            assert ok
-            assert fsm.ReadFileTool._MAX_CHARS == 512_000
-            assert fsm.ListDirTool._DEFAULT_MAX == 500
-            assert srm._DEFAULT_HEAD_LIMIT == 500
-            assert srm._DEFAULT_FILE_HEAD_LIMIT == 400
-            assert srm.GrepTool._MAX_FILE_BYTES == 20_000_000
+    def test_not_applied_by_apply_all(self):
+        applied = []
+        patcher = RuntimePatcher()
+        patcher._record = lambda report, name, outcome: applied.append(name)
+        patcher.patch_exec_timeout_cap = lambda *a, **k: (True, "ok")
+        patcher.patch_assemble_outbound = lambda *a, **k: (True, "ok")
+        patcher.patch_subagent_logging = lambda *a, **k: (True, "ok")
+        patcher.patch_repeat_guard_block = lambda *a, **k: (True, "ok")
 
-    def test_custom_limits(self):
-        fsm = types.ModuleType("nanobot.agent.tools.filesystem")
-        fsm.ReadFileTool = type("ReadFileTool", (), {"_MAX_CHARS": 128_000})
-        fsm.ListDirTool = type("ListDirTool", (), {"_DEFAULT_MAX": 200})
-        srm = types.ModuleType("nanobot.agent.tools.search")
-        srm._DEFAULT_HEAD_LIMIT = 250
-        srm._DEFAULT_FILE_HEAD_LIMIT = 200
-        srm.GrepTool = type("GrepTool", (), {"_MAX_FILE_BYTES": 5_000_000})
-        hidden = {
-            "nanobot.agent.tools.filesystem": fsm,
-            "nanobot.agent.tools.search": srm,
-        }
-        with patch.dict("sys.modules", hidden):
-            patcher = RuntimePatcher()
-            settings = _settings(tool_result_limits={
-                "read_file_max_chars": 999_999,
-                "grep_head_limit": 10,
-                "grep_file_head_limit": 20,
-                "grep_max_file_bytes": 30,
-                "list_dir_max_entries": 40,
-            })
-            ok, _ = patcher.patch_tool_limits(settings)
-            assert ok
-            assert fsm.ReadFileTool._MAX_CHARS == 999_999
-            assert fsm.ListDirTool._DEFAULT_MAX == 40
-            assert srm._DEFAULT_HEAD_LIMIT == 10
-            assert srm._DEFAULT_FILE_HEAD_LIMIT == 20
-            assert srm.GrepTool._MAX_FILE_BYTES == 30
+        patcher.apply_all(
+            MagicMock(), _settings(), Path("ws"),
+            agent=MagicMock(), tool_audit_hook=MagicMock(),
+        )
+
+        assert "exec_limits" not in applied, applied
+        assert "tool_limits" not in applied, applied
+
+    def test_dead_skip_reasons_removed(self):
+        from lib.services.runtime_patcher import _SKIPPABLE_REASONS
+
+        for reason in (
+            "exec_max_output_chars <= 0",
+            "read_file_max_chars <= 0",
+            "exec_session/shell module not loaded",
+            "filesystem/search module not loaded",
+        ):
+            assert reason not in _SKIPPABLE_REASONS, (
+                f"мёртвая запись {reason!r} осталась в _SKIPPABLE_REASONS "
+                "после сноса патча, который её выдавал"
+            )
+
+    def test_config_section_not_read_anymore(self):
+        """``gateway.tool_result_limits`` больше не читает ни один патч.
+
+        Секция удалена из ``config.json``; если её вернуть в конфиг без
+        патчей, она станет молчаливо игнорируемой, а оператор будет
+        уверен, что потолки настроены.
+        """
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "lib/services/runtime_patcher.py"
+        ).read_text(encoding="utf-8")
+        assert '"tool_result_limits"' not in source, (
+            "runtime_patcher всё ещё читает tool_result_limits: секция "
+            "конфига должна быть удалена вместе с патчами, иначе настройка "
+            "будет выглядеть действующей, не будучи ею"
+        )
+
+    def test_framework_limits_are_the_ones_we_think(self):
+        """Фиксируем лимиты, которые теперь действуют на живом пакете.
+
+        Снимает патчей они больше не перекрываются, поэтому любое их
+        изменение апгрейдом nanobot должно ломать этот тест, а не
+        проявляться как тихая потеря данных.
+        """
+        from nanobot.agent.tools import exec_session, filesystem, search, shell
+
+        assert exec_session.MAX_OUTPUT_CHARS == 50_000, (
+            "потолок вывода exec-session изменился: в каталоге патчей и "
+            "TROUBLESHOOTING надо обновить числа"
+        )
+        assert shell.ExecTool._MAX_OUTPUT == 10_000, (
+            "дефолт вывода exec изменился: 10K — рабочее значение, а не 50K; "
+            "в каталоге патчей это уже было зафиксировано как 50K"
+        )
+        assert filesystem.ReadFileTool._MAX_CHARS == 128_000
+        assert filesystem.ListDirTool._DEFAULT_MAX == 200
+        assert search._DEFAULT_HEAD_LIMIT == 250
+        assert search._DEFAULT_FILE_HEAD_LIMIT == 200
+        assert search.GrepTool._MAX_FILE_BYTES == 2_000_000, (
+            "grep перестал искать по файлам крупнее 2 МБ: это молчаливое "
+            "ложное отрицание, а не ошибка — повышать лимит патчем было "
+            "осознанно"
+        )
 
 
 class TestPatchSubagentLogging:
@@ -658,10 +649,24 @@ REMOVED_PATCHES: dict[str, tuple[str, str] | None] = {
     # Нативной замены нет и не должно быть: фича была нужна только для
     # расследования одной ошибки и удалена вместе с её причиной.
     "patch_session_dir_watch": None,
+    # Потолки вывода инструментов — сняты решением владельца (2026-10-03).
+    # Нативной замены нет by design: в nanobot 0.3.5 у exec / read_file /
+    # list_dir / grep НЕТ конфигурируемых лимитов, потолки живут в модульных
+    # константах и атрибутах классов. Снос вернул дефолты библиотеки —
+    # exec 10 000 (дефолт) / 50 000 (потолок), read_file 128 000,
+    # list_dir 200, grep 250/200 и 2 МБ на файл — и удалил секцию
+    # ``gateway.tool_result_limits`` из config.json как мёртвую.
+    # Возврат потолков возможен только новым патчем или апгрейдом nanobot.
+    "patch_exec_limits": None,
+    "patch_tool_limits": None,
 }
 
 #: Удалённые патчи, у которых нативной замены нет by design.
-NO_NATIVE_REPLACEMENT: frozenset[str] = frozenset({"patch_session_dir_watch"})
+NO_NATIVE_REPLACEMENT: frozenset[str] = frozenset({
+    "patch_session_dir_watch",
+    "patch_exec_limits",
+    "patch_tool_limits",
+})
 
 #: Удалённые патчи, механизм которых живёт В САМОЙ БИБЛИОТЕКЕ.
 #:
@@ -864,8 +869,8 @@ class TestPatchReportClassification:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        RuntimePatcher._record(report, "exec_limits", (False, "exec_max_output_chars <= 0"))
-        assert report.skipped == [("exec_limits", "exec_max_output_chars <= 0")]
+        RuntimePatcher._record(report, "exec_timeout_cap", (False, "exec_timeout_cap_sec <= 0"))
+        assert report.skipped == [("exec_timeout_cap", "exec_timeout_cap_sec <= 0")]
         assert report.failed == []
 
     def test_dead_skip_reason_is_a_real_failure(self):
@@ -880,9 +885,11 @@ class TestPatchReportClassification:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        RuntimePatcher._record(report, "exec_limits", (False, "persist_threshold <= 0"))
+        RuntimePatcher._record(
+            report, "assemble_outbound", (False, "persist_threshold <= 0"),
+        )
         assert report.skipped == []
-        assert report.failed == [("exec_limits", "persist_threshold <= 0")]
+        assert report.failed == [("assemble_outbound", "persist_threshold <= 0")]
 
     def test_real_failure_goes_to_failed(self):
         from lib.services.runtime_patcher import PatchReport
@@ -920,9 +927,9 @@ class TestPatchReportClassification:
 
         report = PatchReport()
         RuntimePatcher._record(
-            report, "exec_limits", (False, "exec_session/shell module not loaded"),
+            report, "exec_timeout_cap", (False, "shell module not loaded"),
         )
-        assert report.skipped == [("exec_limits", "exec_session/shell module not loaded")]
+        assert report.skipped == [("exec_timeout_cap", "shell module not loaded")]
         assert report.failed == []
 
     def test_internal_failed_marker_reclassifies(self):
@@ -974,11 +981,11 @@ class TestPatchReportRender:
 
         report = PatchReport()
         report.applied.append("assemble_outbound")
-        report.skipped.append(("exec_limits", "exec_max_output_chars <= 0"))
+        report.skipped.append(("exec_timeout_cap", "exec_timeout_cap_sec <= 0"))
         report.failed.append(("subagent_logging", "import failed: boom"))
         rendered = report.render()
         assert "✓ assemble_outbound" in rendered
-        assert "⚠ exec_limits skipped: exec_max_output_chars <= 0" in rendered
+        assert "⚠ exec_timeout_cap skipped: exec_timeout_cap_sec <= 0" in rendered
         assert "✗ subagent_logging failed: import failed: boom" in rendered
 
     def test_render_includes_spec_purpose_for_failed(self):

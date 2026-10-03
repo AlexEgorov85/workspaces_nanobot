@@ -135,8 +135,11 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
   класс библиотеки ``SessionManager`` поверх ``SanitizingSessionStore``;
   PostgreSQL обслуживает отдельный ``SessionColdSyncService``, а не сам
   менеджер.
-* ``tool_result_limits.*`` — потолки вывода инструментов
-  (``runtime_patcher.py``); все ключи опциональны.
+* ``tool_result_limits.*`` — секция УДАЛЕНА вместе с патчами ``exec_limits``
+  и ``tool_limits`` (``lib/services/runtime_patcher.py``). Потолки вывода
+  инструментов вернулись к дефолтам nanobot; настраивать их в конфиге
+  больше нечем, поэтому ключи оставлены бы без читателя. Что именно
+  изменилось — в докстринге ``lib/services/runtime_patcher.py``.
 * ``compact.*`` — ручное сжатие контекста сессии
   (``lib/services/context_compaction.py``,
   ``workspace/tools/compact_context.py``).

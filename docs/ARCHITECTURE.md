@@ -1119,29 +1119,23 @@ else:
 3. **Вторичные инструменты** (`read_file`/`grep`/`list_dir`) имеют свои
    потолки с маркерами `truncated`.
 
-**Решение (все уровни закрыты патчами `RuntimePatcher`):**
+**Решение (2026-10-03 изменено):**
 
-| Патч | Что делает |
+| Уровень | Чем закрыт |
 |------|-----------|
-| `patch_exec_limits` | Поднимает `MAX_OUTPUT_CHARS` (дефолт 500K), `DEFAULT_MAX_OUTPUT_CHARS` (100K), `ExecTool._MAX_OUTPUT`, а также подменяет `maximum` в JSON-Schema параметра `max_output_chars`/`max_output_tokens` (модель может запросить вывод >50K). Безопасно для контекста: вывод exec не exempt в persist → >`persist_threshold` уходит полным файлом в `data_store`, в контекст — ссылка. |
-| `patch_tool_limits` | Поднимает `ReadFileTool._MAX_CHARS` (512K), `search._DEFAULT_HEAD_LIMIT` / `_DEFAULT_FILE_HEAD_LIMIT` (500/400), `GrepTool._MAX_FILE_BYTES` (20MB), `ListDirTool._DEFAULT_MAX` (500). |
-| `patch_save_turn` | Оборачивает `AgentLoop._save_turn`: любой большой результат `role == "tool"` (строка или JSON-сериализуемый список) пишется **полным** файлом в `data_store` через `SessionFileStore` (суффикс `__<hash>` — dedupe), в историю кладётся ссылка `[Result saved to data_store/<path> (<size> KB)]` — тот же формат, что кастомный persist. Оригинальный `_save_turn` вызывается с копией сообщений, логика nanobot не дублируется. |
-| `save(..., dedupe=True)` | Новый параметр `SessionFileStore.save`: повторное сохранение того же содержимого (sha1, первые 12 hex) возвращает уже существующий файл (`deduped=True`), чтобы повторные/конкурентные обороты не плодили копии. |
+| `exec` | дефолтами nanobot: `ExecTool._MAX_OUTPUT` **10 000** и потолок `MAX_OUTPUT_CHARS` **50 000**. Патч `patch_exec_limits`, поднимавший их до 100K/500K, **снят** — настраивать нечем, нативной конфигурации лимитов в 0.3.5 нет |
+| `read_file` | дефолтом `ReadFileTool._MAX_CHARS` **128 000**, обрезается хвост с маркером `(Showing lines …)`. Патч `patch_tool_limits`, поднимавший до 512K, **снят** |
+| `grep` | дефолтами 250/200 и `GrepTool._MAX_FILE_BYTES` **2 МБ**. Файлы крупнее пропускаются целиком: grep возвращает «No matches found», а уведомление `(skipped N large files)` идёт в хвосте — то есть тихое ложное отрицание. **Это самая дорогая регрессия сноса** |
+| `list_dir` | дефолтом `ListDirTool._DEFAULT_MAX` **200**, с маркером `(truncated, showing first N of M entries)` |
+| persist больших результатов | штатным `maybe_persist_tool_result` (change `use-upstream-tool-result-persist`), порог — `agents.defaults.max_tool_result_chars` |
 
-**Конфигурация** — `gateway.tool_result_limits` в `config.json`
-(все ключи опциональны, дефолты в коде):
-
-```jsonc
-"tool_result_limits": {
-  "exec_max_output_chars": 500000,
-  "exec_default_output_chars": 100000,
-  "read_file_max_chars": 512000,
-  "grep_head_limit": 500,
-  "grep_file_head_limit": 400,
-  "grep_max_file_bytes": 20000000,
-  "list_dir_max_entries": 500
-}
-```
+Секция `gateway.tool_result_limits` удалена из `config.json`: её больше не
+читает ни один патч, и оставить её значило бы оставить настройку, которая
+выглядит действующей, не будучи ею. Потолки не перекрываются ничем, поэтому
+единственная защита от их тихой смены апгрейдом — стражи
+`tests/test_runtime_patcher.py::TestToolLimitPatchesAreGone` и e2e-класс
+`TestGrepBlindToLargeFilesE2E`. Подробности — в
+[`runtime-patcher-inventory.md`](architecture/runtime-patcher-inventory.md) § «Снятые патчи».
 
 **Fallback-поведение**: каждый патч в try/except; при изменении API nanobot —
 `(False, <причина>)` в `PatchReport`, процесс не падает. `_save_turn`-обёртка

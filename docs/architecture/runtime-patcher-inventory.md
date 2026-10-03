@@ -37,7 +37,8 @@ runtime patch'ом — это отдельный loader
 
 ## Сводная таблица (nanobot-ai 0.3.5)
 
-Состояние после change `enterprise-mcp-platform`, фаза 6: **ровно 6 patches**
+Состояние после сноса `exec_limits` и `tool_limits` (решение владельца,
+2026-10-03): **ровно 4 patches**
 в `apply_all()` / `_PATCH_SPECS` / `canonical_runtime_patches()` (попарно
 равны — exact-match тест
 [`tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`](../../tests/test_runtime_patcher.py)).
@@ -46,12 +47,23 @@ runtime patch'ом — это отдельный loader
 
 | # | Патч | Target (nanobot API) | Risk | Required | Категория | Условие удаления |
 |---|---|---|---|---|---|---|
-| 1 | `exec_limits` | глобалы `exec_session.MAX_OUTPUT_CHARS` + import-frozen схема | MEDIUM | — | KEEP | upstream даст конфигурацию лимитов вывода. Подкласс не достаёт: потолок в глобале модуля, схема заморожена `deepcopy` в `base.py:336` |
-| 2 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + схема параметра | MEDIUM | — | **KEEP (спорно)** | Снимать нельзя, пока у навыков нет своего таймаута: патч поднимает потолок `600` до `gateway.exec_timeout_cap_sec` (по умолчанию 3600). Обоснование в спецификации — «legal 7–10 мин» — отпадает только вместе с переездом `legal_summarizer` в платформу (фаза 11). До тех пор правдивая категория — **KEEP**, а не REMOVE: `tools.exec.timeout=0` снимает лимит только когда агент **не** передаёт явный `timeout`, а `TOOLS.md` учит его передавать |
-| 3 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | **PARTIAL** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, подкласс не перехватывает; они лишь значения по умолчанию (per-call `head_limit` есть) |
-| 4 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `TurnEndEvent` в 0.3.5 **не существует** (проверено инспекцией пакета, см. ADR `turn-delivery-public-extension.md`), поэтому пункт «`_final_turn` → `TurnEndEvent`» плана нереализуем в этой формулировке. Остаётся перенос на существующие `EventSink` / `RuntimeEventPublisher` либо решение оставить патч — это отдельное решение владельца, а не молчаливое |
-| 5 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. Проверить, запускаются ли субагенты в деплое — если нет, патч удаляется |
-| 6 | `repeat_guard_block` | `nanobot.agent.tools.execution._execute_tool_call` | MEDIUM | — | KEEP | upstream даст способ **отклонить** tool-вызов из хука. Hook-API возвращаемого значения не имеет, а `before_execute_tool` в `_execute_tool_call` вызывается вне `try`, поэтому без патча режим `block` непригоден: с `reraise=False` он молчаливый no-op, с `reraise=True` — обрыв оборота и отмена соседних вызовов батча через `asyncio.gather`. Пока отказа нет — патч нужен |
+| 1 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + схема параметра | MEDIUM | — | **KEEP (спорно)** | Снимать нельзя, пока у навыков нет своего таймаута: патч поднимает потолок `600` до `gateway.exec_timeout_cap_sec` (по умолчанию 3600). Обоснование в спецификации — «legal 7–10 мин» — **устарело**: навыка `legal_summarizer` в проекте больше нет (`workspace/skills` содержит только `audit_analyzer` и `enterprise_mcp`, `audit_analyzer` — tool-only без CLI), `tools.exec.timeout` в конфиге равен 60, и ни один навык не просит `timeout` выше 600. Правдивая категория сегодня — **REVIEW**, а не KEEP |
+| 2 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `TurnEndEvent` в 0.3.5 **не существует** (проверено инспекцией пакета, см. ADR `turn-delivery-public-extension.md`), поэтому пункт «`_final_turn` → `TurnEndEvent`» плана нереализуем в этой формулировке. Остаётся перенос на существующие `EventSink` / `RuntimeEventPublisher` либо решение оставить патч — это отдельное решение владельца, а не молчаливое |
+| 3 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. **Открытый вопрос каталога закрыт:** подагенты доступны модели — tool `spawn` входит в 22 зарегистрированных tool'а (`tests/test_diagnose_startup.py:25`), так что патч не мёртвый |
+| 4 | `repeat_guard_block` | `nanobot.agent.tools.execution._execute_tool_call` | MEDIUM | — | KEEP | upstream даст способ **отклонить** tool-вызов из хука. Hook-API возвращаемого значения не имеет, а `before_execute_tool` в `_execute_tool_call` вызывается вне `try`, поэтому без патча режим `block` непригоден: с `reraise=False` он молчаливый no-op, с `reraise=True` — обрыв оборота. **Оговорка к прежней формулировке:** отмена соседних вызовов батча через `asyncio.gather` в этом проекте не происходит — `concurrent_tools` не задаётся, а дефолт `AgentRunSpec.concurrent_tools = False` (`runner.py:102`), поэтому `execute_tool_calls` идёт последовательной веткой. Пока отказа нет — патч нужен |
+
+### Снятые патчи
+
+| Патч | Когда | Причина | Нативная замена |
+|---|---|---|---|
+| `exec_limits` | 2026-10-03 | потолки вывода exec вернулись к дефолтам nanobot | **нет by design** — конфигурируемых лимитов вывода в 0.3.5 не существует. Последствия: дефолт `ExecTool._MAX_OUTPUT` **100 000 → 10 000**, потолок `MAX_OUTPUT_CHARS` 500 000 → 50 000. Усечение режется уже в `_BoundedOutputBuffer`, поэтому в файл персиста попадает уже срезанный текст |
+| `tool_limits` | 2026-10-03 | потолки `read_file` / `list_dir` / `grep` вернулись к дефолтам | **нет by design**. Последствия: `read_file` 512 000 → **128 000** (обрезается хвост, маркер `(Showing lines …)` остаётся), `list_dir` 500 → **200**, grep head 500/400 → **250/200**, и главное — `GrepTool._MAX_FILE_BYTES` 20 МБ → **2 МБ**: файлы крупнее пропускаются целиком, и grep возвращает «No matches found» с уведомлением в хвосте, то есть тихое ложное отрицание |
+
+Обе секции `gateway.tool_result_limits` в `config.json` удалены как мёртвые
+(их больше не читает ни один патч). Потолки теперь не перекрываются ничем,
+поэтому единственная защита от их тихой смены апгрейдом nanobot —
+`tests/test_runtime_patcher.py::TestToolLimitPatchesAreGone::test_framework_limits_are_the_ones_we_think`
+и e2e-класс `TestGrepBlindToLargeFilesE2E`.
 
 Колонка и каталог внесены в рамках openspec change
 [`enterprise-mcp-platform`](../../openspec/changes/enterprise-mcp-platform/).
@@ -248,68 +260,22 @@ tool'ов, и при переносе тяжёлых запросов в MCP о�
 **Условие удаления здесь не дублируется:** оно живёт в сводной таблице выше, и
 второе место для него — это расхождение, которое читатель примет за факт.
 
-### 1. `patch_context_governor(config, settings, workspace_dir)`
-
-```yaml
-PATCH: context_governor
-target: ContextGovernor.normalize_tool_result (internal staticmethod)
-nanobot_version: 0.3.5
-required: true
-purpose: >
-  Большие результаты инструментов (> persist_threshold) выгружать в
-  workspace/data_store/cache/sessions/<session_key>/, в контекст класть
-  короткую ссылку data_store/<path>. Экономия токенов + сохранение данных.
-public_alternative: нет.
-risk: MEDIUM (статический метод, не приватный instance-метод —
-  ломается только при rename сигнатуры).
-tests: tests/test_runtime_patcher_e2e.py, tests/test_gateway.py
-```
-
-### 2. `patch_exec_limits(settings)`
-
-```yaml
-PATCH: exec_limits
-target: >
-  exec_session.MAX_OUTPUT_CHARS / DEFAULT_MAX_OUTPUT_CHARS,
-  shell.MAX_OUTPUT_CHARS / ExecTool._MAX_OUTPUT (+ JSON-Schema maximum).
-  WriteStdinTool удалён в 0.3.5 — getattr-guard.
-nanobot_version: 0.3.5
-purpose: поднять потолок вывода exec/shell-tools (дефолт ~50K символов);
-  значения из gateway.tool_result_limits.* в config.json.
-public_alternative: проверять tools.exec секцию config.json на каждом апгрейде.
-risk: MEDIUM (модульные константы + JSON-Schema — оба публичных
-  слоя, ломаются только при изменении схемы).
-tests: tests/test_runtime_patcher.py::test_exec_limits*,
-  tests/test_runtime_patcher_e2e.py::TestExecToolE2E
-```
-
-### 3. `patch_exec_timeout_cap(settings)`
+### 1. `patch_exec_timeout_cap(settings)`
 
 ```yaml
 PATCH: exec_timeout_cap
 target: shell.ExecTool._MAX_TIMEOUT + JSON-Schema параметра timeout
 nanobot_version: 0.3.5
 purpose: >
-  Поднять потолок таймаута exec (хардкод 600с) выше для долгих навыков
-  (legal_summarizer 7–10 мин на ГК РФ).
+  Поднять потолок таймаута exec (хардкод 600с) выше для долгих навыков.
+  Обоснование «legal_summarizer 7–10 мин» УСТАРЕЛО: навыка в проекте нет,
+  а конфигурационный tools.exec.timeout потолком _MAX_TIMEOUT не
+  ограничивается — нативный путь для длинных прогонов есть и он не наш.
 risk: MEDIUM.
 tests: tests/test_runtime_patcher.py
 ```
 
-### 4. `patch_tool_limits(settings)`
-
-```yaml
-PATCH: tool_limits
-target: >
-  ReadFileTool._MAX_CHARS, ListDirTool._DEFAULT_MAX,
-  search._DEFAULT_HEAD_LIMIT, _DEFAULT_FILE_HEAD_LIMIT, GrepTool._MAX_FILE_BYTES.
-nanobot_version: 0.3.5
-purpose: конфигурируемые потолки read_file/list_dir/grep.
-risk: MEDIUM (модульные константы — не приватные instance-методы).
-tests: tests/test_runtime_patcher.py::test_tool_limits*
-```
-
-### 5. `patch_assemble_outbound(agent, tool_audit_hook, recent_files_hook=...)`
+### 2. `patch_assemble_outbound(agent, tool_audit_hook, recent_files_hook=...)`
 
 ```yaml
 PATCH: assemble_outbound
@@ -333,7 +299,7 @@ tests: tests/test_runtime_patcher.py (TestPatchAssembleOutbound),
   tests/contract/test_agent_loop_api.py::test_assemble_outbound_signature
 ```
 
-### 6. `patch_subagent_logging(db_logging_service, session_manager=...)`
+### 3. `patch_subagent_logging(db_logging_service, session_manager=...)`
 
 ```yaml
 PATCH: subagent_logging
@@ -350,7 +316,7 @@ risk: HIGH (CRITICAL пересмотрен до HIGH — публичные а�
 tests: tests/test_runtime_patcher.py::test_subagent_logging*
 ```
 
-### 7. `patch_repeat_guard_block()`
+### 4. `patch_repeat_guard_block()`
 
 ```yaml
 PATCH: repeat_guard_block
@@ -382,7 +348,7 @@ tests: tests/contract/test_repeat_guard_hook_contract.py,
   tests/test_runtime_patcher.py::test_repeat_guard_block*
 ```
 
-### 7. ~~`patch_turn_delivery_fail`~~ — УДАЛЁН (фаза 6, п. 6.1)
+### 5. ~~`patch_turn_delivery_fail`~~ — УДАЛЁН (фаза 6, п. 6.1)
 
 > Запись сохранена как указатель на то, что патч делал, — по контракту и
 > содержимому журнала. Реализации в `runtime_patcher.py` больше нет; см.

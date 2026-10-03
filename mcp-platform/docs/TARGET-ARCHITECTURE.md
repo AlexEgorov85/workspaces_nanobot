@@ -774,7 +774,7 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | 6 | **capability `audit`**: перенос конвейера с сохранением диалекта снимка; проверка списка таблиц в коде, потолок строк, без `context` от вызывающего | Реестр и шаблоны остаются в диалекте снимка (`?`, `main`) — переписывать их под `psycopg2` незачем. Требования безопасности поверхности сохраняются |
 | 7 | **Перенос кластера снимка** во владельца `libs/enterprise_data` одним коммитом | ~2 600 строк меняют место жительства: `duckdb_cache_store.py`, `cache_load_service.py`, `cache_provider.py`, исполнитель запросов из `duckdb_query.py`. Снимок остаётся (§1.1) |
 | 8 | Логирование через `enterprise-mcp: log_events` | Буфер в агенте, батчевый flush. `db_logging_bus.py` остаётся в агенте |
-| 9 | Патчи → хуки и события | Патчей в коде **шесть**, не двенадцать: `exec_limits`, `exec_timeout_cap`, `tool_limits`, `assemble_outbound`, `subagent_logging`, `repeat_guard_block` |
+| 9 | Патчи → хуки и события | Патчей в коде **четыре**, не двенадцать: `exec_timeout_cap`, `assemble_outbound`, `subagent_logging`, `repeat_guard_block`. `exec_limits` и `tool_limits` сняты 2026-10-03: нативной конфигурации лимитов вывода в nanobot 0.3.5 нет, приняты дефолты библиотеки |
 | 10 | document-tool агента | Разблокирует шаг 9: порог длины текста уходит из патча в собственный код tool'а |
 | 13 | Перенос `legal_summarizer` — **последним** | Решение владельца: домен ничего не разблокирует для остальных фаз, ноль связности |
 | 11 | Остатки `audit_analyzer` в агенте: `SKILL.md`, удаление `scripts/cli.py` и `predefined/` | Код уже в платформе, остаётся привести описание в порядок |
@@ -901,7 +901,7 @@ enterprise-стек». Разбор — `design.md` §7.1.
 
 **Патчей в коде шесть, а не двенадцать.**
 `lib/services/runtime_patcher.py::_PATCH_SPECS` объявляет ровно шесть:
-`exec_limits`, `exec_timeout_cap`, `tool_limits`, `assemble_outbound`,
+`exec_timeout_cap`, `assemble_outbound`,
 `subagent_logging`, `repeat_guard_block`. Инвентарь приведён к тому же числу,
 и шестой (`repeat_guard_block`) в таблицу ниже не входил: он единственный
 патчит не `AgentLoop`, а `nanobot.agent.tools.execution._execute_tool_call`.
@@ -936,15 +936,16 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | 8 | `session_dir_watch` | **удалить** | Гейт выключен по умолчанию, тестов нет |
 | 1 | `context_governor` | **удалить** | **Upstream уже работает.** `workspace` и `max_tool_result_chars` прокинуты: `config/schema.py` → `AgentLoop` → `AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`. Патч переписывал работающую функцию |
 | 4 | `exec_timeout_cap` | **удалить** | `tools.exec.timeout` уже прокинут (`0` = без лимита); остаток — подкласс `ExecTool`. Обоснование «legal 7–10 мин» отпадает с переездом legal в MCP |
-| 5 | `tool_limits` | **частично** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, не перехватываются, но они лишь дефолты: per-call `head_limit` есть |
+| 5 | `tool_limits` | **удалён 2026-10-03** | Нативной замены нет: конфигурируемых лимитов `read_file`/`list_dir`/`grep` в nanobot не существует. Приняты дефолты — 128K / 200 записей / **2 МБ на файл**. Цена: grep пропускает крупные файлы и возвращает «No matches found», уведомление о пропуске идёт в хвосте |
+| 3 | `exec_limits` | **удалён 2026-10-03** | Вместе с `tool_limits`. Потолок в глобалах модуля внутри `clamp_session_int`, а `maximum` схемы заморожен `deepcopy` при декорации — ни подкласс, ни конфиг не достают. Приняты дефолты: **10 000** по умолчанию, 50 000 потолком |
 | 6 | `assemble_outbound` | **удалить** | Все три обязанности — события: `_final_turn` → `TurnEndEvent`; `_tool_audit` и `media` публикуются хуком через `turn_context.events`, канал читает. Плата: вложение появляется у пользователя на этапе обработки события, а не на сборке outbound |
 | 9 | `subagent_logging` | **остаётся** | Блокер структурный: у `SubagentManager` нет параметра хука и он зашит; субагент зовёт `runner.run` напрямую, минуя цепочку хуков; `events` не передаётся → `NO_EVENTS` → ноль событий |
-| 3 | `exec_limits` | **остаётся** | Потолок в глобалах модуля внутри `clamp_session_int`, а `maximum` схемы заморожен `deepcopy` при декорации — подкласс не достаёт. Нужен контрактный тест на инварианты |
+| 6 | `assemble_outbound` | **частично** | события для `_final_turn` |
 | 12 | `document_text_threshold` | **удалить** | Документы остаются в агенте нативным tool'ом, порог переносится в его собственный код — это наш код, патчить фреймворк не нужно |
 
 **Арифметика «12 → 2» описывала инвентарь, а не код.** Из двенадцати
-перечисленных выше патчей в коде осталось пять: `exec_limits`,
-`exec_timeout_cap`, `tool_limits`, `assemble_outbound`, `subagent_logging`.
+перечисленных выше патчей в коде осталось четыре: `exec_timeout_cap`,
+`assemble_outbound`, `subagent_logging`, `repeat_guard_block`.
 Вердикты «удалить» для `save_turn`, `context_governor`,
 `document_text_threshold` и `turn_delivery_fail` сегодня не описывают
 состояние кода — их в `_PATCH_SPECS` нет; таблица сохранена как план, а не как

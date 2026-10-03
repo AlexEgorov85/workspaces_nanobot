@@ -124,20 +124,32 @@ class TestKnownPatchesRemainDeclared:
     результаты tool'ов, а наш патч писал второй раз в ``data_store/``.
     Отсутствие в ``EXPECTED`` теперь проверяет ещё и возврат патча обратно
     в ``_PATCH_SPECS``.
+
+    ``exec_limits`` и ``tool_limits`` убраны из списка 2026-10-03: потолки
+    вывода инструментов вернулись к дефолтам nanobot, нативной замены нет by
+    design. Их отсутствие в ``EXPECTED`` проверяет возврат в канон — с см. строкой
+    в ``REMOVED_TOOL_LIMITS``, где зафиксировано, чем именно пришлось заплатить.
     """
 
     EXPECTED = frozenset({
         "assemble_outbound",
-        "exec_limits",
         "exec_timeout_cap",
         "subagent_logging",
-        "tool_limits",
         # Седьмой патч (change repeat-guard-hook). Единственный, кто патчит
         # не AgentLoop, а nanobot.agent.tools.execution._execute_tool_call:
         # hook-API не умеет отклонить вызов, а before_execute_tool там стоит
         # вне try, поэтому без патча режим block либо молчит, либо роняет
         # оборот. Условие удаления — в runtime-patcher-inventory.md.
         "repeat_guard_block",
+    })
+
+    #: Патчи потолков вывода, снятые 2026-10-03. Нативной замены в nanobot
+    #: 0.3.5 нет: конфигурируемых лимитов у exec / read_file / list_dir / grep
+    #: не существует. Возврат возможен только новым патчем или апгрейдом
+    #: библиотеки — и то и другое должно быть явным решением владельца.
+    REMOVED_TOOL_LIMITS = frozenset({
+        "exec_limits",
+        "tool_limits",
     })
 
     REMOVED_IN_PHASE_6 = frozenset({
@@ -157,3 +169,13 @@ class TestKnownPatchesRemainDeclared:
     def test_removed_patches_are_gone(self) -> None:
         present = self.REMOVED_IN_PHASE_6 & set(RuntimePatcher.patch_specs())
         assert not present, f"патчи фазы 6 вернулись в канон: {sorted(present)}"
+
+    def test_removed_tool_limit_patches_stay_removed(self) -> None:
+        present = self.REMOVED_TOOL_LIMITS & set(RuntimePatcher.patch_specs())
+        assert not present, (
+            f"патчи потолков вывода вернулись в канон: {sorted(present)}. "
+            "У них нет нативной замены в nanobot 0.3.5 — возврат меняет "
+            "потолки вывода обратно и обязан быть решением владельца, "
+            "а не побочным эффектом правки. Последствия снятия описаны в "
+            "docs/architecture/runtime-patcher-inventory.md"
+        )

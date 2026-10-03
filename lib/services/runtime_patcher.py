@@ -27,6 +27,28 @@
     ``docs/architecture/runtime-patcher-inventory.md`` и ADR
     ``docs/architecture/decisions/turn-delivery-public-extension.md``.
 
+Решение владельца сняло ещё два патча — ``exec_limits`` и ``tool_limits``.
+Оба поднимали потолки вывода инструментов, которых в nanobot 0.3.5 нет в
+конфигурации, поэтому нативной замены нет by design: потолки возвращены к
+дефолтам библиотеки, а секция ``gateway.tool_result_limits`` из ``config.json``
+удалена как мёртвая. Что это означает на практике (проверено на
+установленном пакете 0.3.5):
+
+  * вывод ``exec``: дефолт ``ExecTool._MAX_OUTPUT`` 100 000 → **10 000**,
+    потолок ``MAX_OUTPUT_CHARS`` 500 000 → **50 000**. Усечение
+    «голова + хвост» при этом не просто форматируется, а режется уже в
+    ``_BoundedOutputBuffer``, то есть попавший в файл персиста вывод
+    середину уже не содержит;
+  * ``read_file``: ``ReadFileTool._MAX_CHARS`` 512 000 → **128 000**
+    (обрезается хвост, маркер «(Showing lines …)» остаётся);
+  * ``list_dir``: ``ListDirTool._DEFAULT_MAX`` 500 → **200**;
+  * ``grep``: ``GrepTool._MAX_FILE_BYTES`` 20 МБ → **2 МБ** — файлы крупнее
+    пропускаются целиком и считаются в ``skipped_large``, то есть детектор
+    молчит, а модель видит пустой результат как факт.
+
+Оставшийся ``exec_timeout_cap`` держит отдельный коридор и к этому
+отношения не имеет.
+
 ``context_governor`` — тоже ушёл в upstream (change
 ``use-upstream-tool-result-persist``). В nanobot 0.3.5
 ``ContextGovernor.normalize_tool_result``
@@ -247,17 +269,6 @@ class PatchSpec:
 
 
 _PATCH_SPECS: dict[str, PatchSpec] = {
-    "exec_limits": PatchSpec(
-        name="exec_limits",
-        purpose="сделать лимиты вывода exec-инструмента конфигурируемыми",
-        nanobot_target="nanobot.agent.tools.exec_session.MAX_OUTPUT_CHARS, "
-                       "shell.ExecTool._MAX_OUTPUT",
-        reason="конфигурируемых лимитов вывода exec в nanobot нет; дефолт "
-               "50K символов теряет данные",
-        alternatives_checked="ToolConfig-схема параметров — обходится через "
-                             "schema bump",
-        risk="medium",
-    ),
     "exec_timeout_cap": PatchSpec(
         name="exec_timeout_cap",
         purpose="поднять потолок таймаута exec (константа _MAX_TIMEOUT и "
@@ -270,17 +281,6 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         alternatives_checked="exec_timeout=0 в project.json снимает лимит, "
                              "но только когда агент НЕ передаёт timeout; "
                              "патч страхует случай явного timeout",
-        risk="medium",
-    ),
-    "tool_limits": PatchSpec(
-        name="tool_limits",
-        purpose="сделать лимиты read_file/grep/list_dir конфигурируемыми",
-        nanobot_target="nanobot.agent.tools.filesystem.ReadFileTool._MAX_CHARS, "
-                       "ListDirTool._DEFAULT_MAX; "
-                       "nanobot.agent.tools.search._DEFAULT_HEAD_LIMIT, "
-                       "GrepTool._MAX_FILE_BYTES",
-        reason="конфигурируемых лимитов read_file/grep/list_dir в nanobot нет",
-        alternatives_checked="ToolConfig параметров не покрывает модульные константы",
         risk="medium",
     ),
     "assemble_outbound": PatchSpec(
@@ -337,13 +337,15 @@ _SKIPPABLE_REASONS: frozenset[str] = frozenset({
     # библиотеки, и он обязан попадать в ``failed``, чтобы баннер запуска
     # его показал. Закреплено tests/test_runtime_patcher.py::
     # TestPatchReportClassification::test_missing_attr_is_failed.
+    #
+    # Записи ``exec_max_output_chars <= 0``, ``read_file_max_chars <= 0``,
+    # ``exec_session/shell module not loaded`` и
+    # ``filesystem/search module not loaded`` удалены вместе с патчами
+    # ``exec_limits`` и ``tool_limits`` — больше их никто не выдаёт.
     "agent is None",
-    "exec_max_output_chars <= 0",
     "exec_timeout_cap_sec <= 0",
-    "read_file_max_chars <= 0",
     "db_logging_service is None",
-    "exec_session/shell module not loaded",
-    "filesystem/search module not loaded",
+    "shell module not loaded",
 })
 
 
@@ -396,9 +398,8 @@ class PatchReport:
             Runtime patches
             ----------------
             ✓ assemble_outbound
-            ✓ subagent_logging
             ⚠ exec_timeout_cap skipped: exec_timeout_cap_sec <= 0
-            ✗ tool_limits failed: read_file_max_chars is None
+            ✗ subagent_logging failed: DbLoggingService is None
 
         При наличии ``specs`` добавляется строка ``(purpose: ...)`` под
         каждым failed, чтобы оператор сразу видел, зачем патч был нужен.
@@ -479,7 +480,8 @@ class RuntimePatcher:
         Args:
             config: runtime-конфиг nanobot.
             settings: ``SETTINGS`` (или его ``.gateway`` секция) — для
-                ``tool_result_limits`` и ``error_messages``.
+                ``exec_timeout_cap_sec``. Секция ``tool_result_limits``
+                больше не читается ни одним патчем: её патчи сняты.
             workspace_dir: ``Path`` — корень workspace.
             agent: ``AgentLoop`` (для ``patch_assemble_outbound``).
             tool_audit_hook: ``ToolAuditHook`` (для ``patch_assemble_outbound``).
@@ -501,9 +503,7 @@ class RuntimePatcher:
             ``PatchReport`` со списками ``applied`` / ``skipped`` (с причиной).
         """
         report = PatchReport()
-        self._record(report, "exec_limits", self.patch_exec_limits(settings))
         self._record(report, "exec_timeout_cap", self.patch_exec_timeout_cap(settings))
-        self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
@@ -574,64 +574,6 @@ class RuntimePatcher:
         return True
 
     # ------------------------------------------------------------------
-    # Патч 1c: лимит вывода exec-инструмента (конфигурируемый)
-    # ------------------------------------------------------------------
-
-    def patch_exec_limits(self, settings: Any) -> tuple[bool, str]:
-        """Поднять лимит вывода exec/shell-инструмента.
-
-        nanobot режет вывод команды до ``MAX_OUTPUT_CHARS`` (50K символов) и
-        вставляет маркер ``... (N chars truncated) ...``, выбрасывая середину
-        (``nanobot/agent/tools/shell.py:354-361``, ``exec_session.py:403-413``).
-        Output «голова+хвост» потом persist кладёт в файл — данные теряются.
-
-        Патч поднимает потолки вывода из ``settings.gateway.tool_result_limits``
-        и делает их конфигурируемыми. В этом проекте это безопасно для контекста:
-        вывод exec длиннее ``agents.defaults.max_tool_result_chars`` и так
-        уходит полным файлом (upstream ``maybe_persist_tool_result``), а в
-        контекст ставится ссылка (exec не exempt).
-
-        Читаемые ключи:
-          * ``exec_max_output_chars`` (дефолт 500_000) — потолок ``MAX_OUTPUT_CHARS``;
-          * ``exec_default_output_chars`` (дефолт 100_000) — дефолт ``_MAX_OUTPUT``.
-
-        Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
-        """
-        limits = _get(settings, "gateway", "tool_result_limits", default={}) or {}
-        max_out = int(limits.get("exec_max_output_chars", 500_000) or 500_000)
-        default_out = int(limits.get("exec_default_output_chars", 100_000) or 100_000)
-        if max_out <= 0:
-            return False, "exec_max_output_chars <= 0"
-
-        try:
-            es = _getloaded("nanobot.agent.tools.exec_session")
-            shell = _getloaded("nanobot.agent.tools.shell")
-            if es is None or shell is None:
-                return False, "exec_session/shell module not loaded"
-
-            # Модульная константа, участвующая в clamp_session_int.
-            es.MAX_OUTPUT_CHARS = max_out
-            es.DEFAULT_MAX_OUTPUT_CHARS = default_out
-            # В shell.py константа импортирована по имени — патчим свою привязку.
-            shell.MAX_OUTPUT_CHARS = max_out
-            # Дефолт разового exec (когда модель не передаёт max_output_chars).
-            shell.ExecTool._MAX_OUTPUT = default_out
-            # Схема: чтобы модель могла запросить больше 50K.
-            self._bump_schema_max(
-                shell.ExecTool, ("max_output_chars", "max_output_tokens"), max_out
-            )
-            # ``WriteStdinTool`` удалён в nanobot 0.3.5 — guard через hasattr.
-            ws_tool = getattr(es, "WriteStdinTool", None)
-            if ws_tool is not None:
-                self._bump_schema_max(
-                    ws_tool, ("max_output_chars", "max_output_tokens"), max_out
-                )
-        except Exception as exc:
-            return False, f"patch failed: {exc}"
-        return True, "exec output limits patched"
-
-    # ------------------------------------------------------------------
     # Патч 1c-2: потолок таймаута exec (константа + схема параметра)
     # ------------------------------------------------------------------
 
@@ -674,48 +616,6 @@ class RuntimePatcher:
 
     # ------------------------------------------------------------------
     # Патч 1d: лимиты read_file / grep / list_dir (конфигурируемые)
-    # ------------------------------------------------------------------
-
-    def patch_tool_limits(self, settings: Any) -> tuple[bool, str]:
-        """Поднять потолки инструментов, которые усекают вывод с маркером.
-
-        Читаемые ключи из ``settings.gateway.tool_result_limits``:
-          * ``read_file_max_chars`` (дефолт 512_000) — ``ReadFileTool._MAX_CHARS``
-            (маркер ``Document text truncated at ~128K chars``);
-          * ``grep_head_limit`` (дефолт 500) — ``search._DEFAULT_HEAD_LIMIT``;
-          * ``grep_file_head_limit`` (дефолт 400) — ``search._DEFAULT_FILE_HEAD_LIMIT``;
-          * ``grep_max_file_bytes`` (дефолт 20_000_000) — ``GrepTool._MAX_FILE_BYTES``
-            (файлы больше этого grep пропускает целиком);
-          * ``list_dir_max_entries`` (дефолт 500) — ``ListDirTool._DEFAULT_MAX``
-            (маркер ``(truncated, showing first N of M entries)``).
-
-        Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
-        """
-        limits = _get(settings, "gateway", "tool_result_limits", default={}) or {}
-        read_max = int(limits.get("read_file_max_chars", 512_000) or 512_000)
-        grep_head = int(limits.get("grep_head_limit", 500) or 500)
-        grep_file_head = int(limits.get("grep_file_head_limit", 400) or 400)
-        grep_max_bytes = int(limits.get("grep_max_file_bytes", 20_000_000) or 20_000_000)
-        list_max = int(limits.get("list_dir_max_entries", 500) or 500)
-        if read_max <= 0:
-            return False, "read_file_max_chars <= 0"
-
-        try:
-            fs = _getloaded("nanobot.agent.tools.filesystem")
-            srch = _getloaded("nanobot.agent.tools.search")
-            if fs is None or srch is None:
-                return False, "filesystem/search module not loaded"
-
-            fs.ReadFileTool._MAX_CHARS = read_max
-            fs.ListDirTool._DEFAULT_MAX = list_max
-            srch._DEFAULT_HEAD_LIMIT = grep_head
-            srch._DEFAULT_FILE_HEAD_LIMIT = grep_file_head
-            srch.GrepTool._MAX_FILE_BYTES = grep_max_bytes
-        except Exception as exc:
-            return False, f"patch failed: {exc}"
-        return True, "tool limits patched"
-
     # ------------------------------------------------------------------
     # Патч 2: agent._assemble_outbound → внедрение _tool_audit
     # ------------------------------------------------------------------
