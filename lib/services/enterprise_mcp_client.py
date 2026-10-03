@@ -521,6 +521,12 @@ class EnterpriseMcpClient:
 #: ``config._lift_agent_sections`` — читать надо ``SETTINGS["logging"]``, а не
 #: ``SETTINGS["gateway"]["agent"]["logging"]``: второго пути к тому же значению
 #: быть не должно.
+#:
+#: Второй читатель того же ключа — ``config._export_platform_process_env``,
+#: он объявляет путь у себя в ``config.py``. Объявить его здесь и импортировать
+#: отсюда нельзя: ``config`` — базовый модуль, и потянуть в него сервисный
+#: слой нельзя. Равенство двух объявлений проверяет
+#: ``tests/test_mcp_platform_declaration.py``.
 JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
 
 #: Имя флага запуска, которым порог доезжает до платформы. Литерал с обеих

@@ -41,6 +41,21 @@ class TestRuntimeEnvExport:
         assert os.environ["NANOBOT_PYTHON"] == os.sys.executable
         assert Path(os.environ["NANOBOT_PROJECT_ROOT"]) == PROJECT_ROOT
 
+    def test_export_sets_workspace(self, monkeypatch) -> None:
+        """Третий факт о запуске: рабочий каталог агента.
+
+        Объявляется не в ``config.json``, а в ``platform.json`` — им разворачивается
+        ``execution.session_root``, корень файлов сессии. Каталог обязан лежать
+        внутри рабочего каталога агента: при включённой границе файловых
+        инструментов запись в папку сессии вне него отклоняется, и агент не смог
+        бы положить туда ни одного файла.
+        """
+        monkeypatch.delenv("NANOBOT_WORKSPACE", raising=False)
+
+        config._export_runtime_env()
+
+        assert Path(os.environ["NANOBOT_WORKSPACE"]) == PROJECT_ROOT / "workspace"
+
     def test_external_value_wins(self, monkeypatch) -> None:
         """Оператор может указать другой интерпретатор осознанно."""
         monkeypatch.setenv("NANOBOT_PYTHON", "/custom/python")
@@ -54,6 +69,48 @@ class TestRuntimeEnvExport:
         assert source.index("_export_runtime_env()") < source.index(
             "cfg = _resolve_env_refs(cfg)"
         )
+
+
+# --- объявление корня файлов сессии --------------------------------------
+
+
+def _session_root_declared() -> str:
+    """``platform.json → execution.session_root`` как он записан в файле."""
+    raw = json.loads(
+        (PROJECT_ROOT / "mcp-platform" / "platform.json").read_text(encoding="utf-8")
+    )
+    return raw["execution"]["session_root"]
+
+
+class TestSessionRootDeclaration:
+    """Корень объявлен один раз, платформой, и лежит внутри рабочего каталога.
+
+    Требование change ``2026-10-03-session-files`` (п. 1.1). Проверяется объявление,
+    а не работающая платформа: подстановку разворачивает сервер, и для этого
+    хватает строки в файле.
+    """
+
+    def test_declared_through_the_workspace_variable(self) -> None:
+        """Объявление обязано быть развёрнутым до абсолютного пути подстановкой.
+
+        Литерал или ``${NANOBOT_PROJECT_ROOT}`` вернули бы корень, который агент
+        не пишет: ``workspace/`` — это не корень проекта, а каталог внутри него.
+        """
+        declared = _session_root_declared()
+        assert declared == "${NANOBOT_WORKSPACE}/data_store/sessions", declared
+
+    def test_expanded_root_stays_inside_the_workspace(self, tmp_path) -> None:
+        """Резолв обязана привести внутрь рабочего каталога агента.
+
+        Иначе граница файловых инструментов (``allowed_root`` = корень проекта)
+        отклонит запись в папку сессии, и объявление окажется верным только на
+        бумаге.
+        """
+        workspace = tmp_path / "workspace"
+        expanded = _session_root_declared().replace(
+            "${NANOBOT_WORKSPACE}", str(workspace)
+        )
+        assert Path(expanded).is_relative_to(workspace), expanded
 
 
 # --- секция enterprise_mcp в config.json --------------------------------
@@ -106,14 +163,41 @@ class TestEnterpriseMcpSection:
         # запуска, и это лучше, чем запуск несуществующего интерпретатора.
         assert client.describe()["command"].startswith("$")
 
-    def test_mcp_servers_in_nanobot_config_stays_empty(self) -> None:
-        """Пока операции не отдаются модели, вторая копия процесса не нужна.
+    def test_operations_reach_the_model_through_mcp_servers(self) -> None:
+        """Операции отдаются модели штатным MCP, а не самописными обёртками.
 
-        Владелец пула PostgreSQL должен быть один — это и есть регистрация
-        клиента агента плюс пустой ``mcpServers``.
+        Раньше ``mcpServers`` обязан был быть пустым: платформа была видна
+        агенту только через собственный клиент, а модели — через
+        ``audit_analyzer_query``/``legal_summarizer_query``/``history_search``
+        с переписанными схемами. Теперь объявление есть, и модель видит
+        настоящие ``inputSchema`` платформы.
+
+        Состав объявления проверяет ``tests/test_mcp_platform_declaration.py``;
+        здесь — только сам факт и честность про второй процесс.
         """
         raw = json.loads((PROJECT_ROOT / "config.json").read_text(encoding="utf-8"))
-        assert raw.get("tools", {}).get("mcpServers") == {}
+        servers = raw.get("tools", {}).get("mcpServers", {})
+        assert "enterprise" in servers
+
+    def test_second_process_is_declared_not_accidental(self) -> None:
+        """Процессов платформы два, и это объявлено, а не случайно вышло.
+
+        Один поднимает нанобот — для модели (это объявление выше). Второй
+        поднимает агент для фоновых служб: ``queue_ops`` воркера канала,
+        ``session_cold_sync``, журнал через ``log_events`` и запись о сжатии
+        контекста ходят в платформу ВНЕ оборота, где MCP-инструмента модели
+        нет и быть не может — там нужен клиент, а не tool.
+
+        Пока оба объявления существуют, страж на «одного владельца пула» был бы
+        неправдой; он и удалён. Обратно объединять их можно будет не правкой
+        конфига, а снятием клиента агента — отдельной задачей.
+        """
+        raw = json.loads((PROJECT_ROOT / "config.json").read_text(encoding="utf-8"))
+        assert raw["tools"]["mcpServers"]["enterprise"]["enabled_tools"]
+        section = _load_enterprise_mcp_raw()
+        assert section["enabled"] is True
+        # Клиент агента остаётся: фоновые службы ходят в платформу вне оборота.
+        assert section["command"] == "${NANOBOT_PYTHON}"
 
 
 # --- валидация модели ----------------------------------------------------

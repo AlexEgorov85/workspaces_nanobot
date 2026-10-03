@@ -21,7 +21,7 @@ TOOL = REPO_ROOT / "tools" / "diagnose_startup.py"
 # один: ``async_save``/``document_text_threshold`` в applied — их больше
 # нет в каноне, это и есть материал для exit code 2.
 USER_LOG = """
-\u2713 Hooks connected: StreamDiagnosisHook, RecentFilesHook, SessionFileRedirectHook, ToolResultArchiveHook, ToolAuditHook, TerminalToolPrintHook, 1 hook factory (per-turn)
+\u2713 Hooks connected: StreamDiagnosisHook, RecentFilesHook, SessionFileRedirectHook, ToolResultArchiveHook, ToolAuditHook, TerminalToolPrintHook, McpIdentityHook, 1 hook factory (per-turn)
 Registered 22 tools: ['apply_patch', 'run_cli_app', 'create_goal', 'edit_file', 'exec_session', 'exec', 'find_files', 'grep', 'list_dir', 'list_exec_sessions', 'list_sessions', 'message', 'my', 'read_file', 'read_session', 'search_sessions', 'send_session_message', 'spawn', 'update_goal', 'web_fetch', 'web_search', 'write_file']
 Custom (project) tools: 5 project tools registered: audit_analyzer_query, compact_context, history_search, legal_summarizer_query, document_read; 1 disabled by config: ExampleTool
 Runtime patches
@@ -108,7 +108,7 @@ class TestParser:
         assert facts.hook_names == [
             "StreamDiagnosisHook", "RecentFilesHook",
             "SessionFileRedirectHook", "ToolResultArchiveHook",
-            "ToolAuditHook", "TerminalToolPrintHook",
+            "ToolAuditHook", "TerminalToolPrintHook", "McpIdentityHook",
         ]
         assert facts.hook_factory_count == 1
         assert len(facts.builtin_tool_names) == 22

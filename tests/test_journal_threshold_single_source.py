@@ -80,14 +80,17 @@ AGENT_SOURCE_FILES: tuple[Path, ...] = (
 #: ``config._lift_agent_sections``, что и в ``resolve_application_config``.
 CONFIG_KEY_PATH: tuple[str, ...] = ("logging", "db", "min_level")
 
-#: Ровно два чтения порога в дереве агента, и оба — из ``CONFIG_KEY_PATH``.
-#: Одно место, которое правит человек, — ``config.json``; читателей два,
-#: потому что половины журнала пишутся двумя процессами, и без второго
-#: читателя платформа писала бы по своей политике, тихо и всегда.
+#: Ровно три чтения порога в дереве агента, и все — из ``CONFIG_KEY_PATH``.
+#: Одно место, которое правит человек, — ``config.json``; читателей три,
+#: потому что журнал пишут ТРИ процесса: писатель агента, клиент MCP фоновых
+#: служб и второй процесс платформы, который поднимает нанобот ради операций
+#: для модели. Без третьего читателя платформа писала бы в журнал по своей
+#: политике — тихо и всегда.
 DECLARED_READERS: tuple[tuple[str, str], ...] = (
     # (файл, функция, которая читает порог)
     ("lib/core/application_context.py", "_make_db_logging"),
     ("lib/services/enterprise_mcp_client.py", "_journal_min_level"),
+    ("config.py", "_export_platform_process_env"),
 )
 
 #: Имя переменной окружения, которой не должно быть. Ловит самый естественный
@@ -195,8 +198,8 @@ def _reads_of(tree: ast.AST, *, path_constants: dict[str, tuple[str, ...]]) -> l
     * по литералу — ``x.get("min_level")`` и ``x["min_level"]``;
     * по константе-пути — ``for key in PATH: node.get(key)``.
 
-    Всё остальное (сообщения об ошибке, имя флага, докстринги) чтением
-    настройки не является и в перечень не попадает.
+    Всё остальное (сообщения об ошибке, имя флага, докстринги, ПРИСВАИВАНИЯ)
+    чтением настройки не является и в перечень не попадает.
     """
     reads: list[tuple[int, tuple[str, ...]]] = []
     for node in ast.walk(tree):
@@ -213,6 +216,11 @@ def _reads_of(tree: ast.AST, *, path_constants: dict[str, tuple[str, ...]]) -> l
             isinstance(node, ast.Subscript)
             and isinstance(node.slice, ast.Constant)
             and isinstance(node.slice.value, str)
+            # Присваивание — не чтение. ``os.environ["X_MIN_LEVEL"] = value``
+            # передаёт порог дочернему процессу и настройку НЕ читает;
+            # без этой проверки экспорт объявлялся бы ещё одним читателем,
+            # и страж вёл бы в заблуждение.
+            and not isinstance(node.ctx, ast.Store)
         ):
             reads.append((node.lineno, (node.slice.value,)))
         elif isinstance(node, ast.For) and isinstance(node.iter, ast.Name):
@@ -401,25 +409,26 @@ class TestConfigValueIsResolvedOnceAndLoudly:
             _build(min_level="verbose")
 
 
-class TestOneSourceWithTwoReaders:
-    """Один источник — ``config.json``; читателей ровно два, и оба его."""
+class TestOneSourceWithThreeReaders:
+    """Один источник — ``config.json``; читателей ровно три, и все его."""
 
-    def test_only_the_two_declared_readers_read_the_threshold(self) -> None:
-        """Порог читают ровно два места, и оба — объявленные.
+    def test_only_the_declared_readers_read_the_threshold(self) -> None:
+        """Порог читают ровно объявленные места, и все — оттуда.
 
-        Третий читатель — это третий ответ на вопрос «каким уровнем пишется
-        журнал», и он появился бы в коде, который никто не правил. Сканер
-        ловит и прямое чтение по литералу, и чтение по константе-пути:
-        второе не хуже первого, а при прежней версии этого стража оно было
-        не видно вовсе.
+        Четвёртый читатель — это четвёртый ответ на вопрос «каким уровнем
+        пишется журнал», и он появился бы в коде, который никто не правил.
+        Сканер ловит и прямое чтение по литералу, и чтение по
+        константе-пути: второе не хуже первого, а при прежней версии этого
+        стража оно было не видно вовсе.
         """
         reads = _threshold_reads()
         files = sorted({file for file, _, _ in reads})
         assert files == sorted(file for file, _ in DECLARED_READERS), (
             "порог журнала читают не те файлы: "
             f"{[(file, line) for file, line, _ in reads]}. Объявлены читатели "
-            f"{[file for file, _ in DECLARED_READERS]} — писатель журнала и "
-            "клиент MCP, и оба читают ключ logging.db.min_level."
+            f"{[file for file, _ in DECLARED_READERS]} — писатель журнала, "
+            "клиент MCP и экспорт для второго процесса платформы, и все "
+            "читают ключ logging.db.min_level."
         )
 
     def test_each_reader_reads_it_once(self) -> None:
