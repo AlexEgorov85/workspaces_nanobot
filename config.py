@@ -245,6 +245,17 @@ AGENT_SECTIONS_PATH: tuple[str, ...] = ("gateway", "agent")
 
 _SUPPORTED_PROFILES = frozenset({"prod", "test"})
 
+#: Путь к порогу журнала в дереве настроек. Объявлен здесь, а не у потребителя,
+#: потому что читателей стало трое: писатель журнала агента
+#: (``lib/core/application_context.py``), клиент MCP фоновых служб
+#: (``lib/services/enterprise_mcp_client.py``) и экспорт для второго процесса
+#: платформы, который поднимает нанобот (``_export_platform_process_env``).
+#: Ключ поднят в корень из ``gateway.agent`` функцией ``_lift_agent_sections`` —
+#: читать надо корень ``logging``, а не ``gateway.agent.logging``: второго пути
+#: к тому же значению быть не должно.
+#: Страж единого источника — ``tests/test_journal_threshold_single_source.py``.
+JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
+
 
 class AttrDict(dict):
     def __getattr__(self, name):
@@ -600,6 +611,40 @@ def _export_runtime_env() -> None:
     os.environ.setdefault("NANOBOT_PROJECT_ROOT", str(_ROOT_DIR))
 
 
+def _export_platform_process_env(cfg: dict, profile: str) -> None:
+    """Экспортировать в ``os.environ`` факты для дочернего процесса платформы.
+
+    Нужны объявлению ``config.json → tools.mcpServers.enterprise``: его ``args``
+    — это список, а не строка, и подстановкой ``${VAR}`` внутрь списка можно
+    передать только ЗНАЧЕНИЕ. Поэтому имя контура и порог журнала едут в
+    процесс платформы значениями, а не флагами, которые агент дописывает
+    руками.
+
+    **Это не второй источник профиля.** Значения выводятся из уже
+    разрешённых ``profile`` и ``cfg`` и присваиваются БЕЗ ``setdefault``:
+    внешнее окружение переопределить их не может, поэтому единственным
+    источником остаётся ``--profile`` у application entrypoint (change
+    ``remove-profile-environment-selection``). Историческое имя
+    ``NANOBOT_PROFILE`` не воскрешается.
+
+    Пустое значение — не мусор, а «флага нет»: платформа разбирает
+    ``--profile <пусто>`` как отсутствие флага и берёт базовый контур
+    (``mcp-platform/servers/enterprise/server.py::_profile_from_argv``
+    возвращает ``None``). То же и с порогом журнала.
+    """
+    node: object = cfg
+    for key in JOURNAL_MIN_LEVEL_PATH:
+        node = node.get(key) if isinstance(node, dict) else None
+        if node is None:
+            break
+    min_level = str(node).strip() if isinstance(node, str) else ""
+    if profile and profile != "prod":
+        os.environ["NANOBOT_ENTERPRISE_MCP_PROFILE"] = profile
+    else:
+        os.environ["NANOBOT_ENTERPRISE_MCP_PROFILE"] = ""
+    os.environ["NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL"] = min_level
+
+
 def _merge_profile_overlay(cfg: dict, mode: str) -> None:
     """Применить profiles/<mode>.jsonc как ПОСЛЕДНИЙ шаг перед валидацией.
 
@@ -788,6 +833,11 @@ def resolve_application_config(profile: str) -> AttrDict:
     # Факты о запуске — тоже до резолва: ими заполняются ${NANOBOT_PYTHON}
     # и ${NANOBOT_PROJECT_ROOT} в объявлении MCP-сервера.
     _export_runtime_env()
+
+    # Контур и порог журнала для ВТОРОГО объявления того же сервера —
+    # ``tools.mcpServers`` (нанобот поднимает процесс сам). Источник тот же,
+    # что и у клиента агента, объявление — другое.
+    _export_platform_process_env(cfg, profile)
 
     _merge_profile_overlay(cfg, profile)
 

@@ -969,7 +969,35 @@
     "restrictToWorkspace": false,
     "webuiAllowLocalServiceAccess": true,
     "webuiAllowRemotePackageInstall": false,
-    "mcpServers": {},
+    "mcpServers": {
+      "enterprise": {
+        "type": "stdio",
+        "command": "${NANOBOT_PYTHON}",
+        "args": [
+          "-m",
+          "servers.enterprise.server",
+          "--profile",
+          "${NANOBOT_ENTERPRISE_MCP_PROFILE}",
+          "--log-min-level",
+          "${NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL}"
+        ],
+        "cwd": "${NANOBOT_PROJECT_ROOT}/mcp-platform",
+        "env": {
+          "NANOBOT_WORKSPACE": "${NANOBOT_WORKSPACE}",
+          "PYTHONIOENCODING": "utf-8"
+        },
+        "tool_timeout": 30,
+        "enabled_tools": [
+          "list_scripts",
+          "run_script",
+          "generate_sql",
+          "vector_search",
+          "query_operation",
+          "history_search",
+          "read_result"
+        ]
+      }
+    },
     "ssrfWhitelist": []
   },
   "modelPresets": {}
