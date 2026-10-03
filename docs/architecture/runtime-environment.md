@@ -10,11 +10,55 @@
 |-----------|-----------------------------|-----------------------------------------------------|
 | ОС        | Linux                       | `tests/test_runtime_environment_contract.py`        |
 | Python    | 3.12                        | `tests/test_runtime_environment_contract.py`        |
-| СУБД      | Greenplum 6.5 (ядро PostgreSQL 9.4) | `tests/test_runtime_environment_contract.py`, `sql/README.md` |
+| СУБД (боевая)   | Greenplum 6.5 (ядро PostgreSQL 9.4) | `tests/test_runtime_environment_contract.py`, `sql/README.md` |
+| СУБД (тестовая) | PostgreSQL 13.22            | `tests/test_runtime_environment_contract.py`        |
 
 Окно проверено и **уже** соответствует коду: в проекте нет ни одного API,
 появившегося в Python 3.13/3.14, нет ни одного модуля, удалённого в 3.12/3.13,
 нет `multiprocessing`/`os.fork`. По СУБД — не соответствует, см. «Долг».
+
+---
+
+## Одна СУБД боевая, другая тестовая
+
+Это не «выбираем движок», а два движка сразу, и DDL обслуживает оба:
+
+- **Greenplum 6.5** — боевая среда, ядро PostgreSQL 9.4.
+- **PostgreSQL 13.22** — тестовый контур, на нём гоняются тесты.
+
+Файлы из `sql/` применяются к обоим. Отсюда правило, которое выглядит
+контринтуитивным, но обязано выполняться буквально:
+
+> **Клауза `DISTRIBUTED BY` в теле `CREATE TABLE` запрещена.** На
+> PostgreSQL это синтаксическая ошибка, и тестовый контур перестанет
+> подниматься. На Greenplum без явной клаузы движок выбирает распределение
+> сам — по первичному ключу, а при его отсутствии по первому подходящему
+> столбцу. То есть клауза нужна, но не там, где её привычно писать.
+
+Поэтому распределение объявляется отдельным ограждённым шагом:
+
+```sql
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition' AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.example SET DISTRIBUTED BY (id)';
+    END IF;
+END
+$distribution$;
+```
+
+`pg_dist_partition` — служебный каталог Greenplum; на PostgreSQL его нет,
+поэтому шаг становится no-op. Исполняемый путь в коде (`tools/migrate.py`)
+поступает так же: определяет движок по `version()` и добавляет клаузу только
+на Greenplum. Статический файл обслуживает `psql -f`, код — запуск через
+runner, и оба приходят к одному ключу распределения.
+
+Идемпотентные конструкции, которых нет на 9.4, заменены по той же причине:
+`CREATE INDEX IF NOT EXISTS` (9.5) и `ADD COLUMN IF NOT EXISTS` (9.6) —
+на `DO`-блоки с проверкой `pg_indexes` и `information_schema.columns`.
 
 Локальная разработка идёт на Windows и на более новом Python — это осознанно:
 расхождение сред не должно быть поводом писать код, который работает «и так
@@ -61,43 +105,41 @@ Greenplum 6.5 требование, которого тот не выполня�
 Известные и зафиксированные нарушения. Список отдан стражу как карантин:
 он зелёный сегодня и красный при **любом новом** нарушении.
 
-**Закрыто 2026-10-03 (было 25, стало 17).** Реестр миграций больше не падает на
+**Закрыто 2026-10-03: было 25, стало 8.** Реестр миграций больше не падает на
 синтаксисе; зеркало сессий не блокирует таблицу и не требует `ON CONFLICT`;
-`IDENTITY` заменена на `BIGSERIAL`.
+`IDENTITY` заменена на `BIGSERIAL`; весь DDL сессий, журнала, каналов и `oarb`
+получил ограждённое объявление распределения, а конструкции 9.5/9.6 заменены
+на `DO`-блоки с проверкой `pg_indexes` и `information_schema.columns`.
 
-| Файл | Нарушение | Чья работа |
-|------|-----------|------------|
-| `sql/session/create_public_agent_session_meta.sql` | нет `DISTRIBUTED BY` | решение владельца не принято, см. ниже |
-| `sql/session/create_public_agent_session_messages.sql` | нет `DISTRIBUTED BY` | то же |
-| `sql/session/create_public_agent_session_meta_test.sql` | нет `DISTRIBUTED BY` | то же |
-| `sql/session/create_public_agent_session_messages_test.sql` | нет `DISTRIBUTED BY` | то же |
-| `sql/logs/create_public_agent_gateway_logs.sql` | нет `DISTRIBUTED BY`, `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `SET NOT NULL` | занято стражем чужой работы |
-| `sql/logs/create_public_agent_gateway_logs_test.sql` | то же | то же |
-| `sql/logs/create_public_agent_question_runs_test.sql` | нет `DISTRIBUTED BY` | то же |
-| `sql/channels/create_public_agent_conversation_messages_test.sql` | нет `DISTRIBUTED BY` | решение владельца не принято |
-| `sql/migrations/schema_migrations.sql` | нет `DISTRIBUTED BY` | то же; исполняемый путь в `tools/migrate.py` уже починен |
-| `sql/migrations/V002__vector_chunk_params.sql` | `ADD COLUMN IF NOT EXISTS` (9.6) | применённую миграцию не переписывают |
-| `sql/migrations/V004__agent_gateway_logs_user_id.sql` | `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS` | то же |
-| `sql/migrations/V008__agent_gateway_logs_event_time_columns.sql` | `ADD COLUMN IF NOT EXISTS`, `SET NOT NULL` (12.0) | то же |
+Оставшийся долг — только два вида: применённые миграции (переписывать нельзя,
+DRIFT по checksum) и два seed-скрипта с `ON CONFLICT`.
+
+| Файл | Нарушение | Почему не закрыто |
+|------|-----------|-------------------|
+| `sql/migrations/V002__vector_chunk_params.sql` | `ADD COLUMN IF NOT EXISTS` (9.6) | применённую миграцию не переписывают — DRIFT по checksum |
+| `sql/migrations/V004__agent_gateway_logs_user_id.sql` | `ADD COLUMN IF NOT EXISTS` (9.6), `CREATE INDEX IF NOT EXISTS` (9.5) | то же |
+| `sql/migrations/V008__agent_gateway_logs_event_time_columns.sql` | `ADD COLUMN IF NOT EXISTS` (9.6), `SET NOT NULL` (12.0) | то же |
 | `sql/migrations/V009__agent_gateway_logs_event_time_indexes.sql` | `CREATE INDEX IF NOT EXISTS` (9.5) | то же |
 | `sql/migrations/V010__agent_session_mirror_replica_key.sql` | `ADD COLUMN IF NOT EXISTS` (9.6), `SET NOT NULL` (12.0) | то же |
 | `sql/migrations/V011__agent_session_mirror_indexes.sql` | `CREATE INDEX IF NOT EXISTS` (9.5) | то же |
 | `sql/audit_analyzer/seed_predefined_scripts.sql` | `ON CONFLICT` (9.5) | нужна эмуляция многострочного upsert |
 | `sql/audit_analyzer/seed_default_indexes.sql` | `ON CONFLICT` (9.5) ×3 | то же; файл помечен LEGACY |
 
-### Незакрытое противоречие, которое должен снять владелец
+### Открытый блокер: два ключа на одной таблице
 
-В шапке `sql/session/create_public_agent_session_meta.sql` объявлено
-«Совместимость: PostgreSQL 13.22 (фактическая база)» с обоснованием, что
-`pg_dist_partition` на сервере отсутствует. Это расходится с каноном
-(«Greenplum 6.5») и с `sql/README.md`, и расхождение не косметическое:
-`DISTRIBUTED BY` — клауза Greenplum, и обычный PostgreSQL её не понимает.
-Одним статическим DDL-файлом оба движка не обслуживаются.
+`sql/session/create_public_agent_session_messages.sql` и его тестовый клон
+объявляют **два** уникальных ключа: `PRIMARY KEY (id)` и
+`UNIQUE (replica_id, session_key, seq)`. Greenplum 6 на хеш-распределённой
+таблице допускает ровно один `UNIQUE`/`PRIMARY KEY`, и он обязан включать
+все столбцы распределения (Summary of Greenplum Features, Greenplum 6).
+Такая таблица на Greenplum 6.5 **не создаётся вовсе** — независимо от клаузы
+распределения.
 
-Обойти это можно было бы двумя наборами DDL, но проект этого не делает и
-не обязан: `sql/README.md` § «Если нужен обычный PostgreSQL 13+» описывает
-конвертацию как ручную операцию. Значит решение — объявить, какая база
-фактическая, и привести DDL к ней.
+Правкой совместимости это не закрывается: нужно решить, какой из двух ключей
+остаётся. Сам файл называет `id` суррогатным, а настоящим ключом —
+`(replica_id, session_key, seq)`, то есть кандидатура очевидна, но это
+решение о схеме, а не о синтаксисе. Пока его нет, позиция держится в
+`KNOWN_TWO_KEY_TABLES` стража.
 
 ### Про `DISTRIBUTED RANDOMLY`
 

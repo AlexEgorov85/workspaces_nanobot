@@ -93,54 +93,50 @@ GP_ROWLOCK_TRAPS = [
      "арбитраж строится на предикате, а не на блокировке строки"),
 ]
 
+#: Таблицы с более чем одним UNIQUE/PRIMARY KEY. Greenplum 6 такую таблицу не
+#: создаёт, но закрыть долг правкой совместимости нельзя: нужен выбор, какой
+#: из ключей остаётся, а это решение о схеме, а не о синтаксисе.
+KNOWN_TWO_KEY_TABLES: dict[str, str] = {
+    "sql/session/create_public_agent_session_messages.sql":
+        "PRIMARY KEY (id) плюс UNIQUE (replica_id, session_key, seq); нужен "
+        "выбор единственного ключа — решение владельца не принято",
+    "sql/session/create_public_agent_session_messages_test.sql":
+        "то же, что для agent_session_messages: тестовый клон повторяет форму",
+}
+
+
 #: Известный долг: путь -> причина. Не «допустимо», а «ещё не закрыто».
 #:
-#: Карантин пустеет по мере починки. Закрыт 2026-10-03: пять файлов
-#: ``create_oarb_*.sql`` (IDENTITY → BIGSERIAL), ``predefined_scripts``
-#: (DISTRIBUTED RANDOMLY → DISTRIBUTED BY), ``tools/migrate.py`` (ON CONFLICT
-#: и клауза распределения по факту движка) и ``main.py`` (ON CONFLICT и
-#: FOR UPDATE в зеркале сессий).
+#: Карантин пустеет по мере починки. Закрыто 2026-10-03: реестр миграций
+#: (``ON CONFLICT`` и клауза распределения по факту движка), зеркало сессий
+#: (``ON CONFLICT`` и ``FOR UPDATE``), пять ``create_oarb_*.sql``
+#: (``IDENTITY`` → ``BIGSERIAL``), ``predefined_scripts``
+#: (``DISTRIBUTED RANDOMLY``), и весь DDL сессий, журнала, каналов и реестра —
+#: клауза распределения перенесена в ограждённый шаг ``SET DISTRIBUTED BY``,
+#: идемпотентные конструкции 9.5/9.6 заменены на DO-блоки.
 KNOWN_DEBT: dict[str, str] = {
-    "sql/session/create_public_agent_session_meta.sql":
-        "решение владельца не принято: то ли целевая база Greenplum 6.5 и нужен "
-        "DISTRIBUTED BY, то ли фактическая база PostgreSQL 13.22 (объявлено в "
-        "шапке файла, fd69ed3) и клауза сломала бы её",
-    "sql/session/create_public_agent_session_messages.sql":
-        "то же решение владельца, что и для agent_session_meta",
-    "sql/session/create_public_agent_session_meta_test.sql":
-        "то же решение владельца, что и для agent_session_meta",
-    "sql/session/create_public_agent_session_messages_test.sql":
-        "то же решение владельца, что и для agent_session_meta",
-    "sql/migrations/V010__agent_session_mirror_replica_key.sql":
-        "переписывать нельзя: правка применённой миграции даёт DRIFT по "
-        "checksum. Требуется замер фактически применённых версий на рабочих БД",
-    "sql/migrations/V011__agent_session_mirror_indexes.sql":
-        "то же: применённую миграцию не переписывают",
-    "sql/logs/create_public_agent_gateway_logs.sql":
-        "занято чужой работой: страж test_journal_event_time_columns требует "
-        "отсутствия DISTRIBUTED BY и объявляет фактической базой PostgreSQL 13",
-    "sql/logs/create_public_agent_gateway_logs_test.sql":
-        "то же: занято стражем чужой работы",
-    "sql/logs/create_public_agent_question_runs_test.sql":
-        "то же решение владельца по фактической СУБД журнала",
-    "sql/channels/create_public_agent_conversation_messages_test.sql":
-        "то же решение владельца, что и для agent_session_meta",
-    "sql/migrations/schema_migrations.sql":
-        "то же решение владельца; исполняемый путь tools/migrate.py уже "
-        "починен и определяет движок в рантайме, расходится только этот файл",
     "sql/migrations/V002__vector_chunk_params.sql":
-        "переписывать нельзя — DRIFT по checksum; на новых установках упадёт",
+        "ADD COLUMN IF NOT EXISTS (9.6). Переписывать нельзя: правка применённой "
+        "миграции даёт DRIFT по checksum. Решение — после замера фактически "
+        "применённых версий на рабочих БД",
     "sql/migrations/V004__agent_gateway_logs_user_id.sql":
-        "то же: применённую миграцию не переписывают",
+        "ADD COLUMN IF NOT EXISTS (9.6), CREATE INDEX IF NOT EXISTS (9.5). "
+        "Тот же DRIFT, что и для V002",
     "sql/migrations/V008__agent_gateway_logs_event_time_columns.sql":
-        "то же: применённую миграцию не переписывают",
+        "ADD COLUMN IF NOT EXISTS (9.6), SET NOT NULL (12.0). Тот же DRIFT",
     "sql/migrations/V009__agent_gateway_logs_event_time_indexes.sql":
-        "то же: применённую миграцию не переписывают",
+        "CREATE INDEX IF NOT EXISTS (9.5). Тот же DRIFT",
+    "sql/migrations/V010__agent_session_mirror_replica_key.sql":
+        "ADD COLUMN IF NOT EXISTS (9.6), SET NOT NULL (12.0). Тот же DRIFT",
+    "sql/migrations/V011__agent_session_mirror_indexes.sql":
+        "CREATE INDEX IF NOT EXISTS (9.5). Тот же DRIFT",
     "sql/audit_analyzer/seed_predefined_scripts.sql":
-        "нужна эмуляция многострочного upsert: VALUES-литерал нельзя "
-        "переиспользовать во втором запросе, а дублировать данные сида нельзя",
+        "ON CONFLICT (9.5) в многострочном VALUES. Нужна эмуляция upsert через "
+        "DO-блок с циклом: VALUES-литерал нельзя переиспользовать во втором "
+        "запросе, а дублировать данные сида нельзя — копии разойдутся",
     "sql/audit_analyzer/seed_default_indexes.sql":
-        "то же; файл помечен LEGACY и обслуживает только старые инстансы",
+        "ON CONFLICT (9.5) ×3, то же препятствие. Файл помечен LEGACY и "
+        "обслуживает только ранее развёрнутые инстансы",
 }
 
 
@@ -255,7 +251,16 @@ class TestNoNewerThanPostgres94:
             f"Нарушения:\n  " + "\n  ".join(offenders)
         )
 
-    def test_every_created_table_is_distributed(self) -> None:
+    def test_every_created_table_declares_its_distribution(self) -> None:
+        """Каждая создаваемая таблица объявляет ключ распределения явно.
+
+        Без явной клаузы Greenplum выбирает распределение сам — по PK, а при
+        его отсутствии по первому подходящему столбцу. Это его решение, а не
+        наше, и первое же изменение состава колонок меняет его молча.
+
+        Форма объявления — ограждённый шаг ``SET DISTRIBUTED BY`` (см.
+        ``test_distribution_clause_is_guarded_not_inline``), а не клауза в
+        теле ``CREATE TABLE``."""
         offenders: list[str] = []
         for path in (REPO_ROOT / "sql").rglob("*.sql"):
             body = strip_sql_comments(
@@ -263,15 +268,17 @@ class TestNoNewerThanPostgres94:
             )
             if not re.search(r"CREATE\s+TABLE", body, re.IGNORECASE):
                 continue
-            if re.search(r"DISTRIBUTED\s+BY", body, re.IGNORECASE):
+            if re.search(r"SET\s+DISTRIBUTED\s+BY", body, re.IGNORECASE):
                 continue
             name = rel(path)
-            if name in KNOWN_DEBT:
+            if name in KNOWN_DEBT or name in KNOWN_TWO_KEY_TABLES:
                 continue
             offenders.append(name)
         assert not offenders, (
-            "в Greenplum таблица без DISTRIBUTED BY распределяется случайно, а "
-            f"первичный ключ на такой таблице не допускается: {offenders}"
+            "таблица не объявляет ключ распределения: на Greenplum его выберет "
+            "движок, и это будет его выбор, а не наше намерение. Добавьте "
+            "ограждённый шаг ALTER TABLE ... SET DISTRIBUTED BY: "
+            f"{offenders}"
         )
 
     def test_random_distribution_is_not_mistaken_for_a_distribution_key(self) -> None:
@@ -293,8 +300,63 @@ class TestNoNewerThanPostgres94:
             offenders.append(rel(path))
         assert not offenders, (
             "DISTRIBUTED RANDOMLY вместе с первичным или уникальным ключом: "
-            "Greenplum такую таблицу не создаст. Нужен DISTRIBUTED BY по "
-            f"столбцу ключа: {offenders}"
+            "Greenplum такую таблицу не создаст. Нужен ограждённый шаг "
+            f"SET DISTRIBUTED BY: {offenders}"
+        )
+
+    def test_distribution_clause_is_guarded_not_inline(self) -> None:
+        """Клауза ``DISTRIBUTED BY`` в теле ``CREATE TABLE`` недопустима.
+
+        Файлы из ``sql/`` применяются к двум движкам: тестовый контур —
+        PostgreSQL 13.22, боевая среда — Greenplum 6.5. В теле ``CREATE
+        TABLE`` клауза падала бы на PostgreSQL как синтаксическая ошибка.
+        Поэтому распределение объявляется отдельным шагом ``SET DISTRIBUTED
+        BY`` внутри DO-блока, ограждённого проверкой служебного каталога
+        ``pg_dist_partition``."""
+        offenders: list[str] = []
+        for path in (REPO_ROOT / "sql").rglob("*.sql"):
+            body = strip_sql_comments(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
+            if not re.search(r"CREATE\s+TABLE", body, re.IGNORECASE):
+                continue
+            for match in re.finditer(
+                r"DISTRIBUTED\s+BY\s*\([^)]*\)", body, re.IGNORECASE
+            ):
+                window = body[max(0, match.start() - 240):match.end() + 40]
+                if re.search(
+                    r"EXECUTE\s+'[^']*SET\s+DISTRIBUTED\s+BY", window, re.IGNORECASE
+                ):
+                    continue
+                offenders.append(f"{rel(path)}: {match.group(0)}")
+        assert not offenders, (
+            "клауза DISTRIBUTED BY в теле CREATE TABLE убьёт тестовый контур "
+            "на PostgreSQL 13.22. Объявите распределение ограждённым шагом "
+            "ALTER TABLE ... SET DISTRIBUTED BY внутри DO-блока с проверкой "
+            f"pg_dist_partition: {offenders}"
+        )
+
+    def test_a_table_declares_at_most_one_key(self) -> None:
+        """Greenplum 6 допускает на хеш-распределённой таблице ровно один
+        ``UNIQUE``/``PRIMARY KEY``, и он обязан включать все столбцы
+        распределения. Второй ключ — не «избыточность», а отказ создать
+        таблицу (Summary of Greenplum Features, Greenplum 6)."""
+        offenders: list[str] = []
+        for path in (REPO_ROOT / "sql").rglob("*.sql"):
+            body = strip_sql_comments(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
+            if not re.search(r"CREATE\s+TABLE", body, re.IGNORECASE):
+                continue
+            keys = re.findall(
+                r"PRIMARY\s+KEY\s*\([^)]*\)|\bUNIQUE\s*\(", body, re.IGNORECASE
+            )
+            if len(keys) > 1 and rel(path) not in KNOWN_TWO_KEY_TABLES:
+                offenders.append(f"{rel(path)}: ключей {len(keys)}")
+        assert not offenders, (
+            "на Greenplum 6 такая таблица не создаётся: допустим один "
+            "UNIQUE/PRIMARY KEY, включающий все столбцы распределения, — "
+            f"а здесь их несколько: {offenders}"
         )
 
     def test_no_row_level_locking_survives(self) -> None:

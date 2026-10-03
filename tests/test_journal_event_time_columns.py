@@ -213,9 +213,21 @@ class TestTestProfileKeepsColumnsNullable:
     """Тестовый профиль — место, где контракт «строки без ключа» проверяем."""
 
     def test_test_profile_has_both_columns(self) -> None:
+        """Обе колонки объявлены, способ добавления — не предмет проверки.
+
+        Раньше тест закреплял литерал ``ADD COLUMN IF NOT EXISTS`` (9.6), то
+        есть запрещал форму, совместимую с ядром Greenplum 6.5. Теперь колонки
+        добавляются через DO-блок с проверкой ``information_schema.columns``,
+        и проверяется результат — колонки есть и они nullable."""
         sql = _text(TEST_DDL)
-        assert "ADD COLUMN IF NOT EXISTS seq         BIGINT" in sql
-        assert "ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ" in sql
+        assert re.search(r"column_name\s*=\s*'seq'", sql), (
+            "тестовый профиль не добавляет колонку seq"
+        )
+        assert re.search(r"column_name\s*=\s*'occurred_at'", sql), (
+            "тестовый профиль не добавляет колонку occurred_at"
+        )
+        assert re.search(r"ADD\s+COLUMN\s+seq\s+BIGINT", sql)
+        assert re.search(r"ADD\s+COLUMN\s+occurred_at\s+TIMESTAMPTZ", sql)
 
     def test_test_profile_columns_stay_nullable(self) -> None:
         """``NOT NULL`` в тестовом профиле убил бы негативные тесты требования.
@@ -240,20 +252,72 @@ class TestTestProfileKeepsColumnsNullable:
         )
 
 
-class TestDdlMatchesActualDatabase:
-    """Фактическая СУБД — PostgreSQL 13.22; DDL обязан соответствовать."""
+class TestDdlServesBothEngines:
+    """DDL журнала обслуживает две СУБД сразу.
 
-    @pytest.mark.parametrize("path", [PROD_DDL, TEST_DDL, MIGRATION])
-    def test_no_greenplum_syntax_or_claim(self, path: Path) -> None:
+    Боевая среда — Greenplum 6.5 (ядро PostgreSQL 9.4). Тестовый контур —
+    PostgreSQL 13.22, и те же самые файлы из ``sql/`` применяются к нему. Отсюда
+    требование, обратное прежнему: клауза ``DISTRIBUTED BY`` обязана быть, но
+    не в теле ``CREATE TABLE`` (на PostgreSQL это синтаксическая ошибка), а
+    ограждённым шагом ``SET DISTRIBUTED BY`` внутри DO-блока, который срабатывает
+    только при наличии служебного каталога ``pg_dist_partition``.
+    """
+
+    @pytest.mark.parametrize("path", [PROD_DDL, TEST_DDL])
+    def test_distribution_is_declared_by_a_guarded_step(self, path: Path) -> None:
         sql = _text(path)
-        assert "DISTRIBUTED BY" not in sql, f"{path.name}: синтаксис Greenplum в DDL"
-        assert "Greenplum" not in sql, (
-            f"{path.name}: ложное объявление о Greenplum — фактическая база "
-            "PostgreSQL 13.22, pg_dist_partition отсутствует"
+        assert "SET DISTRIBUTED BY" in sql, (
+            f"{path.name}: ключ распределения не объявлен. На Greenplum без "
+            "явной клаузы распределение выбирает движок — это его решение, а не "
+            "наше, и первое же изменение состава колонок меняет его молча"
+        )
+        assert "pg_dist_partition" in sql, (
+            f"{path.name}: шаг SET DISTRIBUTED BY не ограждён проверкой "
+            "движка — на PostgreSQL 13.22 такой клаузы нет, и файл упадёт"
         )
 
-    def test_migration_states_the_real_database(self) -> None:
-        assert "PostgreSQL 13.22" in _text(MIGRATION)
+    @pytest.mark.parametrize("path", [PROD_DDL, TEST_DDL])
+    def test_no_greenplum_syntax_in_the_create_table_body(self, path: Path) -> None:
+        """В теле CREATE TABLE клауза недопустима: тот же файл применяется к
+        PostgreSQL 13.22 тестового контура, где её нет в синтаксисе."""
+        body = re.sub(r"--[^\n]*", "", _text(path))
+        for match in re.finditer(r"DISTRIBUTED\s+BY\s*\([^)]*\)", body):
+            window = body[max(0, match.start() - 240):match.end() + 40]
+            if re.search(
+                r"EXECUTE\s+'[^']*SET\s+DISTRIBUTED\s+BY", window
+            ):
+                continue
+            raise AssertionError(
+                f"{path.name}: клауза {match.group(0)!r} стоит вне ограждённого "
+                "шага и убьёт применение на PostgreSQL 13.22"
+            )
+
+    @pytest.mark.parametrize("path", [PROD_DDL, TEST_DDL])
+    def test_no_construct_newer_than_postgres_94(self, path: Path) -> None:
+        """Конструкции 9.5/9.6/12.0 недоступны ядру Greenplum 6.5."""
+        body = re.sub(r"--[^\n]*", "", _text(path)).upper()
+        for pattern, version in (
+            (r"ON\s+CONFLICT", "9.5"),
+            (r"ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS", "9.6"),
+            (r"CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS", "9.5"),
+        ):
+            assert not re.search(pattern, body), (
+                f"{path.name}: {pattern} появился в PostgreSQL {version}, "
+                "ядро Greenplum 6.5 — 9.4"
+            )
+
+    def test_migration_declaration_is_frozen_not_authoritative(self) -> None:
+        """Миграция объявляет PostgreSQL 13.22, и это объявление устарело.
+
+        Файл переписать нельзя: checksum в ``public.schema_migrations`` даёт
+        DRIFT на каждой базе, где миграция уже применена. Поэтому текст
+        миграции не является источником истины о среде — источник истины
+        ``docs/architecture/runtime-environment.md``, а карантин известного
+        долга живёт в ``tests/test_runtime_environment_contract.py``."""
+        assert "PostgreSQL 13.22" in _text(MIGRATION), (
+            "текст миграции изменился: он заморожен checksum-ом, и любая правка "
+            "превращается в DRIFT на уже применённых базах"
+        )
 
     def test_migration_does_not_rename_or_drop_columns(self) -> None:
         """Обратная совместимость: ``timestamp`` и состав колонок не трогаем."""
