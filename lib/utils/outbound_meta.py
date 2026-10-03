@@ -45,18 +45,6 @@ def is_dropped(metadata: Mapping[str, Any] | None) -> bool:
     return any(k in metadata for k in OUTBOUND_DROPPED_KEYS)
 
 
-def is_stream_delta(metadata: Mapping[str, Any] | None) -> bool:
-    """True, если metadata содержит ``_stream_delta`` (чанк стрима).
-
-    Legacy-проверка: в nanobot 0.3.0 потоковые чанки несут типизированный
-    ивент ``StreamDeltaEvent`` в ``msg.event`` (см. ``is_outbound_noise``),
-    а не флаг в metadata. Оставлена для обратной совместимости.
-    """
-    if not metadata:
-        return False
-    return bool(metadata.get("_stream_delta"))
-
-
 def _typed_event(msg: Any) -> Any | None:
     """Вернуть типизированный outbound-ивент nanobot из ``msg`` (или None).
 

@@ -29,7 +29,7 @@ from libs.audit import (
     sanitize_sql_response,
     select_few_shot,
 )
-from test_audit_lib_fakes import (
+from audit_lib_fakes import (
     REGISTRY_TABLE,
     FakeSnapshot,
     script_row_violations_by_period,

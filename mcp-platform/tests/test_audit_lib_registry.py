@@ -21,7 +21,7 @@ from libs.audit import (
     load_all,
     load_script,
 )
-from test_audit_lib_fakes import (
+from audit_lib_fakes import (
     REGISTRY_TABLE,
     FakeSnapshot,
     make_registry_row,
