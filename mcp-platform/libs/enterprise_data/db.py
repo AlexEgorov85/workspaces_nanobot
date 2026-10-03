@@ -1104,6 +1104,31 @@ def fetchval(sql: str, *args: Any, _tag: str | None = None) -> Any:
     return _get_manager()._submit(_Job(_work, tag=tag)).get()
 
 
+def execute_values(
+    cur: Any,
+    sql: str,
+    rows: list[tuple],
+    *,
+    template: str | None = None,
+    page_size: int = 200,
+) -> None:
+    """Множественная вставка на уже открытом курсоре.
+
+    Живёт здесь, а не в capability, по границе владения: psycopg2 знает только
+    этот модуль (``libs/enterprise_data``), и если бы ``execute_values``
+    понадобился сервису, тот начал бы импортировать драйвер сам — а вместе с
+    ним и знать о нём.
+
+    Курсор уже открыт и принадлежит вызывающему: вставка идёт в его транзакции,
+    и отдельную она не создаёт. Это и есть причина, по которой вызывающий,
+    которому нужна атомарность, берёт соединение в аренду (см.
+    :func:`run_transaction`), а не выдаёт этот вызов за транзакцию.
+    """
+    from psycopg2.extras import execute_values as _execute_values
+
+    _execute_values(cur, sql, rows, template=template, page_size=page_size)
+
+
 @contextmanager
 def transaction():
     """Синхронная транзакция: эксклюзивная аренда соединения пула.
@@ -1122,6 +1147,42 @@ def transaction():
         raise
     else:
         manager._release_lease(lease_id, commit=True, tag=tag)
+
+
+def run_transaction(job: Callable[[Any], Any], _tag: str | None = None) -> Any:
+    """Выполнить ``job(conn)`` в одной транзакции и вернуть его результат.
+
+    Существует рядом с :func:`transaction` и по той же причине, что и он:
+    соединения воркеров подняты в ``autocommit``, поэтому несколько операторов
+    внутри одного ``_Job`` — это несколько независимых транзакций, а не одна.
+    Обычный :meth:`DBManager._submit` такой группировки не даёт, и не должен:
+    одиночному ``INSERT`` транзакция не нужна, а платить за аренду соединения
+    на каждой записи журнала незачем.
+
+    Нужен там, где атомарность переносит смысл, а не защищает от мелочей.
+    Например перезапись зеркала сессии: удаление прежних сообщений и вставка
+    новых обязаны либо увидеться оба, либо не увидеться никак. Порознь это
+    даёт разорванную запись, которую потом ничто не чинит — признак «изменилось»
+    у сессии уже совпал бы с тем, что записано, и последующие циклы прошли бы
+    мимо.
+
+    ``job`` выполняется в воркере пула, а не в потоке вызова: соединение
+    принадлежит воркеру, и только он умеет с ним работать. Поэтому ``job``
+    должен быть обычной синхронной функцией и не должен звать ``run()``/
+    ``fetch*``/``transaction()`` — это вложенные задания на тот же воркер, и
+    они встанут в очередь за тем же соединением, то есть за themselves же.
+    """
+    manager = _get_manager()
+    tag = _tag if _tag is not None else _caller_tag()
+    lease_id = manager._acquire_lease(tag)
+    try:
+        result = manager._submit(_Job(job, lease_id=lease_id, tag=tag)).get()
+    except BaseException:
+        manager._release_lease(lease_id, commit=False, tag=tag)
+        raise
+    else:
+        manager._release_lease(lease_id, commit=True, tag=tag)
+    return result
 
 
 # ---------------------------------------------------------------------------

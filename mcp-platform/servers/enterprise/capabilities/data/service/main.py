@@ -31,6 +31,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from typing import Any
 
@@ -154,6 +155,81 @@ class SearchPage:
     truncated: bool = False
 
 
+#: Колонки зеркала сессий, которые пишет ``mirror_session``. Порядок — это
+#: порядок значений в строке для ``execute_values``, поэтому он не свободный.
+#: Задаётся здесь, а не в SQL строкой: список колонок и список значений должны
+#: разойтись максимум на одну правку, а не на две несвязанные.
+MIRROR_MESSAGE_COLUMNS: tuple[str, ...] = (
+    "replica_id",
+    "session_key",
+    "seq",
+    "role",
+    "content",
+    "msg_timestamp",
+    "tool_calls",
+    "tool_call_id",
+    "name",
+    "reasoning_content",
+    "thinking_blocks",
+    "media",
+    "cli_apps",
+    "mcp_presets",
+    "injected_event",
+    "_command",
+    "_channel_delivery",
+)
+
+#: Колонки, принимающие JSON, а не текст. Значение уходит в бату значением
+#: JSON, поэтому приведение нужно на стороне SQL: пустая строка вместо ``NULL``
+#: положила бы в jsonb не массив, а текст, и следующий читатель получил бы
+#: значение не того типа, чему учится по документации.
+MIRROR_MESSAGE_JSONB_COLUMNS: frozenset[str] = frozenset({
+    "tool_calls",
+    "thinking_blocks",
+    "media",
+    "cli_apps",
+    "mcp_presets",
+})
+
+#: Верхняя граница одного вызова зеркала по объёму сообщений в байтах. Не
+#: «сколько влезает», а граница, за которой вызывающий обязан перейти на
+#: постраничную запись: одна операция на сессию означает один аргумент вызова
+#: MCP, и очень большая сессия рано или поздно упрётся в память процесса
+#: платформы. Отказ здесь громкий и названный, а не молчаливая потеря сессии.
+MIRROR_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """Привести дату к datetime с зоной UTC.
+
+    Горимая дата приезжает из агента строкой ISO-8601, холодная лежит в базе
+    timestamptz. Сравнивать их напрямую нельзя: наивное и осведомлённое
+    значения — не comparable, и сравнение упало бы ``TypeError`` посреди
+    транзакции, то есть на ровно том месте, где теряется смысл ошибки.
+
+    Зона по умолчанию — UTC, а не локальная: даты приходят от хранилища
+    сессий, а не от машины оператора, и подстановка локальной зоны сделала бы
+    результат зависимым от того, где запущен агент.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 class DataService:
     """Доступ к данным инфраструктуры и очереди задач."""
 
@@ -164,6 +240,8 @@ class DataService:
         log_table: tuple[str, str] | None = None,
         question_runs_table: tuple[str, str] | None = None,
         task_table: tuple[str, str] | None = None,
+        session_meta_table: tuple[str, str] | None = None,
+        session_messages_table: tuple[str, str] | None = None,
         expected_tables: tuple[str, ...] = (),
         statement_timeout_ms: int = 30_000,
         max_rows: int = 1000,
@@ -188,6 +266,23 @@ class DataService:
         # Дефолт здесь означал бы, что сервер поднимется и начнёт забирать
         # задачи из таблицы, которую никто не объявлял.
         self._task_table = tuple(task_table) if task_table else None
+        # Таблицы холодного зеркала сессий. Половинчатая пара — не
+        # настроенное зеркало, а настроенное наполовину: перезапись сессии
+        # всегда трогает обе таблицы, и оставить одну без второй можно было бы
+        # только ошибкой конфигурации. Поэтому пустота любой из них означает
+        # «зеркало ненастроено» целиком, и операции зеркала отвечают отказом, а
+        # не пишут в одну таблицу.
+        self._session_meta_table = (
+            tuple(session_meta_table) if session_meta_table else None
+        )
+        self._session_messages_table = (
+            tuple(session_messages_table) if session_messages_table else None
+        )
+        if bool(self._session_meta_table) != bool(self._session_messages_table):
+            raise InfrastructureError(
+                "таблицы зеркала сессий объявлены не полностью: нужны обе "
+                "(data.session_meta_table и data.session_messages_table)"
+            )
         self._expected_tables = tuple(expected_tables)
         self._statement_timeout_ms = int(statement_timeout_ms)
         self._max_rows = int(max_rows)
@@ -352,6 +447,10 @@ class DataService:
         """Блокирующий вход: выполнить задание на воркере пула.
 
         Только работа с данными. Всё, что можно потерять, идёт через ``accept``.
+
+        Одиночный оператор: воркеры пула подняты в ``autocommit``, поэтому всё,
+        что внутри ``job``, — независимые транзакции. Если группу операторов
+        нужно увидеть вместе, вход другой — :meth:`submit_transaction`.
         """
         pool = self._pool()
         try:
@@ -360,6 +459,30 @@ class DataService:
             raise
         except Exception as exc:  # noqa: BLE001 - наружу уходит доменная ошибка
             raise InfrastructureError(f"задание в пуле не выполнено: {exc}") from exc
+
+    def submit_transaction(self, job: Any, *, audience: str = AUDIENCE_RUNTIME) -> Any:
+        """Выполнить задание в одной транзакции: аренда соединения, BEGIN, COMMIT.
+
+        Для мест, где атомарность переносит смысл. Перезапись зеркала сессии —
+        как раз такое место: удаление прежних сообщений и вставка новых должны
+        либо увидеться оба, либо не увидеться никак.
+        """
+        pool = self._pool()
+        run_transaction = getattr(pool, "run_transaction", None)
+        if run_transaction is None:
+            raise InfrastructureError(
+                "модуль БД не даёт run_transaction: операция требует атомарной "
+                "группы операторов, а собирать её из независимых нельзя"
+            )
+        try:
+            return run_transaction(lambda conn: self._guarded(conn, job))
+        except InfrastructureError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - наружу уходит доменная ошибка
+            raise InfrastructureError(
+                f"задание в транзакции не выполнено: {exc}"
+            ) from exc
+
 
     def accept(self, event: dict[str, Any]) -> str | None:
         """Неблокирующий вход: событие в буфер журнала.
@@ -1690,6 +1813,436 @@ class DataService:
                 "message_id": str(row[0]) if row is not None else None,
                 "chat_id": chat_id,
             }
+
+        return self.submit(_work, audience=audience)
+
+    def _require_session_tables(
+        self, operation: str,
+    ) -> tuple[tuple[str, str], tuple[str, str]]:
+        """Таблицы зеркала сессий — из настройки платформы, иначе явная ошибка.
+
+        Отказ, а не откат к именам по умолчанию: молчаливая подстановка означала
+        бы, что переименование таблицы в ``platform.json`` не мешает работе, и
+        зеркало писало бы мимо объявления.
+        """
+        if not self._session_meta_table or not self._session_messages_table:
+            raise InfrastructureError(
+                f"{operation}: таблицы зеркала сессий не заданы "
+                f"(data.session_meta_table / data.session_messages_table) — "
+                f"операции зеркала недоступны"
+            )
+        return self._session_meta_table, self._session_messages_table
+
+    def mirror_session(
+        self,
+        *,
+        session_key: str,
+        replica_id: str,
+        source_digest: str,
+        updated_at: Any,
+        created_at: Any = None,
+        last_consolidated: int = 0,
+        metadata: dict[str, Any] | None = None,
+        messages: list[dict[str, Any]] | None = None,
+        stale_tolerance_seconds: int = 0,
+        sync_lag_threshold_seconds: int = 0,
+        session_meta_table: tuple[str, str] | None = None,
+        session_messages_table: tuple[str, str] | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Зеркалировать одну сессию: решить и записать в одной транзакции.
+
+        Решение о записи принимает платформа, а не вызывающая сторона, и это не
+        перенос ответственности, а единственный способ закрыть окно гонки:
+        раньше чтение зеркала, решение и запись были тремя разными транзакциями,
+        и между ними успевал вклиниться второй писатель. Сравнение и запись под
+        одной транзакцией и под ``SELECT ... FOR UPDATE`` делают состояние
+        зеркала таким, каким оно было в момент решения.
+
+        **Признак изменения — ``source_digest``, а не ``updated_at``.** Upstream
+        не поднимает ``updated_at`` при изменении метаданных сессии
+        (``JsonlSessionStore.update_metadata`` переписывает только поле
+        ``metadata`` первой строки), поэтому правило «зеркало не старше файла →
+        пропустить» замирало навсегда: файл менялся, а метка времени оставалась
+        прежней. Сейчас сравнение меток решает только НАПРАВЛЕНИЕ конфликта, а
+        менять или не менять решает дайджест.
+
+        Возвращает ``verdict``:
+
+        ``inserted``
+            сессии в зеркале не было; записана.
+        ``updated``
+            записана. В ``reason`` — почему считали, что изменилось:
+            ``cold_older`` (зеркало отстаёт), ``digest_only_change`` (метки
+            времени равны, а содержимое разошлось — тот самый случай правки
+            metadata), ``digest_missing`` (строка зеркала заведена до
+            появления дайджеста).
+        ``unchanged``
+            дайджесты совпали; записи не было.
+        ``skipped_within_tolerance``
+            зеркало впереди, но не дальше терпимости. Молчание здесь больше
+            недопустимо: расхождение известно и вызывающему возвращается явно.
+        ``skipped_stale``
+            зеркало впереди дальше терпимости — вероятен откат файла
+            (восстановление из резервной копии, смена машины). Запись
+            запрещена: иначе откаченный файл затёр бы более новое зеркало.
+        """
+        self._require_runtime(audience, "mirror_session")
+        if not session_key or not str(session_key).strip():
+            raise InvalidRequestError("mirror_session: не задан session_key")
+        if not replica_id or not str(replica_id).strip():
+            raise InvalidRequestError("mirror_session: не задан replica_id")
+        if not source_digest or not str(source_digest).strip():
+            raise InvalidRequestError("mirror_session: не задан source_digest")
+        hot_updated_at = _as_utc(updated_at)
+        if hot_updated_at is None:
+            raise InvalidRequestError(
+                "mirror_session: не разобран updated_at сессии "
+                f"({updated_at!r}) — записывать метку времени наугад нельзя"
+            )
+        hot_created_at = _as_utc(created_at) or hot_updated_at
+        if metadata is not None and not isinstance(metadata, dict):
+            raise InvalidRequestError("mirror_session: metadata должен быть объектом")
+        message_rows = list(messages or [])
+        if len(json.dumps(message_rows, ensure_ascii=False).encode("utf-8")) > (
+            MIRROR_MAX_PAYLOAD_BYTES
+        ):
+            raise InvalidRequestError(
+                f"mirror_session: сообщения сессии {session_key!r} не помещаются "
+                f"в один вызов (порог {MIRROR_MAX_PAYLOAD_BYTES} байт). Нужна "
+                f"постраничная запись; увеличение порога — осознанное решение "
+                f"оператора, а не молчаливое усечение сессии"
+            )
+
+        tolerance = max(0, int(stale_tolerance_seconds))
+        lag_threshold = max(0, int(sync_lag_threshold_seconds))
+        meta_table, messages_table = self._require_session_tables("mirror_session")
+        meta_sql = _qualified(
+            session_meta_table or meta_table
+        )
+        messages_sql = _qualified(
+            session_messages_table or messages_table
+        )
+        select_sql = (
+            f"SELECT updated_at, source_digest, message_count "
+            f"FROM {meta_sql} WHERE replica_id = %s AND session_key = %s "
+            f"FOR UPDATE"
+        )
+        delete_sql = (
+            f"DELETE FROM {messages_sql} WHERE replica_id = %s AND session_key = %s"
+        )
+        insert_template = "({})".format(", ".join(
+            "%s::jsonb" if column in MIRROR_MESSAGE_JSONB_COLUMNS else "%s"
+            for column in MIRROR_MESSAGE_COLUMNS
+        ))
+        insert_sql = (
+            f"INSERT INTO {messages_sql} "
+            f"({', '.join(MIRROR_MESSAGE_COLUMNS)}) VALUES %s"
+        )
+        upsert_sql = (
+            f"INSERT INTO {meta_sql} "
+            "(replica_id, session_key, created_at, updated_at, last_consolidated, "
+            "metadata, source_digest, missing_cycles, message_count, synced_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, 0, %s, NOW()) "
+            f"ON CONFLICT (replica_id, session_key) DO UPDATE SET "
+            "updated_at = EXCLUDED.updated_at, "
+            "last_consolidated = EXCLUDED.last_consolidated, "
+            "metadata = EXCLUDED.metadata, "
+            "source_digest = EXCLUDED.source_digest, "
+            "missing_cycles = 0, "
+            "message_count = EXCLUDED.message_count, "
+            "synced_at = NOW()"
+        )
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+
+        def _rows() -> list[tuple[Any, ...]]:
+            rows: list[tuple[Any, ...]] = []
+            for seq, message in enumerate(message_rows):
+                if not isinstance(message, dict):
+                    raise InvalidRequestError(
+                        f"mirror_session: сообщение #{seq} — не объект"
+                    )
+                values: list[Any] = []
+                for column in MIRROR_MESSAGE_COLUMNS:
+                    if column == "replica_id":
+                        values.append(replica_id)
+                    elif column == "session_key":
+                        values.append(session_key)
+                    elif column == "seq":
+                        values.append(seq)
+                    elif column == "role":
+                        role = message.get("role") or "user"
+                        values.append(str(role))
+                    elif column == "content":
+                        content = message.get("content")
+                        values.append("" if content is None else str(content))
+                    elif column == "msg_timestamp":
+                        stamp = message.get("timestamp")
+                        values.append(None if stamp is None else str(stamp))
+                    elif column in MIRROR_MESSAGE_JSONB_COLUMNS:
+                        values.append(json.dumps(
+                            message.get(column), ensure_ascii=False,
+                        ))
+                    else:
+                        values.append(message.get(column))
+                rows.append(tuple(values))
+            return rows
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(select_sql, [replica_id, session_key])
+                cold = cur.fetchone()
+
+            verdict = "inserted"
+            reason: str | None = None
+            if cold is not None:
+                cold_updated_at = _as_utc(cold[0])
+                cold_digest = cold[1]
+                if cold_digest is not None and cold_digest == source_digest:
+                    # Содержимое совпало — писать нечего. Но счётчик пропавших
+                    # обнуляется: сессия вернулась, и оставшийся счётчик увел бы
+                    # её удаление по накопленному за прошлые пропуски числу.
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"UPDATE {meta_sql} SET missing_cycles = 0, "
+                            f"synced_at = NOW() "
+                            f"WHERE replica_id = %s AND session_key = %s "
+                            f"AND missing_cycles <> 0",
+                            [replica_id, session_key],
+                        )
+                    return {
+                        "verdict": "unchanged",
+                        "reason": None,
+                        "wrote_meta": False,
+                        "messages_written": 0,
+                        "previous_updated_at": None
+                        if cold_updated_at is None else cold_updated_at.isoformat(),
+                        "previous_digest": cold_digest,
+                    }
+                if cold_digest is None:
+                    verdict, reason = "updated", "digest_missing"
+                elif cold_updated_at is not None and (
+                    cold_updated_at > hot_updated_at + timedelta(seconds=tolerance)
+                ):
+                    verdict, reason = "skipped_stale", "cold_ahead_of_tolerance"
+                elif cold_updated_at is not None and cold_updated_at > hot_updated_at:
+                    verdict, reason = (
+                        "skipped_within_tolerance", "cold_within_tolerance",
+                    )
+                elif cold_updated_at is not None and cold_updated_at == hot_updated_at:
+                    verdict, reason = "updated", "digest_only_change"
+                else:
+                    verdict, reason = "updated", "cold_older"
+
+            if verdict in ("skipped_stale", "skipped_within_tolerance"):
+                return {
+                    "verdict": verdict,
+                    "reason": reason,
+                    "wrote_meta": False,
+                    "messages_written": 0,
+                    "previous_updated_at": None if cold is None
+                    else (
+                        None if _as_utc(cold[0]) is None
+                        else _as_utc(cold[0]).isoformat()
+                    ),
+                    "previous_digest": None if cold is None else cold[1],
+                }
+
+            rows = _rows()
+            with conn.cursor() as cur:
+                cur.execute(delete_sql, [replica_id, session_key])
+                if rows:
+                    # Множественная вставка приходит из слоя БД: capability о
+                    # драйвере не знает и знать не должна.
+                    bulk = getattr(self._pool(), "execute_values", None)
+                    if bulk is None:
+                        raise InfrastructureError(
+                            "модуль БД не даёт execute_values: перезапись "
+                            "сообщений сессии невозможна, а писать их по одному "
+                            "вместо пачки означало бы писать их медленнее "
+                            "намеренно"
+                        )
+                    bulk(
+                        cur, insert_sql, rows,
+                        template=insert_template, page_size=200,
+                    )
+                cur.execute(
+                    upsert_sql,
+                    [
+                        replica_id,
+                        session_key,
+                        hot_created_at,
+                        hot_updated_at,
+                        max(0, int(last_consolidated)),
+                        metadata_json,
+                        source_digest,
+                        len(rows),
+                    ],
+                )
+
+            previous = None if cold is None else _as_utc(cold[0])
+            lag_seconds = 0
+            if previous is not None and lag_threshold > 0:
+                lag_seconds = int((hot_updated_at - previous).total_seconds())
+                if lag_seconds < 0:
+                    lag_seconds = 0
+            return {
+                "verdict": verdict,
+                "reason": reason,
+                "wrote_meta": True,
+                "messages_written": len(rows),
+                "previous_updated_at": None if previous is None else previous.isoformat(),
+                "previous_digest": None if cold is None else cold[1],
+                "previous_message_count": None if cold is None else cold[2],
+                "sync_lag_seconds": lag_seconds if verdict == "updated" else 0,
+                "sync_lag_exceeded": bool(
+                    verdict == "updated" and lag_seconds > lag_threshold
+                ),
+            }
+
+        return self.submit_transaction(_work, audience=audience)
+
+    def cleanup_session_mirror(
+        self,
+        *,
+        replica_id: str,
+        present_keys: list[str] | None = None,
+        delete_after_missed_cycles: int = 2,
+        session_meta_table: tuple[str, str] | None = None,
+        session_messages_table: tuple[str, str] | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Отметить пропавшие сессии и удалить те, что пропадали достаточно долго.
+
+        Удаление не по первому пропуску, а по достижении порога. Причина не в
+        осторожности ради осторожности: список сессий приходит с диска, и пустой
+        или частичный список на каталоге по NFS — обычное дело. Без порога один
+        такой список стёр бы всё зеркало реплики, а восстанавливать его нечем
+        для сессий, удалённых из upstream.
+
+        Область ограничена своей репликой. Раньше вычитание шло по всем строкам
+        зеркала, и реплика удаляла сессии других реплик — при двух репликах они
+        уничтожали зеркала друг друга каждый цикл.
+        """
+        self._require_runtime(audience, "cleanup_session_mirror")
+        if not replica_id or not str(replica_id).strip():
+            raise InvalidRequestError("cleanup_session_mirror: не задан replica_id")
+        threshold = max(1, int(delete_after_missed_cycles))
+        meta_table, messages_table = self._require_session_tables(
+            "cleanup_session_mirror",
+        )
+        meta_sql = _qualified(session_meta_table or meta_table)
+        messages_sql = _qualified(session_messages_table or messages_table)
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT session_key, missing_cycles FROM {meta_sql} "
+                    f"WHERE replica_id = %s FOR UPDATE",
+                    [replica_id],
+                )
+                own_rows = cur.fetchall()
+
+            known = set(present_keys or ())
+            missing: list[str] = []
+            present_again: list[str] = []
+            for session_key, missed in own_rows:
+                if session_key in known:
+                    if missed:
+                        present_again.append(session_key)
+                    continue
+                missing.append(session_key)
+
+            if present_again:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {meta_sql} SET missing_cycles = 0 "
+                        f"WHERE replica_id = %s AND session_key = ANY(%s) "
+                        f"AND missing_cycles <> 0",
+                        [replica_id, present_again],
+                    )
+
+            doomed: list[str] = []
+            if missing:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {meta_sql} SET missing_cycles = missing_cycles + 1 "
+                        f"WHERE replica_id = %s AND session_key = ANY(%s) "
+                        f"RETURNING session_key, missing_cycles",
+                        [replica_id, missing],
+                    )
+                    for session_key, missed in cur.fetchall():
+                        if int(missed) >= threshold:
+                            doomed.append(session_key)
+
+            deleted_messages = 0
+            if doomed:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM {messages_sql} "
+                        f"WHERE replica_id = %s AND session_key = ANY(%s)",
+                        [replica_id, doomed],
+                    )
+                    deleted_messages = cur.rowcount
+                    cur.execute(
+                        f"DELETE FROM {meta_sql} "
+                        f"WHERE replica_id = %s AND session_key = ANY(%s)",
+                        [replica_id, doomed],
+                    )
+
+            return {
+                "scanned": len(own_rows),
+                "missing": len(missing),
+                "reappeared": len(present_again),
+                "deleted_sessions": len(doomed),
+                "deleted_keys": sorted(doomed),
+                "deleted_messages": deleted_messages,
+            }
+
+        return self.submit_transaction(_work, audience=audience)
+
+    def session_mirror_state(
+        self,
+        *,
+        replica_id: str,
+        session_meta_table: tuple[str, str] | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any]:
+        """Состояние зеркала своей реплики: ключ -> дайджест, метка, число строк.
+
+        Один вызов на цикл вместо вызова на каждую сессию. Без него синхронизация
+        обязана была бы спрашивать зеркало по каждой сессие, а сессий сотни: цикл
+        превращался бы в сотни обращений, чтобы выяснить «изменилось ли что-нибудь»,
+        и ни одного из них не меняло данных.
+
+        Результат — только фильтр, а не основание для решения: решение принимает
+        ``mirror_session``, который перечитывает строку под ``FOR UPDATE``. Поэтому
+        гонка между этим чтением и решением безопасна — рассинхронизация может
+        лишь заставить сделать лишний вызов, но не записать устаревшее.
+        """
+        self._require_runtime(audience, "session_mirror_state")
+        if not replica_id or not str(replica_id).strip():
+            raise InvalidRequestError("session_mirror_state: не задан replica_id")
+        meta_table, _ = self._require_session_tables("session_mirror_state")
+        meta_sql = _qualified(session_meta_table or meta_table)
+        sql = (
+            f"SELECT session_key, source_digest, updated_at, message_count "
+            f"FROM {meta_sql} WHERE replica_id = %s"
+        )
+
+        def _work(conn: Any) -> dict[str, Any]:
+            with conn.cursor() as cur:
+                cur.execute(sql, [replica_id])
+                rows = cur.fetchall()
+            sessions: dict[str, Any] = {}
+            for session_key, digest, updated_at, message_count in rows:
+                stamp = _as_utc(updated_at)
+                sessions[str(session_key)] = {
+                    "source_digest": digest,
+                    "updated_at": None if stamp is None else stamp.isoformat(),
+                    "message_count": message_count,
+                }
+            return {"replica_id": replica_id, "count": len(sessions), "sessions": sessions}
 
         return self.submit(_work, audience=audience)
 

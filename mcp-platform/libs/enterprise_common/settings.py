@@ -601,6 +601,20 @@ SETTINGS: tuple[Setting, ...] = (
        "update_task_status в решении 2.18; отменено change "
        "2026-10-02-task-queue-into-mcp)",
        file_key="data.task_table"),
+_s("ENTERPRISE_SESSION_META_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_session_tables",
+       "таблица метаданных холодного зеркала сессий; имя объявляет платформа. "
+       "Профилем НЕ разделяется (в PROFILE_OWNED_KEYS её нет): зеркало хранит "
+       "разговор одного пользователя, разделённый техническим replica_id, и "
+       "разводить его по контурам значило бы развести один и тот же диалог",
+       file_key="data.session_meta_table"),
+    _s("ENTERPRISE_SESSION_MESSAGES_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_session_tables",
+       "таблица сообщений холодного зеркала сессий; имя объявляет платформа, "
+       "не вызывающая сторона. Вместе с таблицей мета образует пару зеркала: "
+       "разрыв между ними — разорванная запись, поэтому перезапись идёт "
+       "всегда обеими",
+       file_key="data.session_messages_table"),
     _s("ENTERPRISE_LOG_BUFFER_MAXLEN", "int", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_build_container",
        "потолок буфера журнала; переполнение теряет события, а не растёт",
@@ -826,6 +840,8 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
             "ENTERPRISE_LOG_TABLE",
             "ENTERPRISE_LOG_QUESTION_RUNS_TABLE",
             "ENTERPRISE_TASK_TABLE",
+            "ENTERPRISE_SESSION_META_TABLE",
+            "ENTERPRISE_SESSION_MESSAGES_TABLE",
             "ENTERPRISE_LOG_BUFFER_MAXLEN",
             "ENTERPRISE_LOG_FLUSH_INTERVAL",
             "ENTERPRISE_LOG_BATCH_SIZE",

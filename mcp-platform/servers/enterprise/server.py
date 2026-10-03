@@ -196,6 +196,31 @@ def _task_table(settings: Settings) -> tuple[str, str] | None:
     return _split_table(str(raw), "ENTERPRISE_TASK_TABLE")
 
 
+def _session_tables(settings: Settings) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    """Таблицы холодного зеркала сессий — из ``data.session_*_table``.
+
+    Возвращает пару ``(meta, messages)`` либо ``None``, если она не настроена.
+    Пара, а не две независимые настройки, потому что перезапись сессии всегда
+    трогает обе таблицы: настроенная одна без второй не даёт отказа при старте,
+    а разорванную запись — на первом же цикле синхронизации, то есть позже и
+    в худшем месте.
+
+    Профилем эти имена НЕ разделяются (``PROFILE_OWNED_KEYS`` их не содержит):
+    зеркало хранит разговор одного пользователя, разделённый между репликами
+    техническим ``replica_id``, и разведение его по контурам развело бы один и
+    тот же диалог. Поэтому и в баннере профиля они не печатаются — в отличие от
+    журнала, прогоны и очереди, у которых оверлей реально применяется.
+    """
+    meta_raw = str(settings.get("ENTERPRISE_SESSION_META_TABLE") or "").strip()
+    messages_raw = str(settings.get("ENTERPRISE_SESSION_MESSAGES_TABLE") or "").strip()
+    if not meta_raw or not messages_raw:
+        return None
+    return (
+        _split_table(meta_raw, "ENTERPRISE_SESSION_META_TABLE"),
+        _split_table(messages_raw, "ENTERPRISE_SESSION_MESSAGES_TABLE"),
+    )
+
+
 def _declared_tables(settings: Settings) -> tuple[str, ...]:
     """Таблицы, которые платформа сама объявила в ``platform.json``.
 
@@ -280,10 +305,15 @@ def _build_container(
 
     statement_timeout_ms = int(settings.get("ENTERPRISE_STATEMENT_TIMEOUT_MS"))
     max_rows = int(settings.get("ENTERPRISE_MAX_ROWS"))
+    session_tables = _session_tables(settings)
     data = DataService(
         log_table=_log_table(settings),
         question_runs_table=_question_runs_table(settings),
         task_table=_task_table(settings),
+        session_meta_table=session_tables[0] if session_tables else None,
+        session_messages_table=(
+            session_tables[1] if session_tables else None
+        ),
         expected_tables=_declared_tables(settings),
         statement_timeout_ms=statement_timeout_ms,
         max_rows=max_rows,

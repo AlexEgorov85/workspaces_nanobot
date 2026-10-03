@@ -66,10 +66,12 @@
     }
   },
   "data": {
-    "_about": "capability data — servers/enterprise/capabilities/data/. Журнал, прогоны вопросов, очередь задач, чтение журнала, schema_check. Здесь же путь к снимку DuckDB: снимком владеет capability data (libs/enterprise_data/snapshot/), и объявлять его должен она, а не получать окружением агента — два владельца одного файла означали бы, что снимок читают не оттуда, откуда пишут. Путь здесь OPTIONAL, и это честно: пустое значение означает «снимок ненастроен» (сервер поднимается, операции со снимком отвечают snapshot_unavailable), а не «сервер не запустится» — capability data от снимка не зависит. schema_check проверяет собственные таблицы платформы (журнал, прогоны вопросов, таблицы аудита, реестр скриптов), а не runtime-таблицы агента: их список приезжал окружением и молча перебивал файл.",
+    "_about": "capability data — servers/enterprise/capabilities/data/. Журнал, прогоны вопросов, очередь задач, чтение журнала, schema_check. Здесь же путь к снимку DuckDB: снимком владеет capability data (libs/enterprise_data/snapshot/), и объявлять его должен она, а не получать окружением агента — два владельца одного файла означали бы, что снимок читают не оттуда, откуда пишут. Путь здесь OPTIONAL, и это честно: пустое значение означает «снимок ненастроен» (сервер поднимается, операции со снимком отвечают snapshot_unavailable), а не «сервер не запустится» — capability data от снимка не зависит. schema_check проверяет собственные таблицы платформы (журнал, прогоны вопросов, таблицы аудита, реестр скриптов), а не runtime-таблицы агента: их список приезжал окружением и молча перебивал файл. Здесь же объявлены таблицы зеркала сессий (session_meta_table, session_messages_table): холодная копия upstream JSONL, и её имя знает платформа, а не вызывающий — по той же причине, что и у журнала. Профилем они НЕ разделяются (в PROFILE_OWNED_KEYS их нет, см. libs/enterprise_common/settings.py): в отличие от журнала зеркало не изолирует контуры, а хранит данные одного и того же пользователя, разделённые лишь техническим replica_id, и разводить его по контурам значило бы развести один и тот же разговор. Оверлей профиля применяется к имени таблицы; replica_id входит в первичный ключ сам по себе, и его подменять нечем.",
     "log_table": "public.agent_gateway_logs",
     "question_runs_table": "public.agent_question_runs",
     "task_table": "public.agent_conversation_messages",
+    "session_meta_table": "public.agent_session_meta",
+    "session_messages_table": "public.agent_session_messages",
     "snapshot_path": "~/.cache/nanobot/duckdb/cache.duckdb",
     "log_buffer_maxlen": 2048,
     "log_flush_interval": 5.0,
