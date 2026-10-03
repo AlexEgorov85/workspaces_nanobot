@@ -104,53 +104,57 @@ class HistorySearchToolConfig(BaseModel):
                 "пустым, если нужна фильтрация только по event_type / "
                 "времени. Примеры: query='договор' (найти упоминания "
                 "договора), query='.pdf' (найти файлы по расширению), "
-                "query='риски' (найти обсуждение рисков в llm_call)."
+                "query='риски' (найти обсуждение рисков в llm.exchanged)."
             ),
         },
         "event_type": {
             "type": "string",
             "enum": [
-                "context_compacted",
-                "tool_call",
-                "tool_result",
-                "llm_call",
-                "run_finished",
-                "turn_completed",
-                "subagent_run_finished",
-                "inbound",
+                "agent.compacted",
+                "tool.started",
+                "tool.completed",
+                "llm.exchanged",
+                "agent.responded",
+                "agent.completed",
+                "agent.received",
             ],
             "description": (
                 "Тип события (опционально). Доступные типы, реально "
                 "пишущиеся в журнал:\n"
-                "  • context_compacted — факт сжатия контекста (что именно "
+                "  • agent.compacted — факт сжатия контекста (что именно "
                 "заархивировано, сколько токенов до/после).\n"
-                "  • tool_call — вызов инструмента агентом, включая "
+                "  • tool.started — вызов инструмента агентом, включая "
                 "аргументы (пути файлов, переданные пользователем или "
                 "агентом, лежат здесь).\n"
-                "  • tool_result — результат инструмента (может содержать "
+                "  • tool.completed — результат инструмента (может содержать "
                 "пути созданных файлов, doc_id и пр.).\n"
-                "  • llm_call — полный промпт итерации LLM, включая вопросы "
-                "пользователя (поиск по тексту диалога).\n"
-                "  • run_finished — прошлый финальный ответ агента "
+                "  • llm.exchanged — полный промпт итерации LLM, включая "
+                "вопросы пользователя (поиск по тексту диалога).\n"
+                "  • agent.responded — прошлый финальный ответ агента "
                 "пользователю (содержит final_content, tools_used). "
                 "Для пользовательского контента это основной тип.\n"
-                "  • turn_completed — метрики оборота: latency_ms, outcome, "
-                "usage_tokens, runtime_model. НЕ содержит final_content — "
-                "только статистика. Для контента используйте run_finished.\n"
-                "  • subagent_run_finished — ответ под-агента.\n"
-                "  • inbound — входящее сообщение пользователя.\n"
-                "Если не указан — ищутся все типы. Для поиска файлов "
-                "используй tool_call/tool_result (аргументы и результаты "
-                "tool-вызовов) и llm_call (текст диалога), а НЕ выдуманные "
-                "типы file_* / document_summarized."
+                "  • agent.completed — метрики оборота: latency_ms, outcome, "
+                "usage_tokens, runtime_model, а также итог подагента. "
+                "НЕ содержит final_content — только статистика. "
+                "Для контента используйте agent.responded.\n"
+                "  • agent.received — входящее сообщение пользователя.\n"
+                "Имена канонические и в таком же написании лежат в "
+                "agent_gateway_logs.event_type. Если не указан — ищутся "
+                "все типы. Для поиска файлов "
+                "используй tool.started/tool.completed (аргументы и "
+                "результаты tool-вызовов) и llm.exchanged (текст диалога), "
+                "а НЕ выдуманные "
+                "типы file_* / document_summarized и НЕ старые имена "
+                "tool_call / llm_call / run_finished (их в журнале больше "
+                "нет — фильтр по ним дал бы пустую выдачу без ошибки)."
             ),
         },
         "tool_name": {
             "type": "string",
             "description": (
                 "Имя инструмента для фильтрации (опционально). "
-                "Применимо только при event_type='tool_call' или "
-                "event_type='tool_result'. Удобно для поиска "
+                "Применимо только при event_type='tool.started' или "
+                "event_type='tool.completed'. Удобно для поиска "
                 "истории конкретного инструмента: tool_name='compact_context' "
                 "найдёт все его вызовы и результаты. Соответствует "
                 "колонке ``name`` в ``agent_gateway_logs``. "
@@ -266,22 +270,27 @@ class HistorySearchTool(Tool):
             "Search the agent's durable event history (agent_gateway_logs) "
             "for past activity that survived context compaction. Use it to "
             "recover details from older messages the agent can no longer see "
-            "in its live context (after a 'context_compacted' event), or to "
+            "in its live context (after a 'agent.compacted' event), or to "
             "find previous results of its own work. CALL THIS BEFORE ANSWERING "
             "whenever the user references something not present in the current "
             "context: 'that file we discussed', 'my report from last week', "
             "'what did you answer about X', 'reprocess that contract', or "
             "after a 'context compressed' notice. Available event types: "
-            "context_compacted (fact of compaction), tool_call (tool "
+            "agent.compacted (fact of compaction), tool.started (tool "
             "invocations + their args, incl. FILE PATHS passed by user/agent), "
-            "tool_result (tool outputs, incl. created file paths / doc_id), "
-            "llm_call (full prompt with user questions — search dialogue text "
-            "here), run_finished (previous final answers), "
-            "subagent_run_finished, inbound (user messages). For files, search "
-            "tool_call / tool_result / llm_call — NEVER invented types like "
-            "file_attached / file_created / document_summarized (not logged). "
+            "tool.completed (tool outputs, incl. created file paths / doc_id), "
+            "llm.exchanged (full prompt with user questions — search dialogue "
+            "text here), agent.responded (previous final answers), "
+            "agent.completed (turn metrics + subagent runs), "
+            "agent.received (user messages). For files, search "
+            "tool.started / tool.completed / llm.exchanged — NEVER invented "
+            "types like file_attached / file_created / document_summarized "
+            "(not logged) and NEVER the old names tool_call / tool_result / "
+            "llm_call / run_finished / inbound (not in the journal anymore — "
+            "such a filter returns nothing, without an error). "
             "Supports text query (ILIKE), event_type filter, tool_name filter "
-            "(only meaningful for tool_call/tool_result; e.g. tool_name='compact_context' "
+            "(only meaningful for tool.started/tool.completed; e.g. "
+            "tool_name='compact_context' "
             "finds all calls/results of compact_context), time range "
             "(since/until ISO-8601), session_scope ('current' default = "
             "current session_id; 'all' = all sessions of the current user; "

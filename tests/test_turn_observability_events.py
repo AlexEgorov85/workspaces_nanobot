@@ -177,9 +177,19 @@ def _stop_and_wait(svc, sink, *, timeout_sec: float = 30.0) -> None:
 
 def _metadata_col_index(sql: str) -> int:
     """Индекс колонки ``metadata`` в списке колонок INSERT-а."""
+    return _column_index(sql, "metadata")
+
+
+def _column_index(sql: str, name: str) -> int:
+    """Индекс колонки по имени в списке колонок INSERT-а.
+
+    Читать значения события полагается по КОЛОНКАМ, а не по JSONB: момент и
+    ключ порядка переехали в ``seq``/``occurred_at``, и тест, который смотрит
+    на ``metadata``, проверял бы уже не то место, куда пишет таблица.
+    """
     columns = re.search(r"\(([^)]*)\)\s*VALUES", sql).group(1)
     names = [c.strip().strip('"') for c in columns.split(",")]
-    return names.index("metadata")
+    return names.index(name)
 
 
 class TestEventTimeThroughRealBuffering:
@@ -195,9 +205,15 @@ class TestEventTimeThroughRealBuffering:
         try:
             # 12 событий подряд: worker не успевает сбросить батч между ними,
             # поэтому ВСЕ они обязаны уехать ОДНИМ execute_batch.
+            #
+            # Наполнитель обязан быть НЕ-пробным: правило подавления
+            # (smoke.*, probe_*, live.db_probe) теперь честно снимает такие
+            # имена на входе писателя, и раньше выбранное ``probe_{i}``
+            # просто перестало доходить до батча. Тест проверяет выживание
+            # момента при буферизации, а не подавление проб.
             for i in range(12):
                 assert svc.log_event(LogEvent(
-                    event_type=f"probe_{i}", summary=str(i), session_id="s:1",
+                    event_type=f"turn.evt_{i}", summary=str(i), session_id="s:1",
                 )) is True
         finally:
             _stop_and_wait(svc, capture_psycopg2)
@@ -210,9 +226,17 @@ class TestEventTimeThroughRealBuffering:
         sql, rows, _page = capture_psycopg2[0]
         assert len(rows) == 12
 
+        # --- значения берутся из НАСТОЯЩИХ колонок, а не из JSONB ---------
+        # `seq`/`occurred_at` — каноническое хранилище (выбор замером), и
+        # читать их из metadata здесь означало бы проверять не то место, куда
+        # пишет таблица.
         meta_idx = _metadata_col_index(sql)
-        seqs = [row[meta_idx]["seq"] for row in rows]
-        moments = [row[meta_idx]["occurred_at"] for row in rows]
+        seq_idx = _column_index(sql, "seq")
+        moment_idx = _column_index(sql, "occurred_at")
+        seqs = [row[seq_idx] for row in rows]
+        moments = [row[moment_idx] for row in rows]
+        assert all(s is not None for s in seqs), "ключ порядка не доехал до колонки"
+        assert all(m is not None for m in moments), "момент не доехал до колонки"
 
         # --- моменты СОБЫТИЯ разные и в порядке создания -------------------
         assert len(set(moments)) == 12, "моменты событий склеились при батчировании"
@@ -228,11 +252,19 @@ class TestEventTimeThroughRealBuffering:
         # --- ключ порядка монотонен и однозначно восстанавливает порядок ---
         assert seqs == sorted(seqs)
         assert len(set(seqs)) == 12
-        by_seq = [row[meta_idx] for row in sorted(rows, key=lambda r: r[meta_idx]["seq"])]
-        assert [m["seq"] for m in by_seq] == seqs
+        by_seq = [row for row in sorted(rows, key=lambda r: r[seq_idx])]
+        assert [r[seq_idx] for r in by_seq] == seqs
         # Порядок по seq совпадает с порядком появления в батче — то есть
         # разбор оборота восстанавливается выражением ORDER BY seq.
-        assert [m["occurred_at"] for m in by_seq] == moments
+        assert [r[moment_idx] for r in by_seq] == moments
+
+        # --- колонка и её текстовая копия в metadata — одно и то же -------
+        # metadata остаётся транспортом батча, и разбирает его в колонки тот
+        # же писатель. Расхождение означало бы, что колонка и её копия
+        # рассказывают о разных моментах одного события.
+        for row in rows:
+            assert row[meta_idx]["seq"] == row[seq_idx]
+            assert row[meta_idx]["occurred_at"] == row[moment_idx]
 
         # --- колонка timestamp НЕ несёт момент события ---------------------
         # Она не попадает в список колонок INSERT-а, поэтому её значение —
@@ -340,8 +372,23 @@ class TestEventTimeThroughMcpTransport:
         assert len(events) == 4
 
         # --- ключ порядка и момент доехали в теле батча --------------------
+        # Тело батча несёт их в metadata — это ТРАНСПОРТ, и он не менялся.
+        # В колонки `seq`/`occurred_at` их разбирает платформенный писатель
+        # (`_write_events`), поэтому проверяется ровно то, на что он смотрит:
+        # ключ — целое число, момент — строка, и оба переживают JSON-сквозняк
+        # stdio. Строка вместо числа разъехала бы приведение в колонке, а
+        # потеря ключа упала бы на `NOT NULL` всей партией.
         seqs = [e["metadata"]["seq"] for e in events]
         moments = [e["metadata"]["occurred_at"] for e in events]
+        assert all(isinstance(s, int) and not isinstance(s, bool) for s in seqs), (
+            "ключ порядка доехал не целым числом — приведение в колонке его не возьмёт"
+        )
+        assert all(isinstance(m, str) and m for m in moments), (
+            "момент события доехал не строкой ISO-8601"
+        )
+        for original, wire in zip(events, json.loads(json.dumps(events)), strict=True):
+            assert wire["metadata"]["seq"] == original["metadata"]["seq"]
+            assert wire["metadata"]["occurred_at"] == original["metadata"]["occurred_at"]
         assert len(set(seqs)) == 4, "ключ порядка не выжил в теле батча"
         assert seqs == sorted(seqs), "порядок событий перемешан на транспорте"
         assert len(set(moments)) == 4, "момент события не выжил в теле батча"
@@ -378,7 +425,7 @@ class TestEventTimeThroughMcpTransport:
         svc.start()
         try:
             svc.log_event(LogEvent(
-                event_type="mcp_probe", session_id="postgres:7",
+                event_type="tool.started", session_id="postgres:7",
                 user_id="u1", request_id="req-1",
             ))
         finally:
@@ -386,7 +433,7 @@ class TestEventTimeThroughMcpTransport:
 
         stats = svc.get_stats()
         assert stats["dropped"] == 1 and stats["written"] == 0
-        assert stats["dropped_by_type"].get("mcp_probe") == 1
+        assert stats["dropped_by_type"].get("tool.started") == 1
 
 
 class TestSeqContract:
@@ -417,7 +464,9 @@ class TestSeqContract:
             svc._queue = MagicMock()
             svc._queue.put_nowait.side_effect = captured.append
             svc._queue.Full = RuntimeError
-            event = LogEvent(event_type="x", metadata={"tool_call_id": "t1"})
+            event = LogEvent(
+                event_type="tool.started", metadata={"tool_call_id": "t1"}
+            )
             svc.log_event(event)
         finally:
             svc.stop(timeout_sec=2.0)
@@ -439,7 +488,7 @@ class TestSeqContract:
             svc._queue = MagicMock()
             svc._queue.Full = RuntimeError
             event = LogEvent(
-                event_type="x",
+                event_type="tool.started",
                 metadata={dbl.EVENT_SEQ_KEY: 1, dbl.EVENT_TIME_KEY: "1999-01-01T00:00:00+00:00"},
             )
             svc.log_event(event)
@@ -454,7 +503,7 @@ class TestSeqContract:
         try:
             svc._queue = MagicMock()
             svc._queue.Full = RuntimeError
-            event = LogEvent(event_type="debug", level="DEBUG")
+            event = LogEvent(event_type="agent.degraded", level="DEBUG")
             assert svc.log_event(event) is False
             assert event.metadata is None, "событие, не попавшее в журнал, размечено временем"
         finally:
@@ -586,7 +635,7 @@ def _capture_service(request_id: str | None = "m1"):
 
     def _log_inbound(**kw):
         events.append(LogEvent(
-            event_type="inbound",
+            event_type="agent.received",
             session_id=kw.get("session_id"),
             channel=kw.get("channel"),
             actor="user",
@@ -599,7 +648,7 @@ def _capture_service(request_id: str | None = "m1"):
 
     def _log_llm_call(**kw):
         events.append(LogEvent(
-            event_type="llm_call",
+            event_type="llm.exchanged",
             session_id=kw.get("session_id"),
             actor="agent",
             name="llm",
@@ -658,8 +707,8 @@ class TestTurnLifecycleEvents:
         assert completed[0].metadata.get("final_content") is None
         # run_finished не потерян — исходный контракт хука на месте, и в нём
         # текст ответа остался.
-        assert len(_of_type(events, "run_finished")) == 1
-        assert _of_type(events, "run_finished")[0].summary == "ответ"
+        assert len(_of_type(events, "agent.responded")) == 1
+        assert _of_type(events, "agent.responded")[0].summary == "ответ"
 
     def test_failed_turn_logs_single_terminal_event(self):
         """on_error + after_run (ошибка без исключения) → ОДИН agent.failed."""
@@ -830,7 +879,7 @@ class TestEventAttributionRuntime:
         svc = _svc(flush_interval_sec=30.0)
         svc.start()
         try:
-            svc.log_event(LogEvent(event_type="x", session_id="s:1"))
+            svc.log_event(LogEvent(event_type="agent.started", session_id="s:1"))
         finally:
             _stop_and_wait(svc, capture_psycopg2)
         _sql, rows, _page = capture_psycopg2[0]
@@ -844,7 +893,9 @@ class TestEventAttributionRuntime:
         try:
             svc._queue = MagicMock()
             svc._queue.Full = RuntimeError
-            event = LogEvent(event_type="x", metadata={"source": "enterprise_mcp"})
+            event = LogEvent(
+                event_type="agent.started", metadata={"source": "enterprise_mcp"}
+            )
             svc.log_event(event)
         finally:
             svc.stop(timeout_sec=2.0)
@@ -858,15 +909,18 @@ class TestTurnOrderWithoutKey:
     def _row(row_id: str, seq=None, metadata=_KEEP_META):
         """Строка журнала для чтения оборота.
 
-        ``metadata=_KEEP_META`` — обычная строка, в неё добавится ``seq``;
-        передача словаря — строка БЕЗ ключа порядка; ``metadata=None`` —
-        строка с ``metadata IS NULL``.
+        Ключ порядка лежит в КОЛОНКЕ ``seq`` — это каноническое хранилище
+        (выбор замером), и читатель смотрит туда же, куда пишет табличный
+        писатель. ``metadata`` приходит отдельным признаком только для
+        отрицательных случаев: строка с текстовой копией ключа, но без
+        ключа в колонке, обязана остаться неатрибутированной — иначе читатель
+        держал бы два хранилища ключа с разными ответами.
+
+        ``metadata=_KEEP_META`` — обычная строка; передача словаря — строка с
+        заданным ``metadata`` (в том числе ``None`` — ``metadata IS NULL``).
         """
         meta = None if metadata is _KEEP_META or metadata is None else dict(metadata)
-        if seq is not None:
-            meta = dict(meta or {})
-            meta[dbl.EVENT_SEQ_KEY] = seq
-        return {"id": row_id, "metadata": meta}
+        return {"id": row_id, "seq": seq, "metadata": meta}
 
     def test_all_rows_have_key(self):
         rows = [self._row("a", 10), self._row("b", 20), self._row("c", 30)]
@@ -900,8 +954,25 @@ class TestTurnOrderWithoutKey:
         assert [r["id"] for r in result.ordered] == ["a", "b"]
         assert result.unattributed == 1
 
+    def test_text_copy_in_metadata_is_not_a_second_source_of_truth(self):
+        """Ключ есть в тексте, но его нет в колонке — строки всё равно нет в порядке.
+
+        Проверка на ловушку смены хранилища: пока ключ жил в ``metadata``,
+        читатель брал его оттуда. Если бы он продолжал брать его оттуда и
+        после переезда в колонку, то строки, у которых колонка пуста (а это
+        ровно те строки, которые ``NOT NULL`` запрещает), молча собрались бы
+        в порядок по своей текстовой копии.
+        """
+        rows = [
+            self._row("with_column", 10, metadata={"seq": 10}),
+            self._row("text_only", metadata={"seq": 20}),
+        ]
+        result = dbl.order_turn_rows(rows)
+        assert [r["id"] for r in result.ordered] == ["with_column"]
+        assert result.unattributed == 1
+
     def test_non_numeric_key_is_unattributed(self):
-        rows = [self._row("a", 10), self._row("bad", metadata={"seq": "не-число"})]
+        rows = [self._row("a", 10), self._row("bad", seq="не-число")]
         result = dbl.order_turn_rows(rows)
         assert [r["id"] for r in result.ordered] == ["a"]
         assert result.unattributed == 1
@@ -912,8 +983,16 @@ class TestTurnOrderWithoutKey:
         assert [r["id"] for r in result.ordered] == ["c", "a", "b"]
 
     def test_canonical_order_expression_declared_once(self):
-        """Выражение порядка живёт в константе, а не вписывается в читателей."""
-        assert dbl.TURN_ORDER_BY_SQL == "(metadata->>'seq')::bigint, id"
+        """Выражение порядка живёт в константе, а не вписывается в читателей.
+
+        Значение — порядок по КОЛОНКАМ: выражение по JSONB отменено замером
+        (колонка выиграла 3 сценария из 3, а ``metadata->>'occurred_at'`` к
+        timestamptz не индексируется вовсе). Возврат сюда выражения было бы
+        тихим шагом назад к неиндексируемому чтению.
+        """
+        assert dbl.TURN_ORDER_BY_SQL == "seq, id"
+        assert dbl.EVENT_SEQ_COLUMN == "seq"
+        assert dbl.EVENT_TIME_COLUMN == "occurred_at"
 
 
 class TestLatencyIsRecomputable:
@@ -996,12 +1075,12 @@ class TestFullTurnTrace:
 
         trace = [e.event_type for e in events]
         assert trace == [
-            "inbound",
+            "agent.received",
             "agent.started",
             "llm.requested",
             "llm.completed",
-            "llm_call",
-            "run_finished",
+            "llm.exchanged",
+            "agent.responded",
             "agent.completed",
         ], "след оборота собран не полностью или вразнобой"
 

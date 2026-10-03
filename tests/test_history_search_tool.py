@@ -139,7 +139,7 @@ def _fake_hits() -> list[dict]:
         {
             "id": "2028c04b-3f25-4153-bb3e-067293f594a8",
             "timestamp": "2026-01-01T10:00:00+00:00",
-            "event_type": "context_compacted",
+            "event_type": "agent.compacted",
             "name": "compact_context",
             "level": "INFO",
             "summary": "context compacted",
@@ -152,7 +152,7 @@ def _fake_hits() -> list[dict]:
         {
             "id": "9a370996-73ca-4d18-aab7-4a9b718ae204",
             "timestamp": "2026-01-01T09:00:00+00:00",
-            "event_type": "run_finished",
+            "event_type": "agent.completed",
             "name": "run",
             "level": "INFO",
             "summary": "итоговый ответ",
@@ -309,7 +309,7 @@ async def test_search_time_bounds_passed_to_operation() -> None:
 @pytest.mark.asyncio
 async def test_search_truncates_long_output() -> None:
     """Большой payload ужимается до ``max_result_chars``, JSON остаётся валидным."""
-    big = [{"timestamp": "t", "event_type": "e", "level": "INFO",
+    big = [{"timestamp": "t", "event_type": "agent.started", "level": "INFO",
             "summary": "s", "payload": {"x": "y" * 10000}}]
     tool, _client = _make_tool(
         big,
@@ -331,7 +331,7 @@ async def test_search_includes_name_field_in_events() -> None:
         {
             "id": "id-1",
             "timestamp": "2026-01-01T10:00:00+00:00",
-            "event_type": "tool_result",
+            "event_type": "tool.completed",
             "name": "compact_context",
             "level": "INFO",
             "summary": "compact ok",
@@ -345,7 +345,7 @@ async def test_search_includes_name_field_in_events() -> None:
     assert parsed["count"] == 1
     ev = parsed["events"][0]
     assert ev["name"] == "compact_context"
-    assert ev["event_type"] == "tool_result"
+    assert ev["event_type"] == "tool.completed"
 
 
 @pytest.mark.asyncio
@@ -355,7 +355,7 @@ async def test_search_returns_event_id_in_each_event() -> None:
         {
             "id": "11111111-2222-3333-4444-555555555555",
             "timestamp": "2026-01-01T10:00:00+00:00",
-            "event_type": "tool_result",
+            "event_type": "tool.completed",
             "name": "compact_context",
             "level": "INFO",
             "summary": "compact ok",
@@ -364,7 +364,7 @@ async def test_search_returns_event_id_in_each_event() -> None:
         {
             "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "timestamp": "2026-01-01T09:00:00+00:00",
-            "event_type": "run_finished",
+            "event_type": "agent.completed",
             "name": "run",
             "level": "INFO",
             "summary": "ответ агента",
@@ -571,7 +571,7 @@ class TestTruncationFlags:
         assert data["truncated"] is True
 
         small = [
-            {"id": "id-1", "timestamp": "t1", "event_type": "tool_call",
+            {"id": "id-1", "timestamp": "t1", "event_type": "tool.started",
              "name": "x", "level": "INFO", "summary": "s",
              "payload": {"k": "v"}}
         ]
@@ -587,10 +587,10 @@ class TestTruncationFlags:
         """payload > per_event_cap → ``payload_truncated=true`` только на этом событии."""
         big = "x" * 5000
         hits = [
-            {"id": "big", "timestamp": "t1", "event_type": "llm_call",
+            {"id": "big", "timestamp": "t1", "event_type": "llm.requested",
              "name": "llm", "level": "INFO", "summary": "s",
              "payload": {"prompt": big}},
-            {"id": "small", "timestamp": "t2", "event_type": "tool_call",
+            {"id": "small", "timestamp": "t2", "event_type": "tool.started",
              "name": "x", "level": "INFO", "summary": "s",
              "payload": {"k": "ok"}},
         ]
@@ -609,7 +609,7 @@ class TestTruncationFlags:
         """payload_truncated=true, results_truncated=false (payload ужат, события не выброшены)."""
         big = "x" * 5000
         hits = [
-            {"id": "big", "timestamp": "t1", "event_type": "llm_call",
+            {"id": "big", "timestamp": "t1", "event_type": "llm.requested",
              "name": "llm", "level": "INFO", "summary": "s",
              "payload": {"prompt": big}},
         ]
@@ -628,7 +628,7 @@ class TestTruncationFlags:
         payload_truncated=true, results_truncated=false."""
         big = "x" * 5000  # > per_event_cap (4000)
         hits = [
-            {"id": "only", "timestamp": "t1", "event_type": "llm_call",
+            {"id": "only", "timestamp": "t1", "event_type": "llm.requested",
              "name": "llm", "level": "INFO", "summary": "s",
              "payload": {"prompt": big}},
         ]
@@ -824,7 +824,7 @@ class TestUserIsolation:
             {
                 "id": "id-1",
                 "timestamp": "t1",
-                "event_type": "tool_call",
+                "event_type": "tool.started",
                 "name": "x",
                 "level": "INFO",
                 "summary": "s",
@@ -979,7 +979,8 @@ class TestSnapshotConsistency:
         """offset уходит в операцию дословно, адаптер не пересортировывает."""
         first = [
             {"id": f"id-{i}", "timestamp": f"2026-01-01T10:0{i}:00+00:00",
-             "event_type": "x", "name": "x", "level": "INFO", "summary": "s",
+             "event_type": "agent.started", "name": "x", "level": "INFO",
+             "summary": "s",
              "payload": {}}
             for i in range(5)
         ]
@@ -995,7 +996,8 @@ class TestSnapshotConsistency:
         # (offset=5) его уже нет, сдвинулась сама платформа, не адаптер.
         second = [
             {"id": f"id-{i}", "timestamp": f"2026-01-01T10:0{i}:00+00:00",
-             "event_type": "x", "name": "x", "level": "INFO", "summary": "s",
+             "event_type": "agent.started", "name": "x", "level": "INFO",
+             "summary": "s",
              "payload": {}}
             for i in range(5, 8)
         ]

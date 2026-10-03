@@ -388,6 +388,16 @@ def _inserted_columns(path: Path) -> set[str]:
     raise AssertionError(f"в {path.name} не найден список колонок INSERT в _write_events")
 
 
+#: Колонки, которые заполняет НЕ конверт события, а сама строка базы или
+#: писатель. ``timestamp`` ставит база (``now()`` в SQL); ``seq`` и
+#: ``occurred_at`` — момент события и ключ порядка, которые писатель разбирает
+#: из ``metadata`` (``sql/migrations/V008__agent_gateway_logs_event_time_columns.sql``).
+#: В ``JOURNAL_FIELDS`` их нет намеренно: конверт описывает содержание события,
+#: а эти две колонки — момент и порядок строки. Полный набор колонок строки
+#: журнала проверяет страж ``tests/test_journal_writer_columns_contract.py``.
+WRITER_FILLED_COLUMNS = {"timestamp", "seq", "occurred_at"}
+
+
 def test_platform_writer_writes_the_whole_envelope() -> None:
     """Писатель платформы пишет те же поля, что и конверт.
 
@@ -397,12 +407,24 @@ def test_platform_writer_writes_the_whole_envelope() -> None:
     columns = _inserted_columns(
         PLATFORM_ROOT / "servers" / "enterprise" / "capabilities" / "data" / "service" / "main.py"
     )
-    # ``timestamp`` заполняется базой (``now()``) и в конверт не входит.
-    assert columns - {"timestamp"} == set(JOURNAL_FIELDS)
+    assert columns - WRITER_FILLED_COLUMNS == set(JOURNAL_FIELDS)
     assert "request_id" in columns
     assert "metadata" in columns
     assert "channel" in columns
     assert "actor" in columns
+
+
+def test_platform_writer_fills_moment_and_order_key() -> None:
+    """Писатель обязан заполнять колонки момента и порядка.
+
+    Обе колонки ``NOT NULL``: забытая колонка означала бы ``NULL`` и отказ
+    записи всей партии, поэтому их отсутствие в ``INSERT`` — дефект, а не
+    «лишняя колонка, уберём».
+    """
+    columns = _inserted_columns(
+        PLATFORM_ROOT / "servers" / "enterprise" / "capabilities" / "data" / "service" / "main.py"
+    )
+    assert {"seq", "occurred_at"} <= columns
 
 
 def test_platform_writer_has_no_extra_columns() -> None:
@@ -410,4 +432,4 @@ def test_platform_writer_has_no_extra_columns() -> None:
     columns = _inserted_columns(
         PLATFORM_ROOT / "servers" / "enterprise" / "capabilities" / "data" / "service" / "main.py"
     )
-    assert columns <= set(JOURNAL_FIELDS) | {"timestamp"}
+    assert columns <= set(JOURNAL_FIELDS) | WRITER_FILLED_COLUMNS

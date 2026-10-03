@@ -5,9 +5,13 @@
 -- boundary для history_search(session_scope="all")); индекс
 -- agent_gateway_logs_test_user_id_timestamp_idx создан сразу при создании
 -- таблицы — отдельной миграции не требуется (аналог V004 для prod).
--- Распределён по request_id. PK на id не объявлен (см. ниже).
+-- Момент события и ключ порядка (seq, occurred_at) — тоже сразу, см. ALTER
+-- ниже: тестовый профиль повторяет форму prod-таблицы, иначе замеры и
+-- проверки чтения оборота проверяли бы не тот состав колонок.
 -- Управляется: lib/services/db_logging_service.py.
--- Совместимость: Greenplum 6.5.
+-- Совместимость: PostgreSQL 13.22 (фактическая база; служебная таблица
+-- pg_dist_partition на сервере отсутствует — объявление о совместимости с
+-- распределённой СУБД здесь было ложным).
 --
 -- Этот файл живёт ТОЛЬКО для psql-ручного применения; для версионированного
 -- применения через runner — V005__test_profile_tables.sql.
@@ -38,11 +42,21 @@ CREATE TABLE IF NOT EXISTS public.agent_gateway_logs_test (
 CREATE INDEX IF NOT EXISTS agent_gateway_logs_test_user_id_timestamp_idx
     ON public.agent_gateway_logs_test (user_id, "timestamp" DESC);
 
+-- Парные боевым индексам под момент события и ключ порядка (см. V009).
+-- Колонки здесь nullable намеренно, но индексы нужны те же: иначе
+-- тестовый профиль проверял бы чтение по seq на плане сортировки, а боевой —
+-- по индексу, и расхождение всплыло бы только в бою.
+CREATE INDEX IF NOT EXISTS idx_agent_gateway_logs_test_seq
+    ON public.agent_gateway_logs_test (seq);
+
+CREATE INDEX IF NOT EXISTS idx_agent_gateway_logs_test_occurred_at
+    ON public.agent_gateway_logs_test (occurred_at DESC);
+
 COMMENT ON TABLE  public.agent_gateway_logs_test IS 'Test-профиль: структурированный журнал событий агента. Структурный клон public.agent_gateway_logs; используется под профилем test. Связан с agent_question_runs_test по request_id.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.id          IS 'PK события (UUID, генерируется в приложении).';
-COMMENT ON COLUMN public.agent_gateway_logs_test."timestamp" IS 'Время события.';
+COMMENT ON COLUMN public.agent_gateway_logs_test."timestamp" IS 'Момент ЗАПИСИ строки (ставит база при сбросе батча). Событийным временем является occurred_at.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.level       IS 'Уровень логирования: DEBUG/INFO/WARN/ERROR.';
-COMMENT ON COLUMN public.agent_gateway_logs_test.event_type  IS 'Тип события (tool_call, agent_run, ...).';
+COMMENT ON COLUMN public.agent_gateway_logs_test.event_type  IS 'Каноническое имя события из словаря платформы; при policy=strict имя вне словаря отказывает батчем.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.request_id  IS 'FK-логически на agent_question_runs_test.request_id.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.session_id  IS 'Денормализованный channel:chat_id для удобства.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.channel     IS 'Канал (telegram/cli/etc).';
@@ -58,3 +72,30 @@ COMMENT ON INDEX  public.agent_gateway_logs_test_user_id_timestamp_idx IS 'Об�
 -- TABLE IF NOT EXISTS на уже существующей таблице default не выставит).
 ALTER TABLE public.agent_gateway_logs_test
     ALTER COLUMN id SET DEFAULT gen_random_uuid();
+
+-- ---------------------------------------------------------------------------
+-- Момент события и ключ порядка: тестовый клон повторяет prod-миграцию
+-- V008__agent_gateway_logs_event_time_columns.sql.
+--
+-- Колонки ЗДЕСЬ ОСТАЮТСЯ NULLABLE намеренно. Ограничение NOT NULL в prod
+-- убирает представимость дефекта, но не отменяет читательскую обязанность:
+-- контракт двухчастного чтения оборота и счётчик unattributed обязаны
+-- проверяться негативными тестами там, где NULL представим, — то есть здесь.
+-- Наложить NOT NULL в тестовом профиле значит delete-тестами, которыми
+-- держится требование «Отсутствие ключа порядка определено и не молчит».
+--
+-- Порядок шагов в prod (nullable → backfill → очистка → ограничение
+-- непустоты) здесь не воспроизводится целиком: очистка УДАЛЯЕТ строки, а
+-- тестовый профиль для этого не предназначен, и объём удаления задаёт
+-- замер, а не файл DDL. Порядок проверяется отдельным тестом на самом файле
+-- миграции.
+-- ---------------------------------------------------------------------------
+ALTER TABLE public.agent_gateway_logs_test
+    ADD COLUMN IF NOT EXISTS seq         BIGINT,
+    ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ;
+
+COMMENT ON COLUMN public.agent_gateway_logs_test.seq IS
+    'Test-профиль: ключ порядка строки журнала (момент события в наносекундах). Nullable намеренно — см. комментарий выше: контракт чтения без ключа проверяется здесь. Канонический порядок — ORDER BY seq, id.';
+
+COMMENT ON COLUMN public.agent_gateway_logs_test.occurred_at IS
+    'Test-профиль: момент СОБЫТИЯ (timestamp остаётся моментом записи строки). Nullable намеренно, парно с seq.';
