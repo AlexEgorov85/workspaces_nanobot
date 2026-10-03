@@ -10,52 +10,71 @@
 
 ## 🏗 Архитектура
 
-Инфраструктура (DuckDB-кеш, векторные индексы, эмбеддинги) вынесена из навыка
-в **универсальный слой** `lib/services` — он не завязан на предметную область
-«аудит» и может переиспользоваться любым навыком. Навык `audit_analyzer` остался
-тонким CLI: он конфигурирует провайдера из своих настроек и работает с ним
-напрямую (без промежуточных обёрток-шимов).
+Агент — тонкий оркестратор оборота: каналы, сессии, журнал, вызовы tool'ов.
+Данных он не держит. Всё, что раньше составляло «инфраструктурный слой агента»
+(DuckDB-снимок, векторные индексы, эмбеддинги, HTTP-вызов к провайдеру
+модели), живёт в отдельном процессе `enterprise-mcp` и доступно агенту только
+операциями по протоколу MCP: клиент — `lib/services/enterprise_mcp_client.py`,
+объявление сервера — `config.json` → `gateway.agent.enterprise_mcp`
+(`tools.mcpServers` намеренно пуст).
 
 > **Об именах таблиц и индексов.** Все имена таблиц/индексов, упомянутые ниже, —
-> **не зашитые константы**, а значения текущей инсталляции, настраиваемые в
-> `config.json`. Они могут отличаться в других развёртываниях. Ключи конфигурации:
+> **не зашитые константы**, а значения текущей инсталляции, и объявляет их
+> владелец. Состав данных аудита и векторной инфраструктуры объявляет платформа
+> в `mcp-platform/platform.json` (`audit.tables`, `vectors.storage_table`,
+> `vectors.indexes`, `data.snapshot_path`); путь к снимку и режим доступа к нему —
+> тоже её (`data.snapshot_path`), потому что файлом владеет capability `data`.
+> Свои runtime-таблицы агент по-прежнему объявляет у себя в `config.json`:
 > `channels.postgres.table_name` / `messages_table` / `meta_table`,
-> `skills.audit_analyzer.tables[*].name` / `vector_indexes[*].name`,
-> `gateway.vector.index.storage_table`,
-> `logging.db.table_name` / `question_runs_table`,
-> `gateway.vector.index.storage_table`. Точный список и дефолты — в
+> `logging.db.table_name` / `question_runs_table`. Точный список и дефолты — в
 > [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) и [AGENTS.md](../AGENTS.md).
 > Таблицы бенчмарков (`agent_benchmark_runs` / `agent_benchmark_results`) и
 > настройка `benchmark.*` удалены в фазе 1 миграции `enterprise-mcp-platform`.
 
 ```mermaid
 flowchart LR
-    SRC["Данные аудита<br/>(в БД, имена в config.json)"] --> SYNC["Фоновая синхронизация<br/>изменения в кеш"]
-    VEC["Эмбеддинги строк"] --> SYNC
-    SYNC --> CACHE["Локальный кеш<br/>DuckDB + FAISS"]
-    CACHE -->|публикация| FILE[("Файл кеша<br/>cache.duckdb")]
-    AGENT["Агент / Навык"] --> CACHE
-    AGENT --> EMB["Эмбеддинг запроса<br/>(Ollama)"]
+    PG[("PostgreSQL<br/>(источник истины)") --> SNAP[("Снимок DuckDB<br/>cache.duckdb")]
+    LOAD["Операторская загрузка<br/>load_snapshot"] --> SNAP
+    SNAP --> DATA["capability data<br/>открывает файл на время операции"]
+    DATA --> VEC["capability vectors<br/>FAISS в памяти, сборка ленивая"]
+    AGENT["Агент / Навык"] -->|MCP stdio-сессия| MCP["enterprise-mcp"]
+    MCP --> AUDIT["capability audit<br/>данные аудита"]
+    MCP --> DATA
+    MCP --> VEC
+    MCP --> LLM["capability llm<br/>единственный вызов провайдера"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
-    class SYNC,CACHE,AGENT,EMB core
-    class SRC,VEC,FILE infra
+    class AGENT,MCP,AUDIT,DATA,VEC,LLM core
+    class PG,SNAP,LOAD infra
 
 ```
 
 **Потоки данных**
 
-- `gateway.py` — единственный владелец файла кеша навыка. `CacheLoadService`
-  (единственное подключение к PG, синхронная разовая загрузка, без фонового
-  потока) наполняет `DuckDbCacheStore`, закрывает файл и отпускает его; провайдер
-  на всё время работы процесса открывает файл только на время операции.
-- Навык CLI (`predefined` / `generated_sql`) — запросы выполняются по локальному
-  снимку кеша, открывая его на время операции в режиме `READ_ONLY`. Создание и
-  обновление кеша его не касается. Единый интерфейс бэкенда:
-  `get_schema / query_sql / explain`.
-- `--mode vector` — семантический поиск: FAISS-индекс собирается **в памяти**
-  из локального снимка `gateway.vector.index.storage_table` при старте gateway
-  (`PreloadService.preload_vector_indexes`), эмбеддинг запроса получает через Ollama.
+- Снимок `cache.duckdb` агент **не открывает и не наполняет**. Владелец файла —
+  capability `data` платформы (`mcp-platform/libs/enterprise_data/snapshot/`),
+  путь к нему объявлен в `mcp-platform/platform.json` → `data.snapshot_path`.
+  Соединение открывается на время операции и закрывается сразу, поэтому файл
+  физически свободен между запросами — в том числе пока его читает соседний
+  процесс.
+- Загрузка снимка — **операторская процедура, а не работа агента**:
+  `python -m servers.enterprise.load_snapshot` (библиотека —
+  `SnapshotLoadService` в `mcp-platform/libs/enterprise_data/loader.py`).
+  Это не capability: операций у него нет и модель его не видит. События
+  `cache_load_started` / `cache_load_done` пишет он, а не агент.
+- Данные аудита агент берёт операциями capability `audit`, семантический поиск —
+  операцией `vector_search` у capability `vectors`. Агентских tool'ов
+  `duckdb_query` / `vector_search` в `workspace/tools/` больше нет; вход агента к
+  данным аудита — инструмент `audit_analyzer_query`.
+- Векторные индексы capability `vectors` собирает **лениво**, при первом
+  `vector_search`; состояние индекса (`missing` / `building` / `ready` / `error`)
+  возвращается в ответе, поэтому «индекс не поднят» наблюдаемо, а не спрятано за
+  пустой выдачей. Отдельного прогона FAISS при старте gateway нет: на старте
+  выполняется по одной дешёвой пробной операции на capability
+  (`gateway._report_enterprise_mcp_health`: `list_indexes` / `schema_check` /
+  `list_scripts`), и её результат печатается вердиктом.
+- Навык `audit_analyzer` — тонкий: в `workspace/skills/audit_analyzer/` остался
+  только `SKILL.md`, своего CLI у него больше нет.
 
 ---
 
@@ -75,28 +94,37 @@ flowchart LR
     CTX --> CFG["ConfigService"]
     CTX --> SESS["SessionStorage"]
     CTX --> DBL["DbLoggingService"]
-    CTX --> SYNC["PgDuckDbSync + CacheStore"]
+    CTX --> SCHEMA["SchemaValidationService"]
+    CTX --> HEALTH["RuntimeHealth / RuntimeReadiness"]
     CTX --> BUS["MessageBus"]
     CTX --> AGENT["AgentFactory (AgentLoop)"]
     CTX --> PATCH["RuntimePatcher"]
-    CTX --> PRE["PreloadService"]
-    CTX --> TRANS["TranscriptionService"]
+    CTX --> TOOLS["ProjectToolLoader"]
+    CTX --> EMCP["EnterpriseMcpClient"]
+    CTX --> COLD["SessionColdSyncService"]
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     class GW,CLI entry
-    class CTX,CFG,SESS,DBL,SYNC,BUS,AGENT,PATCH,PRE,TRANS core
+    class CTX,CFG,SESS,DBL,SCHEMA,HEALTH,BUS,AGENT,PATCH,TOOLS,EMCP,COLD core
 ```
+
+Проверки `duckdb_cache` и `vector_search` из снятого локального кэша в
+readiness не входят: снимком и индексами владеет платформа, а не агент, и их
+состояние агент наблюдает через пробные операции capability, а не через свои
+компоненты.
 
 ### `lib/core/` (ApplicationContext + фабрики)
 
 - **`application_context.py:ApplicationContext`** — единственный класс,
   собирающий все общие сервисы. Поля (помимо путей и конфига):
   `bus`, `agent`, `tool_audit_hook`, `hooks`, `session_manager`,
-  `storage_mode`, `db_logging_service`, `sync_service`,
-  `cache_store`, `config_service`, `runtime_patcher`,
-  `transcription_service`, `subprocess_manager`,
+  `storage_mode`, `db_logging_service`, `config_service`, `runtime_patcher`,
   `runtime_health`, `runtime_readiness`, `session_storage_service`,
-  `hook_factories`, `project_settings`.
+  `hook_factories`, `runtime_events_subscriber`, `session_cold_sync_service`,
+  `usage_store`, `enterprise_mcp`.
+  Полей `cache_loader` / `cache_provider` / `cache_store` / `sync_service` /
+  `transcription_service` в dataclass нет: снятый локальный кэш не входит в
+  состав агента (владелец снимка — capability `data` платформы).
   Метод `start()` использует `ShutdownCoordinator` для регистрации
   сервисов; `stop()` — LIFO graceful shutdown.
   **Graceful degradation:** если БД недоступна, сервис остаётся `None`,
@@ -115,10 +143,11 @@ flowchart LR
   хук печатает в терминал токены каждой LLM-итерации (включается всегда
   в CLI-режиме через `cli_agent.py`; в gateway — опцией
   `gateway.print_llm_calls`).
-- **`bus_factory.py:BusFactory`** — `create()` возвращает `MessageBus`,
+- **Шина** — `application_context._create_bus()` возвращает `MessageBus`,
   опционально обернув `publish_inbound`/`publish_outbound` async-логгерами
-  из `db_logging_bus.py`. **Без monkey-patch'ей**: оригинальные методы
-  шины сохраняются в замыкании.
+  из `db_logging_bus.py` (`_wrap_bus_publish`). **Без monkey-patch'ей**:
+  оригинальные методы шины сохраняются в замыкании. Отдельного
+  `bus_factory.py` в `lib/core/` нет.
 
 ### `lib/services/`
 
@@ -131,13 +160,13 @@ flowchart LR
 | `session_storage.py` | Выбор режима хранения сессий (auto / postgres / file) с поддержкой `session_manager.json` override. `postgres` означает включённое холодное зеркало `SessionColdSyncService`; менеджер сессий во всех режимах — класс библиотеки `SessionManager` поверх `SanitizingSessionStore`. |
 | `runtime_patcher.py` | Все 6 monkey-patch'ей upstream `nanobot.agent.loop.AgentLoop` в одном классе с fallback при изменении API nanobot. Применяется через `apply_all()` из `ApplicationContext.create()`. **НЕ** занимается регистрацией project tools (вынесено в `project_tool_loader.py`). Полный каталог — `docs/architecture/runtime-patcher-inventory.md`. |
 | `project_tool_loader.py` | Stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(...) -> ProjectToolsLoadResult`. Вызывается из `ApplicationContext.create()` сразу после `apply_all()` как независимый stage composition root'а. **НЕ** компонент (нет lifecycle/state/config — критерии `openspec/specs/architecture/component-model/spec.md`). |
-| `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
-| `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
-| ~~`preload_service.py`~~ | **Удалён 2026-10-01.** FAISS preload и `compute_index_health` живут в `mcp-platform/libs/vectors/preload.py`. Прежнее описание: Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычислялся через единый `resolve_cache_path()` — **после фазы 5 (п. 5.8) функция живёт в `mcp-platform/libs/enterprise_data/snapshot/store.py`**, а сам сервис больше не вызывается из runtime: снимком владеет capability `data` платформы. Standalone-утилит сборки индексов в агенте не осталось — она уехала на платформу (`servers/enterprise/build_index.py`) и снимок не открывает. |
+| `channel_factory.py` | `ChannelManager` + Postgres-канал (второй транспорт, Redis, снят — один канал, PostgreSQL). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
+| ~~`transcription_service.py`~~ | **Удалён.** Голос разбирает базовый класс библиотеки (`BaseChannel.transcribe_audio()`, `audio/transcription*.py`), а канал пробрасывал ему четыре атрибута, которых в `PostgresChannel` не было. Канонические настройки — в верхнеуровневой секции `transcription` файла `config.json`. |
+| ~~`preload_service.py`~~ | **Удалён 2026-10-01.** FAISS-preload и чистая функция `compute_index_health` живут в `mcp-platform/libs/vectors/preload.py`; прогона индекса при старте gateway больше нет — capability `vectors` собирает индекс лениво. Снятый агентский preload вызывался из runtime только для собственного кэша, а снимок теперь открывает capability `data` (`mcp-platform/libs/enterprise_data/snapshot/store.py`). Standalone-утилиты сборки индексов в агенте нет — она уехала на платформу (`mcp-platform/servers/enterprise/build_index.py`). |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
-| `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает схему из `SKILL.md` (секция «Схема домена», см. `workspace/skills/audit_analyzer/SKILL.md`). |
-| `nl_sql_runner.py` | **Удалён** — общая логика NL→SELECT pipeline. Заменена: CLI skill'а `audit_analyzer` — режим `--mode generated_sql` (`workspace/skills/audit_analyzer/scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client.call_llm`), либо Agent формирует SQL сам (см. `SKILL.md` секция «SQL guidance»). |
+| ~~`schema_formatter.py`~~ | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Доменную схему теперь знает платформа: её объявляет capability `audit` (`mcp-platform/platform.json` → `audit.tables`) и отдаёт операцией `schema_check`. |
+| ~~`nl_sql_runner.py`~~ | **Удалён** — общая логика NL→SELECT pipeline, равно как и CLI навыка `audit_analyzer` (в `workspace/skills/audit_analyzer/` остался только `SKILL.md`). Замена: SQL к данным аудита формирует агент сам либо операция capability `audit`; доступ к данным даёт инструмент `audit_analyzer_query`. |
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
 
@@ -178,26 +207,15 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 знает вообще: `EnterpriseMcpClient._child_env()` ничего о провайдере не
 передаёт, поэтому ключ не попадает и в окружение процессов скиллов.
 
-Агентский резолв удалён вместе с агентским клиентом, и функции
-`get_llm_config()` в runtime API для skill'ов больше нет. Эмбеддер — исключение
-с обоснованием: `ENTERPRISE_EMBED_*` остались агентскими, потому что модель
-эмбеддера входит в подпись индекса, который строит и проверяет агент.
-
-### Гонка за загрузкой устранена структурно
-
-Раньше `PgDuckDbSyncService` был worker-потоком, который делал `initial_load`
-сразу после `start()`, а привязка колбэков шла отдельным шагом. Если
-`set_on_new_records_callback` ещё не был вызван, `_dispatch` скипал записи →
-DuckDB оставался пустым → `preload_vector_indexes` видел «нет данных» несмотря
-на данные в `oarb.audit_vectors`. Обходной путь был один: в `gateway.py:main()`
-колбэки ставились **ДО** `ctx.start()`, и гонка была лишь «не проявляется».
-
-Сейчас гонки нет вовсе, а не «не проявляется»: `CacheLoadService.load()`
-выполняется **синхронно внутри `ApplicationContext.create()`** и завершается до
-того, как начнётся `preload_indexes()`. Колбэков у загрузчика нет — он держит
-`CacheStore` напрямую, потому что он и есть единственный writer. Порядок
-«загрузка → close → открытие на чтение» закреплён тестом
-`tests/test_application_context_cache_lifecycle.py`.
+Агентский резолв снят вместе с агентским клиентом: ни выбора модели, ни ключа,
+ни функции `get_llm_config()` в runtime API для skill'ов в агенте не осталось.
+Эмбеддер исключением не является — он платформенный тоже
+(`mcp-platform/platform.json` → `llm.embed_*`, HTTP-вызов делает
+`mcp-platform/libs/llm/embeddings.py`). Агентские `ENTERPRISE_EMBED_*`
+не просто не нужны: подпись индекса считает `libs.vectors.signature` в том же
+процессе платформы, поэтому объявление модели эмбеддера в чужом окружении
+означало бы, что половина подписи живёт здесь, а половина там, и расхождение
+видно только как «индекс STALE».
 
 ### Конкурентно-безопасное БД-логирование: per-turn инстанс `DatabaseLoggingHook`
 
@@ -268,13 +286,18 @@ PG→DuckDB sync-путь пишет события (`sync_service_started`,
 
 Поэтому событие получает собственное время в писателе — в момент, когда
 `DbLoggingService` его принимает, — и оно переживает батчирование, потому
-что едет вместе с событием в JSONB `metadata`:
+что едет вместе с событием в JSONB `metadata`. В `metadata` значения
+**транспорт**: таблицу читают и фильтруют по колонкам, а разбирает
+`metadata` в колонки единственный табличный писатель (у агента —
+`_insert_batch`, у платформы — операция `log_events`).
 
 | Поле | Смысл | Читаемо как |
 |---|---|---|
 | `timestamp` | момент **записи** (сброс батча, ставит база) | `ORDER BY timestamp` |
-| `metadata->>'occurred_at'` | момент **события**, ISO-8601 UTC | `occurred_at::timestamptz` |
-| `metadata->>'seq'` | тот же момент в наносекундах — **ключ порядка** | `ORDER BY (metadata->>'seq')::bigint, id` |
+| `occurred_at` (колонка) | момент **события**, то же мгновение, что `seq` | `ORDER BY occurred_at`, окно времени |
+| `seq` (колонка) | тот же момент в наносекундах — **ключ порядка** | `ORDER BY seq, id` |
+| `metadata->>'occurred_at'` | читаемая копия момента (тот же мгновенный снимок) | только для чтения глазами |
+| `metadata->>'seq'` | читаемая копия ключа (та же величина) | только для чтения глазами |
 
 Ключ порядка выводится из системных часов, а не из локального счётчика
 процесса: журнал пишут **два** процесса — агент и отдельный subprocess
@@ -284,41 +307,50 @@ PG→DuckDB sync-путь пишет события (`sync_service_started`,
 процесса порядок строго монотонен: пол `_SEQ_FLOOR` не даёт часам уйти
 назад (шаг NTP) перевернуть порядок двух событий.
 
-Момент пишется в `metadata`, а не в колонку `timestamp`, потому что обе
-колонки заполняют два писателя, а платформенная операция `log_events` пишет
+`occurred_at` пишется не в колонку `timestamp`, потому что обе колонки
+заполняют два писателя, а платформенная операция `log_events` пишет
 в `timestamp` `now()` в SQL
 (`mcp-platform/servers/enterprise/capabilities/data/service/main.py`).
 Если бы агент писал туда момент события, одна колонка означала бы разное в
 зависимости от того, кто её заполнил, и читатель не смог бы это отличить.
-`metadata` оба писателя передают как есть, поэтому **DDL-миграция для этой
-реализации не требуется**.
+У `seq`/`occurred_at` такой неоднозначности нет: их ставит **писатель
+события** (агент — для своих строк, платформа — для своих), а база только
+принимает.
 
-**Это предварительный вариант, а не принятое решение.** Выбор между
-хранением в `metadata` и настоящими колонками ещё не измерен
-(`openspec/specs/logging-db/spec.md`, требование «Хранение момента события
-и идентификатора оборота выбрано замером плана запроса», блокер A). Пока
-выбран вариант (a):
+**Решение о хранении принято замером, а не вкусом.** На 48 979 боевых
+строках колонка выиграла 3 сценария из 3 (0.242 против 0.384 мс; 0.197
+против 0.275 мс; 5.548 против 5.905 мс). JSONB отпадает и по существу:
+`(metadata->>'occurred_at')::timestamptz` не индексируется (текст→timestamptz
+это STABLE, а индекс требует IMMUTABLE), а сортировка ISO-строкой не
+сохраняет хронологию (`…33.261Z` встаёт после `…33.261000Z`). Метод и
+цифры — `openspec/specs/logging-db/spec.md`, требование «Хранение момента
+события и идентификатора оборота выбрано замером плана запроса».
 
 - каноническое выражение порядка объявлено **ровно в одном месте** —
-  `db_logging_service.TURN_ORDER_BY_SQL`; читатели переиспользуют его, а не
-  вписывают заново (любое переписывание молча превращает индексное чтение в
-  полный скан 784 МБ таблицы);
-- **индексы по выражениям и DDL-миграция НЕ созданы** — они следствие
-  решения, которое замер может отменить; при выборе колонок выражение и все
-  его читатели обновляются в том же change;
-- отсутствие ключа порядка **определено и не молчит**: строки без `seq`
-  (включая `metadata IS NULL`) не попадают в порядок, а считаются
-  отдельным счётчиком — `db_logging_service.order_turn_rows()`;
+  `db_logging_service.TURN_ORDER_BY_SQL` (`seq, id`); читатели переиспользуют
+  его, а не вписывают заново (любое переписывание молча превращает
+  индексное чтение в полный скан 784 МБ таблицы);
+- колонки добавлены миграцией
+  `sql/migrations/V008__agent_gateway_logs_event_time_columns.sql` в порядке
+  «nullable → backfill → очистка строк без ключа → `SET NOT NULL»»; обратный
+  порядок ломает существующие строки;
+- **индексы под колонки ещё не созданы** — это отдельный заход и только
+  после backfill: индекс по колонке, в которой ключа ещё нет, бесполезен;
+- отсутствие ключа порядка **определено и не молчит**: строки с
+  `seq IS NULL` (включая `metadata IS NULL`) не попадают в порядок, а
+  считаются отдельным счётчиком — `db_logging_service.order_turn_rows()`.
+  После `NOT NULL` отсутствие ключа означает уже отказ записи партии, и
+  такой отказ обязан быть виден, а не растворяться в «всё в порядке»;
 - присутствие события признака источника: каждая строка агента несёт
   `metadata.source = "nanobot"`.
 
 Оборот читается по `request_id`:
 
 ```sql
-SELECT event_type, metadata->>'occurred_at', metadata->>'latency_ms'
+SELECT event_type, occurred_at, seq, metadata->>'latency_ms'
 FROM agent_gateway_logs
 WHERE request_id = '<id>'
-ORDER BY (metadata->>'seq')::bigint, id;
+ORDER BY seq, id;
 ```
 
 **Прямой SQL INSERT в журнал запрещён** — это invariant архитектуры,
@@ -330,11 +362,19 @@ Producer'ы (с обязательным keyword-only DI через `db_logging_
 | Producer | События | DI |
 |---|---|---|
 | `ContextCompactionService` | `context_compacted` | параметр конструктора из composition root; событие приводит `lib/services/compaction_event_subscriber.py` |
-| `CacheLoadService` | `cache_load_started`, `cache_load_done` | kwarg `db_logging_service` |
-| `DuckDbCacheStore` | `sync_publish_ok`/`_failed`/`_empty`, `vector_preload_error`, `vector_index_build_failed` | kwarg `db_logging_service` |
-| `PreloadService` | `vector_index_preload_health` | kwarg `db_logging_service` |
-| `ApplicationContext._make_sync_services` | `sync_skipped_*` | inline `try_log_event` |
 | `DatabaseLoggingHook` (AgentLoop) | `agent.started`/`agent.completed`/`agent.failed`, `llm.requested`/`llm.completed`, `tool_call`/`tool_result`/`llm_call`/`run_finished`/`turn_failed` | kwarg `db_logging_service` |
+| `PostgresChannel` | `channel_poll_error` / `channel_lease_error` / `channel_unstick_error` | kwarg `db_logging_service` (через `ChannelFactory`) |
+| `RuntimeEventsSubscriber` | turn-метрики runtime-событий nanobot | kwarg `db_logging_service` |
+| `DbLoggingBus` | входящие/исходящие сообщения шины + регистрация контекста вопроса | kwarg `db_logging_service` (через `_create_bus`) |
+
+Снятый локальный кэш унёс с собой и своих producer'ов: события `cache_load_*`,
+`sync_publish_*`, `sync_skipped_*`, `vector_preload_error`,
+`vector_index_build_failed` и `vector_index_preload_health` агент больше не
+пишет — ни одного из этих имён в коде не осталось. `cache_load_started` и
+`cache_load_done` публикует теперь загрузчик снимка на платформе
+(`mcp-platform/libs/enterprise_data/loader.py`, `SnapshotLoadService`) через
+подключённый приёмник событий; имена сохранены намеренно, чтобы один словарь
+журнала не разошёлся на два.
 
 Имена `agent.*`/`llm.*` взяты из словаря платформы
 (`mcp-platform/libs/enterprise_common/eventing/types.py`): агент ходит к
@@ -383,57 +423,45 @@ is out of scope».
 терминал gateway (мгновенно). Два источника «тихих» сбоев подняты на
 этот уровень:
 
-**1. FAISS-preload при старте** (`DuckDbCacheStore.preload_indexes`).
-Раньше ошибка чтения списка source была беззвучной (`return []`), а
-провал построения одного индекса — тихим `continue`: gateway печатал
-dim-«нет данных в кэше», неотличимо от реального отсутствия данных.
-Теперь `preload_indexes`:
+**1. Векторные индексы — состояние видно на старте без прогона.**
+Агентского прогона FAISS при старте больше нет: снятый `preload_indexes`
+принадлежал локальному кэшу агента, а capability `vectors` прогревает индекс
+лениво, по первому векторному запросу. Наблюдаемость переехала на другую
+сторону той же границы:
 
-* собирает ошибки в `self._preload_errors` (аксессор
-  `preload_errors()`; сбрасывается при каждом вызове);
-* пишет события `vector_preload_error` (ошибка чтения `source` из
-  таблицы хранения, `index_name=None`) и `vector_index_build_failed`
-  (ошибка построения конкретного индекса) через
-  `DbLoggingService.try_log_event(...)` — в журнал; при недоступности
-  сервиса — no-op + WARNING внутри `try_log_event`; дополнительно
-  дублирует warning в терминал (`logger.warning`, stdlib-logging).
-* `PreloadService.preload_vector_indexes` логирует
-  `logger.warning` (loguru) при собственном исключении вместо тихого
-  `None`;
-* `gateway._preload_and_report` по `cache_store.preload_errors()`
-  печатает красный список ошибок построения вместо/вместе
-  dim-строки «нет данных».
+* `list_indexes` у capability `vectors` отдаёт состояние каждого индекса
+  (`missing` / `building` / `ready` / `error`), поэтому «индекс не поднят» —
+  это поле в ответе, а не пустая выдача;
+* на старте gateway выполняет по одной дешёвой пробной операции на capability
+  (`gateway._report_enterprise_mcp_health`): `vectors → list_indexes`,
+  `data → schema_check`, `audit → list_scripts`. По индексам печатается
+  `N/M ready` с перечислением неготовых (`_indexes_line`), то есть расхождение
+  «объявлено, но не собрано» видно на старте, а не после первого поиска;
+* отказ **одной** пробы не роняет старт — платформа отвечает, а неполнота
+  отдельного capability разбирается отдельно. Отказ рукопожатия, наоборот,
+  печатается вердиктом и уходит в `GatewayRunner` (перезапуск с backoff).
 
 **1.1. Health-summary declared vs runtime (vector index discovery)**.
-До этого — даже при полностью diverged состоянии (объявил
-новый индекс в `gateway.vector.index.indexes.*`, но не собрал blob
-через `tools/build_vectors.py`, удалённой 2026-10-01 вместе с кластером)
-«vector index … loaded» через fallback-цепочку
-(`store → vdb → cache → files`), без какого-либо указания, что на
-самом деле расхождение есть. Тогда `PreloadService.preload_vector_indexes`
-после прогона считает явное расхождение между **declared** (JSON,
-`config.json::gateway.vector.index.indexes.*`) и **runtime** (снимок DuckDB,
-таблица-хранилище `platform.json → vectors.storage_table`,
-`mcp-platform/libs/vectors/runtime.py::list_runtime_vector_indexes()`), классифицируя каждое
-имя индекса в одну из категорий:
+Прежний агентский `PreloadService.preload_vector_indexes` после прогона считал
+явное расхождение между **declared** (объявлением индексов) и **runtime**
+(снимком) и печатал его в stderr. Класс `PreloadService` на платформу не
+портирован намеренно: в capability вызова на старте нет и быть не должно
+(ленивый прогрев), а прежним вызывающим был агентский процесс. Остались
+чистые функции, весь диагностический смысл которых в них и состоит:
 
-  * `missing` — объявлен в JSON, но не найден в снапшоте-хранилище;
-  * `orphan` — есть строки в снапшоте-хранилище, но индекс не объявлен в JSON;
-  * `stale` — строки есть, но сигнатура не совпадает с текущим cfg
-    (помечается как `STALE` или `INVALID`).
+  * `compute_index_health(declared, loaded, runtime_rows)` классифицирует
+    каждое имя индекса: `missing` — объявлено, но в снимке нет; `orphan` —
+    строки в снимке есть, а объявления нет; `stale` — строки есть, но
+    сигнатура не совпадает с текущим объявлением;
+  * `format_index_health_lines(...)` собирает из этого текстовую сводку
+    (без ANSI — гарантии у MCP-клиентов нет).
 
-Сводка печатается в **stderr** (multi-line, без ANSI) и пишется в
-`agent_gateway_logs` через `DbLoggingService.try_log_event`
-(event_type `vector_index_preload_health`, level=`WARN` если есть
-divergence, иначе `INFO`). Ошибки любого этапа (PG недоступна, config
-parse failed) глотаются — summary **никогда** не валит startup gateway.
-
-Чистая логика вычисления была в pure-функции `compute_index_health()`
-в `preload_service.py`, отделена от I/O и эмита; тестируема без mock'ов
-PG/JOBS. **Состояние на 2026-10-01:** сам `preload_service.py` и весь
-кластер снимка удалены из агента; функция живёт в
-`mcp-platform/libs/vectors/preload.py`, её страж перенесён на платформу —
-`mcp-platform/tests/test_vectors_index_health.py` (5 тестов, 5/5 мутаций).
+  Живут они в `mcp-platform/libs/vectors/preload.py`, состояние снимка читает
+  `mcp-platform/libs/vectors/runtime.py::list_runtime_vector_indexes()`, а
+  страж перенесён на платформу —
+  `mcp-platform/tests/test_vectors_index_health.py` (5 тестов, 5/5 мутаций).
+  Вызывающей стороны в runtime у них нет: единственные потребители —
+  платформенные тесты и ре-экспорт из `libs/vectors`.
 
 **2. PostgresChannel — циклы опроса БД.** Ошибки
 `poll_inbound`/`_poll_once`, `_lease_loop`, `_unstick_loop` раньше шли
