@@ -23,7 +23,7 @@
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.agent_session_messages (
-    id                BIGSERIAL,
+    id                BIGSERIAL NOT NULL,
     replica_id        TEXT NOT NULL,
     session_key       TEXT NOT NULL,
     seq               INT NOT NULL,
@@ -42,28 +42,54 @@ CREATE TABLE IF NOT EXISTS public.agent_session_messages (
     _command          BOOLEAN,
     _channel_delivery BOOLEAN,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id),
-    CONSTRAINT agent_session_messages_replica_session_seq_idx
-        UNIQUE (replica_id, session_key, seq)
+    PRIMARY KEY (replica_id, session_key, seq)
 );
 
--- КЛЮЧ РАСПРЕДЕЛЕНИЯ НЕ ОБЪЯВЛЕН, и это не пропуск.
---
--- Greenplum 6 разрешает на хеш-распределённой таблице ровно один
+-- Ключ — составной, и это не выбор вкуса, а следствие ограничения
+-- Greenplum 6: на хеш-распределённой таблице допустим ровно один
 -- UNIQUE/PRIMARY KEY, и он обязан включать все столбцы распределения
--- (Summary of Greenplum Features, Greenplum 6). Здесь их два — PRIMARY KEY
--- (id) и UNIQUE (replica_id, session_key, seq) — поэтому на Greenplum 6.5
--- таблица в таком виде не создаётся вовсе, независимо от клаузы
--- распределения.
+-- (Summary of Greenplum Features, Greenplum 6). Прежних было два — PK (id)
+-- и UNIQUE (replica_id, session_key, seq) — и такая таблица на Greenplum 6.5
+-- не создавалась вовсе.
 --
--- Это следствие выбранной схемы зеркала, а не вопрос синтаксиса: закрыть
--- правкой совместимости нельзя, нужно решение, какой из двух ключей
--- остаётся. Пока его нет, файл применяется только там, где оба ключа
--- допустимы. Страж tests/test_runtime_environment_contract.py держит эту
--- позицию в карантине и не даст ей молча разойтись с кодом.
+-- Уникальность по составному ключу держит писатель, а не ограничение в БД.
+-- Оно и раньше было избыточным: mirror_session удаляет все сообщения сессии и
+-- вставляет заново с seq = 0…N-1, то есть дубль не может возникнуть в
+-- принципе. Проверять это ограничением было второй проверкой одного и того же
+-- факта — ценой невозможности создать таблицу.
+--
+-- id остаётся обычной колонкой с последовательностью: писатель её не
+-- передаёт (в списке колонок mirror_session её нет), а для разбора
+-- неустойчивых позиций нужна именно она — seq после сдвига нумерации при
+-- консолидации меняет смысл.
+--
+-- Распределение — по (replica_id, session_key), то есть подмножество ключа,
+-- как требует Greenplum, и ровно как у agent_session_meta. Все сообщения
+-- сессии ложатся на тот же сегмент, что и её метаданные, поэтому
+-- восстановление сессии не собирает данные со всех сегментов. Альтернатива
+-- (replica_id, session_key, seq) разложила бы сообщения одной сессии по
+-- разным сегментам: запись стала бы параллельнее, а чтение — сборкой со
+-- всего кластера, а читают сессию целиком.
+--
+-- Шаг ограждён проверкой pg_dist_partition: файлы из sql/ применяются и к
+-- PostgreSQL 13.22, где SET DISTRIBUTED BY не существует.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_session_messages
+                 SET DISTRIBUTED BY (replica_id, session_key)';
+    END IF;
+END
+$distribution$;
 
 COMMENT ON TABLE  public.agent_session_messages IS 'Холодное зеркало сообщений сессии. Перезаписывается целиком при синхронизации, не append-only. Источник истины — upstream JSONL-стор SessionManager.';
-COMMENT ON COLUMN public.agent_session_messages.id                IS 'PK строки. Суррогатный: настоящий ключ строки — (replica_id, session_key, seq).';
+COMMENT ON COLUMN public.agent_session_messages.id                IS 'Суррогатный номер строки, ключом не является. Нужен для разбора неустойчивых позиций: seq меняет смысл при сдвиге нумерации после консолидации, а этот номер остаётся.';
 COMMENT ON COLUMN public.agent_session_messages.replica_id        IS 'Реплика-владелец строки; часть ключа наравне с session_key. У сессии, общей для двух реплик, у каждой свои сообщения.';
 COMMENT ON COLUMN public.agent_session_messages.session_key       IS 'FK-логически на agent_session_meta (replica_id, session_key). FK не объявлен: каскад выполняет писатель.';
 COMMENT ON COLUMN public.agent_session_messages.seq               IS 'Позиция сообщения в текущем списке сессии (0, 1, 2, ...). Не устойчивый идентификатор: после консолидации позиции сдвигаются.';

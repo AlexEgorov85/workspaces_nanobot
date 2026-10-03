@@ -14,7 +14,7 @@
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.agent_session_messages_test (
-    id                BIGSERIAL,
+    id                BIGSERIAL NOT NULL,
     replica_id        TEXT NOT NULL,
     session_key       TEXT NOT NULL,
     seq               INT NOT NULL,
@@ -33,19 +33,31 @@ CREATE TABLE IF NOT EXISTS public.agent_session_messages_test (
     _command          BOOLEAN,
     _channel_delivery BOOLEAN,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id),
-    CONSTRAINT agent_session_messages_test_replica_session_seq_idx
-        UNIQUE (replica_id, session_key, seq)
+    PRIMARY KEY (replica_id, session_key, seq)
 );
 
--- КЛЮЧ РАСПРЕДЕЛЕНИЯ НЕ ОБЪЯВЛЕН, и это не пропуск. Greenplum 6 разрешает на
--- хеш-распределённой таблице ровно один UNIQUE/PRIMARY KEY, и он обязан
--- включать все столбцы распределения; здесь их два, поэтому на Greenplum 6.5
--- таблица не создаётся. См. подробности в боевом файле
--- create_public_agent_session_messages.sql и в каноне среды.
+-- Ключ и распределение — как в боевом файле: Greenplum 6 допускает на
+-- хеш-распределённой таблице ровно один UNIQUE/PRIMARY KEY, поэтому
+-- составной ключ объявлен единственным, а уникальность по нему держит
+-- писатель. Подробности и обоснование выбора распределения — в
+-- create_public_agent_session_messages.sql.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_session_messages_test
+                 SET DISTRIBUTED BY (replica_id, session_key)';
+    END IF;
+END
+$distribution$;
 
 COMMENT ON TABLE  public.agent_session_messages_test IS 'Test-профиль: холодное зеркало сообщений сессии. Структурный клон public.agent_session_messages.';
-COMMENT ON COLUMN public.agent_session_messages_test.id                IS 'PK строки. Суррогатный: настоящий ключ — (replica_id, session_key, seq).';
+COMMENT ON COLUMN public.agent_session_messages_test.id                IS 'Суррогатный номер строки, ключом не является. Нужен для разбора неустойчивых позиций: seq меняет смысл при сдвиге нумерации после консолидации, а этот номер остаётся.';
 COMMENT ON COLUMN public.agent_session_messages_test.replica_id        IS 'Реплика-владелец строки; часть ключа наравне с session_key.';
 COMMENT ON COLUMN public.agent_session_messages_test.session_key       IS 'FK-логически на agent_session_meta_test (replica_id, session_key).';
 COMMENT ON COLUMN public.agent_session_messages_test.seq               IS 'Позиция сообщения в текущем списке сессии. Не устойчивый идентификатор.';
