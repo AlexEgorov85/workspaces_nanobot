@@ -146,14 +146,12 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   (например, 45 сек при интервале 30 сек из-за большого
   workspace или медленного PG)
 - **THEN** следующий цикл НЕ запускается параллельно:
-  `SessionColdSyncService` использует внутренний
-  `threading.Lock` (sync-код, не async) вокруг
-  `_sync_cycle()`.
-- **AND** если lock уже занят — `_sync_loop` пропускает
-  итерацию, инкрементирует метрику
-  `cycles_skipped_lock_busy`.
-- **AND** `start()` через `_lifecycle.shutdown` ждёт
-  завершения текущего цикла (через `lock.acquire()`).
+  `SessionColdSyncService` использует `asyncio.Lock` вокруг тела
+  цикла (сервис — задача event loop, а не daemon-поток, потому
+  что клиент платформы привязан к своему loop'у).
+- **AND** остановка сервиса ждёт завершения текущего цикла:
+  `stop()` через `_lifecycle.shutdown` дожидается текущей
+  итерации, иначе корутина потерялась бы молча.
 - **AND** накопление лага предотвращается через
   экспоненциальный backoff при ошибках PG: если
   предыдущий цикл упал, задержка до следующего =
@@ -167,8 +165,6 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   `SessionColdSyncService.get_stats() -> dict`:
   - `cycles_total`: количество выполненных циклов;
   - `cycles_failed_total`: количество упавших циклов;
-  - `cycles_skipped_lock_busy`: циклов пропущено из-за занятого
-    advisory-lock (другая реплика — лидер);
   - `cycles_skipped_pool_busy`: циклов пропущено из-за исчерпания
     пула (D-Pool.5);
   - `consecutive_failures`: счётчик подряд упавших;
@@ -200,10 +196,27 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 
 ### Requirement: Multi-instance изоляция через replica_id в ключе
 
-При нескольких репликах gateway зеркало разграничивается СОСТАВНЫМ
-первичным ключом `(replica_id, session_key)`, а не соглашением в коде.
+При нескольких репликах gateway зеркало разграничивается СОСТАВНЫМИ
+первичными ключами, а не соглашением в коде.
 `SessionColdSyncService` SHALL передавать `replica_id` в каждую операцию
 зеркала; цикл очистки SHALL ограничиваться своей репликой.
+
+Ключи таблиц:
+
+- `agent_session_meta` — `PRIMARY KEY (replica_id, session_key)`;
+- `agent_session_messages` — `PRIMARY KEY (replica_id, session_key, seq)`.
+
+> **Поправка 2026-10-03.** Ключ сообщений изменён. Прежде было два
+> уникальных ключа — `PRIMARY KEY (id)` и
+> `UNIQUE (replica_id, session_key, seq)`, — а Greenplum 6 допускает на
+> хеш-распределённой таблице ровно один `UNIQUE`/`PRIMARY KEY` и требует,
+> чтобы он включал все столбцы распределения. Такая таблица не создавалась
+> вовсе. Решение владельца: составной ключ объявлен единственным,
+> уникальность по нему держит писатель — `mirror_session` удаляет все
+> сообщения сессии и вставляет заново с `seq = 0…N-1`, поэтому дубль на
+> одну позицию невозможен по построению. `id` остался обычной колонкой:
+> он нужен для разбора неустойчивых позиций, потому что `seq` меняет
+> смысл при сдвиге нумерации после консолидации.
 
 > **Заменяет leader-election на advisory lock.** Предыдущая редакция требовала
 > `pg_try_advisory_xact_lock` на весь цикл. Требование снято: xact-lock живёт
@@ -240,61 +253,46 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   «потому что всё удалили», а потому что не подмонтирован. Уборка
   пропускается с записью `cleanup_guarded_total`.
 
-При наличии нескольких реплик gateway `SessionColdSyncService`
-SHALL использовать `pg_try_advisory_xact_lock(hashtext(
-'storage_hybridization_session_cold_sync'))` для автоматического
-leader-election в рамках одной транзакции sync-цикла: ровно одна
-реплика получает lock и выполняет sync, остальные пропускают
-цикл. Это устраняет необходимость внешней координации
-(Kubernetes labels, deployment manifests).
+Leader-election между репликами **не применяется**, и это не недосмотр.
+
+> **Изменение модели lock (2026-10-03).** Спека требовала
+> `pg_try_advisory_xact_lock(hashtext('storage_hybridization_session_cold_sync'))`
+> для выбора лидера. Требование **снято**: цикл состоит из нескольких
+> вызовов платформы, и одной транзакции он не образует — lock физически не
+> переживает границу между вызовами. Взамен разграничение сделано данными:
+> `replica_id` в первичном ключе, так что реплики пишут и убирают **свои**
+> строки и не конкурируют за общую. Leader-election поверх этого был бы
+> второй, избыточной проверкой того же факта.
+>
+> Что осталось в коде: локальный `asyncio.Lock` на цикл — он не допускает
+> наложения итераций **внутри одной реплики**, и это другая задача.
+> Счётчик `cycles_skipped_lock_busy` удалён вместе с lock'ом: он был
+> мёртвым, потому что пути, который его наполнял, не существовало.
 
 Дополнительный escape hatch: `gateway.session_cold_sync.enabled=false`
 (default `true`) — sync-сервис не запускается вообще
 (для реплик, которые по политике не должны синхронизировать).
 
-> **Изменение модели lock:** первоначальная версия спеки
-> использовала session-scoped `pg_try_advisory_lock` с явным
-> `pg_advisory_unlock` в `finally`. Реальная имплементация и
-> дизайн `storage-hybridization` D-Pool перешли на **per-transaction**
-> (`pg_try_advisory_xact_lock`) — lock автоматически
-> освобождается на COMMIT/ROLLBACK, без отдельного
-> `pg_advisory_unlock`, без долгоживущего соединения.
+#### Scenario: реплики не конкурируют за одну и ту же строку
 
-#### Scenario: Leader-election через pg_try_advisory_xact_lock
+- **WHEN** две реплики gateway работают одновременно
+- **THEN** каждая пишет и убирает **только** строки со своим
+  `replica_id`, а не соревнуется за общую строку сессии
+- **AND** leader-election SHALL NOT применяться: отдельного lock'а нет,
+  а разграничение обеспечено составным первичным ключом
+- **AND** наложение итераций **внутри** одной реплики SHALL
+  предотвращаться локальным `asyncio.Lock`
 
-- **WHEN** две реплики gateway стартуют одновременно и
-  первая итерация `_sync_loop` запускается в обеих
-- **THEN** каждая реплика вызывает
-  `SELECT pg_try_advisory_xact_lock(hashtext('storage_hybridization_session_cold_sync')::bigint)`
-  в начале цикла (через `utils.db.transaction()`, в той же
-  транзакции, где идёт sync).
-  - Явный `::bigint` cast — `hashtext()` возвращает
-    `int4`; `pg_try_advisory_xact_lock` имеет две перегрузки
-    `(bigint)` и `(int, int)`. Cast делает выбор перегрузки
-    детерминированным и устраняет implicit cast.
-  - Имя ключа `storage_hybridization_session_cold_sync`
-    namespace-уникальное (с префиксом change'а), чтобы не
-    пересечься с другими advisory-lock'ами в проекте.
-- **AND** только одна реплика получает `True` (lock acquired);
-  остальные получают `False` (lock already held).
-- **AND** реплика с lock'ом выполняет `_sync_batch()` в той же
-  транзакции.
-- **AND** остальные пропускают цикл и инкрементируют
-  метрику `cycles_skipped_lock_busy`.
-- **AND** lock автоматически освобождается на COMMIT/ROLLBACK
-  — никакого отдельного `pg_advisory_unlock` не требуется.
+#### Scenario: Crash реплики
 
-#### Scenario: Crash реплики-держателя lock
-
-- **WHEN** реплика-держатель `pg_try_advisory_xact_lock` падает
-  (segfault, kill -9, network partition)
-- **THEN** транзакция ROLLBACK'ится автоматически при разрыве
-  соединения; xact-scoped advisory lock освобождается
-  (документированное поведение PostgreSQL для transaction
-  locks).
-- **AND** следующая реплика захватывает lock в следующем
-  цикле и продолжает sync. Время обнаружения —
-  не более `sync_interval_sec`.
+- **WHEN** реплика, ведущая sync, падает (segfault, kill -9, network
+  partition)
+- **THEN** разграничение реплик SHALL сохраняться без всякой
+  координации: у каждой свои строки по `replica_id`, поэтому падение одной
+  реплики не оставляет занятых блокировок и не мешает другой
+- **AND** потеря реплики SHALL быть видна как осиротевшие строки, а её
+  очистка SHALL зависеть от `missing_cycles` порога, а не от
+  освобождения какого-либо lock'а
 
 ### Requirement: Stale-detection и reverse-lag detection
 
@@ -621,16 +619,16 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 - **AND** НЕ создаёт собственный `SimpleConnectionPool` /
   `psycopg2.pool` / `connect()` / `create_pool`.
 
-#### Scenario: Advisory lock — per-transaction (xact-scoped)
+#### Scenario: Разграничение реплик — данными, а не lock'ом
 
 - **WHEN** `SessionColdSyncService` начинает sync-цикл
-- **THEN** он вызывает
-  `SELECT pg_try_advisory_xact_lock(hashtext('storage_hybridization_session_cold_sync')::bigint)`
-  внутри одной транзакции.
-- **AND** если результат `False` — цикл пропускается
-  (`cycles_skipped_lock_busy += 1`).
-- **AND** lock автоматически освобождается на COMMIT/ROLLBACK
-  (xact-scoped) — никакого долгоживущего соединения.
+- **THEN** он SHALL NOT брать advisory-lock: блокировки не
+  переживают границу между вызовами платформы, из которых
+  состоит цикл
+- **AND** разграничение SHALL обеспечиваться `replica_id` в
+  первичном ключе, а не блокировкой
+- **AND** внутри одной реплики наложение итераций SHALL
+  предотвращаться `asyncio.Lock`
 
 #### Scenario: Пул исчерпан — цикл пропущен
 
