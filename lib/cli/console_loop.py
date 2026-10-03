@@ -479,6 +479,12 @@ async def run_repl(
                 console.print("\nGoodbye!")
                 break
     finally:
+        # ``agent.stop()`` — СНАЧАЛА, до любых ожиданий. ``agent.run()`` —
+        # это ``while self._running`` в библиотеке, и единственное место,
+        # которое сбрасывает флаг, — синхронный ``stop()``. Если ждать
+        # ``bus_task`` раньше, цикл ждёт сам себя: ``/exit``, EOF и Ctrl-C
+        # не завершают процесс.
+        agent.stop()
         outbound_task.cancel()
         try:
             await outbound_task
@@ -488,7 +494,6 @@ async def run_repl(
             await asyncio.gather(bus_task, return_exceptions=True)
         except Exception:
             pass
-        agent.stop()
         if bg is not None and not bg.done():
             bg.cancel()
         flushed = agent.sessions.flush_all()
