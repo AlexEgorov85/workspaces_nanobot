@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS public.agent_predefined_scripts (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (name)
 )
-DISTRIBUTED RANDOMLY;
+-- Распределение по столбцу первичного ключа. `DISTRIBUTED RANDOMLY`, стоявшее
+-- здесь раньше, было неверно на обоих движках сразу: на Greenplum первичный
+-- ключ на случайно распределённой таблице не создаётся, а на обычном
+-- PostgreSQL такой клаузы в синтаксисе нет вовсе.
+DISTRIBUTED BY (name);
 
 COMMENT ON TABLE  public.agent_predefined_scripts IS 'Реестр предопределённых SQL-скриптов навыка audit_analyzer. Источник истины для режима --mode predefined.';
 COMMENT ON COLUMN public.agent_predefined_scripts.name             IS 'PK — уникальное имя скрипта. Используется в CLI: --script <name>. Должно быть валидным идентификатором (^[a-z][a-z0-9_]*$).';
