@@ -866,7 +866,7 @@
           "flush_interval_sec": 5.0,
           "batch_size": 100,
           "queue_maxsize": 10000,
-          "min_level": "INFO",
+          "min_level": "DEBUG",
           "dialect": "postgres",
           "connect_backoff_sec": 1.0,
           "connect_backoff_max_sec": 60.0,

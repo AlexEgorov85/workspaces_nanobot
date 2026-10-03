@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
+from libs.enterprise_common.eventing.models import DEFAULT_MIN_LEVEL
 from libs.enterprise_common.execution.factory import build_execution_layer
 from libs.enterprise_common.loader import build_server, load_registry
 from libs.enterprise_common.registry import ToolRegistry
@@ -70,6 +71,11 @@ def build(
         settings,
         session_root=session_root
         or SERVER_ROOT / (settings.get("ENTERPRISE_EXEC_SESSION_ROOT") or ".sessions"),
+        # Порог журнала — явный, как и всё остальное в заготовке. Настоящий
+        # сервер получает его от агента флагом запуска; здесь оператора нет, и
+        # забытый аргумент вернул бы писателю событий его собственный дефолт,
+        # то есть заготовка учила бы создавать второй порог в новом сервере.
+        min_level=DEFAULT_MIN_LEVEL,
     )
     transport = build_server(
         registry,

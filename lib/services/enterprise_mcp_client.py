@@ -513,6 +513,44 @@ class EnterpriseMcpClient:
         return env
 
 
+#: Путь к порогу журнала в конфигурации агента. Объявлен один раз и на
+#: чтение, и на сверку: писатель журнала агента
+#: (``lib/core/application_context.py``) читает **этот же** ключ, и страж
+#: ``tests/test_journal_threshold_reaches_mcp.py`` падает, если чтения
+#: разъедутся. Ключ поднят в корень ``SETTINGS`` из ``gateway.agent`` функцией
+#: ``config._lift_agent_sections`` — читать надо ``SETTINGS["logging"]``, а не
+#: ``SETTINGS["gateway"]["agent"]["logging"]``: второго пути к тому же значению
+#: быть не должно.
+JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
+
+#: Имя флага запуска, которым порог доезжает до платформы. Литерал с обеих
+#: сторон процесса, как ``--profile``: общего модуля у агента и платформы нет,
+#: а объявлять флаг в третьем месте — значит завести ещё одно объявление.
+LOG_MIN_LEVEL_FLAG = "--log-min-level"
+
+
+def _journal_min_level(settings: Any) -> str:
+    """Порог журнала из ``config.json → gateway.agent.logging.db.min_level``.
+
+    Значение уходит строкой **как есть**: разбором уровня занимается
+    платформа, где шкала объявлена один раз
+    (``libs/enterprise_common/eventing/models.py``), и незнакомый уровень там
+    роняет старт с названным значением. Тихая замена на ``INFO`` здесь
+    переключила бы платформу на другую политику молча — ровно то, чем
+    кончается любой откат «на всякий случай».
+
+    Пустая строка — «флага нет»: платформа пишет всё, как сейчас.
+    """
+    if settings is None:
+        return ""
+    node: Any = settings
+    for key in JOURNAL_MIN_LEVEL_PATH:
+        node = node.get(key) if hasattr(node, "get") else None
+        if node is None:
+            return ""
+    return str(node).strip()
+
+
 def client_from_settings(
     settings: Any, *, db_logging_service: Any = None
 ) -> EnterpriseMcpClient | None:
@@ -526,6 +564,12 @@ def client_from_settings(
     не вычисляет. Второе вычисление того же пути или того же списка разошлось
     бы с первым при первой же правке — а хуже того, окружение приоритетнее
     файла, и такой «экспорт» молча побеждал бы объявление платформы.
+
+    Из настроек агента платформа получает ровно два значения: имя контура
+    (``--profile``) и порог журнала (``--log-min-level``). Оба — при старте,
+    оба читаются из ключей, которые платформа не объявляет, и оба приходят
+    **как есть**: разбор и отказ на незнакомом значении — на стороне, где
+    шкала объявлена.
     """
     section = settings.get("enterprise_mcp") if settings is not None else None
     if not section:
@@ -536,15 +580,24 @@ def client_from_settings(
     if not command:
         return None
     args = list(section.get("args") or [])
-    # Агент передаёт платформе ТОЛЬКО имя контура, и только когда контур
-    # отличается от базы. Значения имён таблиц не передаются никогда: они
-    # объявлены в ``mcp-platform/platform.json → profiles.<имя>``, и значение,
-    # присланное вызывающей стороной, сделало бы вход в данные агента
-    # независимым от его конфигурации (ровно тот класс дефекта, который
-    # чинили в фазе 9 — «окружение приоритетнее файла»).
+    # Агент передаёт платформе имя контура (и только когда контур отличается
+    # от базы) и НЕ значения имён таблиц: те объявлены в
+    # ``mcp-platform/platform.json → profiles.<имя>``, и значение, присланное
+    # вызывающей стороной, сделало бы вход в данные агента независимым от его
+    # конфигурации (ровно тот класс дефекта, который чинили в фазе 9 —
+    # «окружение приоритетнее файла»).
     profile = str((settings.get("profile") or "") if settings is not None else "").strip()
     if profile and profile != "prod":
         args += ["--profile", profile]
+    # Порог журнала — тот же ключ, что у писателя агента, и тоже ОДИН раз при
+    # старте. В ``params._meta`` каждого вызова он не едет: значение,
+    # перечитываемое на каждый вызов, способно разъехаться между вызовами
+    # одного оборота, а вызывающая сторона получила бы право решать, сколько
+    # логировать платформа, — а это её собственные события (``tool.*``,
+    # ``quality.check``), и подменять им политику вызывающего нельзя.
+    min_level = _journal_min_level(settings)
+    if min_level:
+        args += [LOG_MIN_LEVEL_FLAG, min_level]
     return EnterpriseMcpClient(
         command=str(command),
         args=args,

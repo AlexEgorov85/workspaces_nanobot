@@ -310,7 +310,11 @@ class TestFromSettings:
         if profile == "prod":
             assert "--profile" not in args
         else:
-            assert args[-2:] == ["--profile", profile]
+            # Значение ищется по имени флага, а не по позиции: в argv после
+            # ``--profile`` дописываются и другие значения, объявленные агентом
+            # (``--log-min-level``), и проверка хвоста перестала бы проверять
+            # проводку, а не порядок аргументов.
+            assert args[args.index("--profile") + 1] == profile
 
     def test_description_carries_no_secret(self) -> None:
         """Описание попадает в баннер запуска — DSN там быть не должно."""

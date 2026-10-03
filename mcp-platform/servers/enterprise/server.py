@@ -246,16 +246,32 @@ def _declared_tables(settings: Settings) -> tuple[str, ...]:
     task = _task_table(settings)
     if task:
         tables.add(".".join(task))
+    # Зеркало сессий — тоже объявлено платформой и ею же используется, поэтому
+    # проверке подлежит. В отличие от очереди его имена профилем не
+    # перекрываются, так что сверять их не с чем: проверка нужна не для
+    # согласования контуров, а чтобы отсутствие таблиц обнаружилось на старте,
+    # а не на первом же цикле синхронизации.
+    session = _session_tables(settings)
+    if session:
+        tables.add(".".join(session[0]))
+        tables.add(".".join(session[1]))
     return tuple(sorted(tables))
 
 
 def _build_container(
-    settings: Settings, capabilities: frozenset[str] | None = None
+    settings: Settings,
+    capabilities: frozenset[str] | None = None,
+    *,
+    log_min_level: str | None = None,
 ) -> ToolContainer:
     """Собрать контейнер: сервисы capability и конфигурация из настроек.
 
     Args:
         capabilities: какие capability поднимать. ``None`` — все.
+        log_min_level: порог журнала из ``--log-min-level``, как есть
+            (``None`` — флага не было). Разбор уровня и отказ на негодном
+            значении — в писателе журнала; здесь значение только доезжает до
+            него и не подменяется.
 
     Сборка не тяжелеет сама себя: сервисы и настройки читаются только для
     отобранных capability. Это не оптимизация, а условие корректности —
@@ -311,9 +327,7 @@ def _build_container(
         question_runs_table=_question_runs_table(settings),
         task_table=_task_table(settings),
         session_meta_table=session_tables[0] if session_tables else None,
-        session_messages_table=(
-            session_tables[1] if session_tables else None
-        ),
+        session_messages_table=session_tables[1] if session_tables else None,
         expected_tables=_declared_tables(settings),
         statement_timeout_ms=statement_timeout_ms,
         max_rows=max_rows,
@@ -323,6 +337,12 @@ def _build_container(
         # больше не ведёт, и решение «сколько живёт запись» принимает сервер.
         log_retention_days=int(settings.get("ENTERPRISE_LOG_RETENTION_DAYS")),
         purge_empty_outbound=bool(settings.get("ENTERPRISE_LOG_PURGE_EMPTY_OUTBOUND")),
+        # Порог журнала платформы — от агента, из того же ключа его
+        # конфигурации, что и у его писателя. Настройкой платформы он не
+        # является: объявлять его ещё и в ``platform.json`` значило бы
+        # завести второе место, и вопрос «каким уровнем пишется журнал» получил
+        # бы два ответа, разъехавшихся молча.
+        min_level=log_min_level,
         snapshot=_snapshot(settings),
     )
     services["data"] = data
@@ -506,6 +526,7 @@ def _log_table(settings: Settings) -> tuple[str, str]:
 def build(
     capabilities: frozenset[str] | None = None,
     profile: str | None = None,
+    log_min_level: str | None = None,
 ) -> tuple[Any, ToolRegistry, ToolContainer]:
     """Собрать сервер: настройки, пул, сервисы, реестр, транспорт.
 
@@ -515,6 +536,12 @@ def build(
             то есть prod). Имя присылает агент: он знает, в каком контуре
             запущен. Значения имён таблиц при этом не приходят — перекрывает
             объявление платформы (:func:`read_profile_overlay`).
+        log_min_level: порог журнала, присланный агентом из его
+            ``config.json → gateway.agent.logging.db.min_level`` (``None`` —
+            флага не было, платформа пишет всё). Применяют его оба писателя
+            журнала процесса — capability ``data`` и писатель слоя исполнения;
+            здесь значение только передаётся вниз, и разбор уровня живёт там,
+            где шкала объявлена один раз.
 
     Возвращает ``(server, registry, container)`` — чтобы тест мог проверить
     реестр, не поднимая транспорт.
@@ -531,17 +558,24 @@ def build(
         _check_dependencies(settings)
         _configure_dsn(settings)
         _apply_pool_settings(settings)
-    container = _build_container(settings, wanted)
+    container = _build_container(settings, wanted, log_min_level=log_min_level)
     registry = load_registry(
         CAPABILITIES_DIR, container, root=PLATFORM_ROOT, capabilities=wanted
     )
     # Слой исполнения собирается после реестра и получает приёмником журнала
     # сервис ``data``: второй писатель событий означал бы, что журнал читают
     # двое, а порядок записей определяет тот, кто быстрее.
+    #
+    # ``min_level`` — тот же порог, что и у ``DataService`` выше, из того же
+    # флага. Раньше он сюда не доезжал, и ``EventWriter`` резал внутренние
+    # события платформы по своему дефолту ``INFO``: при ``DEBUG`` в
+    # ``config.json`` внутренние события выпадали, а агентские проходили, то
+    # есть журнал писался по двум разным правилам.
     execution = build_execution_layer(
         settings,
         sink=_event_sink(container),
         session_root=PLATFORM_ROOT / _session_root(settings),
+        min_level=log_min_level,
     )
     # Платформенная операция чтения сохранённого результата. Здесь, а не через
     # загрузчик каталогов: файлами сессии владеет платформа, и страж
@@ -582,6 +616,7 @@ def build(
             settings.get("ENTERPRISE_LOG_QUESTION_RUNS_TABLE"),
             settings.get("ENTERPRISE_TASK_TABLE"),
         )
+    _log_journal_min_level(container)
     if wanted != _ALL_CAPABILITIES:
         logger.info("подняты только capability: %s", ", ".join(sorted(wanted)))
     _log_llm_settings(container.get("llm"))
@@ -616,6 +651,30 @@ def _session_root(settings: Settings) -> str:
     артефактов.
     """
     return str(settings.get("ENTERPRISE_EXEC_SESSION_ROOT") or ".sessions")
+
+
+def _log_journal_min_level(container: Any) -> None:
+    """Показать, каким порогом платформа пишет журнал.
+
+    Отдельная строка, а не часть баннера профиля: порог присылает агент и он
+    один на обе половины журнала, поэтому «применён ли он» — вопрос к
+    стартовому логу, а не к конфигурации платформы. Значение берётся у
+    писателя, а не из флага: строка должна показывать то, что действительно
+    применяется, иначе неизвестный уровень, тихо упавший в дефолт, был бы
+    виден как заданный.
+
+    Отсутствие порога — не ошибка и не «дефолт INFO»: флага может не быть
+    (сервер поднят без агента, тест), и тогда платформа пишет всё, как
+    сейчас. Отдельная формулировка нужна, чтобы это не читалось как
+    «применён INFO».
+    """
+    data = container.services.get("data")
+    stats = getattr(data, "stats", None)
+    min_level = stats()["min_level"] if callable(stats) else None
+    logger.info(
+        "порог журнала: %s",
+        min_level if min_level else "не задан — пишем всё",
+    )
 
 
 def _log_execution_settings(execution: Any) -> None:
@@ -801,7 +860,9 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     transport, _, container = build(
-        _capabilities_from_argv(argv), profile=_profile_from_argv(argv)
+        _capabilities_from_argv(argv),
+        profile=_profile_from_argv(argv),
+        log_min_level=_log_min_level_from_argv(argv),
     )
     # ``services``, а не ``get``: у процесса без ``data`` такого сервиса
     # нет, и строгий ``get`` уронил бы старт с «сервис не зарегистрирован»
@@ -861,6 +922,35 @@ def _profile_from_argv(argv: list[str] | None) -> str | None:
         if arg == "--profile" and index + 1 < len(args):
             return args[index + 1].strip() or None
         if arg.startswith("--profile="):
+            return arg.split("=", 1)[1].strip() or None
+    return None
+
+
+def _log_min_level_from_argv(argv: list[str] | None) -> str | None:
+    """Разобрать ``--log-min-level <уровень>``; без флага — писать всё.
+
+    Ручной разбор по той же причине и в том же виде, что у ``--profile`` и
+    ``--capabilities``: входная точка одна и живёт в потоке, где ``sys.argv``
+    принадлежит не серверу, а лишняя зависимость ради трёх строк разбора не
+    окупается.
+
+    Значение присылает агент — из ``config.json →
+    gateway.agent.logging.db.min_level``, того же ключа, что и у его
+    писателя журнала. Объявление порога потому и одно: платформа узнаёт о нём
+    один раз при старте и применяет у себя, а не получает в каждом вызове.
+
+    Возвращается строка **как есть**, включая негодную. Проверку уровня делает
+    писатель журнала (:class:`~servers.enterprise.capabilities.data.service.main.DataService`),
+    где шкала объявлена один раз, и незнакомое значение обязано уронить старт
+    с названным уровнем: откат к значению по умолчанию молча переключил бы
+    платформу на другую политику записи — ровно тот случай, из-за которого
+    неизвестный профиль тоже не откатывается к боевому.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    for index, arg in enumerate(args):
+        if arg == "--log-min-level" and index + 1 < len(args):
+            return args[index + 1].strip() or None
+        if arg.startswith("--log-min-level="):
             return arg.split("=", 1)[1].strip() or None
     return None
 

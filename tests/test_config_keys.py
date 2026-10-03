@@ -148,7 +148,12 @@ def _required_keys():
         ("logging.db.flush_interval_sec", 5.0),
         ("logging.db.batch_size", 100),
         ("logging.db.queue_maxsize", 10000),
-        ("logging.db.min_level", "INFO"),
+        # logging.db.min_level намеренно НЕ в этом списке: его значение —
+        # решение оператора, а этот страж фиксирует значения. Закрепив здесь
+        # конкретный уровень, страж запрещал бы менятьverbosity, то есть
+        # требование «уровень регулируется в одном месте, без правки кода»
+        # превратилось бы в «уровень нельзя поменять вообще». Принадлежность
+        # шкале проверяет test_min_level_is_a_declared_level ниже.
         ("logging.db.dialect", "postgres"),
         ("logging.db.connect_backoff_sec", 1.0),
         ("logging.db.connect_backoff_max_sec", 60.0),
@@ -235,6 +240,38 @@ class TestConfigFileShape:
         assert actual == expected_default, (
             f"Ключ {key_path!r}: ожидалось {expected_default!r}, "
             f"получено {actual!r}"
+        )
+
+    def test_min_level_is_a_declared_level(self):
+        """Порог обязан СУЩЕСТВОВАТЬ и быть уровнем общей шкалы.
+
+        Значение здесь намеренно не закреплено: порог — единственный
+        регулятор громкости журнала, и он по требованию заказчика меняется
+        правкой этого файла. Закрепить значение значило бы запретить менять.
+
+        Но «не закреплено» не значит «не проверено»: уровень обязан быть
+        членом шкалы, объявленной писателем, иначе опечатка дойдёт до него
+        и превратится в отказ — то есть в отказ поднять агента из-за одной
+        буквы в конфиге.
+
+        Шкала берётся у писателя агента, а не у платформы: платформенный
+        пакет недоступен из агентских тестов по границе процессов. Равенство
+        этой шкалы платформенной закреплено отдельно
+        (``tests/test_journal_level_canonical.py``), так что цепочка
+        «конфиг → шкала агента → шкала платформы» покрыта целиком.
+        """
+        from lib.services.db_logging_service import JOURNAL_LEVEL_RANKS
+
+        key_path = "logging.db.min_level"
+        assert key_path in self.flat, (
+            f"Ключ {key_path!r} отсутствует в config.json: без него порог "
+            f"нечем регулировать, и вернётся молчаливый дефолт"
+        )
+        actual = self.flat[key_path]
+        assert actual in JOURNAL_LEVEL_RANKS, (
+            f"{key_path}={actual!r} не входит в объявленную шкалу "
+            f"{tuple(JOURNAL_LEVEL_RANKS)}; писатель откажет событие, "
+            f"а не отбросит его"
         )
 
 

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..eventing.models import DEFAULT_MIN_LEVEL
 from ..eventing.writer import EventSink, EventWriter
 from ..session.artifact_store import ArtifactStore
 from ..session.workspace import SessionWorkspace
@@ -69,6 +70,7 @@ def build_execution_layer(
     sink: EventSink | None = None,
     executor: ThreadPoolExecutor | None = None,
     session_root: str | Path | None = None,
+    min_level: str | None = DEFAULT_MIN_LEVEL,
 ) -> ExecutionLayer:
     """Собрать слой исполнения.
 
@@ -81,6 +83,17 @@ def build_execution_layer(
             а не соединения.
         session_root: переопределение корня файлов сессий. Нужно тестам, чтобы
             не писать в каталог рядом с ``platform.json``.
+        min_level: порог журнала, **как его прислал оператор**, из того же
+            ключа ``config.json``, что и у агента. ``None`` — порога нет,
+            пишется всё; это тот же смысл, что у писателя capability ``data``.
+
+            Значение по умолчанию — офлайн-дефолт (сборка без агента, тест),
+            а не рантайм-значение. Рантайм обязан передать то, что разобрано из
+            ``--log-min-level``: забытый здесь порог означал бы второй фильтр на
+            пути события, и внутренние события платформы резались бы по
+            ``INFO`` независимо от настройки оператора. Что значение действительно
+            доезжает, проверяет
+            ``tests/test_journal_writer_threshold_wiring.py``.
     """
     values = policy_values(settings)
     policy = ExecutionPolicy.from_settings(values)
@@ -95,6 +108,7 @@ def build_execution_layer(
         sink,
         workspace=workspace,
         persist_session_events=policy.persist_session_events,
+        min_level=min_level,
     )
     pipeline = ToolExecutionPipeline(
         base_policy=policy,

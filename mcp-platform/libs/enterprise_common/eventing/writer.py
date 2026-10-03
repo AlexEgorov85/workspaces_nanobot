@@ -13,6 +13,12 @@
 Петля журналирования не замыкается: событие о сбое записи события писатель не
 создаёт, иначе отказ записи породил бы новые события и наполнил бы буфер, из
 которого не пишется.
+
+Порог у писателя **не свой**: он приходит от оператора (агент объявляет его в
+``config.json → gateway.agent.logging.db.min_level`` и передаёт флагом запуска)
+и доезжает с тем же значением, что и до писателя журнала capability ``data``.
+Два фильтра на одном пути означали бы, что внутренние события платформы
+отбрасываются по одному правилу, а события агента — по другому.
 """
 
 from __future__ import annotations
@@ -52,7 +58,7 @@ class EventWriter:
         *,
         workspace: SessionWorkspace | None = None,
         persist_session_events: bool = False,
-        min_level: str = DEFAULT_MIN_LEVEL,
+        min_level: str | None = DEFAULT_MIN_LEVEL,
     ) -> None:
         self._sink = sink
         self._workspace = workspace
@@ -60,7 +66,16 @@ class EventWriter:
         # Порог нормализуется один раз, на создании: сравнение на каждом
         # событии с сырой строкой означало бы, что опечатка в пороге держится
         # до первого события и падает уже в рантайме.
-        self._min_level = normalize_level(min_level)
+        #
+        # ``None`` — «порог не задан», то есть пишем всё, и это **тот же**
+        # смысл, что у писателя журнала capability ``data``
+        # (``_journal_min_level``). Значение по умолчанию — офлайн-дефолт
+        # (сборка без оператора, тест), а не рантайм-значение: в рантайме порог
+        # приходит от агента флагом ``--log-min-level``, и второй фильтр,
+        # живший здесь по умолчанию, резал внутренние события платформы по
+        # ``INFO`` независимо от того, что выбрал оператор. Проверяет это
+        # ``tests/test_journal_writer_threshold_wiring.py``.
+        self._min_level = normalize_level(min_level) if min_level is not None else None
         self._accepted = 0
         self._dropped = 0
         self._rejected = 0
@@ -77,7 +92,7 @@ class EventWriter:
         return self._persist
 
     @property
-    def min_level(self) -> str:
+    def min_level(self) -> str | None:
         return self._min_level
 
     def emit(self, event: AgentEvent) -> str:
@@ -96,7 +111,7 @@ class EventWriter:
             self._suppressed_probe += 1
             self._warn_probe_once(event.event_type)
             return SUPPRESSED
-        if not is_at_least(event.level, self._min_level):
+        if self._min_level is not None and not is_at_least(event.level, self._min_level):
             self._suppressed_noise += 1
             self._warn_noise_once(event.level)
             return SUPPRESSED
@@ -217,7 +232,7 @@ class EventWriter:
             return
         self._mirrored += 1
 
-    def stats(self) -> dict[str, int | bool | str]:
+    def stats(self) -> dict[str, int | bool | str | None]:
         return {
             "accepted": self._accepted,
             "dropped": self._dropped,
@@ -227,6 +242,9 @@ class EventWriter:
             # от вычистки шума (постоянно), а различие и есть смысл счётчика.
             "suppressed_probe": self._suppressed_probe,
             "suppressed_noise": self._suppressed_noise,
+            # ``None`` — порога нет, пишется всё. Значение, а не пустая строка:
+            # иначе «порог не задан» и «порог INFO» выглядели бы на баннере
+            # одинаково, а это два разных ответа на вопрос «что отбрасывается».
             "min_level": self._min_level,
             "mirrored": self._mirrored,
             "mirror_failed": self._mirror_failed,

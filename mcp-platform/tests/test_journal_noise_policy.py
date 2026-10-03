@@ -39,6 +39,12 @@ from libs.enterprise_common.eventing import (
     level_rank,
     normalize_level,
 )
+
+# Приватное читается намеренно: синонимы уровней — часть контракта, который
+# оба писателя обязаны разбирать одинаково, а публичного доступа к таблице
+# синонимов модуль не выставляет. Пока его нет, страж ходит сюда; если
+# экспорт появится, ссылку надо перевести на него.
+from libs.enterprise_common.eventing.models import _LEVEL_ALIASES  # noqa: PLC2701
 from libs.enterprise_common.eventing.types import (
     PROBE_EVENT_NAMES,
     PROBE_EVENT_PREFIXES,
@@ -172,36 +178,84 @@ class TestLevelScaleIsSingle:
             level_rank("TRACE")
 
     def test_agent_level_scale_matches_the_shared_dictionary(self) -> None:
-        """Вторая копия шкалы у агента обязана совпадать с платформенной.
+        """Объявленная агентом шкала обязана совпадать с платформенной.
 
-        Агент фильтрует события по собственной числовой шкале
-        (``DbLoggingService._should_log``). Пока эта копия совпадает с
-        ``LEVEL_RANKS``, порядок уровней в базе и при записи, и при чтении
-        один. Проверка ловит изменение любой из сторон по отдельности.
+        Раньше страж искал ЛИТЕРАЛ ``order = {...}`` внутри тела
+        ``_should_log``. Это проверяло не объявление, а способ его
+        использования: перепиши фильтр, оставив шкалу объявленной выше, —
+        и страж падал бы, не заметив никакого расхождения. И наоборот:
+        равенство словарей ничего не говорило о поведении, поэтому
+        расхождение в разборе синонима ``WARNING`` прожило незамеченным
+        (уровень съедался агентом при пороге ``WARN`` и писался платформой).
+
+        Теперь сверяется источник истины — объявленный набор уровней, из
+        которого агент выводит числовой вес, и объявленный набор синонимов.
+        Поведенческая сверка по всей области входов живёт на стороне агента
+        (``tests/test_journal_level_canonical.py``) — там можно импортировать
+        обе стороны, здесь нельзя: платформа по границе процессов не видит
+        пакет агента, поэтому и приходится читать исходник.
         """
         agent = _require_agent_tree()
         source = (agent / "lib" / "services" / "db_logging_service.py").read_text(
             encoding="utf-8"
         )
         tree = ast.parse(source, filename="db_logging_service.py")
-        scales = [
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "order" for target in node.targets
-            )
-            and isinstance(node.value, ast.Dict)
+
+        def declared(name: str) -> ast.expr | None:
+            for node in tree.body:
+                # Объявления уровней идут С АННОТАЦИЕЙ типа
+                # (``JOURNAL_LEVELS: tuple[str, ...] = (...)``), а это
+                # ast.AnnAssign с единственным ``target``, а не ast.Assign
+                # со списком ``targets``. Искать только ast.Assign значило бы
+                # не найти ничего и упасть с ложным «шкала не объявлена».
+                if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    if node.target.id == name:
+                        return node.value
+                elif isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == name for t in node.targets
+                ):
+                    return node.value
+            return None
+
+        levels_node = declared("JOURNAL_LEVELS")
+        assert levels_node is not None, (
+            "в db_logging_service нет объявления JOURNAL_LEVELS — числовой вес "
+            "уровней выводится из него, и без него фильтр лишён шкалы"
+        )
+        assert isinstance(levels_node, ast.Tuple), (
+            "JOURNAL_LEVELS обязан быть кортежем строк, а не результатом "
+            f"вычисления: {ast.dump(levels_node)[:120]}"
+        )
+        agent_levels = [
+            element.value
+            for element in levels_node.elts
+            if isinstance(element, ast.Constant)
         ]
-        assert scales, "в _should_log больше нет числовой шкалы уровней"
-        declared = {
+        # Порядок важен: из него строится числовой вес, а вес определяет,
+        # что отбрасывается порогом.
+        assert tuple(agent_levels) == tuple(LEVELS), (
+            "набор уровней агента разошёлся с общим: "
+            f"агент {tuple(agent_levels)}, общий {tuple(LEVELS)}"
+        )
+
+        aliases_node = declared("JOURNAL_LEVEL_ALIASES")
+        assert aliases_node is not None, (
+            "в db_logging_service нет объявления JOURNAL_LEVEL_ALIASES — "
+            "синоним WARNING не будет разобран и уйдёт в ветку «неизвестно»"
+        )
+        call = aliases_node.args[0] if isinstance(aliases_node, ast.Call) else aliases_node
+        assert isinstance(call, ast.Dict), (
+            "JOURNAL_LEVEL_ALIASES обязан быть словарём: "
+            f"{ast.dump(aliases_node)[:120]}"
+        )
+        agent_aliases = {
             key.value: value.value
-            for key, value in zip(scales[0].keys, scales[0].values, strict=True)
+            for key, value in zip(call.keys, call.values, strict=True)
             if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
         }
-        assert declared == dict(LEVEL_RANKS), (
-            "шкала уровней агента разошлась с общей: "
-            f"агент {declared}, общая {dict(LEVEL_RANKS)}"
+        assert agent_aliases == dict(_LEVEL_ALIASES), (
+            "синонимы уровней разошлись с общими: "
+            f"агент {agent_aliases}, общие {dict(_LEVEL_ALIASES)}"
         )
 
     def test_agent_writes_only_levels_the_database_accepts(self) -> None:
