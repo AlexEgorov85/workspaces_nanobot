@@ -84,6 +84,10 @@ class TestMakeUsageStore:
 
 
 class TestMakeSessionColdSyncService:
+    """Сборка зеркала. Условие создания сменилось с «есть DSN в PG-конфиге»
+    на «есть клиент платформы»: прямого доступа к БД у сервиса больше нет,
+    и имена таблиц он не получает вовсе."""
+
     def test_returns_none_without_session_manager(self) -> None:
         from lib.core.application_context import _make_session_cold_sync_service
 
@@ -92,84 +96,86 @@ class TestMakeSessionColdSyncService:
             config_service=_FakeConfigService(None),
             db_logging_service=None,
         )
-        with patch("config.get_setting", return_value=""):
-            assert _make_session_cold_sync_service(ctx) is None
+        assert _make_session_cold_sync_service(ctx) is None
 
-    def test_returns_none_without_dsn(self) -> None:
+    def test_service_gets_no_table_names(self) -> None:
+        """Имена таблиц зеркала объявлены на платформе. Если агент снова начнёт
+        их читать из своей конфигурации, появится вторая копия объявления —
+        ровно тот рассинхрон, из-за которого канал и журнал ушли на платформу."""
         from lib.core.application_context import _make_session_cold_sync_service
 
         ctx = _fake_ctx(
             session_manager=object(),
-            config_service=_FakeConfigService(None),
-            db_logging_service=None,
-        )
-        with patch("config.get_setting", return_value=""):
-            assert _make_session_cold_sync_service(ctx) is None
-
-    def test_creates_service_with_dsn(self, tmp_path: Path) -> None:
-        from lib.core.application_context import _make_session_cold_sync_service
-
-        sm = object()
-        ctx = _fake_ctx(
-            session_manager=sm,
             config_service=_FakeConfigService(flat={"session_cold_sync": {}}),
             db_logging_service=None,
         )
-
-        def _fake_get_setting(*keys, default=""):
-            if "dsn" in keys:
-                return "postgresql://test"
-            if "schema" in keys:
-                return "public"
-            if "meta_table" in keys:
-                return runtime_table("session_meta")
-            if "messages_table" in keys:
-                return runtime_table("session_messages")
-            return default
-
-        with (
-            patch("config.get_setting", side_effect=_fake_get_setting),
-            patch("config.require_setting", side_effect=_fake_get_setting),
-        ):
-            svc = _make_session_cold_sync_service(ctx)
-
+        svc = _make_session_cold_sync_service(ctx)
         assert svc is not None
-        assert svc.enabled is True
-        assert svc._session_manager is sm
-        assert svc._meta_table == runtime_table("session_meta")
-        assert svc._messages_table == runtime_table("session_messages")
+        assert not hasattr(svc, "_meta_table")
+        assert not hasattr(svc, "_messages_table")
+        assert not hasattr(svc, "_pg_dsn")
+
+    def test_replica_id_comes_from_settings(self) -> None:
+        from lib.core.application_context import _make_session_cold_sync_service
+
+        ctx = _fake_ctx(
+            session_manager=object(),
+            config_service=_FakeConfigService(flat={
+                "session_cold_sync": {"replica_id": "gw-2"},
+            }),
+            db_logging_service=None,
+        )
+        svc = _make_session_cold_sync_service(ctx)
+        assert svc is not None
+        assert svc.replica_id == "gw-2"
+
+    def test_replica_id_defaults_to_something_stable(self) -> None:
+        """Без явной настройки идентичность реплики должна переживать
+        перезапуск: идентификатор с pid'ом оставил бы прежние строки зеркала
+        осиротевшими, и они копились бы после каждого рестарта."""
+        from lib.core.application_context import _make_session_cold_sync_service
+        from lib.services.session_cold_sync_service import default_replica_id
+
+        ctx = _fake_ctx(
+            session_manager=object(),
+            config_service=_FakeConfigService(flat={"session_cold_sync": {}}),
+            db_logging_service=None,
+        )
+        svc = _make_session_cold_sync_service(ctx)
+        assert svc is not None
+        assert svc.replica_id == default_replica_id()
+        assert default_replica_id() == default_replica_id()
 
     def test_respects_enabled_false(self) -> None:
         from lib.core.application_context import _make_session_cold_sync_service
 
-        sm = object()
         ctx = _fake_ctx(
-            session_manager=sm,
+            session_manager=object(),
             config_service=_FakeConfigService(flat={
                 "session_cold_sync": {"enabled": False},
             }),
             db_logging_service=None,
         )
-
-        def _fake_get_setting(*keys, default=""):
-            if "dsn" in keys:
-                return "postgresql://test"
-            if "schema" in keys:
-                return "public"
-            if "meta_table" in keys:
-                return runtime_table("session_meta")
-            if "messages_table" in keys:
-                return runtime_table("session_messages")
-            return default
-
-        with (
-            patch("config.get_setting", side_effect=_fake_get_setting),
-            patch("config.require_setting", side_effect=_fake_get_setting),
-        ):
-            svc = _make_session_cold_sync_service(ctx)
+        svc = _make_session_cold_sync_service(ctx)
 
         assert svc is not None
         assert svc.enabled is False
+
+    def test_missing_cycles_threshold_is_wired(self) -> None:
+        """Порог подтверждения пропажи — единственная защита от стирания
+        зеркала по пустому списку сессий; молчаливое значение по умолчанию
+        здесь означало бы, что оператор никогда о нём не узнает."""
+        from lib.core.application_context import _make_session_cold_sync_service
+
+        ctx = _fake_ctx(
+            session_manager=object(),
+            config_service=_FakeConfigService(flat={
+                "session_cold_sync": {"missing_cycles_threshold": 5},
+            }),
+            db_logging_service=None,
+        )
+        svc = _make_session_cold_sync_service(ctx)
+        assert svc.get_stats()["missing_cycles_threshold"] == 5
 
 
 class TestApplicationContextHasNewAttrs:

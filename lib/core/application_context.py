@@ -690,17 +690,15 @@ class ApplicationContext:
         # нет ни потока, ни ``start()``, ни записи в shutdown-координатор.
         # Фоновой синхронизации больше не существует.
 
-        if self.session_cold_sync_service is not None:
-            try:
-                self.session_cold_sync_service.start()
-                self._shutdown.register(
-                    "session_cold_sync_service",
-                    self.session_cold_sync_service,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "SessionColdSyncService not started: %s", exc
-                )
+        # Зеркало сессий здесь НЕ запускается. Оно работает задачей event loop'а,
+        # а ``ApplicationContext.start()`` выполняется ДО ``asyncio.run`` в
+        # gateway: поднять задачу в этом месте нельзя (loop'а ещё нет), а
+        # зарегистрировать в ShutdownCoordinator нельзя — тот вызывает
+        # ``stop()`` синхронно, и корутина потерялась бы с молчаливым
+        # «coroutine was never awaited», а финальный проход зеркала (последний
+        # шанс внести изменения оборота) не выполнился бы.
+        # Старт и остановка — в ``gateway._run``, рядом с рукопожатием
+        # платформы, и до ``ctx.stop()`` (D21).
 
         self._started = True
 
@@ -1423,13 +1421,16 @@ def _make_cron_service(config: Any) -> Any:
 
 
 def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
-    """Создать ``SessionColdSyncService`` (cold-storage mirror).
+    """Создать ``SessionColdSyncService`` (холодное зеркало сессий).
 
-    Сервис создаётся только если:
+    Сервис создаётся только если есть ``session_manager`` (upstream JSONL).
 
-    - есть ``session_manager`` (upstream JSONL);
-    - в PG-конфиге указан DSN (cold-storage нужен только при
-      PG-деплое).
+    Условие прежнее — «нужен PG-деплой» — ушло вместе с прямым доступом к БД:
+    зеркалом владеет платформа, и её наличие определяется наличием клиента
+    платформы. Имена таблиц сервис больше не получает: они объявлены в
+    ``mcp-platform/platform.json`` и передаются на платформу, второй экземпляр
+    объявления в конфигурации агента означал бы ровно тот рассинхрон, из-за
+    которого канал и журнал ушли на платформу.
 
     Если условия не выполнены — возвращает ``None``.
 
@@ -1437,14 +1438,6 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
     requirement «Cold-storage mirror в PostgreSQL».
     """
     if ctx.session_manager is None:
-        return None
-    try:
-        from config import get_setting, require_setting
-
-        pg_dsn = get_setting("channels", "postgres", "dsn", default="")
-    except Exception:
-        pg_dsn = ""
-    if not pg_dsn:
         return None
 
     try:
@@ -1458,42 +1451,37 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
 
     enabled = bool(sync_cfg.get("enabled", True))
     sync_interval_sec = float(sync_cfg.get("sync_interval_sec", 30.0))
-    batch_size = int(sync_cfg.get("batch_size", 50))
     stale_tolerance_seconds = int(sync_cfg.get("stale_tolerance_seconds", 120))
     sync_lag_threshold_seconds = int(
         sync_cfg.get("sync_lag_threshold_seconds", 3600)
     )
-
-    # Имена таблиц — обязательные ключи конфигурации: литерал в коде означал бы
-    # вторую копию объявления, которая молча разойдётся с config.json/профилем.
-    schema = get_setting("channels", "postgres", "schema", default="public")
-    meta_table = require_setting("channels", "postgres", "meta_table")
-    messages_table = require_setting("channels", "postgres", "messages_table")
+    missing_cycles_threshold = int(sync_cfg.get("missing_cycles_threshold", 2))
+    replica_id = str(sync_cfg.get("replica_id") or "").strip() or None
 
     from lib.services.session_cold_sync_service import SessionColdSyncService
 
     logger.info(
-        'session_cold_sync: stale_tolerance=%ss, '
-        'sync_lag_threshold=%ss, sync_interval=%ss, batch=%d, enabled=%s',
+        'session_mirror: replica_id=%s, stale_tolerance=%ss, '
+        'sync_lag_threshold=%ss, missing_cycles_threshold=%d, '
+        'sync_interval=%ss, enabled=%s',
+        replica_id or "<hostname>",
         stale_tolerance_seconds,
         sync_lag_threshold_seconds,
+        missing_cycles_threshold,
         sync_interval_sec,
-        batch_size,
         enabled,
     )
 
     return SessionColdSyncService(
         session_manager=ctx.session_manager,
-        pg_dsn=pg_dsn,
-        schema=schema,
-        meta_table=meta_table,
-        messages_table=messages_table,
+        enterprise_mcp=getattr(ctx, "enterprise_mcp", None),
+        replica_id=replica_id,
         sync_interval_sec=sync_interval_sec,
-        batch_size=batch_size,
         enabled=enabled,
         db_logging_service=ctx.db_logging_service,
         stale_tolerance_seconds=stale_tolerance_seconds,
         sync_lag_threshold_seconds=sync_lag_threshold_seconds,
+        missing_cycles_threshold=missing_cycles_threshold,
     )
 
 

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,17 @@ _project_root = Path(__file__).resolve().parent.parent
 _workspace_path = str(_project_root / "workspace")
 if _workspace_path not in sys.path:
     sys.path.insert(0, _workspace_path)
+
+
+class _FakeMcp:
+    """Клиент платформы: отвечает пустым, но валидным JSON."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call(self, operation: str, arguments: dict) -> str:
+        self.calls.append((operation, arguments))
+        return '{"count": 0, "sessions": {}, "deleted_sessions": 0}'
 
 
 class _FakeSession:
@@ -65,49 +77,65 @@ class _FakeConfigService:
 
 
 class TestSessionColdSyncLifecycleMock:
-    def test_start_and_stop_does_not_crash(self) -> None:
+    """Зеркало стало задачей event loop, а не фоновым потоком.
+
+    Проверять его lifecycle в потоке больше нельзя: ``start``/``stop`` —
+    корутины, привязанные к loop'у, на котором поднята сессия платформы.
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop_does_not_crash(self) -> None:
         from lib.services.session_cold_sync_service import SessionColdSyncService
 
-        sm = _FakeSessionManager()
         svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
+            session_manager=_FakeSessionManager(),
+            enterprise_mcp=_FakeMcp(),
+            replica_id="gw-test",
             sync_interval_sec=0.05,
             enabled=True,
         )
-        svc.start()
-        import time
-        time.sleep(0.15)
-        svc.stop(timeout_sec=2.0)
-        assert svc._thread is None or not svc._thread.is_alive()
+        await svc.start()
+        await asyncio.sleep(0.15)
+        await svc.stop(timeout_sec=2.0)
+        assert svc._task is None
 
-    def test_enabled_false_start_is_noop(self) -> None:
+    @pytest.mark.asyncio
+    async def test_enabled_false_start_is_noop(self) -> None:
         from lib.services.session_cold_sync_service import SessionColdSyncService
 
         svc = SessionColdSyncService(
             session_manager=_FakeSessionManager(),
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
+            enterprise_mcp=_FakeMcp(),
             enabled=False,
         )
-        svc.start()
-        assert svc._thread is None
+        await svc.start()
+        assert svc._task is None
 
-    def test_stop_idempotent(self) -> None:
+    @pytest.mark.asyncio
+    async def test_stop_idempotent(self) -> None:
         from lib.services.session_cold_sync_service import SessionColdSyncService
 
         svc = SessionColdSyncService(
             session_manager=_FakeSessionManager(),
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
+            enterprise_mcp=_FakeMcp(),
         )
         # Двойной stop не падает.
-        svc.stop(timeout_sec=1.0)
-        svc.stop(timeout_sec=1.0)
+        await svc.stop(timeout_sec=1.0)
+        await svc.stop(timeout_sec=1.0)
+
+    def test_without_platform_the_mirror_is_off_and_says_why(self) -> None:
+        """Отсутствие платформы — не поломка, но и не «работает молча»:
+        зеркало обязано быть выключено с названной причиной, иначе оператор
+        видит исправный сервис, который ничего не пишет."""
+        from lib.services.session_cold_sync_service import SessionColdSyncService
+
+        svc = SessionColdSyncService(
+            session_manager=_FakeSessionManager(),
+            enterprise_mcp=None,
+        )
+        assert svc.enabled is False
+        assert "платформа" in svc.disabled_reason
+        assert svc.get_stats()["disabled_reason"] == svc.disabled_reason
 
 
 class TestUsageStoreLifecycleMock:

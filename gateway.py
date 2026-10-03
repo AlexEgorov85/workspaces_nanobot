@@ -438,6 +438,22 @@ async def _run(ctx) -> None:
     # снимает отметку «транспорт не выбран», установленную в ``start()``.
     ctx.attach_log_transport()
 
+    # Зеркало сессий стартует здесь, а не в ``ctx.start()``: оно работает задачей
+    # этого loop'а и ходит к данным через тот же клиент платформы, чья сессия
+    # только что поднялась рукопожатием. Раньше — раньше бессмысленно (loop ещё
+    # не существует), позже — позже сессии уже могли бы перестать доходить до
+    # холодного хранилища незамеченными.
+    mirror = getattr(ctx, "session_cold_sync_service", None)
+    if mirror is not None:
+        try:
+            await mirror.start()
+            if not mirror.enabled:
+                console.print(
+                    f"[yellow]session_mirror: выключено ({mirror.disabled_reason})[/yellow]"
+                )
+        except Exception as exc:
+            logger.warning("SessionColdSyncService not started: %s", exc)
+
     try:
         channels_task = asyncio.create_task(channels.start_all())
         await ctx.agent.run()
@@ -452,18 +468,30 @@ async def _run(ctx) -> None:
             await channels_task
 
         await ctx.agent.aclose()
-        # Сессия enterprise-mcp закрывается здесь, пока жив loop: после
-        # выхода из asyncio.run() закрыть её уже нечем, и сервер завершился
-        # бы только вслед за stdin агента.
-        if getattr(ctx, "enterprise_mcp", None) is not None:
-            with contextlib.suppress(Exception):
-                await ctx.enterprise_mcp.aclose()
         ctx.agent.stop()
         await channels.stop_all()
 
         flushed = ctx.agent.sessions.flush_all()
         if flushed:
             logger.info("Flushed {} session(s) to disk", flushed)
+
+        # Финальный проход зеркала — ПОСЛЕ сброса сессий на диск и ДО закрытия
+        # сессии платформы. Порядок не переставлен ради красоты: сброс делает
+        # JSONL окончательным, и только после этого имеет смысл зеркалить;
+        # закрытие сессии платформы до прохода погасило бы последний шанс внести
+        # изменения текущего оборота. ``ctx.stop()`` вызывается уже после
+        # ``asyncio.run``, когда loop мёртв, поэтому ждать его здесь нельзя
+        # (D21).
+        if mirror is not None:
+            with contextlib.suppress(Exception):
+                await mirror.stop()
+
+        # Сессия enterprise-mcp закрывается здесь, пока жив loop: после
+        # выхода из asyncio.run() закрыть её уже нечем, и сервер завершился
+        # бы только вслед за stdin агента.
+        if getattr(ctx, "enterprise_mcp", None) is not None:
+            with contextlib.suppress(Exception):
+                await ctx.enterprise_mcp.aclose()
 
 
 _SCRIPT_DIR: Path | None = None

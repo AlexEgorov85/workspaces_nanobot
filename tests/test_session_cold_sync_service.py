@@ -1,685 +1,406 @@
-"""Тесты ``SessionColdSyncService`` (mock-smoke, без реального PG).
+"""Холодное зеркало сессий на стороне агента: решения, защиты, метрики.
 
-Проверяют:
+Тесты идут на подставных ``SessionManager`` и клиенте платформы. Живой БД,
+файлы сессий и event loop подменяются — проверяется решение, а не ввод-вывод.
 
-- инвариант «single-writer per layer» (только super()-источник);
-- leader-election через ``pg_try_advisory_xact_lock``;
-- ``last-write-wins`` по ``updated_at``;
-- метрики (cycles_total / cycles_skipped_* / pool_*);
-- lifecycle start/stop;
-- архитектурный гард: модуль не создаёт собственный psycopg2-пул.
+Что здесь защищается
+--------------------
+1. **Дайджест вместо ``updated_at``.** ``JsonlSessionStore.update_metadata``
+   меняет поле ``metadata`` первой строки файла, оставляя ``updated_at``
+   прежним, а ``SessionManager.save`` сохраняет метку как есть. Правило «зеркало
+   не старше файла — пропустить» на такой правке замирало навсегда, и разошедшееся
+   зеркало было уже нечем починить. Тест
+   ``test_metadata_only_change_reaches_the_platform`` существует ради этого.
 
-Реальный PG smoke запускается разработчиком вручную после deploy.
+2. **Пустой список сессий не стирает зеркало.** Каталог лежит на диске, и пуст
+   он бывает не «потому что всё удалили», а потому что не подмонтирован или
+   сорван. Раньше один такой список удалял всё зеркало, а для удалённых сессий
+   восстанавливать было нечего.
 
-См. спеку ``openspec/specs/storage/session-hybridization/spec.md`` и
-правила пула в ``openspec/changes/storage-hybridization/design.md``
-§ «Connection pool».
+3. **Ошибка платформы не убивает цикл.** Отказ поднимается в цикл, который
+   считает неудачу и откатывается на backoff; зеркало — фоновая подсистема, и
+   её падение не должно уносить агента.
+
+4. **Сервис не знает имён таблиц.** Они объявлены на платформе; вторая копия
+   объявления в конфигурации агента — это тот рассинхрон, из-за которого канал
+   и журнал ушли на платформу.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import asyncio
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
-from config import runtime_table  # noqa: F401
+
+from lib.services.session_cold_sync_service import (
+    SessionColdSyncService,
+    default_replica_id,
+    file_digest,
+)
+
+UTC = timezone.utc
+NOW = datetime(2026, 10, 3, 12, 0, 0, tzinfo=UTC)
+
+
+# --- подставки --------------------------------------------------------------
+
+
+class _FakeMcp:
+    """Клиент платформы с заранее заданными ответами на операции."""
+
+    def __init__(self, responses: dict[str, Any] | None = None) -> None:
+        self.responses = dict(responses or {})
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(self, operation: str, arguments: dict[str, Any]) -> str:
+        self.calls.append((operation, arguments))
+        answer = self.responses.get(operation, {})
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, str):
+            return answer
+        return json.dumps(answer)
+
+    def ops(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+    def args_for(self, operation: str) -> list[dict[str, Any]]:
+        return [args for name, args in self.calls if name == operation]
 
 
 class _FakeSession:
-    def __init__(
-        self,
-        key: str,
-        updated_at: datetime,
-        messages: list[dict[str, Any]] | None = None,
-        metadata: dict[str, Any] | None = None,
-        created_at: datetime | None = None,
-    ) -> None:
-        self.key = key
+    def __init__(self, updated_at: datetime = NOW) -> None:
         self.updated_at = updated_at
-        self.created_at = created_at or updated_at
-        self.messages = messages or []
-        self.metadata = metadata or {}
-        self.last_consolidated = None
+        self.created_at = updated_at
+        self.messages = [{"role": "user", "content": "привет"}]
+        self.metadata = {"channel": "telegram"}
+        self.last_consolidated = 0
 
 
 class _FakeSessionManager:
-    def __init__(self, sessions: dict[str, _FakeSession]) -> None:
-        self._sessions = sessions
-        self.list_calls = 0
+    def __init__(self, sessions: dict[str, _FakeSession] | None = None) -> None:
+        self._sessions = dict(sessions or {})
+        self.snapshot_missing: set[str] = set()
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        self.list_calls += 1
         return [
-            {"key": k, "updated_at": s.updated_at.isoformat()}
-            for k, s in self._sessions.items()
+            {"key": key, "path": str(path), "updated_at": str(s.updated_at)}
+            for key, (path, s) in self._sessions.items()
         ]
 
-    def read_session_snapshot(self, key: str):
-        return self._sessions.get(key)
-
-
-class _FakeConnectionMeta:
-    encoding = "UTF8"
-
-
-class _FakeCursor:
-    def __init__(self) -> None:
-        self._results: list[Any] = []
-        self._idx = 0
-        self.executed: list[tuple[str, tuple]] = []
-        self.connection = _FakeConnectionMeta()
-        self.rowcount = 0
-
-    def mogrify(self, template, args):
-        return ("%s " * len(args)).strip().encode("utf-8")
-
-    def execute(self, sql, params: tuple = ()) -> None:
-        if isinstance(sql, bytes):
-            sql_str = sql.decode("utf-8", errors="replace")
-        else:
-            sql_str = sql
-        self.executed.append((sql_str, params))
-        if "pg_try_advisory_xact_lock" in sql_str:
-            self._results.append([(True,)])
-        elif "SELECT updated_at FROM" in sql_str:
-            key = params[0] if params else None
-            row = (datetime(2026, 9, 1),) if key == "stale" else None
-            self._results.append([row])
-        elif "SELECT 1 FROM" in sql_str:
-            self._results.append([None])
-        elif "SELECT COUNT(*) FROM" in sql_str:
-            self._results.append([(0,)])
-        elif "SELECT session_key FROM" in sql_str:
-            self._results.append([("orphan",)])
-        elif sql_str.startswith("UPDATE") and "RETURNING" in sql_str:
-            self._results.append([None])
-        elif sql_str.startswith("INSERT INTO") and runtime_table("session_meta") in sql_str:
-            self._results.append([])
-        elif sql_str.startswith("DELETE FROM"):
-            self._results.append([])
-        else:
-            self._results.append([])
-
-    def fetchone(self):
-        if self._idx >= len(self._results):
+    def read_session_snapshot(self, key: str) -> _FakeSession | None:
+        if key in self.snapshot_missing:
             return None
-        rows = self._results[self._idx]
-        self._idx += 1
-        return rows[0] if rows else None
-
-    def fetchall(self):
-        if self._idx >= len(self._results):
-            return []
-        rows = self._results[self._idx]
-        self._idx += 1
-        return rows
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
+        entry = self._sessions.get(key)
+        return entry[1] if entry else None
 
 
-class _FakeConn:
-    def __init__(self) -> None:
-        self.cursor_obj = _FakeCursor()
-        self.autocommit = True
-        self.committed = False
-        self.rolled_back = False
-
-    def cursor(self):
-        return self.cursor_obj
-
-    def commit(self) -> None:
-        self.committed = True
-
-    def rollback(self) -> None:
-        self.rolled_back = True
+def _session_file(tmp_path: Path, name: str, body: str = '{"messages": []}') -> Path:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
 
 
-def _fake_transaction():
-    """Context manager, возвращающий одну и ту же _FakeConn."""
-    conn = _FakeConn()
-
-    class _CM:
-        def __enter__(self_inner):
-            return conn
-
-        def __exit__(self_inner, exc_type, exc, tb):
-            if exc_type is None:
-                conn.commit()
-            else:
-                conn.rollback()
-            return False
-
-    return _CM()
+def _service(
+    sm: _FakeSessionManager,
+    mcp: _FakeMcp,
+    **kwargs: Any,
+) -> SessionColdSyncService:
+    kwargs.setdefault("replica_id", "gw-1")
+    return SessionColdSyncService(session_manager=sm, enterprise_mcp=mcp, **kwargs)
 
 
-class TestSessionColdSyncServiceMock:
-    def test_enabled_false_does_not_start_thread(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+# --- дайджест ----------------------------------------------------------------
 
+
+class TestFileDigest:
+    def test_digest_is_stable_for_unchanged_file(self, tmp_path: Path) -> None:
+        path = _session_file(tmp_path, "s.jsonl")
+        assert file_digest(path) == file_digest(path)
+
+    def test_digest_changes_with_content(self, tmp_path: Path) -> None:
+        path = _session_file(tmp_path, "s.jsonl", '{"a": 1}')
+        before = file_digest(path)
+        path.write_text('{"a": 2}', encoding="utf-8")
+        assert file_digest(path) != before
+
+    def test_metadata_only_change_moves_the_digest(self, tmp_path: Path) -> None:
+        """Правка метаданных меняет содержимое файла, не меняя updated_at.
+        Дайджест это видит, метка времени — нет."""
+        path = _session_file(
+            tmp_path, "s.jsonl",
+            '{"updated_at": "2026-10-03T12:00:00", "metadata": {}, "messages": []}',
+        )
+        before = file_digest(path)
+        path.write_text(
+            '{"updated_at": "2026-10-03T12:00:00", "metadata": {"x": 1},'
+            ' "messages": []}',
+            encoding="utf-8",
+        )
+        assert file_digest(path) != before
+
+    def test_missing_file_is_none_not_error(self, tmp_path: Path) -> None:
+        assert file_digest(tmp_path / "нет-такого.jsonl") is None
+
+
+# --- цикл --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCycle:
+    async def test_unchanged_session_never_reaches_the_platform(
+        self, tmp_path: Path,
+    ) -> None:
+        """Самый частый исход цикла. Если он стоит вызова в БД на каждую
+        сессию, синхронизация сотни сессий превращается в сотни обращений
+        каждую минуту, и ни одно из них ничего не меняет."""
+        path = _session_file(tmp_path, "s.jsonl")
+        sm = _FakeSessionManager({"k1": (path, _FakeSession())})
+        mcp = _FakeMcp({"session_mirror_state": {
+            "count": 1, "sessions": {
+                "k1": {"source_digest": file_digest(path), "updated_at": str(NOW)},
+            },
+        }})
+        svc = _service(sm, mcp)
+
+        await svc._cycle()
+
+        assert mcp.ops() == ["session_mirror_state", "cleanup_session_mirror"]
+        assert svc.get_stats()["skipped_unchanged_total"] == 1
+
+    async def test_changed_session_is_written(self, tmp_path: Path) -> None:
+        path = _session_file(tmp_path, "s.jsonl")
+        sm = _FakeSessionManager({"k1": (path, _FakeSession())})
+        mcp = _FakeMcp({
+            "session_mirror_state": {
+                "count": 1, "sessions": {
+                    "k1": {"source_digest": "старый", "updated_at": str(NOW)},
+                },
+            },
+            "mirror_session": {
+                "verdict": "updated", "messages_written": 1, "reason": "digest_only_change",
+            },
+        })
+        svc = _service(sm, mcp)
+
+        await svc._cycle()
+
+        assert "mirror_session" in mcp.ops()
+        stats = svc.get_stats()
+        assert stats["sessions_written_total"] == 1
+        assert stats["messages_written_total"] == 1
+
+    async def test_metadata_only_change_reaches_the_platform(
+        self, tmp_path: Path,
+    ) -> None:
+        """ГЛАВНЫЙ тест файла. Метка времени не изменилась — а правка была.
+        Прежний код на этом сценарии замолкал навсегда."""
+        path = _session_file(tmp_path, "s.jsonl")
+        digest_now = file_digest(path)
+        sm = _FakeSessionManager({"k1": (path, _FakeSession())})
+        mcp = _FakeMcp({
+            "session_mirror_state": {
+                "count": 1, "sessions": {
+                    "k1": {"source_digest": "прежний", "updated_at": str(NOW)},
+                },
+            },
+            "mirror_session": {"verdict": "updated", "messages_written": 1},
+        })
+        svc = _service(sm, mcp)
+
+        await svc._cycle()
+
+        payload = mcp.args_for("mirror_session")[0]
+        assert payload["source_digest"] == digest_now
+        assert payload["replica_id"] == "gw-1"
+
+    async def test_every_call_carries_the_replica_identity(self, tmp_path: Path) -> None:
+        path = _session_file(tmp_path, "s.jsonl")
+        sm = _FakeSessionManager({"k1": (path, _FakeSession())})
+        mcp = _FakeMcp({
+            "session_mirror_state": {"count": 0, "sessions": {}},
+            "mirror_session": {"verdict": "inserted", "messages_written": 1},
+        })
+        svc = _service(sm, mcp, replica_id="gw-7")
+
+        await svc._cycle()
+
+        assert mcp.calls, "цикл не обратился к платформе"
+        for operation, args in mcp.calls:
+            assert args.get("replica_id") == "gw-7", operation
+
+    async def test_unreadable_file_is_counted_not_guessed(
+        self, tmp_path: Path,
+    ) -> None:
+        """Файл прямо сейчас переписывается. Засчитать дайджест можно лишь
+        выдумав его, и тогда зеркало сохранит байты, которых в файле не было."""
+        sm = _FakeSessionManager({"k1": (tmp_path / "нет.jsonl", _FakeSession())})
+        mcp = _FakeMcp({"session_mirror_state": {"count": 0, "sessions": {}}})
+        svc = _service(sm, mcp)
+
+        await svc._cycle()
+
+        assert "mirror_session" not in mcp.ops()
+        assert svc.get_stats()["unreadable_total"] == 1
+
+    async def test_unreadable_snapshot_is_counted(self, tmp_path: Path) -> None:
+        path = _session_file(tmp_path, "s.jsonl")
+        sm = _FakeSessionManager({"k1": (path, _FakeSession())})
+        sm.snapshot_missing.add("k1")
+        mcp = _FakeMcp({"session_mirror_state": {"count": 0, "sessions": {}}})
+        svc = _service(sm, mcp)
+
+        await svc._cycle()
+
+        assert "mirror_session" not in mcp.ops()
+        assert svc.get_stats()["snapshot_missing_total"] == 1
+
+
+# --- защита от стирания ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestWipeGuard:
+    async def test_empty_upstream_never_triggers_cleanup(self, tmp_path: Path) -> None:
         sm = _FakeSessionManager({})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            enabled=False,
-        )
-        svc.start()
-        assert svc._thread is None
-        stats = svc.get_stats()
-        assert stats["enabled"] is False
-        assert stats["cycles_total"] == 0
+        mcp = _FakeMcp({"session_mirror_state": {"count": 42, "sessions": {}}})
+        svc = _service(sm, mcp)
 
-    def test_sync_cycle_skipped_when_lock_busy(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+        await svc._cycle()
 
+        assert "cleanup_session_mirror" not in mcp.ops()
+        assert svc.get_stats()["cleanup_guarded_total"] == 1
+
+    async def test_empty_upstream_with_empty_mirror_is_quiet(self, tmp_path: Path) -> None:
+        sm = _FakeSessionManager({})
+        mcp = _FakeMcp({"session_mirror_state": {"count": 0, "sessions": {}}})
+        svc = _service(sm, mcp)
+
+        await svc._cycle()
+
+        assert svc.get_stats()["cleanup_guarded_total"] == 0
+
+    async def test_present_keys_are_sent_to_cleanup(self, tmp_path: Path) -> None:
+        path_a = _session_file(tmp_path, "a.jsonl")
+        path_b = _session_file(tmp_path, "b.jsonl")
         sm = _FakeSessionManager({
-            "a": _FakeSession("a", datetime(2026, 9, 1)),
+            "k1": (path_a, _FakeSession()),
+            "k2": (path_b, _FakeSession()),
         })
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            sync_interval_sec=1.0,
-        )
-        with patch.object(svc, "_try_advisory_xact_lock", return_value=False), \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._sync_cycle()
-        stats = svc.get_stats()
-        assert stats["cycles_skipped_lock_busy"] == 1
-        assert stats["cycles_total"] == 1
-
-    def test_sync_cycle_updates_stats_on_success(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts = datetime(2026, 9, 1, 12, 0, 0)
-        sm = _FakeSessionManager({
-            "k1": _FakeSession(
-                "k1", ts, messages=[{"role": "user", "content": "q"}]
-            ),
+        mcp = _FakeMcp({
+            "session_mirror_state": {
+                "count": 2,
+                "sessions": {
+                    "k1": {"source_digest": file_digest(path_a)},
+                    "k2": {"source_digest": file_digest(path_b)},
+                },
+            },
         })
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            sync_interval_sec=1.0,
-        )
-        with patch("utils.db.transaction", _fake_transaction):
-            svc._sync_cycle()
-        stats = svc.get_stats()
-        assert stats["cycles_total"] == 1
-        assert stats["cycles_failed_total"] == 0
-        assert stats["upstream_session_count"] == 1
-        assert stats["rows_synced_total"] == 1
-        assert stats["messages_synced_total"] == 1
-        assert stats["last_success_ts"] is not None
-        assert stats["pool_wait_seconds"] is not None
+        svc = _service(sm, mcp)
 
-    def test_sync_session_skips_when_existing_updated_at_equal_or_newer(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+        await svc._cycle()
 
-        ts = datetime(2026, 9, 1, 12, 0, 0)
-        sm = _FakeSessionManager({
-            "stale": _FakeSession("stale", ts),
+        payload = mcp.args_for("cleanup_session_mirror")[0]
+        assert payload["present_keys"] == ["k1", "k2"]
+        assert payload["delete_after_missed_cycles"] == 2
+
+
+# --- отказы ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestFailures:
+    async def test_platform_failure_rolls_back_to_backoff(self, tmp_path: Path) -> None:
+        sm = _FakeSessionManager({})
+        mcp = _FakeMcp({
+            "session_mirror_state": RuntimeError("платформа недоступна"),
         })
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            sync_interval_sec=1.0,
-        )
+        svc = _service(sm, mcp, sync_interval_sec=30.0)
 
-        # Мокаем _read_pg_updated_at: возвращаем тот же timestamp,
-        # что в upstream. Sync должен skip'нуть эту сессию.
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts}), \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._sync_cycle()
-        stats = svc.get_stats()
-        assert stats["rows_synced_total"] == 0
-
-    def test_get_stats_shape(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        svc = SessionColdSyncService(
-            session_manager=_FakeSessionManager({}),
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-        )
-        stats = svc.get_stats()
-        # D-Pool.6: pool metrics обязательны
-        for key in (
-            "enabled", "cycles_total", "cycles_failed_total",
-            "consecutive_failures", "rows_synced_total",
-            "messages_synced_total", "upstream_session_count",
-            "pg_session_count", "pool_size", "pool_available",
-            "pool_wait_seconds",
-            "cycles_skipped_lock_busy", "cycles_skipped_pool_busy",
-        ):
-            assert key in stats, f"missing key: {key}"
-
-    def test_start_and_stop_thread_lifecycle(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts = datetime(2026, 9, 1, 12, 0, 0)
-        sm = _FakeSessionManager({
-            "k1": _FakeSession("k1", ts, messages=[]),
-        })
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            sync_interval_sec=0.05,
-        )
-        with patch("utils.db.transaction", _fake_transaction):
-            svc.start()
-            import time
-            time.sleep(0.2)
-            svc.stop(timeout_sec=2.0)
-        assert svc._thread is None or not svc._thread.is_alive()
-
-    def test_failure_increments_consecutive_failures(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        sm = _FakeSessionManager({
-            "k1": _FakeSession("k1", datetime(2026, 9, 1)),
-        })
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            sync_interval_sec=1.0,
-        )
-
-        with patch.object(svc, "_try_advisory_xact_lock",
-                          side_effect=RuntimeError("boom")):
-            try:
-                with svc._state_lock:
-                    svc._sync_cycle()
-            except RuntimeError:
-                pass
-        svc._cycles_failed_total += 1
+        with pytest.raises(RuntimeError):
+            await svc._cycle()
         svc._consecutive_failures += 1
-        stats = svc.get_stats()
-        assert stats["cycles_failed_total"] >= 1
-        assert stats["consecutive_failures"] >= 1
+        assert svc._consecutive_failures == 1
 
-    def test_sync_processes_sessions_in_sorted_order(self) -> None:
-        """Сортировка по ключу перед батчингом — детерминированный порядок блокировок."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+    async def test_backoff_grows_then_caps(self, tmp_path: Path) -> None:
+        sm = _FakeSessionManager({})
+        svc = _service(sm, _FakeMcp(), sync_interval_sec=3600.0)
 
-        ts = datetime(2026, 9, 1, 12, 0, 0)
-        sm = _FakeSessionManager({
-            "zeta": _FakeSession("zeta", ts),
-            "alpha": _FakeSession("alpha", ts),
-            "mu": _FakeSession("mu", ts),
-        })
+        assert svc._compute_delay() == 3600.0
+        svc._consecutive_failures = 1
+        assert svc._compute_delay() == 2.0
+        svc._consecutive_failures = 20
+        assert svc._compute_delay() <= 16 * 60.0
 
-        seen_keys: list[str] = []
-        original_snapshot = sm.read_session_snapshot
+    async def test_malformed_answer_is_an_error_not_an_empty_success(
+        self, tmp_path: Path,
+    ) -> None:
+        """Нечитаемый ответ хуже отсутствующего: выглядит как пустой успех."""
+        sm = _FakeSessionManager({})
+        mcp = _FakeMcp({"session_mirror_state": "не json вовсе"})
+        svc = _service(sm, mcp)
 
-        def _tracking_snapshot(key):
-            seen_keys.append(key)
-            return original_snapshot(key)
+        with pytest.raises(ValueError, match="JSON"):
+            await svc._cycle()
 
-        sm.read_session_snapshot = _tracking_snapshot
+    async def test_answer_of_wrong_type_is_refused(self, tmp_path: Path) -> None:
+        sm = _FakeSessionManager({})
+        mcp = _FakeMcp({"session_mirror_state": "[1, 2, 3]"})
+        svc = _service(sm, mcp)
 
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://x",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            sync_interval_sec=1.0,
-        )
-        with patch("utils.db.transaction", _fake_transaction):
-            svc._sync_cycle()
-        assert seen_keys == sorted(seen_keys)
-        assert seen_keys == ["alpha", "mu", "zeta"]
-
-    def test_no_new_pool_created(self) -> None:
-        """Архитектурный гард: модуль НЕ создаёт собственный psycopg2-пул.
-
-        Проверяет, что в исходнике нет вызовов ``SimpleConnectionPool``,
-        ``psycopg2.pool``, ``connect(`` или локальных пулов.
-        """
-        import ast
-        from pathlib import Path
-
-        src_path = Path("lib/services/session_cold_sync_service.py")
-        tree = ast.parse(src_path.read_text(encoding="utf-8"))
-        forbidden_ids = {"SimpleConnectionPool", "ThreadedConnectionPool",
-                          "AbstractConnectionPool"}
-        forbidden_strings = ("psycopg2.pool", "create_pool", ".connect(")
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                attr = ast.unparse(node)
-                for bad in forbidden_strings:
-                    assert bad not in attr, (
-                        f"forbidden pool creation pattern at "
-                        f"{src_path}:{node.lineno}: {attr}"
-                    )
-            if isinstance(node, ast.Name) and node.id in forbidden_ids:
-                pytest.fail(
-                    f"forbidden psycopg2 pool symbol at {src_path}:{node.lineno}: "
-                    f"{node.id}"
-                )
-            if isinstance(node, ast.Call):
-                func = ast.unparse(node.func)
-                for bad in forbidden_strings:
-                    assert bad not in func, (
-                        f"forbidden pool creation call at "
-                        f"{src_path}:{node.lineno}: {func}"
-                    )
+        with pytest.raises(ValueError, match="объектом"):
+            await svc._cycle()
 
 
-class TestStage0Regression:
-    """Этап 0: contract-тесты на текущее поведение _sync_session ДО
-    рефакторинга условия. Без них есть риск сломать silent-skip для
-    нормального случая при добавлении stale-detection (tasks 0.1-0.3)."""
-
-    def test_sync_skips_when_pg_equal_to_jsonl(self) -> None:
-        """0.1: при ``existing_updated_at == upstream_updated_at``
-        sync не выполняется, никаких событий не публикуется."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts = datetime(2026, 9, 1, 12, 0, 0)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts}), \
-             patch.object(svc, "_upsert_meta") as mock_upsert, \
-             patch.object(svc, "_log_stale") as mock_log_stale, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        assert svc.get_stats()["stale_sync_skipped_total"] == 0
-        assert svc.get_stats()["rows_synced_total"] == 0
-        mock_upsert.assert_not_called()
-        mock_log_stale.assert_not_called()
-
-    def test_sync_skips_when_pg_newer_within_tolerance(self) -> None:
-        """0.2: при ``pg > jsonl``, но ``pg - jsonl < stale_tolerance``
-        — sync пропускается silently (текущее поведение)."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts_jsonl = datetime(2026, 9, 1, 12, 0, 0)
-        ts_pg = ts_jsonl + timedelta(seconds=60)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_jsonl)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_pg}), \
-             patch.object(svc, "_upsert_meta") as mock_upsert, \
-             patch.object(svc, "_log_stale") as mock_log_stale, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        assert svc.get_stats()["stale_detected_total"] == 0
-        assert svc.get_stats()["rows_synced_total"] == 0
-        mock_log_stale.assert_not_called()
-        mock_upsert.assert_not_called()
-
-    def test_sync_performs_lww_when_jsonl_newer(self) -> None:
-        """0.3: при ``upstream_updated_at > existing_updated_at``
-        sync выполняется (last-write-wins, текущее поведение)."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_new = ts_old + timedelta(seconds=60)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_new)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-            sync_lag_threshold_seconds=3600,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_old}), \
-             patch.object(svc, "_upsert_meta") as mock_upsert, \
-             patch.object(svc, "_replace_messages") as mock_messages, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        assert svc.get_stats()["rows_synced_total"] == 1
-        mock_upsert.assert_called_once()
-        mock_messages.assert_called_once()
+# --- метрики и границы -------------------------------------------------------
 
 
-class TestStaleAndLagDetection:
-    """D23: stale-detection (PG > JSONL + tolerance → skip + log)
-    + reverse-lag detection (JSONL > PG + threshold → log).
+class TestStatsAndBoundaries:
+    def test_stats_publish_the_replica_identity(self, tmp_path: Path) -> None:
+        svc = _service(_FakeSessionManager(), _FakeMcp(), replica_id="gw-9")
+        assert svc.get_stats()["replica_id"] == "gw-9"
 
-    Имена тестов — точно как в tasks.md 4.3.
-    """
-
-    def test_stale_detected_event_published_when_pg_ahead(self) -> None:
-        """task 4.3: PG свежее JSONL + tolerance → session_stale_detected."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_new = ts_old + timedelta(seconds=300)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_old)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-            sync_lag_threshold_seconds=3600,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_new}), \
-             patch.object(svc, "_log_stale") as mock_log_stale, \
-             patch.object(svc, "_upsert_meta") as mock_upsert, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        stats = svc.get_stats()
-        assert stats["stale_detected_total"] == 1
-        assert stats["stale_sync_skipped_total"] == 1
-        mock_log_stale.assert_called_once()
-        mock_upsert.assert_not_called()
-
-    def test_stale_event_dedup_within_ttl(self) -> None:
-        """task 4.3: повторный stale-event в пределах TTL не публикуется."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_new = ts_old + timedelta(seconds=300)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_old)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_new}), \
-             patch.object(svc, "_log_stale") as mock_log_stale, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-            svc._do_sync_batch()
-        assert mock_log_stale.call_count == 1
-        assert svc.get_stats()["stale_detected_total"] == 1
-        assert svc.get_stats()["stale_sync_skipped_total"] == 2
-
-    def test_reverse_lag_event_published(self) -> None:
-        """task 4.3: JSONL > PG + threshold → sync_lag_exceeded."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_new = ts_old + timedelta(seconds=7200)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_new)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-            sync_lag_threshold_seconds=3600,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_old}), \
-             patch.object(svc, "_log_lag_exceeded") as mock_log_lag, \
-             patch.object(svc, "_upsert_meta") as mock_upsert, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        assert mock_log_lag.call_count == 1
-        assert svc.get_stats()["sync_lag_exceeded_total"] == 1
-        # LWW тоже выполнен
-        assert svc.get_stats()["rows_synced_total"] == 1
-        mock_upsert.assert_called_once()
-
-    def test_normal_sync_continues_after_lag_event(self) -> None:
-        """task 4.3: после sync_lag_exceeded sync всё равно выполняется."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_new = ts_old + timedelta(seconds=7200)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_new)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-            sync_lag_threshold_seconds=3600,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_old}), \
-             patch.object(svc, "_log_lag_exceeded"), \
-             patch.object(svc, "_upsert_meta") as mock_upsert, \
-             patch.object(svc, "_replace_messages") as mock_messages, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        assert svc.get_stats()["rows_synced_total"] == 1
-        mock_upsert.assert_called_once()
-        mock_messages.assert_called_once()
-
-    def test_no_stale_when_within_tolerance(self) -> None:
-        """Если разница меньше tolerance — sync выполняется как обычно."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_pg = ts_old + timedelta(seconds=60)
-        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_old)})
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-            stale_tolerance_seconds=120,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_pg}), \
-             patch.object(svc, "_log_stale") as mock_log_stale, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        stats = svc.get_stats()
-        assert stats["stale_sync_skipped_total"] == 0
-        assert stats["stale_detected_total"] == 0
-        mock_log_stale.assert_not_called()
-
-    def test_constructor_rejects_invalid_thresholds(self) -> None:
-        """Task 2.4: sync_lag_threshold_seconds < stale_tolerance_seconds
-        должно бросить ValueError."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        with pytest.raises(ValueError, match="sync_lag_threshold"):
-            SessionColdSyncService(
-                session_manager=_FakeSessionManager({}),
-                pg_dsn="postgresql://test",
-                meta_table=runtime_table("session_meta"),
-                messages_table=runtime_table("session_messages"),
-                stale_tolerance_seconds=300,
-                sync_lag_threshold_seconds=120,
+    def test_constructor_rejects_lag_below_tolerance(self, tmp_path: Path) -> None:
+        """Порог отставания меньше терпимости бессмыслен: событие прилетало бы
+        раньше, чем состояние признавалось расхождением."""
+        with pytest.raises(ValueError, match="stale_tolerance"):
+            _service(
+                _FakeSessionManager(), _FakeMcp(),
+                stale_tolerance_seconds=300, sync_lag_threshold_seconds=60,
             )
 
+    def test_service_knows_no_table_names(self, tmp_path: Path) -> None:
+        """Имена таблиц зеркала объявлены на платформе. Собственная копия в
+        агенте — источник рассинхрона, который уже стоил нам баг с профилем."""
+        source = Path(
+            "lib/services/session_cold_sync_service.py"
+        ).read_text(encoding="utf-8")
+        for forbidden in ("meta_table", "messages_table", "psycopg2", "utils.db"):
+            assert forbidden not in source, forbidden
 
-class TestGracefulShutdown:
-    """Task 3.3 + 3.6: per-iteration self._running, graceful stop()."""
+    def test_default_replica_id_is_stable_across_calls(self) -> None:
+        assert default_replica_id() == default_replica_id()
+        assert default_replica_id()
 
-    def test_per_iteration_running_check_skips_mid_batch(self) -> None:
-        """Если ``_running`` снимается в середине обработки,
-        per-iteration check пропускает остаток."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
 
-        ts = datetime(2026, 9, 1, 12, 0, 0)
-        sm = _FakeSessionManager({
-            "k1": _FakeSession("k1", ts),
-            "k2": _FakeSession("k2", ts),
-            "k3": _FakeSession("k3", ts),
-        })
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-        )
-        seen_keys: list[str] = []
+@pytest.mark.asyncio
+class TestLifecycle:
+    async def test_disabled_service_does_nothing(self, tmp_path: Path) -> None:
+        mcp = _FakeMcp()
+        svc = _service(_FakeSessionManager(), mcp, enabled=False)
 
-        def _tracking_sync_session(key):
-            seen_keys.append(key)
-            if len(seen_keys) >= 1:
-                svc._running = False
-            return None
+        await svc.start()
+        await svc._cycle()
+        await svc.stop()
 
-        with patch.object(svc, "_sync_session_with_detection",
-                          side_effect=_tracking_sync_session), \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-        assert seen_keys == ["k1"]
-        stats = svc.get_stats()
-        assert stats["cycles_total"] == 1
-        assert stats["rows_synced_total"] == 0
+        assert mcp.calls == []
+        assert svc._task is None
 
-    def test_stop_sets_running_false_after_start(self) -> None:
-        """После ``start()`` и ``stop()`` ``_running`` устанавливается в False."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        svc = SessionColdSyncService(
-            session_manager=_FakeSessionManager({}),
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-        )
-        with patch("utils.db.transaction", _fake_transaction):
-            svc.start()
-        import time as _time
-        _time.sleep(0.1)
-        svc.stop(timeout_sec=2.0)
-        assert svc._running is False
-
-    def test_stop_without_thread_is_noop(self) -> None:
-        """``stop()`` без ``start()`` (т.е. ``_thread is None``) не падает."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
-
-        svc = SessionColdSyncService(
-            session_manager=_FakeSessionManager({}),
-            pg_dsn="postgresql://test",
-            meta_table=runtime_table("session_meta"),
-            messages_table=runtime_table("session_messages"),
-        )
-        svc.stop(timeout_sec=1.0)
-        assert svc._running is True  # _running не трогается без start
+    async def test_stop_without_start_is_safe(self, tmp_path: Path) -> None:
+        svc = _service(_FakeSessionManager(), _FakeMcp())
+        await svc.stop()
+        await svc.stop()

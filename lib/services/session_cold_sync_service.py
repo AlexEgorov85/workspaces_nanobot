@@ -1,51 +1,57 @@
-"""Background mirror для upstream SessionManager (JSONL) → PostgreSQL.
+"""Зеркалирование сессий в холодное хранилище через платформу.
 
-См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
-и правила пула в ``openspec/changes/storage-hybridization/design.md``
-§ «Connection pool».
+Источник истины — upstream ``SessionManager`` (JSONL). Холодное зеркало в
+PostgreSQL обслуживается только для multi-instance, наблюдаемости и
+аварийного восстановления; пишет его этот сервис, и пишет он через операции
+платформы ``mirror_session`` / ``cleanup_session_mirror`` /
+``session_mirror_state``, а не напрямую.
 
-Upstream ``SessionManager`` (JSONL) — единственный hot-path writer и
-единственный source of truth; PostgreSQL — cold-storage mirror для
-multi-instance deploy и observability, обслуживается этим сервисом.
+Почему через платформу, а не пул агента
+--------------------------------------
+Тот же путь, по которому ушли канал и журнал: имя таблицы зеркала тогда было
+объявлено и в конфигурации агента, и в ``platform.json``, и агент видел только
+второй источник. Оверлей профиля применялся на платформе, а писатель смотрел
+в другую сторону — и писал мимо. Здесь такой возможности нет вовсе: имена
+таблиц живут только на платформе.
 
-Архитектурные инварианты:
+Почему решение о записи принимает платформа
+------------------------------------------
+Сравнение «зеркало против файла» и сама запись должны быть в одной транзакции.
+Пока это были разные вызовы, между ними успевал вклиниться второй писатель, а
+разрыв метаданных и сообщений после сбоя оставлял зеркало разорванным навсегда:
+признак «изменилось» у сессии уже совпадал бы с записанным, и следующие циклы
+проходили мимо. Операция ``mirror_session`` делает чтение под ``FOR UPDATE``,
+решение и запись одной транзакцией.
 
-- Сервис работает в ``daemon=True`` потоке (sync-код с
-  ``threading.Lock`` блокирует event loop; см. обоснование в
-  ``PgDuckDbSyncService``);
-- Внутри — ``threading.Lock`` вокруг ``_sync_cycle()`` (single-flight);
-- **Пул — единый (utils.db)**, соединение НЕ создаётся в модуле.
-  Acquire/release соединения происходит в одном worker-потоке пула,
-  что соответствует правилам пула (D-Pool.3);
-- Leader-election через ``pg_try_advisory_xact_lock`` (per-transaction
-  lock; автоматически освобождается на COMMIT/ROLLBACK — никакого
-  долгоживущего соединения);
-- ``last-write-wins`` по ``updated_at`` (через ``UPDATE ... WHERE
-  updated_at > existing.updated_at``); колонка ``version`` НЕ вводится;
-- Upstream JSONL — единственный source of truth. Cleanup удаляет из
-  PG любую строку без upstream-двойника;
-- ``enabled=false`` (``gateway.session_cold_sync.enabled``) — escape
-  hatch, поток не запускается вообще;
-- Ошибки логируются через ``DbLoggingService.try_log_event`` (по
-  контракту ``logging-db``); никаких прямых ``INSERT INTO
-  agent_gateway_logs``.
+Почему признак изменения — дайджест, а не ``updated_at``
+-------------------------------------------------------
+``updated_at`` не поднимается при всех правках сессии. ``JsonlSessionStore``
+меняет ``metadata`` первой строки файла, оставляя ``updated_at`` прежним, а
+``SessionManager.save`` сохраняет метку как есть, не вычисляя её заново. Правило
+«зеркало не старше файла — пропустить» в этом случае замирало навсегда, и
+починить разошедшееся зеркало было нечем. Дайджест содержимого файла —
+единственный признак, который не врёт.
 
-Shutdown-порядок (D21): ``SessionColdSyncService.stop()`` вызывается
-ДО закрытия ``SessionManager``, чтобы успеть синхронизировать
-последние dirty-сессии.
+Почему асинхронно, а не в потоке
+--------------------------------
+Раньше сервис жил в daemon-потоке, чтобы синхронный код не блокировал event
+loop. Но обращение к данным теперь идёт через клиента платформы, чья сессия
+привязана к event loop, на котором создана, и из потока её вызвать нельзя.
+Поэтому сервис стал задачей loop'а, а единственное действительно блокирующее —
+чтение файлов сессий — ушло в ``asyncio.to_thread``.
+
+Спека: ``openspec/specs/storage/session-hybridization/spec.md``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
-import logging
-import threading
-import time
+import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-from lib.services.db_logging_service import LogEvent, try_log_event
 
 if TYPE_CHECKING:
     from nanobot.session.manager import SessionManager
@@ -53,621 +59,496 @@ if TYPE_CHECKING:
     from lib.services.db_logging_service import DbLoggingService
 
 
-_ADVISORY_LOCK_KEY = "storage_hybridization_session_cold_sync"
 _BACKOFF_BASE_SEC = 1.0
 _BACKOFF_CAP_SEC = 16 * 60.0
-_POOL_BUSY_BACKOFF_SEC = 5.0
 _STALE_LOG_DEDUP_TTL = timedelta(seconds=60.0)
+
+#: Уровни журнала — константами, а не литералами в вызовах. Собранный на лету
+#: уровень неотличим от правильного по виду, но CHECK ``valid_level`` в базе
+#: отвергает его и уносит весь батч, а не одну строку. Канон проверяется
+#: ``tests/test_journal_level_canonical.py``.
+_LEVEL_WARN = "WARN"
+_LEVEL_INFO = "INFO"
+
+#: Вердикты зеркала, при которых содержимое не записывается. Всё остальное —
+#: запись или отсутствие изменений. Список назван явно, чтобы неизвестный
+#: вердикт не был молча принят за «записали»: новый вердикт обязан заставить
+#: пересмотреть это место, а не тихо продолжить работу по старой логике.
+_VERDICTS_WITHOUT_WRITE = frozenset({
+    "unchanged",
+    "skipped_equal",
+    "skipped_within_tolerance",
+    "skipped_stale",
+})
+
+
+def default_replica_id() -> str:
+    """Идентичность реплики по умолчанию — имя машины.
+
+    Именно машина, а не ``os.getpid()``: идентичность должна ПЕРЕЖИВАТЬ
+    перезапуск. С ``pid`` реплика после перезапуска получила бы новое имя, её
+    прежние строки остались бы в зеркале навсегда (они не её, очистка их не
+    видит), и зеркало росло бы на мусоре после каждого рестарта.
+
+    Несколько реплик на одной машине разводятся явной настройкой
+    ``gateway.session_cold_sync.replica_id``.
+    """
+    return socket.gethostname() or "replica-unknown"
+
+
+def file_digest(path: Any) -> str | None:
+    """SHA-256 файла сессии либо ``None``, если файл в этот момент меняется.
+
+    Принимает и ``Path``, и строку: upstream отдаёт путь в ``SessionInfo``
+    строкой, и требование ``Path`` здесь означало бы, что подмена заглушкой
+    расходится с боевым вызовом, а расхождение всплыло бы на первом же цикле.
+
+    ``None`` означает «не сейчас»: файл читается прямо в момент ``save`` и
+    может быть переписан между чтением и подсчётом. Засчитать такой дайджест
+    можно только одним способом — выдумав его, а тогда зеркало сохранит байты,
+    которых в файле никогда не было. Пропуск до следующего цикла дешевле и
+    честен.
+
+    Размер и время изменения сверяются до и после чтения — ровно так же, как
+    это делает upstream в своём приватном снимке файла.
+    """
+    try:
+        target = path if hasattr(path, "stat") else Path(path)
+        before = target.stat()
+        payload = target.read_bytes()
+        after = target.stat()
+    except (OSError, TypeError, ValueError):
+        return None
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or len(payload) != after.st_size
+    ):
+        return None
+    return hashlib.sha256(payload).hexdigest()
 
 
 class SessionColdSyncService:
-    """Зеркалирует upstream JSONL → PG в фоне.
+    """Фоновое зеркалирование сессий JSONL → платформа.
 
-    Получает пул через DI: в ``ApplicationContext`` создаётся
-    ``utils.db`` (через ``utils.db.configure(dsn)`` — синглтон),
-    ``SessionColdSyncService`` использует ``utils.db.transaction()``
-    и ``utils.db.run(...)`` — никаких собственных psycopg2-пулов.
-
-    Аргументы конструктора — все опциональные с дефолтами, кроме
-    ``meta_table``/``messages_table``: имена таблиц читаются из конфигурации
-    (``ApplicationContext`` → ``require_setting``) и в коде не зашиты.
-    PG DSN берётся из ``config`` через ``ApplicationContext`` (см. ``_make_*``).
+    Аргументы конструктора — все с дефолтами. DSN и имена таблиц сюда НЕ
+    приходят: и то, и другое принадлежит платформе, и второй экземпляр
+    объявления разошёлся бы с первым при первой же смене настройки.
     """
 
     def __init__(
         self,
         session_manager: SessionManager,
-        pg_dsn: str,
         *,
-        meta_table: str,
-        messages_table: str,
-        schema: str = "public",
-        sync_interval_sec: float = 30.0,
-        batch_size: int = 50,
+        enterprise_mcp: Any | None = None,
+        replica_id: str | None = None,
         enabled: bool = True,
-        db_logging_service: DbLoggingService | None = None,
-        pool_acquire_timeout_sec: float = 10.0,
+        sync_interval_sec: float = 30.0,
         stale_tolerance_seconds: int = 120,
         sync_lag_threshold_seconds: int = 3600,
+        missing_cycles_threshold: int = 2,
+        db_logging_service: DbLoggingService | None = None,
     ) -> None:
         self._session_manager = session_manager
-        self._pg_dsn = pg_dsn
-        self._schema = schema
-        self._meta_table = meta_table
-        self._messages_table = messages_table
+        self._mcp = enterprise_mcp
+        self._replica_id = (replica_id or default_replica_id()).strip() or default_replica_id()
         self._sync_interval_sec = max(1.0, float(sync_interval_sec))
-        self._batch_size = max(1, int(batch_size))
-        self._enabled = bool(enabled)
-        self._pool_acquire_timeout_sec = max(0.1, float(pool_acquire_timeout_sec))
-        self._stale_tolerance = timedelta(seconds=max(0, int(stale_tolerance_seconds)))
-        self._sync_lag_threshold = timedelta(
-            seconds=max(0, int(sync_lag_threshold_seconds))
-        )
+        self._stale_tolerance = max(0, int(stale_tolerance_seconds))
+        self._sync_lag_threshold = max(0, int(sync_lag_threshold_seconds))
+        self._missing_cycles_threshold = max(1, int(missing_cycles_threshold))
+        self._db_logging = db_logging_service
         if sync_lag_threshold_seconds < stale_tolerance_seconds:
             raise ValueError(
                 f"sync_lag_threshold_seconds ({sync_lag_threshold_seconds}) "
                 f"must be >= stale_tolerance_seconds ({stale_tolerance_seconds})"
             )
+        if self._mcp is None:
+            self._enabled = False
+            self._disabled_reason = "платформа недоступна (enterprise_mcp не задан)"
+        else:
+            self._enabled = bool(enabled)
+            self._disabled_reason = "" if self._enabled else "выключено настройкой"
 
-        self._db_logging = db_logging_service
-
-        self._fq_meta = self._quote(f"{schema}.{meta_table}")
-        self._fq_messages = self._quote(f"{schema}.{messages_table}")
-
-        self._state_lock = threading.Lock()
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._running = True
+        self._task: asyncio.Task | None = None
+        self._cycle_lock = asyncio.Lock()
+        self._stopping = False
 
         self._cycles_total = 0
         self._cycles_failed_total = 0
         self._consecutive_failures = 0
-        self._cycles_skipped_lock_busy = 0
-        self._cycles_skipped_pool_busy = 0
-        self._stale_detected_counter = 0
-        self._sync_lag_exceeded_counter = 0
-        self._stale_sync_skipped_counter = 0
-        self._rows_synced_total = 0
-        self._messages_synced_total = 0
-        self._last_success_ts: float | None = None
-        self._last_pool_wait_seconds: float | None = None
-        self._last_upstream_session_count: int = 0
-        self._last_pg_session_count: int = 0
-
+        self._sessions_written_total = 0
+        self._messages_written_total = 0
+        self._skipped_unchanged_total = 0
+        self._skipped_stale_total = 0
         self._stale_logged_at: dict[str, datetime] = {}
+        self._unreadable_total = 0
+        self._snapshot_missing_total = 0
+        self._cleanup_guarded_total = 0
+        self._deleted_sessions_total = 0
+        self._last_success_ts: float | None = None
+        self._last_cycle_seconds: float | None = None
+        self._last_upstream_session_count: int = 0
+        self._last_mirror_session_count: int = 0
 
-        self._pool_size: int | None = None
-        self._pool_available: int | None = None
-
-        if pg_dsn:
-            from utils.db import configure as _cfg
-            _cfg(pg_dsn)
+    # -- свойства ------------------------------------------------------------
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
-    def start(self) -> None:
-        """Запустить фоновый sync-поток. No-op если ``enabled=False``."""
+    @property
+    def replica_id(self) -> str:
+        return self._replica_id
+
+    @property
+    def disabled_reason(self) -> str:
+        return self._disabled_reason
+
+    # -- жизненный цикл ------------------------------------------------------
+
+    async def start(self) -> None:
+        """Запустить фоновую задачу. No-op, если зеркало выключено."""
         if not self._enabled:
             return
-        if self._thread is not None and self._thread.is_alive():
+        if self._task is not None and not self._task.done():
             return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._worker,
-            name="session-cold-sync",
-            daemon=True,
-        )
-        self._thread.start()
+        self._stopping = False
+        self._task = asyncio.create_task(self._run(), name="session-cold-sync")
 
-    def stop(self, timeout_sec: float = 30.0) -> None:
-        """Корректно остановить поток.
+    async def stop(self, timeout_sec: float = 30.0) -> None:
+        """Остановить задачу, успев сбросить последние изменения.
 
-        Устанавливает ``self._running = False`` и ждёт завершения
-        текущего цикла в пределах ``timeout_sec``. Перед teardown
-        пытается выполнить финальный ``_sync_cycle()`` для D21
-        shutdown order (если lock свободен).
+        Финальный проход обязателен до закрытия ``SessionManager``: он последний
+        шанс внести в зеркало изменения текущего оборота.
         """
-        if self._thread is None:
+        self._stopping = True
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(self._task), timeout_sec)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            self._task = None
+        if not self._enabled:
             return
-        self._running = False
-        self._stop_event.set()
-        acquired = self._state_lock.acquire(timeout=timeout_sec)
-        if acquired:
-            try:
-                try:
-                    self._sync_cycle()
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "session_cold_sync: final flush failed",
-                    )
-            finally:
-                self._state_lock.release()
-        self._thread.join(timeout_sec)
-        self._thread = None
+        try:
+            await asyncio.wait_for(self._cycle(), timeout_sec)
+        except asyncio.TimeoutError:
+            self._log_failure(
+                TimeoutError(f"финальный проход зеркала не уложился в {timeout_sec}с")
+            )
+        except Exception as exc:  # noqa: BLE001 - остановка не должна ронять выход
+            self._log_failure(exc)
 
-    def _worker(self) -> None:
-        while self._running and not self._stop_event.is_set():
+    async def _run(self) -> None:
+        while not self._stopping:
             try:
-                with self._state_lock:
-                    self._do_sync_batch()
-            except Exception as exc:
+                await self._cycle()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - цикл не должен умирать
                 self._consecutive_failures += 1
                 self._cycles_failed_total += 1
                 self._log_failure(exc)
-            delay = self._compute_delay()
-            if self._stop_event.wait(timeout=delay):
-                break
+            await asyncio.sleep(self._compute_delay())
 
     def _compute_delay(self) -> float:
         if self._consecutive_failures <= 0:
             return self._sync_interval_sec
-        backoff = min(
-            self._sync_interval_sec,
-            _BACKOFF_BASE_SEC * (2 ** min(self._consecutive_failures, 5)),
-        )
-        return min(backoff, _BACKOFF_CAP_SEC)
+        backoff = _BACKOFF_BASE_SEC * (2 ** min(self._consecutive_failures, 5))
+        return min(self._sync_interval_sec, backoff, _BACKOFF_CAP_SEC)
 
-    def _do_sync_batch(self) -> None:
-        """Один цикл sync: leader-election → read upstream → D23/D11 sync.
+    # -- цикл ----------------------------------------------------------------
 
-        Реализует:
-        - leader-election через ``pg_try_advisory_xact_lock``;
-        - per-iteration ``self._running`` проверку (graceful
-          shutdown по ``stop()``);
-        - D23 stale-detection (если PG свежее JSONL + tolerance —
-          пропустить sync для этой сессии);
-        - reverse-lag detection (если JSONL свежее PG + threshold
-          — залогировать ``sync_lag_exceeded``);
-        - last-write-wins для нормальных сессий.
-
-        Исключения пробрасываются наверх (вызывающий инкрементирует
-        счётчики и логирует).
-        """
-        self._cycles_total += 1
-        t_start = time.monotonic()
-
-        if not self._try_advisory_xact_lock():
-            self._cycles_skipped_lock_busy += 1
-            self._last_pool_wait_seconds = time.monotonic() - t_start
-            return
-
-        try:
-            upstream_sessions = self._read_upstream()
-            upstream_keys = {s["key"] for s in upstream_sessions}
-            self._last_upstream_session_count = len(upstream_keys)
-
-            sorted_sessions = sorted(upstream_sessions, key=lambda s: s["key"])
-            for sm in sorted_sessions:
-                if not self._running:
-                    return
-                key = sm.get("key")
-                if not key:
-                    continue
-                self._sync_session_with_detection(key)
-            self._cleanup_missing(upstream_keys)
-
-            pg_count = self._count_pg_sessions()
-            self._last_pg_session_count = pg_count
-            self._last_success_ts = time.time()
-            self._consecutive_failures = 0
-        finally:
-            self._last_pool_wait_seconds = time.monotonic() - t_start
-
-    def _sync_cycle(self) -> None:
-        """Backward-compat alias: финальный flush при ``stop()``.
-
-        Реализация идентична ``_do_sync_batch`` (вызывается при
-        shutdown для D21).
-        """
-        self._do_sync_batch()
-
-    def _sync_session_with_detection(self, key: str) -> None:
-        """Один ключ: D23 stale-check + reverse-lag + LWW sync.
-
-        Структура (согласно tasks.md 3.4):
-          1. ``existing is None`` — нормальный sync (новая сессия).
-          2. ``existing > jsonl + tolerance`` — STALE, log
-             ``session_stale_detected``, skip.
-          3. ``existing >= jsonl`` (EQUAL/PG-WITHIN-TOLERANCE) — silent
-             skip (no-op).
-          4. else — нормальный sync + проверка sync_lag_exceeded.
-        """
-        try:
-            snapshot = self._session_manager.read_session_snapshot(key)
-        except Exception:
-            return
-        if snapshot is None:
-            return
-
-        jsonl_updated_at = getattr(snapshot, "updated_at", None)
-        if jsonl_updated_at is None:
-            return
-
-        pg_meta = self._read_pg_updated_at(key)
-        pg_updated_at = pg_meta if pg_meta is None else pg_meta.get("updated_at")
-
-        if pg_updated_at is None:
-            # 1. Новая сессия — нормальный sync.
-            self._do_lww_sync(key, snapshot, jsonl_updated_at)
-            return
-
-        if pg_updated_at > jsonl_updated_at + self._stale_tolerance:
-            # 2. STALE: PG свежее JSONL + tolerance → пропуск.
-            self._stale_sync_skipped_counter += 1
-            if not self._is_stale_logged_recently(key):
-                self._log_stale(key, jsonl_updated_at, pg_updated_at)
-                self._stale_logged_at[key] = datetime.now()
-                self._stale_detected_counter += 1
-            return
-
-        if pg_updated_at >= jsonl_updated_at:
-            # 3. EQUAL / PG-WITHIN-TOLERANCE — silent skip (current behavior).
-            # 3. EQUAL / PG-WITHIN-TOLERANCE — silent skip (current behavior).
-            return
-
-        # 4. JSONL > PG → нормальный sync + проверка reverse-lag.
-        self._do_lww_sync(key, snapshot, jsonl_updated_at)
-        if jsonl_updated_at > pg_updated_at + self._sync_lag_threshold:
-            self._log_lag_exceeded(key, jsonl_updated_at, pg_updated_at)
-            self._sync_lag_exceeded_counter += 1
-
-    def _do_lww_sync(self, key: str, snapshot: Any, jsonl_updated_at: datetime) -> None:
-        """LWW-sync: записать meta + messages в PG."""
-        self._upsert_meta(key, snapshot, jsonl_updated_at)
-        self._replace_messages(key, snapshot)
-        self._rows_synced_total += 1
-        self._messages_synced_total += len(getattr(snapshot, "messages", []) or [])
-
-    def _is_stale_logged_recently(self, key: str) -> bool:
-        """True, если для ``key`` уже логировали stale-detected
-        за последние ``_STALE_LOG_DEDUP_TTL`` секунд."""
-        last = self._stale_logged_at.get(key)
-        if last is None:
-            return False
-        if datetime.now() - last > _STALE_LOG_DEDUP_TTL:
-            self._stale_logged_at.pop(key, None)
-            return False
-        return True
-
-    def _read_upstream(self) -> list[dict[str, Any]]:
-        return self._session_manager.list_sessions() or []
-
-    def _upsert_meta(self, key: str, snapshot: Any, updated_at: datetime) -> None:
-        metadata_val = getattr(snapshot, "metadata", None) or {}
-        last_consolidated = getattr(snapshot, "last_consolidated", None)
-        created_at = getattr(snapshot, "created_at", updated_at)
-
-        def _work(conn) -> None:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"UPDATE {self._fq_meta} SET "
-                    f"updated_at = %s, last_consolidated = %s, metadata = %s "
-                    f"WHERE session_key = %s "
-                    f"AND updated_at < %s "
-                    f"RETURNING session_key",
-                    (updated_at, last_consolidated, json.dumps(metadata_val),
-                     key, updated_at),
-                )
-                if cur.fetchone() is None:
-                    cur.execute(
-                        f"SELECT 1 FROM {self._fq_meta} "
-                        f"WHERE session_key = %s",
-                        (key,),
-                    )
-                    if cur.fetchone() is None:
-                        cur.execute(
-                            f"INSERT INTO {self._fq_meta} "
-                            f"(session_key, created_at, updated_at, "
-                            f"last_consolidated, metadata) "
-                            f"VALUES (%s, %s, %s, %s, %s)",
-                            (key, created_at, updated_at,
-                             last_consolidated, json.dumps(metadata_val)),
-                        )
-
-        self._run_in_tx(_work)
-
-    def _replace_messages(self, key: str, snapshot: Any) -> None:
-        messages = getattr(snapshot, "messages", []) or []
-        from psycopg2.extras import execute_values
-
-        def _work(conn) -> None:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"DELETE FROM {self._fq_messages} WHERE session_key = %s",
-                    (key,),
-                )
-                if not messages:
-                    return
-                rows: list[tuple] = []
-                for seq, msg in enumerate(messages):
-                    rows.append((
-                        key,
-                        seq,
-                        msg.get("role", "user"),
-                        msg.get("content", "") or "",
-                        msg.get("timestamp"),
-                    ))
-                execute_values(
-                    cur,
-                    f"INSERT INTO {self._fq_messages} "
-                    f"(session_key, seq, role, content, msg_timestamp) VALUES %s",
-                    rows,
-                    page_size=self._batch_size,
-                )
-
-        self._run_in_tx(_work)
-
-    def _cleanup_missing(self, upstream_keys: set[str]) -> None:
-        """Удалить из PG сессии, которых больше нет в upstream JSONL.
-
-        Upstream JSONL — единственный source of truth. Любая строка
-        в PG без upstream-двойника считается устаревшей и удаляется.
-        """
-        try:
-            pg_rows = self._select_all_pg_keys()
-        except Exception:
-            return
-
-        to_delete = sorted(row for row in pg_rows if row not in upstream_keys)
-        if not to_delete:
-            return
-
-        def _work(conn) -> None:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"DELETE FROM {self._fq_messages} WHERE session_key = ANY(%s)",
-                    (to_delete,),
-                )
-                cur.execute(
-                    f"DELETE FROM {self._fq_meta} WHERE session_key = ANY(%s)",
-                    (to_delete,),
-                )
-
-        try:
-            self._run_in_tx(_work)
-        except Exception:
-            return
-
-        for key in to_delete:
+    async def _cycle(self) -> None:
+        """Один проход: состояние зеркала → догон изменённого → уборка."""
+        async with self._cycle_lock:
+            if not self._enabled:
+                return
+            self._cycles_total += 1
+            started = asyncio.get_running_loop().time()
             try:
-                self._log_deleted(key)
-            except Exception:
-                pass
-
-    def _read_pg_updated_at(self, key: str) -> datetime | None:
-        def _work(conn) -> datetime | None:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT updated_at FROM {self._fq_meta} "
-                    f"WHERE session_key = %s",
-                    (key,),
+                present = await self._sync_changed()
+                await self._cleanup_absent(present)
+                self._consecutive_failures = 0
+                self._last_success_ts = datetime.now().timestamp()
+            finally:
+                self._last_cycle_seconds = (
+                    asyncio.get_running_loop().time() - started
                 )
-                row = cur.fetchone()
-                return row[0] if row else None
 
-        return self._run_in_tx(_work)
+    async def _sync_changed(self) -> list[str]:
+        """Догнать изменившееся. Возвращает ключи, которые реально есть."""
+        sessions = await asyncio.to_thread(self._session_manager.list_sessions) or []
+        keys = [str(item["key"]) for item in sessions if item.get("key")]
+        self._last_upstream_session_count = len(keys)
 
-    def _count_pg_sessions(self) -> int:
-        def _work(conn) -> int:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT COUNT(*) FROM {self._fq_meta}")
-                return cur.fetchone()[0]
-        return self._run_in_tx(_work)
+        state = await self._call(
+            "session_mirror_state", {"replica_id": self._replica_id},
+        )
+        mirrored = state.get("sessions") or {}
+        self._last_mirror_session_count = int(state.get("count") or 0)
 
-    def _select_all_pg_keys(self) -> list[str]:
-        def _work(conn) -> list[str]:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT session_key FROM {self._fq_meta}"
-                )
-                return [r[0] for r in cur.fetchall()]
-        return self._run_in_tx(_work)
+        by_key = {str(item["key"]): item for item in sessions if item.get("key")}
+        for key in sorted(keys):
+            if self._stopping:
+                return keys
+            await self._sync_one(key, by_key[key], mirrored.get(key))
+        return keys
 
-    def _try_advisory_xact_lock(self) -> bool:
-        """Per-transaction advisory lock.
+    async def _sync_one(
+        self, key: str, info: dict[str, Any], cached: dict[str, Any] | None,
+    ) -> None:
+        path = info.get("path")
+        if not path:
+            self._unreadable_total += 1
+            return
 
-        ``pg_try_advisory_xact_lock`` держит lock до конца транзакции
-        (COMMIT/ROLLBACK); нет риска «зависшего» lock на соединении.
-        См. D-Pool.2 «Advisory lock — на выделенном соединении»:
-        вместо долгоживущего соединения используем короткий lease с
-        xact-scoped lock.
+        digest = await asyncio.to_thread(file_digest, path)
+        if digest is None:
+            # Файл прямо сейчас переписывается либо недоступен. Не гадаем.
+            self._unreadable_total += 1
+            return
+
+        if cached is not None and cached.get("source_digest") == digest:
+            # Содержимое совпало с зеркалом. Это самый частый исход цикла, и он
+            # не должен стоить ни чтения сессии, ни обращения к данным: без этой
+            # проверки каждый проход читал и разбирал все сессии целиком.
+            self._skipped_unchanged_total += 1
+            return
+
+        snapshot = await asyncio.to_thread(
+            self._session_manager.read_session_snapshot, key,
+        )
+        if snapshot is None:
+            self._snapshot_missing_total += 1
+            return
+
+        result = await self._call("mirror_session", self._mirror_payload(
+            key, snapshot, digest,
+        ))
+        verdict = str(result.get("verdict") or "")
+        if verdict not in _VERDICTS_WITHOUT_WRITE and verdict != "":
+            self._sessions_written_total += 1
+            self._messages_written_total += int(result.get("messages_written") or 0)
+        if verdict == "skipped_stale":
+            self._skipped_stale_total += 1
+            self._log_stale_once(key, result)
+        elif result.get("sync_lag_exceeded"):
+            self._log_lag(key, result)
+
+    def _mirror_payload(
+        self, key: str, snapshot: Any, digest: str,
+    ) -> dict[str, Any]:
+        messages = [
+            message for message in (getattr(snapshot, "messages", None) or [])
+            if isinstance(message, dict)
+        ]
+        return {
+            "session_key": key,
+            "replica_id": self._replica_id,
+            "source_digest": digest,
+            "updated_at": _isoformat(getattr(snapshot, "updated_at", None)),
+            "created_at": _isoformat(getattr(snapshot, "created_at", None)),
+            "last_consolidated": int(getattr(snapshot, "last_consolidated", 0) or 0),
+            "metadata": getattr(snapshot, "metadata", None) or {},
+            "messages": messages,
+            "stale_tolerance_seconds": int(self._stale_tolerance),
+            "sync_lag_threshold_seconds": int(self._sync_lag_threshold),
+        }
+
+    async def _cleanup_absent(self, present: list[str]) -> None:
+        """Убрать из зеркала сессии, которых больше нет в JSONL.
+
+        Пустой список upstream НИКОГДА не бывает основанием для уборки. Каталог
+        сессий лежит на диске, и пустой он бывает не «потому что всё удалили»,
+        а потому что каталог не подмонтирован, недоступен или сорван: список
+        приходит с чужой машины по NFS, и молчаливое удаление всего зеркала на
+        таком сбое стоило бы месяцев переписки. Пустое зеркало удалять нечего,
+        а непустое на пустом списке — это не «всё удалили», это «мы ничего не
+        видим».
         """
-        def _work(conn) -> bool:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT pg_try_advisory_xact_lock(hashtext(%s)::bigint)",
-                    (_ADVISORY_LOCK_KEY,),
+        if not present:
+            if self._last_mirror_session_count:
+                self._cleanup_guarded_total += 1
+                self._publish(
+                    "agent.degraded",
+                    "session_mirror: список сессий пуст, уборка пропущена — "
+                    "зеркало не тронуто",
+                    level=_LEVEL_WARN,
+                    payload={
+                        "replica_id": self._replica_id,
+                        "mirror_sessions": self._last_mirror_session_count,
+                    },
                 )
-                row = cur.fetchone()
-                return bool(row and row[0])
+            return
+
+        result = await self._call("cleanup_session_mirror", {
+            "replica_id": self._replica_id,
+            "present_keys": sorted(present),
+            "delete_after_missed_cycles": self._missing_cycles_threshold,
+        })
+        deleted = int(result.get("deleted_sessions") or 0)
+        if deleted:
+            self._deleted_sessions_total += deleted
+            for key in result.get("deleted_keys") or []:
+                self._log_deleted(str(key))
+
+    # -- обращение к платформе -----------------------------------------------
+
+    async def _call(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Вызвать операцию платформы и разобрать её JSON-ответ.
+
+        Отказ платформы не проглатывается: он поднимается в цикл, который
+        считает неудачу и откатывается на backoff. Разбор ответа — с отказом по
+        форме, а не ``json.loads`` в молчание: нечитаемый ответ хуже отсутствия
+        ответа, потому что выглядит как пустой успех.
+        """
+        raw = await self._mcp.call(operation, arguments)
         try:
-            return self._run_in_tx(_work)
-        except Exception:
-            return False
+            parsed = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{operation}: ответ платформы не разобран как JSON ({exc})"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"{operation}: ответ платформы — {type(parsed).__name__}, "
+                f"а должен быть объектом"
+            )
+        return parsed
 
-    def _run_in_tx(self, fn):
-        """Выполнить ``fn(conn)`` в короткой транзакции через utils.db.
+    # -- журнал событий ------------------------------------------------------
 
-        ``utils.db.transaction()`` сам управляет COMMIT/ROLLBACK
-        (autocommit=False, COMMIT на выходе без ошибки, ROLLBACK на
-        исключении); lease на соединение выдаётся на один job и
-        возвращается в worker-потоке — D-Pool.3 выполняется.
+    def _publish(
+        self,
+        event_type: str,
+        summary: str,
+        *,
+        level: str = "WARN",
+        session_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Отправить событие в журнал.
+
+        Уровень — именованная константа с каноническим дефолтом, а не сборка на
+        лету: CHECK ``valid_level`` в базе отвергает значение, которого в шкале
+        нет, и отказ уносит весь батч, а не одну строку. Сборка уровня
+        (f-строка, ``.upper()``) выглядит правдоподобно и уезжает в базу
+        неотличимо от правильного. Канон проверяется
+        ``tests/test_journal_level_canonical.py``, в том числе требование
+        дефолта: «WARN» по умолчанию, потому что деградация — это дефолтное
+        состояние фоновой подсистемы, а не исключение.
         """
-        from utils.db import transaction
-        with transaction() as conn:
-            return fn(conn)
-
-    def _log_failure(self, exc: Exception) -> None:
         if self._db_logging is None:
             return
-        event = LogEvent(
-            event_type="session_cold_sync_failed",
-            level="WARNING",
-            summary=f"session cold sync cycle failed: {exc.__class__.__name__}",
-            payload={"error": str(exc)[:500]},
-            metadata={"consecutive_failures": self._consecutive_failures},
-        )
+        from lib.services.db_logging_service import LogEvent, try_log_event
+
         try_log_event(
             self._db_logging,
-            event,
+            LogEvent(
+                event_type=event_type,
+                level=level,
+                summary=summary,
+                session_id=session_id,
+                payload=payload or {},
+            ),
             producer="SessionColdSyncService",
-            event_type=event.event_type,
+            event_type=event_type,
+        )
+
+    def _log_failure(self, exc: Exception) -> None:
+        self._publish(
+            "agent.degraded",
+            f"session mirror cycle failed: {exc.__class__.__name__}",
+            level=_LEVEL_WARN,
+            payload={
+                "error": str(exc)[:500],
+                "consecutive_failures": self._consecutive_failures,
+            },
         )
 
     def _log_deleted(self, key: str) -> None:
-        if self._db_logging is None:
-            return
-        event = LogEvent(
-            event_type="session_cold_sync_deleted",
-            level="INFO",
-            summary=f"session_cold_sync: deleted mirror row for {key}",
+        self._publish(
+            "agent.degraded",
+            f"session_mirror: удалена строка зеркала {key}",
+            level=_LEVEL_INFO,
+            session_id=key,
             payload={"session_key": key},
         )
-        try_log_event(
-            self._db_logging,
-            event,
-            producer="SessionColdSyncService",
-            event_type=event.event_type,
-        )
 
-    def _log_stale(
-        self,
-        key: str,
-        jsonl_updated_at: datetime,
-        pg_updated_at: datetime,
-    ) -> None:
-        """D23: PG свежее JSONL + tolerance → логируем ``session_stale_detected``.
-
-        Используется in-memory dedup ``_stale_logged_at`` (TTL 60s),
-        чтобы не флудить БД на каждом sync-цикле.
-        """
-        if self._db_logging is None:
+    def _log_stale_once(self, key: str, result: dict[str, Any]) -> None:
+        now = datetime.now()
+        last = self._stale_logged_at.get(key)
+        if last is not None and now - last <= _STALE_LOG_DEDUP_TTL:
             return
-        event = LogEvent(
-            event_type="session_stale_detected",
-            level="WARNING",
-            summary=f"session_stale_detected: {key} (PG newer than JSONL + tolerance)",
+        self._stale_logged_at[key] = now
+        self._publish(
+            "agent.degraded",
+            f"session_stale_detected: {key} (зеркало впереди файла за пределы "
+            f"терпимости)",
+            level=_LEVEL_WARN,
             session_id=key,
             payload={
                 "session_key": key,
-                "jsonl_updated_at": jsonl_updated_at.isoformat(),
-                "pg_updated_at": pg_updated_at.isoformat(),
-                "tolerance_seconds": self._stale_tolerance.total_seconds(),
+                "replica_id": self._replica_id,
+                "jsonl_updated_at": result.get("updated_at"),
+                "pg_updated_at": result.get("previous_updated_at"),
+                "tolerance_seconds": int(self._stale_tolerance),
             },
         )
-        try_log_event(
-            self._db_logging,
-            event,
-            producer="SessionColdSyncService",
-            event_type=event.event_type,
-        )
 
-    def _log_lag_exceeded(
-        self,
-        key: str,
-        jsonl_updated_at: datetime,
-        pg_updated_at: datetime,
-    ) -> None:
-        """Reverse-lag: JSONL свежее PG + threshold → логируем ``sync_lag_exceeded``."""
-        if self._db_logging is None:
-            return
-        event = LogEvent(
-            event_type="sync_lag_exceeded",
-            level="WARNING",
-            summary=f"sync_lag_exceeded: {key} (JSONL newer than PG + threshold)",
+    def _log_lag(self, key: str, result: dict[str, Any]) -> None:
+        self._publish(
+            "agent.degraded",
+            f"sync_lag_exceeded: {key} (файл впереди зеркала за пределы порога)",
+            level=_LEVEL_WARN,
             session_id=key,
             payload={
                 "session_key": key,
-                "jsonl_updated_at": jsonl_updated_at.isoformat(),
-                "pg_updated_at": pg_updated_at.isoformat(),
-                "threshold_seconds": self._sync_lag_threshold.total_seconds(),
+                "replica_id": self._replica_id,
+                "sync_lag_seconds": result.get("sync_lag_seconds"),
+                "threshold_seconds": int(self._sync_lag_threshold),
             },
         )
-        try_log_event(
-            self._db_logging,
-            event,
-            producer="SessionColdSyncService",
-            event_type=event.event_type,
-        )
+
+    # -- метрики -------------------------------------------------------------
 
     def get_stats(self) -> dict[str, Any]:
-        """Метрики для health-check.
-
-        D-Pool.6: ``pool_size`` / ``pool_available`` / ``pool_wait_seconds``
-        публикуются в stats, чтобы отличить «sync не работает, потому что
-        реплика не лидер» от «sync не работает, потому что пул занят».
-
-        Размер пула и доступные соединения подтягиваются из
-        ``utils.db.get_stats()`` (D-Pool.3: единый пул, метрики
-        публикуются его владельцем).
-        """
         last_success_lag = None
         if self._last_success_ts is not None:
-            last_success_lag = max(0.0, time.time() - self._last_success_ts)
-        pool_size, pool_available = self._read_pool_size()
+            last_success_lag = max(
+                0.0, datetime.now().timestamp() - self._last_success_ts,
+            )
         return {
             "enabled": self._enabled,
+            "disabled_reason": self._disabled_reason,
+            "replica_id": self._replica_id,
             "cycles_total": self._cycles_total,
             "cycles_failed_total": self._cycles_failed_total,
-            "cycles_skipped_lock_busy": self._cycles_skipped_lock_busy,
-            "cycles_skipped_pool_busy": self._cycles_skipped_pool_busy,
             "consecutive_failures": self._consecutive_failures,
-            "stale_detected_total": self._stale_detected_counter,
-            "sync_lag_exceeded_total": self._sync_lag_exceeded_counter,
-            "stale_sync_skipped_total": self._stale_sync_skipped_counter,
-            "stale_tolerance_seconds": int(self._stale_tolerance.total_seconds()),
-            "sync_lag_threshold_seconds": int(self._sync_lag_threshold.total_seconds()),
+            "last_cycle_seconds": self._last_cycle_seconds,
             "last_success_ts": self._last_success_ts,
             "last_success_lag_seconds": last_success_lag,
-            "pool_size": pool_size,
-            "pool_available": pool_available,
-            "pool_wait_seconds": self._last_pool_wait_seconds,
-            "rows_synced_total": self._rows_synced_total,
-            "messages_synced_total": self._messages_synced_total,
             "upstream_session_count": self._last_upstream_session_count,
-            "pg_session_count": self._last_pg_session_count,
+            "mirror_session_count": self._last_mirror_session_count,
+            "sessions_written_total": self._sessions_written_total,
+            "messages_written_total": self._messages_written_total,
+            "skipped_unchanged_total": self._skipped_unchanged_total,
+            "skipped_stale_total": self._skipped_stale_total,
+            "unreadable_total": self._unreadable_total,
+            "snapshot_missing_total": self._snapshot_missing_total,
+            "cleanup_guarded_total": self._cleanup_guarded_total,
+            "deleted_sessions_total": self._deleted_sessions_total,
+            "stale_tolerance_seconds": int(self._stale_tolerance),
+            "sync_lag_threshold_seconds": int(self._sync_lag_threshold),
+            "missing_cycles_threshold": self._missing_cycles_threshold,
         }
 
-    def _read_pool_size(self) -> tuple[int | None, int | None]:
-        """Читает pool_size / pool_available из utils.db.get_stats().
 
-        Если utils.db.get_stats недоступен (например, в тестах без
-        реального пула) — возвращает ``(None, None)``; это нормальное
-        состояние, не ошибка.
-        """
-        try:
-            from utils.db import get_stats as _db_stats
-            stats = _db_stats()
-        except Exception:
-            return self._pool_size, self._pool_available
-        if not isinstance(stats, dict):
-            return self._pool_size, self._pool_available
-        size = stats.get("pool_size")
-        available = stats.get("pool_available")
-        if isinstance(size, int):
-            self._pool_size = size
-        if isinstance(available, int):
-            self._pool_available = available
-        return self._pool_size, self._pool_available
-
-    @staticmethod
-    def _validate_ident(part: str) -> None:
-        if not part or not part.replace("_", "").replace("$", "").isalnum():
-            raise ValueError(f"Unsafe SQL identifier part: {part!r}")
-
-    @classmethod
-    def _quote(cls, ident: str) -> str:
-        parts = ident.split(".")
-        for part in parts:
-            cls._validate_ident(part)
-        return ".".join(f'"{p}"' for p in parts)
-
-
-def resolve_default_sqlite_path() -> Path:
-    """Дефолтный путь к SQLite-файлу ``LLMUsageStore`` из design D4.
-
-    Хранилище создаёт библиотека: ``nanobot.llm_usage.get_llm_usage_store()``.
-    """
-    return Path.home() / ".cache" / "nanobot" / "usage" / "usage.db"
+def _isoformat(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
