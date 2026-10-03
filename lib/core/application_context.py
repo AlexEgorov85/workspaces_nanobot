@@ -1280,11 +1280,6 @@ def _resolve_agent_id(config: Any) -> str:
     return "main"
 
 
-#: Дефолт лимита длины результата tool'а, если runtime-конфиг его не задал.
-#: Совпадает с дефолтом nanobot ``AgentLoop.max_tool_result_chars``.
-_DEFAULT_MAX_TOOL_RESULT_CHARS = 16_000
-
-
 def _make_db_logging(ctx: ApplicationContext) -> Any | None:
     """Собрать ``DbLoggingService`` из секции ``logging.db`` в settings.
 
@@ -1299,7 +1294,12 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
     """
     try:
         from lib.services.config_service import ConfigService  # noqa: F401
-        from lib.services.db_logging_service import DbLoggingService
+        from lib.services.db_logging_service import (
+            DEFAULT_MIN_LEVEL,
+            DbLoggingService,
+            JournalLevelError,
+            normalize_journal_level,
+        )
     except Exception as exc:
         logger.warning("DbLoggingService unavailable: %s", exc)
         return None
@@ -1340,6 +1340,33 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
         ctx.project_settings.logging.db.flush_interval_sec
     )
 
+    # Порог журнала настраивается ОДНИМ местом: ключ
+    # ``gateway.agent.logging.db.min_level`` файла ``config.json``, и больше
+    # нигде. Ни переменной окружения, ни второго ключа, ни хардкода в коде —
+    # это проверяет ``tests/test_journal_threshold_single_source.py``.
+    #
+    # Отсутствие ключа — законный дефолт писателя (``DEFAULT_MIN_LEVEL``).
+    # ПРИСУТСТВИЕ негодного значения — отказ на старте с названным значением:
+    # раньше здесь стояло ``db_cfg.get("min_level", "INFO")``, и опечатка
+    # («verbose», «info») молча превращалась в ``INFO`` — порог включался не
+    # тот, и об этом не узнавал никто. Платформа на незнакомом уровне
+    # отказывает; молчание здесь было расхождением поведения между
+    # половинами журнала.
+    configured_min_level = db_cfg.get("min_level")
+    if configured_min_level is None:
+        min_level = DEFAULT_MIN_LEVEL
+    else:
+        try:
+            min_level = normalize_journal_level(configured_min_level)
+        except JournalLevelError as exc:
+            from config import ConfigurationError
+
+            raise ConfigurationError(
+                "config.json → gateway.agent.logging.db.min_level: "
+                f"{exc}. Уровень порога журнала задаётся в одном месте — "
+                "этим ключом, правкой файла, без правки кода."
+            ) from exc
+
     return DbLoggingService(
         dsn=dsn,
         table_name=table_name,
@@ -1349,7 +1376,7 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
         flush_interval_sec=flush_interval_sec,
         batch_size=int(db_cfg.get("batch_size", 100)),
         queue_maxsize=int(db_cfg.get("queue_maxsize", 10000)),
-        min_level=db_cfg.get("min_level", "INFO"),
+        min_level=min_level,
         connect_backoff_sec=float(db_cfg.get("connect_backoff_sec", 1.0)),
         connect_backoff_max_sec=float(db_cfg.get("connect_backoff_max_sec", 60.0)),
         summary_max_chars=int(db_cfg.get("summary_max_chars", 200)),
