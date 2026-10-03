@@ -128,6 +128,7 @@ def test_full_round_trip_existing_files(tmp_path):
     """Полный цикл: создать файл → serialize → deserialize → проверить."""
     from workspace.utils.media import deserialize, serialize
     from utils.session_file_store import SessionFileStore
+    from utils.session_key import safe_session_key
 
     f1 = tmp_path / "report.md"
     f1.write_bytes(b"# Report\nContent here.")
@@ -140,7 +141,10 @@ def test_full_round_trip_existing_files(tmp_path):
         assert entry["mime_type"]
         assert entry["file_size"]
 
-    file_store = SessionFileStore(tmp_path / "cache", attachments_subdir="attachments")
+    # Каталог сессии отдаёт резолвер (замена корень темповым каталогом),
+    file_store = SessionFileStore(
+        lambda key: tmp_path / safe_session_key(key), attachments_subdir="attachments"
+    )
     runtime_media = deserialize(db_media, file_store, session_key="test:1")
     assert len(runtime_media) == 2
     for entry in runtime_media:
@@ -156,6 +160,7 @@ def test_round_trip_keeps_existing_when_some_missing(tmp_path):
     """Сценарий со скрина: .md и .xlsx есть, .docx нет."""
     from workspace.utils.media import deserialize, serialize
     from utils.session_file_store import SessionFileStore
+    from utils.session_key import safe_session_key
 
     md = tmp_path / "test.md"
     md.write_bytes(b"# test")
@@ -170,6 +175,9 @@ def test_round_trip_keeps_existing_when_some_missing(tmp_path):
     assert db_media[2]["mime_type"] == ""
     assert db_media[2]["file_size"] == 0
 
-    file_store = SessionFileStore(tmp_path / "cache", attachments_subdir="attachments")
+    # Каталог сессии отдаёт резолвер (замена корень темповым каталогом),
+    file_store = SessionFileStore(
+        lambda key: tmp_path / safe_session_key(key), attachments_subdir="attachments"
+    )
     runtime = deserialize(db_media, file_store, session_key="telegram:1")
     assert len(runtime) == 3

@@ -27,9 +27,13 @@ Layout на диске (под ``document_dir(document_id)``)::
     chunks/<chunk_id>.json                 # per-chunk summary
     sections/<section_id>.json             # per-section LLM summary
 
-Корень: ``<repo>/workspace/data_store/cache/sessions/<safe_session_key>/documents/``.
-Привязка к сессии: в одной сессии тот же ``document_id`` (SHA-256 от
-resolved_path+size+mtime_ns) → cache hit. Между сессиями переиспользования нет.
+Корень: ``<корень кэша домена>/<имя каталога сессии>/documents/``. Корень
+объявляет владелец домена (``ENTERPRISE_LEGAL_CACHE_ROOT``), имя каталога
+считает платформа общей реализацией правила имени сессии
+(``libs.enterprise_common.session.security.session_dir_name``) — той же, что у
+``SessionWorkspace``. Привязка к сессии: в одной сессии тот же ``document_id``
+(SHA-256 от resolved_path+size+mtime_ns) → cache hit. Между сессиями
+переиспользования нет.
 
 Snapshot пишется атомарно: staging dir + ``Path.rename``. ``_complete.marker``
 создаётся последним. Без marker snapshot считается неполным (cache miss).
@@ -57,7 +61,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from libs.legal_summarizer.cache.session_key import safe_session_key
+from libs.enterprise_common.session.security import session_dir_name
 
 __all__ = ["DocumentCache"]
 
@@ -112,17 +116,22 @@ def _default_cache_root() -> Path:
 
 
 def _cache_root(workspace_root: Path | str | None, session_key: str) -> Path:
-    """Корень document-level cache для конкретной сессии.
+    """Каталог document-level cache конкретной сессии - под корнем кэша домена.
 
-    ``<root>/workspace/data_store/cache/sessions/<safe_session_key>/documents/``.
+    ``<root>/<имя каталога сессии>/documents/``, где ``root`` - объявленный
+    владельцем корень кэша домена (``ENTERPRISE_LEGAL_CACHE_ROOT``), а имя
+    каталога сессии считает платформа, функцией ``session_dir_name``.
+
+    Раньше здесь был ``<root>/workspace/data_store/cache/sessions/<key>/documents``:
+    кэш домена писался в ``data_store`` репозитория агента, то есть в чужое
+    дерево сессий, и правило имени сессии тут было ещё раз написано своим
+    regex'ом. Оба расхождения сняты: корень объявляет владелец, имя - общая
+    платформенная реализация правила (эта же, что у ``SessionWorkspace``).
+    Неразрешимое имя - отказ, а не служебный каталог: псевдосессия в дереве
+    сессий означала бы один кэш на все неразобранные сессии.
     """
     root = Path(workspace_root) if workspace_root is not None else _default_cache_root()
-    safe = safe_session_key(session_key or "default")
-    return (
-        root
-        / "workspace" / "data_store" / "cache"
-        / "sessions" / safe / "documents"
-    )
+    return root / session_dir_name(session_key or "default") / "documents"
 
 
 class DocumentCache:

@@ -29,6 +29,15 @@ tool, а не в промпт.
 
 Инвариант: путь к файлу присутствует в ответе **всегда** — и когда текст
 вернулся, и когда тело опущено по порогу.
+
+Граница чтения: ``path`` — **только относительный** путь внутри ``files/``
+каталога своей сессии (вложение пользователя лежит в ``files/attachments/``, т.е.
+``attachments/<файл>.pdf``). Абсолютный путь, путь с буквой диска и выход за
+пределы каталога отвергаются тем же примитивом ``safe_child``, что и на стороне
+платформы, а не собственным разбором строки. Каталог сессии берётся из
+``lib.services.session_files`` (резолвер процесса) по ``session_key`` текущего
+оборота; при отсутствии резолвера чтение **отказано с названной причиной** — тот
+же отказ, что и у ``SessionFileRedirectHook`` на записи.
 """
 from __future__ import annotations
 
@@ -55,6 +64,16 @@ SUPPORTED_SUFFIXES: tuple[str, ...] = (
 
 #: Дефолт порога длины текста (наследует дефолт удалённого патча).
 DEFAULT_MAX_CHARS: int = 20_000
+
+
+class _Refused(Exception):
+    """Чтение отказано с названной причиной.
+
+    Отдельный тип, а не ``None`` в качестве признака: «файла нет» и «путь за
+    пределами каталога сессии» — разные отказы, и модель должна видеть, какой из
+    них произошёл, иначе она начнёт искать другой путь вместо того, чтобы
+    остановиться.
+    """
 
 
 def _as_offset(value: Any) -> int:
@@ -84,8 +103,9 @@ class DocumentReadToolConfig(BaseModel):
         "path": {
             "type": "string",
             "description": (
-                "Путь к файлу документа (DOCX/XLSX/XLS/PDF/PPTX/CSV/TXT). "
-                "Абсолютный либо относительный к workspace."
+                "Путь к файлу документа (DOCX/XLSX/XLS/PDF/PPTX/CSV/TXT) "
+                "ОТНОСИТЕЛЬНО к папке files/ твоей сессии, например "
+                "attachments/report.pdf. Абсолютные пути не принимаются."
             ),
         },
         "chunk_chars": {
@@ -170,11 +190,12 @@ class DocumentReadTool(Tool):
     def description(self) -> str:
         return (
             "Извлечь текст из офисного документа (DOCX/XLSX/XLS/PDF/PPTX/CSV/"
-            "TXT). Используй, когда к запросу приложен документ или пользователь "
-            "назвал путь к файлу: содержимое НЕ вставляется в промпт заранее, "
-            "текст читается этим инструментом. Если ответ содержит маркер "
-            "'[text omitted ...]', дочитай нужный фрагмент через offset/"
-            "chunk_chars."
+            "TXT) из папки files/ твоей сессии. Используй, когда к запросу "
+            "приложен документ или пользователь назвал файл: содержимое НЕ "
+            "вставляется в промпт заранее, текст читается этим инструментом. "
+            "Путь только относительный (attachments/<файл>), абсолютный "
+            "отвергается. Если ответ содержит маркер '[text omitted ...]', "
+            "дочитай нужный фрагмент через offset/chunk_chars."
         )
 
     # ------------------------------------------------------------------
@@ -196,9 +217,10 @@ class DocumentReadTool(Tool):
         if not isinstance(path, str) or not path.strip():
             return ToolResult.error("Error: path is required and must be a non-empty string")
 
-        target = self._resolve_path(path)
-        if target is None:
-            return ToolResult.error(f"Error: file not found: {path}")
+        try:
+            target = await self._resolve_in_session(path)
+        except _Refused as exc:
+            return ToolResult.error(f"Error: {exc}")
         if not target.is_file():
             return ToolResult.error(f"Error: not a regular file: {path}")
 
@@ -280,20 +302,71 @@ class DocumentReadTool(Tool):
         return max_chars if max_chars > 0 else DEFAULT_MAX_CHARS
 
     @staticmethod
-    def _resolve_path(path: str) -> Path | None:
-        """Разрешить путь к файлу относительно cwd, затем workspace.
+    async def _resolve_in_session(path: str) -> Path:
+        """Разрешить ``path`` как путь внутри ``files/`` каталога сессии.
 
-        Возвращает ``None``, если файл не существует. Модуль не знает
-        про ``workspace_dir`` (его задаёт loader), поэтому пробуем cwd —
-        этого достаточно: агент оперирует абсолютными путями, а
-        ``SessionFileRedirectHook`` уже перенаправил их в
-        ``workspace/data_store/cache/sessions/<key>/``.
+        Только относительный путь: база — ``files_dir`` текущей сессии от
+        ``lib.services.session_files``. Границу держит ``safe_child`` платформы
+        (тот же примитив, что у операции ``session_files``), а не свой разбор
+        строки: вторая копия правила разошлась бы с первой при первой же правке
+        и тихо вернула бы чтение мимо границы.
+
+        Любой отказ — ``_Refused`` с текстом причины, включая отсутствие
+        резолвера: читать нечем, и «где-то ещё» здесь означало бы возврат к
+        прежнему поведению, которое этот пункт и убирает.
         """
-        candidate = Path(path).expanduser()
-        if candidate.is_file():
-            return candidate
         try:
-            resolved = candidate.resolve()
-        except OSError:
-            return None
-        return resolved if resolved.is_file() else None
+            from libs.enterprise_common.session.security import (
+                PathDeniedError,
+                safe_child,
+            )
+        except Exception as exc:
+            # Примитив границы — платформенный импорт; если он недоступен,
+            # читать нечем, и отказ здесь правильнее отката на свой разбор пути.
+            raise _Refused(
+                f"примитив границы пути недоступен (платформа): {exc}"
+            ) from exc
+
+        from nanobot.agent.tools.context import current_request_session_key
+
+        from lib.services.session_files import (
+            SessionFilesUnavailable,
+            current_session_file_resolver,
+        )
+        from workspace.utils.session_key import SessionDirNameDenied
+
+        session_key = current_request_session_key()
+        if not session_key:
+            # Служебное имя каталога означало бы «все безымянные обороты в одной
+            # папке» — тот же отказ, что у хука перенаправления на записи.
+            raise _Refused(
+                "у оборота нет session_key: каталог файлов сессии не вычисляется, "
+                "чтение отменено"
+            )
+
+        resolver = current_session_file_resolver()
+        if resolver is None:
+            raise _Refused(
+                f"резолвер каталога сессии не опубликован: файлы сессии "
+                f"{session_key!r} прочитать неоткуда"
+            )
+        try:
+            # Без ``ensure``: чтение не должно создавать каталог сессии для
+            # оборота, который к ней не обращался.
+            files_dir = await resolver.files_dir(session_key)
+        except (SessionFilesUnavailable, SessionDirNameDenied) as exc:
+            raise _Refused(
+                f"каталог файлов сессии {session_key!r} недоступен: {exc}"
+            ) from exc
+
+        try:
+            target = safe_child(files_dir, path)
+        except PathDeniedError as exc:
+            raise _Refused(
+                f"{exc}; читается только содержимое files/ сессии по "
+                f"относительному пути (вложение пользователя — "
+                f"attachments/<файл>)"
+            ) from exc
+        if not target.is_file():
+            raise _Refused(f"file not found: {path}")
+        return target

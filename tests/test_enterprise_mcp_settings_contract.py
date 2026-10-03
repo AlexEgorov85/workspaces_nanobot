@@ -244,6 +244,69 @@ class TestPlatformDeclaresEverything:
             )
 
 
+class TestClientDoesNotOwnTheSessionRoot:
+    """Корень файлов сессии объявляет платформа, и клиент его не везёт.
+
+    Агентский ``gateway.agent.session_files.root`` действует только при
+    выключенной платформе — тогда платформы, которая объявила бы второй корень,
+    просто нет. Если бы клиент всё равно вез объявление агента в процесс, то
+    при включённой платформе у одного значения появилось бы два источника, и
+    более приоритетный (аргументы процесса) тихо победил бы.
+    """
+
+    def _client(self, tmp_path: Path) -> object:
+        from lib.services.enterprise_mcp_client import client_from_settings
+
+        client = client_from_settings(
+            {
+                "enterprise_mcp": {
+                    "enabled": True,
+                    "command": "python",
+                    "args": ["-m", "servers.enterprise.server"],
+                },
+                "session_files": {"root": str(tmp_path / "agent-sessions")},
+            }
+        )
+        assert client is not None, "раздел enterprise_mcp включён, клиент обязан собраться"
+        return client
+
+    def test_process_args_carry_no_session_root(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        args = [str(arg) for arg in (client.describe()["args"] or [])]
+
+        assert not [arg for arg in args if "agent-sessions" in arg or "session_root" in arg], (
+            f"корень файлов сессии попал в аргументы процесса: {args}"
+        )
+
+    def test_child_env_adds_no_root_variable(self, tmp_path: Path) -> None:
+        """Сверх наследования — только принудительная кодировка.
+
+        Форма проверки выбрана так, чтобы результат не зависел от того, что
+        окружение процесса уже содержит: сравниваются ключи, которых в нём не
+        было, а не их значения. Кодировка из исключения — её же отдельно
+        охраняет ``test_child_env_adds_nothing_but_encoding``, и на её фоне
+        любая другая новая переменная была бы незаметна.
+        """
+        import os
+
+        client = self._client(tmp_path)
+        env = client._child_env()
+        new_keys = set(env) - set(os.environ) - {"PYTHONIOENCODING"}
+        changed = {
+            key for key, value in env.items() if key in os.environ and os.environ[key] != value
+        }
+
+        assert not new_keys, (
+            f"в окружение процесса добавлены свои переменные: {sorted(new_keys)} — "
+            f"корень файлов сессии объявляет платформа, и переменная перебила бы "
+            f"её platform.json"
+        )
+        assert changed <= {"PYTHONIOENCODING"}, (
+            f"в окружении процесса переопределено: {sorted(changed)} — кроме "
+            f"кодировки агент не переписывает ничего"
+        )
+
+
 class TestGuardIsNotVacuous:
     def test_the_scanner_actually_finds_names(self) -> None:
         """Если скан перестанет видеть имена, проверки выше станут зелёными

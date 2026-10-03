@@ -64,7 +64,19 @@ def _required_keys():
         ("channels.postgres.msg_ctx_max_size", 100),
         ("channels.postgres.worker_id", ""),
         ("channels.postgres.error_retry_delay", 60.0),
-        ("channels.postgres.media_cache_dir", "data_store/cache/sessions"),
+        # ``channels.postgres.media_cache_dir`` снят вместе с change'ом
+        # ``2026-10-03-session-files``: канал берёт каталог сессии у резолвера,
+        # а объявление держало красным страж конфигов. Проверка, что ключ
+        # больше не читается, живёт в ``tests/test_postgres_channel.py``.
+        # session_files
+        # Корень каталогов сессий. Значение — НЕ развёрнутая ``${NANOBOT_WORKSPACE}``,
+        # а литерал: ``_load_config_keys`` поднимает секцию тем же lift'ом, что и
+        # ``SETTINGS``, но подстановку ``${VAR}`` не выполняет. Подстановка
+        # проходит позже по всему ``cfg`` (шаг 5 в ``resolve_application_config``),
+        # к тому моменту секция уже в корне — поэтому порядок не мешает.
+        # Декларация читается как ``SETTINGS["session_files"]["root"]``
+        # (``lib/services/session_files.py::DECLARED_ROOT_PATH``).
+        ("session_files.root", "${NANOBOT_WORKSPACE}/data_store/sessions"),
         # общее поведение для всех каналов (Postgres, Redis, будущие)
         ("channels.document_text_threshold", 20000),
         # channels.postgres.pool

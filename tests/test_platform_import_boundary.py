@@ -23,12 +23,15 @@
    первого утверждения.
 
 Единственное исключение — ``workspace/tools/document_read.py``, которому
-разрешено импортировать ``libs.office``: он читает локальный пользовательский
-файл по пути, известному только агенту (сам файл лежит на диске выбранного
-каталога), и отдельная операция ради «прочитать этот файл» была бы вторым
-путём к тому же разбору. Решение осознанное и зафиксировано в докстринге модуля;
-страж его не ломает, а лишь держит единственным — чтобы исключение не
-разъехалось на другие модули.
+разрешено импортировать ``libs.office`` (парсер офисных форматов) и
+``libs.enterprise_common.session.security`` (примитив ``safe_child``, граница
+пути внутри каталога сессии): он читает локальный пользовательский файл по
+пути, известному только агенту (сам файл лежит на диске выбранного каталога), и
+отдельная операция ради «прочитать этот файл» была бы вторым путём к тому же
+разбору. Правило границы, наоборот, обязано быть **одним**: своя копия разбора
+пути в агенте разошлась бы с платформенной при первой же правке. Решения
+осознанные и зафиксированы в докстринге модуля; страж их не ломает, а лишь
+держит единственными — чтобы исключение не разъехалось на другие модули.
 """
 
 from __future__ import annotations
@@ -48,12 +51,15 @@ SCAN_ROOTS = ("lib", "workspace", "tools")
 #: зависимость направлена не туда.
 PLATFORM_ROOTS = ("libs", "servers", "mcp_platform", "mcp-platform")
 
-#: Разрешённая точка входа: ``libs.office`` (парсер офисных форматов) и только
-#: он. Ключ — путь относительно корня репозитория, значение — единственный
-#: разрешённый модуль. Всё остальное платформенное в этом файле по-прежнему
-#: запрещено.
+#: Разрешённые точки входа для ``workspace/tools/document_read.py``: парсер
+#: офисных форматов и примитив границы пути. Ключ — путь относительно корня
+#: репозитория, значение — разрешённые модули. Всё остальное платформенное в
+#: этом файле по-прежнему запрещено.
 SANCTIONED: dict[Path, frozenset[str]] = {
-    Path("workspace/tools/document_read.py"): frozenset({"libs.office"}),
+    Path("workspace/tools/document_read.py"): frozenset({
+        "libs.office",
+        "libs.enterprise_common.session.security",
+    }),
 }
 
 #: Каталоги, исключённые из обхода. ``workspace/data_store/`` — не код, а
@@ -282,17 +288,24 @@ def test_import_scanner_detects_a_planted_platform_import() -> None:
 
 
 def test_sanctioned_exception_stays_narrow() -> None:
-    """Исключение держится ровно на ``libs.office`` и не расползается.
+    """Исключение держится на двух названных модулях и не расползается.
 
-    Разрешённый модуль проходит, а любой другой платформенный импорт в том же
-    файле — по-прежнему запрещён: иначе «одна санкция» тихо превратилась бы в
+    Разрешённые модули проходят, а любой другой платформенный импорт в том же
+    файле — по-прежнему запрещён: иначе «две санкции» тихо превратились бы в
     «весь файл может импортировать платформу».
     """
     allowed = Path("workspace/tools/document_read.py")
     assert not _platform_imports(
-        "from libs.office import extract_text\n", rel=allowed
-    ), "санкционированный libs.office обязан проходить"
+        "from libs.office import extract_text\n"
+        "from libs.enterprise_common.session.security import safe_child\n",
+        rel=allowed,
+    ), "санкционированные libs.office и session.security обязаны проходить"
     assert _platform_imports(
-        "from libs.office import extract_text\nfrom libs.enterprise_data import x\n",
+        "from libs.office import extract_text\n"
+        "from libs.enterprise_common.session.security import safe_child\n"
+        "from libs.enterprise_data import x\n",
         rel=allowed,
     ), "санкция не должна покрывать другие модули платформы в этом же файле"
+    assert _platform_imports(
+        "from libs.enterprise_data import x\n", rel=Path("lib/x.py")
+    ), "санкция не должна выдаваться другим файлам агента"

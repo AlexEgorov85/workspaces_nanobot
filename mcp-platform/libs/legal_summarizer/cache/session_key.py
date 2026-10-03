@@ -11,33 +11,41 @@
 окружении и не выставлялся нигде в репозитории — то есть ветка была
 мёртвой. Источник ключа — ``session_id`` из контракта операции (п. 11.5);
 fallback на имя файла остаётся лишь на случай, когда сессии нет.
+
+Своего правила имени каталога здесь больше нет. Домен - **библиотека** платформы,
+а не отдельная сторона контракта, и своя копия правила была четвёртой в проекте:
+она резала всё вне ``[A-Za-z0-9._-]``, из-за чего ``привет`` и ``ключ`` давали
+каталог ``__nosession__`` на все не-ASCII сессии, и не-ASCII ключ никогда не мог
+стать каталогом. Теперь это реэкспорт платформенной реализации
+(:func:`libs.enterprise_common.session.security.session_dir_name`), которой
+пользуется и ``SessionWorkspace``, то есть внутри платформы имя считается один
+раз. Согласие сторон проверяет
+``tests/contract/test_session_dir_name_contract.py``.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
+
+from libs.enterprise_common.session.security import (
+    PathDeniedError,
+    session_dir_name,
+)
 
 __all__ = (
     "NO_SESSION",
+    "PathDeniedError",
     "resolve_session_key",
     "safe_session_key",
 )
 
-_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
-
 #: Случай «контекста нет». Единая константа, а не строка по разным файлам.
 NO_SESSION = "__nosession__"
 
-
-def safe_session_key(key: str) -> str:
-    """Привести ключ к безопасному имени каталога (Windows + Linux).
-
-    ``cli:1`` → ``cli_1``, ``telegram:8281248569`` →
-    ``telegram_8281248569``. Пустой результат → :data:`NO_SESSION`.
-    """
-    cleaned = _SAFE_RE.sub("_", key).strip("._-")
-    return cleaned or NO_SESSION
+#: Реэкспорт, а не обёртка: правило имени каталога в платформе одно. Имя
+#: функции сохранено, потому что её зовёт код домена (и контрактный тест), а
+#: переименование ничего не меняет в поведении и ломает вызывающих без причины.
+safe_session_key = session_dir_name
 
 
 def resolve_session_key(
@@ -52,20 +60,30 @@ def resolve_session_key(
         file_path: документ. Используется, когда сессии нет.
 
     Returns:
-        Безопасное имя каталога.
+        Имя каталога сессии, либо :data:`NO_SESSION`, если имя непригодно.
 
     Notes:
-        Ветка ``SESSION_KEY`` — переходная (п. 11.5). Пока она стоит выше
-        имени файла, но не выше ``session_id``: явный идентификатор
-        контракта всегда побеждает.
+        Здесь отказ правила имени **не** роняет вызывающего, в отличие от
+        :func:`safe_session_key`: результат — метка сессии для отчёта и для
+        ключа кэша, а не путь, который создаётся. Каталогом сессии служебная
+        метка не становится — имя каталога считает владелец, и служебное имя
+        он отвергает (требование «Псевдосессии запрещены»).
     """
-    if session_id:
-        return safe_session_key(session_id)
-    if file_path is not None:
+    for candidate in (session_id, _basename(file_path)):
+        if not candidate:
+            continue
         try:
-            name = Path(file_path).name
-            if name:
-                return safe_session_key(name)
-        except (OSError, ValueError):
-            pass
+            return safe_session_key(candidate)
+        except PathDeniedError:
+            continue
     return NO_SESSION
+
+
+def _basename(file_path: str | Path | None) -> str | None:
+    """Basename файла как кандидат в ключ сессии; ``None``, если его нет."""
+    if file_path is None:
+        return None
+    try:
+        return Path(file_path).name or None
+    except (OSError, ValueError):
+        return None

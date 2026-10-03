@@ -132,6 +132,35 @@ def test_session_layout_is_created_on_demand(workspace: SessionWorkspace) -> Non
         assert (root / name).is_dir(), f"нет подкаталога {name}"
 
 
+def test_layout_is_pinned(workspace: SessionWorkspace) -> None:
+    """Состав раскладки проверяется целиком, а не «каждый из SESSION_SUBDIRS
+    создан».
+
+    Перечисление по самому объявлению проходит и после того, как подкаталог из
+    него исчез, — и пропавший ``files/`` означал бы, что агент пишет рядом со
+    снимками оборота, снова без объявленного места.
+    """
+    assert SESSION_SUBDIRS == (
+        "files",
+        "calls",
+        "responses",
+        "results",
+        "errors",
+        "events",
+        "artifacts",
+    )
+
+
+def test_files_is_writable_by_the_agent_alone(workspace: SessionWorkspace) -> None:
+    """``files/`` — единственное место записи агента, и оно не хуже прочих.
+
+    Проверяется, что рабочая папка сессии отдаёт его под тем же именем, каким
+    объявлено: иначе операция отдала бы агенту путь, а писать было бы некуда.
+    """
+    assert workspace.subdir("s1", "files").is_dir()
+    assert workspace.list_files("s1", subdir="files") == []
+
+
 def test_sessions_are_isolated(workspace: SessionWorkspace) -> None:
     workspace.write_text("s1", "answer.json", "один", subdir="responses")
     workspace.write_text("s2", "answer.json", "два", subdir="responses")

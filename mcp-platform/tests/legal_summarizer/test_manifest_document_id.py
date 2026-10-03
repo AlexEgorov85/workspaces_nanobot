@@ -77,15 +77,12 @@ def test_manifest_raw_document_id_matches_document_cache(tmp_path, monkeypatch):
     document_id_from_manifest = raw["raw"]["document_id"]
 
     # Тот же document_id в documents/<doc_id>/_complete.marker.
-    docs_root = (
-        tmp_path
-        / "workspace"
-        / "data_store"
-        / "cache"
-        / "sessions"
-        / "default"
-        / "documents"
-    )
+    # Путь спрашивается у кода, а не собирается здесь. Сборка пути в тесте —
+    # это вторая декларация, и именно она разошлась с кодом, когда корень
+    # кэша документов перестал быть деревом сессий агента.
+    from libs.legal_summarizer.cache.document_cache import _cache_root
+
+    docs_root = _cache_root(tmp_path, "default")
     doc_dirs = [d for d in docs_root.iterdir() if d.is_dir()]
     assert len(doc_dirs) == 1
     assert doc_dirs[0].name == document_id_from_manifest

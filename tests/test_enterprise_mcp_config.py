@@ -41,6 +41,78 @@ class TestRuntimeEnvExport:
         assert os.environ["NANOBOT_PYTHON"] == os.sys.executable
         assert Path(os.environ["NANOBOT_PROJECT_ROOT"]) == PROJECT_ROOT
 
+    def test_export_sets_workspace(self, monkeypatch) -> None:
+        """Третий факт о запуске: рабочий каталог агента.
+
+        Объявляется не в ``config.json``, а в ``platform.json`` — им разворачивается
+        ``execution.session_root``, корень файлов сессии. Каталог обязан лежать
+        внутри рабочего каталога агента: при включённой границе файловых
+        инструментов запись в папку сессии вне него отклоняется, и агент не смог
+        бы положить туда ни одного файла.
+        """
+        monkeypatch.delenv("NANOBOT_WORKSPACE", raising=False)
+
+        config._export_runtime_env()
+
+        assert Path(os.environ["NANOBOT_WORKSPACE"]) == PROJECT_ROOT / "workspace"
+
+    def test_external_value_wins(self, monkeypatch) -> None:
+        """Оператор может указать другой интерпретатор осознанно."""
+        monkeypatch.setenv("NANOBOT_PYTHON", "/custom/python")
+        config._export_runtime_env()
+        assert os.environ["NANOBOT_PYTHON"] == "/custom/python"
+
+    def test_export_runs_before_config_resolution(self) -> None:
+        """Порядок обязателен: иначе ``${NANOBOT_PYTHON}`` остался бы
+        литералом и сервер не поднялся бы."""
+        source = (PROJECT_ROOT / "config.py").read_text(encoding="utf-8")
+        assert source.index("_export_runtime_env()") < source.index(
+            "cfg = _resolve_env_refs(cfg)"
+        )
+
+
+# --- объявление корня файлов сессии --------------------------------------
+
+
+def _session_root_declared() -> str:
+    """``platform.json → execution.session_root`` как он записан в файле."""
+    raw = json.loads(
+        (PROJECT_ROOT / "mcp-platform" / "platform.json").read_text(encoding="utf-8")
+    )
+    return raw["execution"]["session_root"]
+
+
+class TestSessionRootDeclaration:
+    """Корень объявлен один раз, платформой, и лежит внутри рабочего каталога.
+
+    Требование change ``2026-10-03-session-files`` (п. 1.1). Проверяется объявление,
+    а не работающая платформа: подстановку разворачивает сервер, и для этого
+    хватает строки в файле.
+    """
+
+    def test_declared_through_the_workspace_variable(self) -> None:
+        """Объявление обязано быть развёрнутым до абсолютного пути подстановкой.
+
+        Литерал или ``${NANOBOT_PROJECT_ROOT}`` вернули бы корень, который агент
+        не пишет: ``workspace/`` — это не корень проекта, а каталог внутри него.
+        """
+        declared = _session_root_declared()
+        assert declared == "${NANOBOT_WORKSPACE}/data_store/sessions", declared
+
+    def test_expanded_root_stays_inside_the_workspace(self, tmp_path) -> None:
+        """Резолв обязана привести внутрь рабочего каталога агента.
+
+        Иначе граница файловых инструментов (``allowed_root`` = корень проекта)
+        отклонит запись в папку сессии, и объявление окажется верным только на
+        бумаге.
+        """
+        workspace = tmp_path / "workspace"
+        expanded = _session_root_declared().replace(
+            "${NANOBOT_WORKSPACE}", str(workspace)
+        )
+        assert Path(expanded).is_relative_to(workspace), expanded
+
+
 # --- секция enterprise_mcp в config.json --------------------------------
 
 

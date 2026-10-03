@@ -255,6 +255,12 @@ AGENT_SECTIONS: frozenset[str] = frozenset({
     "skills",
     "logging",
     "enterprise_mcp",
+    # Корень файлов сессии. Секция названа так же, как и единственный
+    # потребитель объявления — ``lib/services/session_files.py``, — потому что
+    # читатель и раздел объявления обязаны называться одним: раздел без
+    # читателя — настройка без владельца, а читатель без раздела — корень,
+    # посчитанный агентом в обход объявления платформы.
+    "session_files",
 })
 
 #: Путь внутри ``config.json``, где физически лежат ``AGENT_SECTIONS``.
@@ -622,11 +628,20 @@ def _export_runtime_env() -> None:
     зашить абсолютные пути конкретной машины, а сервер поднялся бы не
     тем Python, в котором установлены его зависимости.
 
+    Третий факт — ``NANOBOT_WORKSPACE``, рабочий каталог агента, — нужен уже
+    не объявлению сервера, а ``platform.json``: файлы сессии обязаны лежать
+    внутри него, иначе граница файловых инструментов агента (а она включена
+    по умолчанию в потоке записи) откажет в записи. Он выводится от корня
+    проекта тем же приёмом, каким точками входа выводится ``workspace_dir``:
+    иначе каталог, объявленный платформой, и каталог, куда реально пишет
+    агент, разошлись бы на одном компьютере.
+
     ``setdefault`` — внешнее окружение имеет приоритет: другой
     интерпретатор может быть указан осознанно.
     """
     os.environ.setdefault("NANOBOT_PYTHON", sys.executable)
     os.environ.setdefault("NANOBOT_PROJECT_ROOT", str(_ROOT_DIR))
+    os.environ.setdefault("NANOBOT_WORKSPACE", str(_ROOT_DIR / "workspace"))
 
 
 def _export_platform_process_env(cfg: dict, profile: str) -> None:
@@ -849,7 +864,9 @@ def resolve_application_config(profile: str) -> AttrDict:
     _export_secrets_to_env(cfg)
 
     # Факты о запуске — тоже до резолва: ими заполняются ${NANOBOT_PYTHON}
-    # и ${NANOBOT_PROJECT_ROOT} в объявлении MCP-сервера.
+    # и ${NANOBOT_PROJECT_ROOT} в объявлении MCP-сервера, а
+    # ${NANOBOT_WORKSPACE} — в platform.json, дочерний процесс наследует
+    # os.environ целиком.
     _export_runtime_env()
 
     # Контур и порог журнала для ВТОРОГО объявления того же сервера —

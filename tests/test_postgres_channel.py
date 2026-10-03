@@ -158,6 +158,21 @@ def mock_db_and_psycopg(tmp_path):
         yield _Holder()
 
 
+def _store(root: Path):
+    """Настоящее хранилище с резолвером, заменённым временным каталогом.
+
+    Каталог сессии отдаёт функция, а не корень: это контракт хранилища после
+    снятия собственной раскладки. Здесь она повторяет то, что делает резолвер —
+    применяет объявленное правило имени к ``session_key``.
+    """
+    from utils.session_file_store import SessionFileStore  # type: ignore
+    from utils.session_key import safe_session_key  # type: ignore
+
+    return SessionFileStore(
+        lambda key: root / safe_session_key(key), attachments_subdir="attachments"
+    )
+
+
 def _make_channel(mock_db, **overrides):
     """Helper to create PostgresChannel with mocked config."""
     PostgresChannel, _decode_jsonb, client = mock_db
@@ -585,29 +600,29 @@ class TestPostgresChannelMedia:
         assert await ch._embed_media_for_db(None) is None
 
     @pytest.mark.asyncio
-    async def test_decode_non_data_passthrough(self, mock_db_and_psycopg):
+    async def test_decode_non_data_passthrough(self, mock_db_and_psycopg, tmp_path):
         PostgresChannel, _, _ = mock_db_and_psycopg
-        ch = _make_channel((PostgresChannel, None, None))
+        ch = _make_channel(
+            (PostgresChannel, None, None), **{"_file_store": _store(tmp_path)}
+        )
         result = await ch._decode_media_from_db(
             ["http://example.com/img.png"], "sess-1"
         )
         assert result == ["http://example.com/img.png"]
 
     @pytest.mark.asyncio
-    async def test_decode_empty(self, mock_db_and_psycopg):
+    async def test_decode_empty(self, mock_db_and_psycopg, tmp_path):
         PostgresChannel, _, _ = mock_db_and_psycopg
-        ch = _make_channel((PostgresChannel, None, None))
+        ch = _make_channel(
+            (PostgresChannel, None, None), **{"_file_store": _store(tmp_path)}
+        )
         assert await ch._decode_media_from_db([], "sess-1") == []
         assert await ch._decode_media_from_db(None, "sess-1") is None
 
     @pytest.mark.asyncio
     async def test_decode_data_url_writes_session_file(self, mock_db_and_psycopg, tmp_path):
-        import lib.channels.postgres_channel as pch
-
-        from utils.session_file_store import SessionFileStore  # type: ignore
-
         PostgresChannel, _, _ = mock_db_and_psycopg
-        fs = SessionFileStore(tmp_path, attachments_subdir="attachments")
+        fs = _store(tmp_path)
         ch = _make_channel(
             (PostgresChannel, None, None),
             **{"_file_store": fs},
@@ -620,16 +635,12 @@ class TestPostgresChannelMedia:
         assert path.is_file()
         assert path.read_bytes() == raw
         assert path.suffix == ".pdf"
-        assert path.parent == tmp_path / "cache" / "sessions" / "sess-1" / "attachments"
+        assert path.parent == tmp_path / "sess-1" / "files" / "attachments"
 
     @pytest.mark.asyncio
     async def test_decode_dict_with_filename_keeps_name(self, mock_db_and_psycopg, tmp_path):
-        import lib.channels.postgres_channel as pch
-
-        from utils.session_file_store import SessionFileStore  # type: ignore
-
         PostgresChannel, _, _ = mock_db_and_psycopg
-        fs = SessionFileStore(tmp_path, attachments_subdir="attachments")
+        fs = _store(tmp_path)
         ch = _make_channel(
             (PostgresChannel, None, None),
             **{"_file_store": fs},
@@ -647,12 +658,8 @@ class TestPostgresChannelMedia:
 
     @pytest.mark.asyncio
     async def test_decode_non_data_dict_passthrough(self, mock_db_and_psycopg, tmp_path):
-        import lib.channels.postgres_channel as pch
-
-        from utils.session_file_store import SessionFileStore  # type: ignore
-
         PostgresChannel, _, _ = mock_db_and_psycopg
-        fs = SessionFileStore(tmp_path, attachments_subdir="attachments")
+        fs = _store(tmp_path)
         ch = _make_channel(
             (PostgresChannel, None, None),
             **{"_file_store": fs},
@@ -1377,61 +1384,85 @@ class TestPostgresChannelMarkFailed:
 # ---------------------------------------------------------------------------
 # Регресс: путь хранилища сессии не должен раздваиваться (БАГ-2).
 #
-# `SessionFileStore(base_dir)` сам дописывает `cache/sessions`. Канонический
-# `channels.postgres.media_cache_dir` — `data_store/cache/sessions`, значит
-# база должна быть `data_store`. Раньше `_resolve_sfs_base` срезал только
-# `sessions`, база становилась `data_store/cache`, и итоговый путь был
-# `data_store/cache/cache/sessions` — не тот, что у
-# `session_file_redirect_hook`, то есть вложения из PostgreSQL агенту были
-# недоступны.
+# Раньше канал считал каталог вложений из строки конфигурации
+# (`channels.postgres.media_cache_dir`) арифметикой по компонентам пути, а
+# `SessionFileStore(base_dir)` дописывал свой `cache/sessions`. База становилась
+# `data_store/cache`, и итоговый путь не совпадал с тем, по которому хук
+# `session_file_redirect_hook` ищет файл, то есть вложения из PostgreSQL агенту
+# были недоступны.
+#
+# Теперь у канала своего пути нет: каталог сессии отдаёт резолвер — тот же, что
+# у хука. Проверяем именно это: вложение ложится в `files/attachments/` того
+# каталога, который назвал резолвер, и арифметики по компонентам пути в канале
+# больше нет.
 # ---------------------------------------------------------------------------
 
 
-class TestResolveSfsBase:
-    """`_resolve_sfs_base` обязан вернуть базу, а не готовый каталог сессий."""
+class TestStorePathComesFromResolver:
+    """Каталог вложений — от резолвера, и раскладка в нём объявленная."""
 
-    def test_canonical_config_value_does_not_double_cache(self):
-        from lib.channels.postgres_channel import _resolve_sfs_base
+    def test_channel_has_no_sfs_base_arithmetic(self):
+        """Арифметики по компонентам пути в канале быть не должно вовсе."""
+        import lib.channels.postgres_channel as pch
 
-        base = _resolve_sfs_base("data_store/cache/sessions")
-        # SessionFileStore добавит `cache/sessions` — результат обязан
-        # совпасть с путём из config.json и с путём хука.
-        assert (base / "cache" / "sessions").parts[-2:] == ("cache", "sessions")
-        assert base.name == "data_store"
-
-    def test_matches_config_json_and_redirect_hook(self):
-        """Три независимых источника обязаны сойтись в одном каталоге."""
-        import json
-
-        from lib.channels.postgres_channel import _WORKSPACE_DIR, _resolve_sfs_base
-
-        cfg = json.loads(
-            (_project_root / "config.json").read_text(encoding="utf-8")
+        assert not hasattr(pch, "_resolve_sfs_base"), (
+            "канал снова вычисляет корень хранилища из строки конфигурации"
         )
-        configured = cfg["channels"]["postgres"]["media_cache_dir"]
-        from_store = _resolve_sfs_base(configured) / "cache" / "sessions"
-        # Путь хукa: workspace/data_store/cache/sessions
-        from_hook = _WORKSPACE_DIR / "data_store" / "cache" / "sessions"
-        assert from_store == from_hook, (
-            f"хранилище ({from_store}) и хук ({from_hook}) разошлись"
+        assert not hasattr(pch, "_WORKSPACE_DIR"), (
+            "канал снова держит свой корень дерева сессий"
         )
 
-    def test_absolute_path_is_handled(self):
-        from lib.channels.postgres_channel import _resolve_sfs_base
+    def test_media_cache_dir_setting_is_not_read(self):
+        """Ключ настройки ``channels.postgres.media_cache_dir`` больше не читается."""
+        source = (
+            _project_root / "lib" / "channels" / "postgres_channel.py"
+        ).read_text(encoding="utf-8")
+        assert '"media_cache_dir"' not in source, (
+            "канал читает media_cache_dir: это второй ответ на вопрос, где лежат вложения"
+        )
 
-        absolute = str(_project_root / "workspace" / "data_store" / "cache" / "sessions")
-        base = _resolve_sfs_base(absolute)
-        assert base.parts[-1] == "data_store"
+    def test_attachment_lands_in_resolver_session_dir(self, tmp_path):
+        """Вложение попадает в `files/attachments/` каталога от резолвера."""
+        from utils.session_file_store import SessionFileStore
 
-    def test_sessions_without_cache_component(self):
-        """Путь, оканчивающийся на `sessions` без `cache`, снимает один уровень."""
-        from lib.channels.postgres_channel import _resolve_sfs_base
+        session_dir = tmp_path / "sessions" / "sess-1"
+        store = SessionFileStore(lambda _key: session_dir, attachments_subdir="attachments")
 
-        base = _resolve_sfs_base("other/sessions")
-        assert base.name == "other"
+        info = store.save_attachment(
+            "sess-1", "data:text/plain;base64,aGVsbG8=", filename="a.txt"
+        )
+        assert info is not None
+        written = Path(info["path"])
+        assert written.parent == session_dir / "files" / "attachments"
+        assert written.is_file()
 
-    def test_path_not_ending_in_sessions_is_untouched(self):
-        from lib.channels.postgres_channel import _resolve_sfs_base
+    def test_resolver_backed_dir_is_refused_without_resolver(self):
+        """Без опубликованного резолвера каталог не вычисляется, а не подменяется."""
+        import lib.channels.postgres_channel as pch
+        from lib.services.session_files import SessionFilesUnavailable
 
-        base = _resolve_sfs_base("data_store/media")
-        assert base.parts[-1] == "media"
+        with pytest.raises(SessionFilesUnavailable):
+            pch._resolved_session_dir("sess-1")
+
+    @pytest.mark.asyncio
+    async def test_unavailable_resolver_refuses_write_but_keeps_message(
+        self, mock_db_and_psycopg
+    ):
+        """Без резолвера вложение не сохраняется, но сообщение не теряется.
+
+        Отказ резолвера — это отказ **сохранения**: ронять из-за него весь опрос
+        нельзя, иначе одно вложение съедало бы сообщение целиком. При этом
+        вложение не должно уехать в запасной каталог — запасного пути у
+        хранилища нет вовсе.
+        """
+        from lib.services.session_files import install_session_file_resolver
+
+        install_session_file_resolver(None)
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+
+        data_url = "data:text/plain;base64,aGVsbG8="
+        result = await ch._decode_media_from_db([data_url], "sess-1")
+        assert result == [data_url], (
+            "неразобранное вложение должно уйти агенту как есть, а не потеряться"
+        )

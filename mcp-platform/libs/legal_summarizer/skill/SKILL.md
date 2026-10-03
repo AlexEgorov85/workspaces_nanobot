@@ -1,8 +1,17 @@
 ---
 name: legal_summarizer
-description: Юридический анализ PDF/DOCX/TXT — вызывай ТОЛЬКО через `python workspace/skills/legal_summarizer/scripts/cli.py --file <path>`. Skill сам решает, нужен ли пользовательский confirm; для длинных документов (оценка > 2 минут) сначала вернёт confirmation_required. `office_files.extract_metadata()` (раньше `summarize()`) — это НЕ саммари, а метаданные; не подменяй cli.
+description: Юридический анализ PDF/DOCX/TXT — CLI capability, запускается вызывающим, у которого есть оболочка: `python <skill>/scripts/cli.py --file <path>`. Skill сам решает, нужен ли пользовательский confirm; для длинных документов (оценка > 2 минут) сначала вернёт confirmation_required. `office_files.extract_metadata()` (раньше `summarize()`) — это НЕ саммари, а метаданные; не подменяй cli. Агенту оболочка недоступна: см. «Статус» ниже.
 metadata: {"nanobot":{"emoji":"📄","always":true}}
 ---
+
+> **Статус (после отключения `exec`).** Документ ниже описывает CLI-точку входа
+> capability для вызывающего, у которого есть оболочка. У агента оболочки нет
+> (`tools.exec.enable = false`), поэтому модель не может ни запустить `cli.py`, ни
+> опрашивать его через `write_stdin`: **все указания ниже про запуск `python …/cli.py`
+> и про опрос сессии к модели неприменимы.** Из агента доступно только чтение
+> состояния уже существующей операции платформой — операция `query_operation` по
+> `operation_id`. Запуск нового прогона из агента после решения об отключении `exec`
+> невозможен; если он нужен — это отдельная операция платформы, а не вызов оболочки.
 
 # Legal Summarizer — единственный путь: `cli.py`
 

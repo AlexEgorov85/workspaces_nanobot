@@ -31,6 +31,7 @@ PostgreSQL, а владелец у разделяемого ресурса до�
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import uuid
@@ -40,6 +41,8 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+from lib.services.session_files import SESSION_FILES_OPERATION
 
 DEFAULT_TOOL_TIMEOUT_SEC = 30.0
 
@@ -383,6 +386,49 @@ class EnterpriseMcpClient:
             code, message = _split_error_code(text)
             raise EnterpriseOperationError(code, message)
         return text
+
+    async def session_files(
+        self,
+        identity: CallIdentity | None = None,
+        *,
+        ensure: bool = True,
+    ) -> dict[str, Any]:
+        """Каталог сессии от платформы — единственный источник пути на её стороне.
+
+        Корень, имя каталога и раскладку объявляет платформа
+        (``mcp-platform/platform.json → execution.session_root``), поэтому клиент
+        не только не вычисляет путь, но и не передаёт никакого: аргумент у
+        вызова один — ``ensure``. Переданный корень перебил бы объявление файла
+        (среда приоритетнее объявления), и настройка снова выглядела бы
+        настроенной, не применяясь.
+
+        ``identity``, если он передан, уходит в ``_meta``; иначе личность
+        достраивает сам ``call()`` из текущего оборота. Собирать её здесь
+        второй раз нельзя: событие в журнале и каталог сессии тогда описали бы
+        разные вызовы.
+
+        Raises:
+            EnterpriseOperationError: операция ответила не объектом JSON. Метод
+                не подменяет содержимое ответа и не заполняет пробелы: путь,
+                которого не прислали, резолвер трактует как отказ.
+        """
+        text = await self.call(
+            SESSION_FILES_OPERATION, {"ensure": bool(ensure)}, identity=identity
+        )
+        try:
+            answer = json.loads(text)
+        except ValueError as exc:
+            raise EnterpriseOperationError(
+                "session_files_invalid",
+                f"ответ операции {SESSION_FILES_OPERATION!r} не JSON: {exc}",
+            ) from exc
+        if not isinstance(answer, dict):
+            raise EnterpriseOperationError(
+                "session_files_invalid",
+                f"ответ операции {SESSION_FILES_OPERATION!r} — не объект: "
+                f"{type(answer).__name__}",
+            )
+        return answer
 
     def _meta_for(self, identity: CallIdentity | None) -> dict[str, str] | None:
         """``_meta`` для вызова: полный набор ключей или ничего.

@@ -12,6 +12,11 @@
     манифеста окажется под git, скрипт откажется его удалять: значит, список
     устарел и требует пересмотра, а не молчаливого сноса.
 
+    Отдельно перечислены $KnownDeadTrees — остатки прежнего корня файлов
+    сессий и деревья бага с двойным `cache`. Это НЕ список на удаление: в них
+    лежат данные прошлых сессий, скрипт их не трогает даже с -Apply и только
+    показывает вместе с пометкой, что решение за владельцем.
+
 .PARAMETER Apply
     Без этого ключа скрипт только показывает, что он удалил бы. Удаление
     запускается явно.
@@ -63,12 +68,29 @@ $ScratchDirs = @(
 # --- Что НЕ трогаем, даже если очень похоже на мусор ------------------------
 
 $Protected = @(
-    'mcp-platform/.sessions'                  # ЖИВАЯ рабочая папка сессий: session_root = "./.sessions". Хранит артефакты реального старта gateway.
+    'workspace/data_store/sessions'        # ЖИВОЕ хранилище файлов сессий: корень объявляет платформа (platform.json → execution.session_root = ${NANOBOT_WORKSPACE}/data_store/sessions). Прежняя запись охраняла mcp-platform/.sessions, которая живым хранилищем больше не является.
     'mcp-platform/_live_audit_tables.py'      # Живая фикстура: на неё ссылается mcp-platform/tests/test_journal_contract_visibility.py
     'mcp-platform/servers/enterprise/tools'   # Операция read_result (недавняя работа, не закоммичена)
     'mcp-platform/tests/test_read_result_operation.py'  # Тесты read_result
     'openspec/specs/OWNERSHIP.md'             # Индекс владения спеками
     '.secrets.env'                            # Секреты
+)
+
+# --- Известные мёртвые деревья прежнего корня: НЕ сносить молча -------------
+
+# Это НЕ список на удаление, и он намеренно не в `$ScratchDirs`. Каталоги
+# остались от бага с двойным `cache` (`data_store/cache` + `cache` каталога
+# сессии) и от прежнего корня `data_store/cache/sessions`. Код их больше не
+# читает, но внутри лежат настоящие данные прошлых сессий — отчёт аудита в md,
+# снимок application_context.py, строки pytest, черновики сообщений коммитов.
+# Снести их молча нельзя, а разбирать содержимое уборщик не умеет: решение
+# владельца. Разбор — `PENDING-DELETIONS.md`, «Фаза 4 (2026-10-03-session-files)».
+
+$KnownDeadTrees = @(
+    @{ Path = 'workspace/data_store/cache/cache'; Guard = $true;  Why = 'вывод теста, ушедший в дерево с двойным cache; внутри sessions/test_1/attachments/' }
+    @{ Path = 'workspace/data_store/media/cache'; Guard = $true;  Why = 'пустые каталоги прежнего бага' }
+    @{ Path = 'workspace/data_store/cache/sessions'; Guard = $true; Why = 'старый корень сессий: рабочие материалы прошлой сессии агента, НЕ мусор' }
+    @{ Path = 'data_store'; Guard = $false; Why = 'корень репозитория: cache/commit_msg_*.txt, черновики сообщений коммитов. Без охраны по префиксу: data_store/cache/scratch в списке на удаление проверен отдельно и ждать решения владельца не должен' }
 )
 
 # --- Вспомогательное -------------------------------------------------------
@@ -149,6 +171,23 @@ foreach ($item in $items) {
         $skipped.Add("$($item.Rel) — путь не относительный или вне корня репозитория, пропущен")
         continue
     }
+    # Строка, равная охраняемому мёртвому дереву или лежащая ВНУТРИ него,
+    # отбрасывается целиком: точный список на удаление таких путей не содержит,
+    # а сравнение по префиксу ловит случайную попытку добавить их в
+    # `$ScratchDirs` позже. В отчёт попадает и сам факт, и причина.
+    $itemAbs = [System.IO.Path]::GetFullPath($abs)
+    $inDeadTree = $false
+    foreach ($k in $KnownDeadTrees) {
+        if (-not $k.Guard) { continue }
+        $kAbs = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $k.Path))
+        if ($itemAbs.TrimEnd('\') -ieq $kAbs.TrimEnd('\') -or
+            $itemAbs.StartsWith($kAbs.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $skipped.Add("$($item.Rel) — внутри известного мёртвого дерева ($($k.Path)): $($k.Why)")
+            $inDeadTree = $true
+            break
+        }
+    }
+    if ($inDeadTree) { continue }
     foreach ($p in $Protected) {
         $pAbs = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $p))
         $iAbs = [System.IO.Path]::GetFullPath($abs)
@@ -207,6 +246,36 @@ if ($skipped.Count -gt 0) {
     Write-Host ""
     Write-Host "  Пропущено:" -ForegroundColor Yellow
     foreach ($s in $skipped) { Write-Host "    - $s" -ForegroundColor DarkYellow }
+}
+
+# Известные мёртвые деревья показываются всегда, а не только когда что-то
+# попало в «Пропущено»: их содержимое ждёт решения владельца, а уборщик — тот
+# инструмент, у которого это решение забывают принять.
+$presentDead = @()
+foreach ($k in $KnownDeadTrees) {
+    $kAbs = Join-Path $RepoRoot $k.Path
+    if (-not (Test-Path -LiteralPath $kAbs)) { continue }
+    $fs = Get-Item -LiteralPath $kAbs
+    $files = @(Get-ChildItem -LiteralPath $kAbs -Recurse -File -ErrorAction SilentlyContinue)
+    $sum = ($files | Measure-Object -Property Length -Sum).Sum
+    $size = if ($null -eq $sum) { 0 } else { $sum }
+    $presentDead += [pscustomobject]@{
+        Rel   = $k.Path
+        Size  = $size
+        Files = $files.Count
+        Age   = "{0:yyyy-MM-dd}" -f $fs.LastWriteTime
+        Why   = $k.Why
+    }
+}
+if ($presentDead.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  Решение владельца (уборщик не трогает, -Apply тоже):" -ForegroundColor Magenta
+    foreach ($row in $presentDead) {
+        $size = if ($row.Size -ge 1MB) { "{0:N1} МБ" -f ($row.Size / 1MB) }
+                elseif ($row.Size -ge 1KB) { "{0:N1} КБ" -f ($row.Size / 1KB) }
+                else { "$($row.Size) Б" }
+        Write-Host ("    {0,-44} {1,10} {2,7}  {3}" -f $row.Rel, $size, "$($row.Files) ф", $row.Why) -ForegroundColor DarkMagenta
+    }
 }
 
 # --- Действие --------------------------------------------------------------

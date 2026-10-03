@@ -6,27 +6,42 @@ import json
 import mimetypes
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 UTC = UTC
 
-"""Модуль для хранения сессий в файловой системе.
+"""Хранилище файлов сессии: вложения канала и результаты инструментов.
 
-SessionFileStore управляет сохранением, архивацией и очисткой
-файлов результатов сессий инструментов.
+Каталог сессии и раскладка внутри него — **не здесь**. Хранилище получает
+каталог от :class:`~lib.services.session_files.SessionFileResolver` (функция
+``session_dir_for``) и раскладывает файлы по объявленной платформой раскладке:
+``files/results/`` и ``files/attachments/`` рядом с файлами, которые пишет хук
+перенаправления. Прежняя собственная раскладка (сессии и архив под каталогом
+кэша) стоила расхождения, при котором вложения из PostgreSQL ложились не туда,
+куда их потом искал хук, поэтому и имя каталога, и собственный корень, и
+каталог архива убраны.
+
+Архивации сессии больше нет: каталог сессии перемещает его владелец
+(``SessionWorkspace``), а у хранилища на это ни вызывающего, ни прав, и каталог
+архива создавался впустую при каждой инициализации.
 """
 
-# Characters invalid in directory names across platforms (Windows, macOS, Linux).
-# On Windows: \ / : * ? " < > |
-# On Linux:  / (null byte handled separately)
-# We treat the full Windows set as reserved for portability.
-_INVALID_FS_CHARS = re.compile(r'[\\/:*?"<>|]+')
+#: Подкаталог сессии, в который агент пишет файлы. Объявлен платформой
+#: (``mcp-platform/servers/enterprise/tools/session_files.py::FILES_SUBDIR`` и
+#: ``libs/enterprise_common/session/workspace.py::SESSION_SUBDIRS``), поэтому
+#: повторяется здесь строкой: операция отдаёт агенту готовый ``files_dir``, а
+#: хранилище пишет по тому же имени, что и хук перенаправления. Проверяет
+#: ``tests/test_no_hardcoded_session_paths.py`` и контракт раскладки.
+FILES_SUBDIR = "files"
 
+#: Подкаталог сессии с выгрузками инструментов.
+RESULTS_SUBDIR = "results"
 
-def safe_session_key(key: str) -> str:
-    """Заменяет символы, небезопасные для имён директорий, на ``_``."""
-    return _INVALID_FS_CHARS.sub("_", key)
+#: Служебный файл хранилища: счётчики файлов и байт сессии. Лежит в корне
+#: каталога сессии рядом с подкаталогами и принадлежит той же сессии.
+METADATA_FILE = "metadata.json"
 
 
 def guess_ext_from_mime(mime_type: str, default_ext: str = ".bin") -> str:
@@ -127,49 +142,65 @@ def _try_convert_to_csv(data) -> str | None:
 class SessionFileStore:
     def __init__(
         self,
-        base_dir: Path,
+        session_dir_for: Callable[[str], Path],
         max_files: int = 0,
         max_age_hours: int = 0,
         attachments_subdir: str = "attachments",
     ):
-        """Инициализирует хранилище сессий.
+        """Инициализирует хранилище файлов сессии.
 
         Аргументы:
-            base_dir: Базовая директория (внутри неё создаются cache/sessions и cache/archive).
+            session_dir_for: функция ``(session_key) -> Path``, отдающая каталог
+                сессии. Её реализация — резолвер: имя каталога и его корень
+                приходят оттуда, а не вычисляются здесь. Хранилище не создаёт
+                каталогов в конструкторе: дерево сессии создаёт его владелец,
+                и пустая инициализация не должна оставлять после себя
+                ``cache/``, в котором ничего не лежит.
             max_files: Максимальное количество файлов результатов на сессию
                 (0 — без ограничения).
             max_age_hours: Максимальный возраст файлов результатов в часах
                 (0 — без ограничения).
-            attachments_subdir: Имя подпапки под вложения пользователя внутри
-                директории сессии. Не пересекается с ``results`` и подчищается
-                общим ``cleanup`` для attachments.
+            attachments_subdir: Имя подкаталога вложений пользователя внутри
+                ``files/`` сессии. Не пересекается с ``results``.
         """
-        cache = base_dir / "cache"
-        self.base = cache / "sessions"
-        self.base.mkdir(parents=True, exist_ok=True)
-        self.archive_dir = cache / "archive"
-        self.archive_dir.mkdir(exist_ok=True)
+        self._session_dir_for = session_dir_for
         self.max_files = max_files
         self.max_age_hours = max_age_hours
         self.attachments_subdir = attachments_subdir
 
     def _get_session_dir(self, session_key: str) -> Path:
-        """Возвращает директорию сессии, создавая её при необходимости."""
-        sdir = self.base / safe_session_key(session_key)
-        sdir.mkdir(exist_ok=True)
-        (sdir / "results").mkdir(exist_ok=True)
-        (sdir / self.attachments_subdir).mkdir(exist_ok=True)
+        """Каталог сессии от резолвера, с раскладкой платформы.
+
+        Подкаталоги создаются здесь, потому что вложение приходит извне
+        (декодируется каналом) и каталога сессии, к которому у агента может не
+        быть обращения, ещё не существует.
+        """
+        sdir = Path(self._session_dir_for(session_key))
+        sdir.mkdir(parents=True, exist_ok=True)
+        files_dir = sdir / FILES_SUBDIR
+        (files_dir / RESULTS_SUBDIR).mkdir(parents=True, exist_ok=True)
+        (files_dir / self.attachments_subdir).mkdir(exist_ok=True)
         return sdir
 
-    def _resolve_attachments_dir(self, session_key: str) -> Path:
-        """Возвращает каталог вложений сессии, создавая при необходимости.
+    def _resolve_results_dir(self, session_key: str) -> Path:
+        """Каталог результатов сессии — ``files/results/``.
 
-        Лежит рядом с ``results/``: ``{base}/{safe_key}/{attachments_subdir}/``.
-        Удобно для разграничения источников: ``results/`` — выгрузки из
-        инструментов, ``{attachments_subdir}/`` — пользовательские вложения.
+        Тот же подкаталог, который ищет хук перенаправления: результат
+        инструмента и вложение канала лежат рядом, и агент находит оба по
+        одному пути.
         """
         sdir = self._get_session_dir(session_key)
-        adir = sdir / self.attachments_subdir
+        return sdir / FILES_SUBDIR / RESULTS_SUBDIR
+
+    def _resolve_attachments_dir(self, session_key: str) -> Path:
+        """Каталог вложений сессии — ``files/attachments/``.
+
+        Отдельно от ``files/results/``, чтобы источник файла читался по
+        каталогу: ``results/`` — выгрузки инструментов,
+        ``attachments/`` — то, что прислал пользователь.
+        """
+        sdir = self._get_session_dir(session_key)
+        adir = sdir / FILES_SUBDIR / self.attachments_subdir
         adir.mkdir(exist_ok=True)
         return adir
 
@@ -243,7 +274,7 @@ class SessionFileStore:
         dest.write_bytes(raw)
 
         self._ensure_metadata(session_key)
-        meta_path = self._get_session_dir(session_key) / "metadata.json"
+        meta_path = self._get_session_dir(session_key) / METADATA_FILE
         meta = json.loads(meta_path.read_text())
         meta["last_activity"] = datetime.now(UTC).isoformat()
         meta["file_count"] = meta.get("file_count", 0) + 1
@@ -257,9 +288,8 @@ class SessionFileStore:
         }
 
     def _ensure_metadata(self, session_key: str) -> None:
-        """Создаёт metadata.json для сессии, если его ещё нет."""
-        sdir = self._get_session_dir(session_key)
-        meta_path = sdir / "metadata.json"
+        """Создаёт ``metadata.json`` для сессии, если его ещё нет."""
+        meta_path = self._get_session_dir(session_key) / METADATA_FILE
         if not meta_path.exists():
             meta_path.write_text(json.dumps({
                 "session_key": session_key,
@@ -273,11 +303,11 @@ class SessionFileStore:
     def _find_existing_for_hash(self, session_key: str, content_hash: str, ext: str) -> str | None:
         """Вернуть путь уже сохранённого файла с таким хешем содержимого.
 
-        Сканирует ``results/`` сессии в поисках файла с суффиксом ``__<hash>``
-        и подходящим расширением. Сканирование ограничено одной сессией.
+        Сканирует ``files/results/`` сессии в поисках файла с суффиксом
+        ``__<hash>`` и подходящим расширением. Сканирование ограничено одной
+        сессией.
         """
-        sdir = self._get_session_dir(session_key)
-        results_dir = sdir / "results"
+        results_dir = self._resolve_results_dir(session_key)
         if not results_dir.exists():
             return None
         marker = f"__{content_hash}{ext}"
@@ -313,6 +343,7 @@ class SessionFileStore:
         content_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
         self._ensure_metadata(session_key)
         sdir = self._get_session_dir(session_key)
+        results_dir = self._resolve_results_dir(session_key)
 
         existing = (
             self._find_existing_for_hash(session_key, content_hash, ext)
@@ -320,7 +351,7 @@ class SessionFileStore:
             else None
         )
         if existing is not None:
-            existing_path = sdir / "results" / existing
+            existing_path = results_dir / existing
             try:
                 size = existing_path.stat().st_size
             except OSError:
@@ -328,7 +359,7 @@ class SessionFileStore:
             return {
                 "session_key": session_key,
                 "id": existing.split("_")[-1].split(".")[0],
-                "path": f"cache/sessions/{safe_session_key(session_key)}/results/{existing}",
+                "path": f"{FILES_SUBDIR}/{RESULTS_SUBDIR}/{existing}",
                 "size_kb": round(size / 1024, 2),
                 "format": ext.lstrip("."),
                 "deduped": True,
@@ -337,12 +368,12 @@ class SessionFileStore:
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         entry_id = uuid.uuid4().hex[:8]
         filename = f"{ts}_{source_tool}_{entry_id}__{content_hash}{ext}"
-        filepath = sdir / "results" / filename
+        filepath = results_dir / filename
 
         filepath.write_text(content, encoding="utf-8")
         size = len(content.encode("utf-8"))
 
-        meta_path = sdir / "metadata.json"
+        meta_path = sdir / METADATA_FILE
         meta = json.loads(meta_path.read_text())
         meta["last_activity"] = datetime.now(UTC).isoformat()
         meta["file_count"] = meta.get("file_count", 0) + 1
@@ -354,7 +385,7 @@ class SessionFileStore:
         return {
             "session_key": session_key,
             "id": entry_id,
-            "path": f"cache/sessions/{safe_session_key(session_key)}/results/{filename}",
+            "path": f"{FILES_SUBDIR}/{RESULTS_SUBDIR}/{filename}",
             "size_kb": round(size / 1024, 2),
             "format": ext.lstrip("."),
             "deduped": False,
@@ -367,8 +398,7 @@ class SessionFileStore:
         if max_files <= 0 and max_age_hours <= 0:
             return
 
-        sdir = self._get_session_dir(session_key)
-        results_dir = sdir / "results"
+        results_dir = self._resolve_results_dir(session_key)
         if not results_dir.exists():
             return
 
@@ -402,7 +432,7 @@ class SessionFileStore:
                         pass
 
         if removed > 0:
-            meta_path = sdir / "metadata.json"
+            meta_path = self._get_session_dir(session_key) / METADATA_FILE
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text())
@@ -417,15 +447,3 @@ class SessionFileStore:
                 except (OSError, json.JSONDecodeError):
                     pass
 
-    def archive_session(self, session_key: str) -> bool:
-        """Перемещает директорию сессии в архив.
-
-        Возвращает True, если архивация выполнена, иначе False.
-        """
-        src = self.base / safe_session_key(session_key)
-        dst = self.archive_dir / f"{safe_session_key(session_key)}_{datetime.now(UTC).strftime('%Y%m%d')}"
-        if src.exists() and not dst.exists():
-            import shutil
-            shutil.move(str(src), str(dst))
-            return True
-        return False

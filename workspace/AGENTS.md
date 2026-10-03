@@ -1,10 +1,35 @@
 # Agent Instructions
 
+## Нет оболочки
+
+У агента нет оболочки: `exec`, `exec_session`, `list_exec_sessions` и `run_cli_app`
+отключены в `config.json → tools`, поэтому ни шелл, ни скрипт навыка, ни CLI-приложение
+вызвать нечем. Вся работа — инструментами агента.
+
+Граница файловых инструментов здесь намеренно **не поднимается**
+(`tools.restrictToWorkspace = false`): настройка опиралась бы на
+`agents.defaults.workspace` = `~/.nanobot/workspace`, а это подкаталог репозитория, куда
+не входят `lib/`, `config.py`, `mcp-platform/`, `tests/`, `docs/`, `sql/` — код, который
+агент обслуживает. Разделение держится на трёх вещах: перенаправление (создание файла →
+`files/` сессии), отказ (нет резолвера → нет записи) и отключённый `exec` (нет обхода
+в обход инструментов).
+
 ## File Storage Policy
 
-New files must be saved under `data_store/cache/` (e.g. `data_store/cache/report.csv`).
-Editing existing files (HEARTBEAT.md, MEMORY.md, etc.) works as before.
-Do NOT use shell redirects (`>`, `>>`) in `exec` to create files — use `write_file` instead.
+New files are created inside the `files/` directory of **your own session**, and
+always by a **relative** path (`report.csv`, `report/2026/q3.md`). The relative
+structure is preserved: `lib/new_module.py` lands in `files/lib/new_module.py`.
+There is no tool that creates a file outside `files/` — do not try to compose one.
+
+Creating and editing are different operations. `edit` of an existing project file
+(HEARTBEAT.md, MEMORY.md, `lib/...`, etc.) does not change its path: it is work on
+the repository, not a session file.
+
+If the session directory cannot be obtained (the platform is declared but does not
+answer), the write is **refused with a named reason** — it is never written
+"somewhere else". Do not retry the same path: report the reason.
+Do NOT try to reach a file by an absolute path of your own machine: it does not exist
+here. Work with relative paths.
 
 ## Dependencies & pip install
 
@@ -18,19 +43,9 @@ Do NOT use shell redirects (`>`, `>>`) in `exec` to create files — use `write_
   `pyarrow`, `redis`, `httpx`, `loguru`, `PyYAML`, `streamlit`,
   `sqlglot`, `nanobot`.
 
-**Запрещено вызывать `pip install ...` в `exec`.** Причины:
-
-1. `nanobot` shell-tool режет вызовы `pip install -i <url>` через
-   SSRF-guard (зеркало PyPI считается «internal/private URL»), и установка
-   отвалится без полезного сообщения.
-2. Установка пакетов в user-site агенту недоступна, в системный Python —
-   тем более.
-3. Если пакета нет в `requirements.txt` — это запрос на расширение
-   зависимостей, а не повод ставить его на лету. Сообщи пользователю,
-   что нужен новый пакет.
-
-Если нужно проверить, что пакет доступен, — используй короткий
-`python3 -c "import <pkg>"`; если импорт не падает — пакет есть.
+**Установить пакет агент не может** — оболочки нет, а установка на лету всё равно была
+бы неверным шагом: если пакета нет в `requirements.txt`, это запрос на расширение
+зависимостей. Сообщи пользователю, что нужен новый пакет.
 
 ## Absolute paths & hooks
 
@@ -44,49 +59,33 @@ keeping path` → в БД уходит AW-dict с пустым `mime_type`/`file
 
 Чтобы этого избежать:
 
-- **Всегда отдавай относительные пути** в `write_file`/`write`/`edit` —
-  `test/test.md`, `data_store/cache/report.csv`, `workspace/skills/...`.
-  `SessionFileRedirectHook` (см. `workspace/hooks/session_file_redirect_hook.py`)
-  сам перенаправит их в `data_store/cache/sessions/<session_key>/...`.
-- Если skill требует указать абсолютный путь — сначала вызови
-  `p = Path("...").resolve()` и **не передавай** в `write_file`:
-  пусть хук перепишет путь, а не файловая система.
+- **Всегда отдавай относительные пути** в `write_file`/`write`/`create_file` —
+  `test/test.md`, `report.csv`, `workspace/skills/...`. `SessionFileRedirectHook`
+  (см. `workspace/hooks/session_file_redirect_hook.py`) сам перенаправит их в
+  `files/` каталога сессии, сохранив структуру исходного пути:
+  `lib/new_module.py` → `files/lib/new_module.py`. У `edit` путь, наоборот, не
+  меняется — это правка файла проекта.
 - В `message({"media": [...]})` тоже передавай относительные пути —
-  `SessionFileRedirectHook` сам найдёт файл в текущей session-папке
-  (`data_store/cache/sessions/<session_key>/`) по относительному пути и
+  `SessionFileRedirectHook` сам найдёт файл в `files/` текущей сессии
+  (а также в `files/attachments/` и `files/results/`) по относительному пути и
   по имени файла и подставит реальный путь. НЕ придумывай абсолютные пути
   вида `/home/<user>/<project>/workspace/<file>` — на сервере их нет.
   Для файлов, которых реально не существует (`Path(p).is_file()` ложно)
   даже после перенаправления — не прикладывай.
 
-## Пути к media-attach при вызове CLI skill'ов через `exec`
+## Файлы сессии и вложения
 
-**Это особый случай**: `SessionFileRedirectHook` перенаправляет только
-`write_file`/`edit`, но НЕ произвольные `exec`-команды (включая вызовы
-skill CLI через `python skills/<name>/scripts/cli.py --file <path>`).
-
-Skill CLI сам не делает redirect и не знает session_key агента.
-
-При вызове `python skills/<skill>/scripts/cli.py --file <path>`:
-
-- ✅ Передавай **абсолютный** путь к media-attach в канале:
-  `C:\Users\<user>\.nanobot\workspace\data_store\cache\sessions\<session_key>\<file>.pdf`
-- ✅ Или **относительный от корня репо** (cwd должен быть `.nanobot/`):
-  `data_store/cache/sessions/<session_key>/<file>.pdf`
-- ❌ Только basename (`<file>.pdf` без префикса) — skill вернёт
-  `Файл не найден`, потому что в cwd такого файла нет.
-
-Если не знаешь session_key — найди файл через `glob` по
-`data_store/cache/sessions/*/<file>`, или возьми абсолютный путь из
-context канала (он лежит в `media` payload сообщения).
-
-Конкретные правила для каждого skill'а — в его `SKILL.md` (секция
-«Чтение файлов из чата»).
+Вложение, присланное пользователем, лежит в `files/attachments/` каталога **твоей**
+сессии. Читать его нужно относительным путём от `files/` — `attachments/<файл>.pdf`:
+`document_read` принимает только такой путь и отказывает абсолютному. Имя каталога
+сессии знать не нужно — корень объявляет платформа
+(`mcp-platform/platform.json → execution.session_root`), а `SessionFileRedirectHook`
+перенаправляет относительные пути сам, в том числе в `message({"media": [...]})`.
 
 ## Scheduled Reminders
 
 Before scheduling reminders, check available skills and follow skill guidance first.
-Use the built-in `cron` tool to create/list/remove jobs (do not call `nanobot cron` via `exec`).
+Use the built-in `cron` tool to create/list/remove jobs.
 Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegram` from `telegram:8281248569`).
 
 **Do NOT just write reminders to MEMORY.md** — that won't trigger actual notifications.

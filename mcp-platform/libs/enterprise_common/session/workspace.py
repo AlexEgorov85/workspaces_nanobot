@@ -17,7 +17,8 @@
 .. code-block:: text
 
     <session_root>/<session_id>/
-        requests/    снимок аргументов оборота
+        files/       файлы, созданные агентом в этой сессии
+        calls/       снимок аргументов оборота
         responses/   снимок ответа
         results/     крупные результаты, сохранённые по порогу
         errors/      снимок неуспешного оборота
@@ -26,6 +27,15 @@
 
 ``results/`` и ``artifacts/`` — разные вещи и не смешиваются: первое платформа
 создаёт сама по порогу, второе capability создаёт осознанно.
+
+``files/`` отличается от остальных шести не именем, а тем, кто в них пишет: их
+создаёт платформа (конвейер, ``ArtifactStore``, писатель событий), а ``files/``
+— агент, своим файловым инструментом. Отсюда два следствия. Первое: каталог
+объявлен здесь и создаётся при первом обращении, но содержимое ему не
+принадлежит — платформа не кладёт в него ничего, иначе «где мои файлы» снова
+пришлось бы угадывать по содержимому. Второе: агент пишет туда сам, по пути из
+операции ``session_files``, минуя ``SessionWorkspace``. Общие у сторон корень,
+имя и раскладка; код доступа к файлам общим быть не может и не должен.
 """
 
 from __future__ import annotations
@@ -35,10 +45,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from libs.enterprise_common.session.security import PathDeniedError, safe_child, safe_name
+from libs.enterprise_common.session.security import (
+    PathDeniedError,
+    safe_child,
+    session_dir_name,
+)
 
 #: Подкаталоги сессии. Объявлены здесь, а не разбросаны по месту использования:
 #: запись в ``results/`` и чтение из ``artifacts/`` должны опираться на одно имя.
+#:
+#: ``files`` — первым, чтобы различие владельцев читалось с начала списка, а не
+#: выискивалось: это единственный подкаталог, куда пишет не платформа.
 #:
 #: ``calls``, а не ``requests``: каталог хранит снимок аргументов **вызова**
 #: операции, и весь контракт вызова говорит «вызов». Имя ``requests`` вдобавок
@@ -46,6 +63,7 @@ from libs.enterprise_common.session.security import PathDeniedError, safe_child,
 #: запрещено, — одинаковое имя в соседних контекстах означает разные вещи и
 #: рано или поздно вводит в заблуждение при чтении.
 SESSION_SUBDIRS: tuple[str, ...] = (
+    "files",
     "calls",
     "responses",
     "results",
@@ -74,10 +92,14 @@ class SessionWorkspace:
     def session_dir(self, session_id: str, *, create: bool = True) -> Path:
         """Каталог сессии с подкаталогами.
 
-        Идентификатор сессии проходит через :func:`safe_name`, потому что приходит
-        снаружи и в имя файла на диске попадает как есть.
+        Имя считает :func:`session_dir_name` — единственная реализация правила
+        имени каталога в платформе. Раньше здесь был :func:`safe_name`, то есть
+        функция имени **артефакта**: она усекала длинные идентичности до 128
+        символов (две сессии в одном каталоге) и пропускала ``CON``, а имя
+        артефакта склеивалось с расширением. Это разные границы, и отказ здесь
+        вместо подстановки.
         """
-        directory = self.root / safe_name(session_id)
+        directory = self.root / session_dir_name(session_id)
         if create:
             directory.mkdir(parents=True, exist_ok=True)
             for name in SESSION_SUBDIRS:

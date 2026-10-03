@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -37,10 +38,8 @@ from libs.enterprise_data.db import (
     get_stats,
     resolve_dsn,
     run,
-    set_job_class_config,
     set_pool_config,
     transaction,
-    try_submit,
 )
 import libs.enterprise_data.db as _db_module
 from libs.enterprise_common.settings import Settings, pool_config
@@ -58,6 +57,11 @@ PLATFORM_ROOT = Path(__file__).resolve().parent.parent
 #: разворачивает весь файл целиком. Список подстановок растёт вместе с
 #: файлом — и это правильный порядок событий: сначала объявляем секрет, потом
 #: на него ссылаемся.
+#:
+#: ``NANOBOT_WORKSPACE`` — тоже не про пул и не секрет: им объявлен
+#: ``execution.session_root``, корень файлов сессии, и он обязан лежать внутри
+#: рабочего каталога агента (change 2026-10-03-session-files, п. 1.1).
+#: Значение уводится в TEMP, чтобы прогон не писал в каталог платформы.
 _DUMMY_SECRETS = {
     "DB_USER": "test",
     "DB_PASSWORD": "test",
@@ -66,6 +70,7 @@ _DUMMY_SECRETS = {
     "DB_NAME": "test",
     "LLM_API_KEY": "test",
     "EMBED_TOKEN": "test",
+    "NANOBOT_WORKSPACE": str(Path(tempfile.gettempdir()) / "nanobot-platform-tests"),
 }
 
 
@@ -120,7 +125,6 @@ def mock_psycopg2():
         _db._dsn = ""
         _db._pool_cfg = {}
         set_pool_config(_POOL_FROM_FILE)
-        saved_classes = {name: dict(values) for name, values in _db._job_class_cfg.items()}
 
         yield {
             "mock_connect": mock_connect,
@@ -141,8 +145,6 @@ def mock_psycopg2():
             "run": run,
             "get_stats": get_stats,
             "set_pool_config": set_pool_config,
-            "set_job_class_config": set_job_class_config,
-            "try_submit": try_submit,
             "PoolTimeoutError": PoolTimeoutError,
             "_db": _db,
         }
@@ -150,11 +152,6 @@ def mock_psycopg2():
         # Teardown: остановить воркеры, чтобы они не жили между тестами
         _db.shutdown()
         _db._manager = None
-        # Секция классов — тоже глобальная конфигурация пула: оставленная
-        # после теста, она сделала бы следующий тест не тем, что он объявляет.
-        # Восстанавливается снимком, а не очисткой: пустой раздел не проходит
-        # проверку полноты, и чистить его «вручную» — значит обойти её.
-        _db._job_class_cfg = saved_classes
 
 
 class TestConfigure:
@@ -421,9 +418,7 @@ class TestTransaction:
 class TestPool:
     def test_single_connection_reused(self, mock_psycopg2):
         """Пул N=1: все операции на одном соединении."""
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0})
-        )
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 1}))
         mock_psycopg2["configure"]("dsn")
         mock_psycopg2["mock_cur"].fetchone.return_value = (1,)
         for _ in range(5):
@@ -439,9 +434,7 @@ class TestPool:
 
     def test_parallel_transactions_use_separate_connections(self, mock_psycopg2):
         """Две параллельные транзакции получают разные соединения (max_conn=2)."""
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 2, "reserved_workers": 0})
-        )
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
 
         results: list = []
@@ -465,9 +458,7 @@ class TestPool:
 
     def test_auto_scale_when_worker_leased(self, mock_psycopg2):
         """Пока транзакция держит воркер, обычная операция уходит на новый."""
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 3, "reserved_workers": 0})
-        )
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 3}))
         mock_psycopg2["configure"]("dsn")
 
         tx_done = threading.Event()
@@ -519,15 +510,7 @@ class TestPool:
     def test_queue_full_raises_timeout(self, mock_psycopg2):
         """Переполненная очередь → PoolTimeoutError, а не вечный блок."""
         mock_psycopg2["set_pool_config"](
-            _pool(
-                {
-                    "min_conn": 1,
-                    "max_conn": 1,
-                    "reserved_workers": 0,
-                    "queue_maxsize": 1,
-                    "pool_timeout": 0.2,
-                }
-            )
+            _pool({"min_conn": 1, "max_conn": 1, "queue_maxsize": 1, "pool_timeout": 0.2})
         )
         mock_psycopg2["configure"]("dsn")
         lock = threading.Lock()
@@ -558,9 +541,7 @@ class TestPool:
     def test_third_transaction_waits_for_free_worker(self, mock_psycopg2):
         """Сценарий из прода: при занятых 2 воркерах 3-я транзакция
         ждёт в очереди и дожидается (вместо PoolTimeoutError)."""
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 2, "max_conn": 2, "reserved_workers": 0})
-        )
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 2, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
 
         # Событие срабатывает ТОЛЬКО когда оба воркера заняты.
@@ -619,13 +600,8 @@ class TestPool:
         third_entered = threading.Event()
         third_view: dict = {}
         orig_acquire = _db_module.DBManager._acquire_lease
-        from libs.enterprise_data.audience import JOB_AUDIENCE_MODEL
 
-        # Подмена повторяет сигнатуру аренды целиком, включая ``audience``:
-        # пропущенный параметр здесь означал бы TypeError у третьей
-        # транзакции, и тест падал бы не на ожидании места, а на своём же
-        # хелпере.
-        def _watched_acquire(self, tag="", *, audience=JOB_AUDIENCE_MODEL):
+        def _watched_acquire(self, tag=""):
             if threading.current_thread() is tc:
                 with self._cond:
                     third_view.update(
@@ -634,7 +610,7 @@ class TestPool:
                         free=sum(1 for w in self._workers if w._lease_id == 0),
                     )
                 third_entered.set()
-            return orig_acquire(self, tag, audience=audience)
+            return orig_acquire(self, tag)
 
         with patch.object(_db_module.DBManager, "_acquire_lease", _watched_acquire):
             tc.start()
@@ -661,9 +637,7 @@ class TestPool:
         мимо ожидания. На старой версии сценарий воспроизводился в 15
         раундах из 40.
         """
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 2, "max_conn": 2, "reserved_workers": 0})
-        )
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 2, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
 
         errors: list[str] = []
@@ -692,9 +666,7 @@ class TestPool:
 
     def test_lease_released_when_begin_fails(self, mock_psycopg2):
         """Утечка лиза: если begin-задача падает, воркер возвращается в пул."""
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0})
-        )
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 1}))
         mock_psycopg2["configure"]("dsn")
         mock_psycopg2["mock_cur"].fetchone.return_value = (1,)
         _db = mock_psycopg2["_db"]
@@ -715,92 +687,40 @@ class TestPool:
 
     def test_lease_waiter_released_on_shutdown(self, mock_psycopg2):
         """Ждущая транзакция при shutdown не висит вечно — получает
-        RuntimeError, а не блокируется навсегда.
-
-        Держатель аренды не имеет права пережить тест: освобождая аренду уже
-        после остановки пула, он ткнулся бы в глобальную конфигурацию, которую
-        к тому времени переставили следующие тесты, и отказ ушёл бы в
-        ``threading.excepthook`` мимо прогна. Поэтому он ждёт стоп-сигнала, а
-        тест дожидается потока и проверяет, что тот закончил.
-        """
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0})
-        )
-        # Классы объявлены здесь, а не взяты из окружения: у ``_CLASSES`` у
-        # модели ``leases: false``, а этот тест про аренду. Предел ожидания
-        # нужен обоим потокам, но с разных сторон — ждущей аренде с запасом до
-        # shutdown, а освобождению аренды ровно на израсходование предела.
-        mock_psycopg2["set_job_class_config"]({
-            "model": {
-                "statement_timeout_ms": 15000,
-                "queue_maxsize": 1,
-                "wait_sec": 1.0,
-                "leases": True,
-            },
-            "runtime": {
-                "statement_timeout_ms": 5000,
-                "queue_maxsize": 8,
-                "wait_sec": 1.0,
-                "leases": True,
-            },
-        })
+        RuntimeError, а не блокируется навсегда."""
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 1, "max_conn": 1}))
         mock_psycopg2["configure"]("dsn")
         _db = mock_psycopg2["_db"]
         mgr = _db._get_manager()
 
         held = threading.Event()
-        # Стоп-сигнал вместо сна: держатель отпускает аренду под присмотром
-        # теста, а не через десять секунд после него.
-        release = threading.Event()
-        keeper_result: list[str] = []
 
         def _keeper():
-            try:
-                with mock_psycopg2["transaction"]() as conn:
-                    conn.execute("UPDATE t SET x=1")
-                    held.set()
-                    # Предел — страховка на случай, если тест упал раньше, чем
-                    # подал сигнал: поток обязан умереть сам, без внешнего join.
-                    release.wait(timeout=30)
-            except Exception as exc:
-                # Отказ на освобождении аренды ожидаем, и почему — под проверкой
-                # ниже. Ловить его здесь обязательно: иначе он ушёл бы в
-                # threading.excepthook, и прогон об отказе не узнал бы.
-                keeper_result.append(type(exc).__name__)
+            with mock_psycopg2["transaction"]() as conn:
+                conn.execute("UPDATE t SET x=1")
+                held.set()
+                time.sleep(10)
 
         t = threading.Thread(target=_keeper, daemon=True)
         t.start()
-        try:
-            assert held.wait(timeout=5)
+        assert held.wait(timeout=5)
 
-            waiter_result = []
+        waiter_result = []
 
-            def _waiter():
-                try:
-                    with mock_psycopg2["transaction"]() as conn:
-                        conn.execute("SELECT 1")
-                    waiter_result.append("ok")
-                except Exception as exc:
-                    waiter_result.append(type(exc).__name__)
+        def _waiter():
+            try:
+                with mock_psycopg2["transaction"]() as conn:
+                    conn.execute("SELECT 1")
+                waiter_result.append("ok")
+            except Exception as exc:
+                waiter_result.append(type(exc).__name__)
 
-            w = threading.Thread(target=_waiter, daemon=True)
-            w.start()
-            time.sleep(0.3)  # waiter уже в queue-ожидании lease
-            mgr.shutdown()
-            w.join(timeout=5)
-            assert waiter_result == ["RuntimeError"]
-        finally:
-            release.set()
-            t.join(timeout=10)
-
-        assert not t.is_alive(), "держатель аренды пережил тест"
-        # Освобождение аренды, пережившей shutdown, отказывается — и это
-        # законно: пул остановлен, воркер, взявший аренду, снят, а допуск
-        # классом теперь один на всех, включая освобождение. Раньше этот отказ
-        # случался через десять секунд после конца теста и всплывал в полном
-        # прогоне как PytestUnhandledThreadExceptionWarning — то есть дефект был
-        # виден только целиком, и никто его не ловил.
-        assert keeper_result == ["PoolBusyError"], keeper_result
+        w = threading.Thread(target=_waiter, daemon=True)
+        w.start()
+        time.sleep(0.3)  # waiter уже в queue-ожидании lease
+        mgr.shutdown()
+        w.join(timeout=5)
+        assert waiter_result == ["RuntimeError"]
 
     def test_unconnected_worker_yields_to_connected(self, mock_psycopg2):
         """Неподключённый воркер не отнимает задачи у подключённых.
@@ -814,7 +734,6 @@ class TestPool:
                 {
                 "min_conn": 1,
                 "max_conn": 5,
-                "reserved_workers": 0,
                 "connect_max_retries": 1,
                 "reconnect_backoff_sec": 0.01,
                 }
@@ -866,7 +785,6 @@ class TestPool:
                 {
                 "min_conn": 1,
                 "max_conn": 1,
-                "reserved_workers": 0,
                 "connect_max_retries": 2,
                 "reconnect_backoff_sec": 0.01,
                 }
@@ -898,9 +816,7 @@ class TestPool:
         warm-up может быть 1 живое соединение — суть probe в проверке
         доступности БД, а не в прогреве всех min_conn.
         """
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 2, "max_conn": 2, "reserved_workers": 0})
-        )
+        mock_psycopg2["set_pool_config"](_pool({"min_conn": 2, "max_conn": 2}))
         mock_psycopg2["configure"]("dsn")
         _db = mock_psycopg2["_db"]
         _db.probe_connections(timeout=5)
@@ -919,7 +835,6 @@ class TestPool:
                 {
                 "min_conn": 2,
                 "max_conn": 2,
-                "reserved_workers": 0,
                 "connect_max_retries": 1,
                 "reconnect_backoff_sec": 0.01,
                 }
@@ -943,7 +858,7 @@ class TestPool:
         поломку, которая ломала бы протокол целиком при включённом флаге.
         """
         mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0, "print_activity": True})
+            _pool({"min_conn": 1, "max_conn": 1, "print_activity": True})
         )
         mock_psycopg2["configure"]("dsn")
         mgr = mock_psycopg2["_db"]._get_manager()
@@ -960,7 +875,7 @@ class TestPool:
     def test_transaction_jobs_have_tag_not_unknown(self, mock_psycopg2, capsys):
         """begin/end транзакции тегируются, без [unknown] (никто не остаётся без метки)."""
         mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0, "print_activity": True})
+            _pool({"min_conn": 1, "max_conn": 1, "print_activity": True})
         )
         mock_psycopg2["configure"]("dsn")
         with mock_psycopg2["transaction"]() as conn:
@@ -976,161 +891,6 @@ class TestPool:
         mock_psycopg2["_db"].set_pool_config(_pool({"print_activity": True}))
         _db = mock_psycopg2["_db"]
         assert _db._pool_cfg.get("print_activity") is True
-
-
-class _FakeWorker:
-    """Воркер для проверки разбора очереди без потоков и соединений.
-
-    Настоящий ``_Worker`` — поток с живым соединением, и проверка «кого этот
-    воркер возьмёт» на нём означала бы гонку. Здесь нужны только те поля,
-    которые читает ``_take_job``.
-    """
-
-    def __init__(self, audiences, *, connected: bool = True) -> None:
-        self._audiences = frozenset(audiences)
-        self._lease_id = 0
-        self._busy = False
-        self._idle_since = None
-        self._conn = MagicMock() if connected else None
-        self._conn.closed = False
-
-
-#: Классы работы для тестов ниже. Числа взяты не из файла, а подобраны так,
-#: чтобы повод для отказа был виден в самой проверке: у модели ожидание нулевое
-#: (ждать нечего, место есть всегда), у рантайма — ожидание и очередь есть.
-_CLASSES = {
-    "model": {
-        "statement_timeout_ms": 15000,
-        "queue_maxsize": 1,
-        "wait_sec": 0.0,
-        "leases": False,
-    },
-    "runtime": {
-        "statement_timeout_ms": 5000,
-        "queue_maxsize": 8,
-        "wait_sec": 5.0,
-        "leases": True,
-    },
-}
-
-
-class TestJobClasses:
-    """Поведение классов работы: резерв, отказ вместо ожидания, счётчики.
-
-    Числа конфигурации в коде теста — не второй источник для применения: они
-    задают **повод** для проверки, а не применяются на процессе.
-    """
-
-    def test_reserved_worker_refuses_model_work(self, mock_psycopg2):
-        """Зарезервированный воркер не берёт модельную работу и ищет дальше.
-
-        Ради этого всё затевалось: пока резерв не занят, место для модельной
-        работы не исчезает. Проверяется не «какие аудитории у воркера», а что
-        воркер с ними делает: пропуск — это «не моё», а не отказ, и подходящая
-        работа ниже по очереди должна достаться тому, кому она принадлежит.
-        """
-        from libs.enterprise_data.audience import ALL_AUDIENCES, JOB_AUDIENCE_MODEL
-        from libs.enterprise_data.audience import JOB_AUDIENCE_RUNTIME
-
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 2, "max_conn": 2, "reserved_workers": 1})
-        )
-        mock_psycopg2["set_job_class_config"](_CLASSES)
-        mock_psycopg2["configure"]("dsn")
-
-        mgr = mock_psycopg2["_db"].DBManager("dsn")
-        assert mgr._audiences_for(1) == {JOB_AUDIENCE_RUNTIME}, mgr._audiences_for(1)
-        assert mgr._audiences_for(2) == ALL_AUDIENCES, mgr._audiences_for(2)
-        reserved = _FakeWorker(mgr._audiences_for(1))
-        universal = _FakeWorker(mgr._audiences_for(2))
-
-        model_job = mock_psycopg2["_db"]._Job(lambda conn: "model", audience=JOB_AUDIENCE_MODEL)
-        mgr._queue.append(model_job)
-        assert mgr._take_job(reserved) is None, "зарезервированный воркер взял модельную работу"
-        assert list(mgr._queue) == [model_job], "пропуск выбросил работу из очереди"
-        assert mgr._take_job(universal) is model_job
-
-        runtime_job = mock_psycopg2["_db"]._Job(lambda conn: "runtime", audience=JOB_AUDIENCE_RUNTIME)
-        mgr._queue.append(runtime_job)
-        assert mgr._take_job(reserved) is runtime_job, (
-            "зарезервированный воркер не взял работу своего класса"
-        )
-
-    def test_try_submit_refuses_instead_of_waiting(self, mock_psycopg2):
-        """Нет места — отказ, а не ожидание; работа в очередь не встаёт.
-
-        На этом держится сброс журнала: батч, которому некуда деться,
-        возвращается в буфер и уйдёт следующим тиком. Если бы отказ был
-        «подождать и упасть по таймауту», буфер блокировался бы на
-        собственном пуле, то есть на том, для которого он и работает.
-        """
-        from libs.enterprise_data.audience import JOB_AUDIENCE_RUNTIME
-        from libs.enterprise_data.db import PoolBusyError, try_submit
-
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0})
-        )
-        mock_psycopg2["set_job_class_config"](_CLASSES)
-        mock_psycopg2["configure"]("dsn")
-
-        busy = threading.Event()
-        release = threading.Event()
-
-        def _hold(conn):
-            busy.set()
-            assert release.wait(timeout=30)
-            return "held"
-
-        holder = threading.Thread(
-            target=lambda: try_submit(_hold, audience=JOB_AUDIENCE_RUNTIME), daemon=True
-        )
-        holder.start()
-        assert busy.wait(timeout=30), "воркер не взял работу — проверять нечего"
-
-        with pytest.raises(PoolBusyError):
-            try_submit(lambda conn: "second", audience=JOB_AUDIENCE_RUNTIME)
-
-        stats = mock_psycopg2["get_stats"]()
-        assert stats["queue_size"] == 0, "отказавшая работа всё-таки встала в очередь"
-        assert stats["audiences"][JOB_AUDIENCE_RUNTIME]["rejected"] == 1, stats
-
-        # Отказ не оставил пул сломанным: освободив воркер, тот же вызов
-        # проходит. Иначе «занято» превратилось бы в «пул встал».
-        release.set()
-        holder.join(timeout=30)
-        assert try_submit(lambda conn: "after", audience=JOB_AUDIENCE_RUNTIME) == "after"
-
-    def test_stats_carry_counters_per_class(self, mock_psycopg2):
-        """По каждому классу видно, сколько стоит, выполняется и отказано.
-
-        Без этого «модельная работа не идёт» и «журнал не пишется» выглядят
-        снаружи одинаково, а разбираться приходится вслепую, гоняя трафик по
-        живому контуру.
-        """
-        from libs.enterprise_data.audience import JOB_AUDIENCE_MODEL, JOB_AUDIENCE_RUNTIME
-        from libs.enterprise_data.db import run, try_submit
-
-        mock_psycopg2["set_pool_config"](
-            _pool({"min_conn": 1, "max_conn": 1, "reserved_workers": 0})
-        )
-        mock_psycopg2["set_job_class_config"](_CLASSES)
-        mock_psycopg2["configure"]("dsn")
-
-        assert run(lambda conn: "m", audience=JOB_AUDIENCE_MODEL) == "m"
-        assert try_submit(lambda conn: "r", audience=JOB_AUDIENCE_RUNTIME) == "r"
-
-        stats = mock_psycopg2["get_stats"]()
-        assert stats["reserved_workers"] == 0, stats
-        buckets = stats["audiences"]
-        assert set(buckets) == {JOB_AUDIENCE_MODEL, JOB_AUDIENCE_RUNTIME}, buckets
-        for audience, bucket in buckets.items():
-            assert set(bucket) == {
-                "queued", "running", "rejected", "taken", "wait_total", "wait_max",
-            }, (audience, bucket)
-            assert bucket["taken"] == 1, (audience, bucket)
-            assert bucket["queued"] == 0 and bucket["running"] == 0, (audience, bucket)
-            assert bucket["rejected"] == 0, (audience, bucket)
-            assert bucket["wait_max"] >= bucket["wait_total"] >= 0.0, (audience, bucket)
 
 
 class TestAsyncAPI:

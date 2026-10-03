@@ -27,6 +27,7 @@ import json
 import os
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -49,39 +50,46 @@ from utils.session_file_store import SessionFileStore
 
 from lib.channels.message_exchange import MessageExchange
 from lib.channels.queue_ops import QueueOps
+from lib.services.session_files import (
+    SessionFileResolver,
+    SessionFilesUnavailable,
+    current_session_file_resolver,
+)
 from lib.utils.outbound_meta import FINAL_TURN_KEY, is_dropped
-
-_WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
 
 console = Console()
 
 
-def _resolve_sfs_base(media_cache_dir: str | Path) -> Path:
-    """Преобразовать ``channels.postgres.media_cache_dir`` в ``base_dir``
-    для ``SessionFileStore``.
+def _session_dir_resolver() -> SessionFileResolver:
+    """Резолвер каталога сессии текущего процесса; отказ, если его нет.
 
-    ``SessionFileStore(base_dir)`` размещает сессии в
-    ``base_dir/cache/sessions/``. Канонический ``media_cache_dir``
-    (``config.json``) — ``data_store/cache/sessions``, то есть ``base_dir``
-    должен быть ``data_store``: снять нужно ОБА компонента, ``cache`` и
-    ``sessions``.
-
-    Раньше снимался только ``sessions``, и база становилась
-    ``data_store/cache``, а стор добавлял ``cache/sessions`` снова — путь
-    раздваивался до ``data_store/cache/cache/sessions``. Каталог хука
-    ``session_file_redirect_hook`` (``data_store/cache/sessions``) и
-    каталог вложений из PostgreSQL не совпадали, и вложения агенту были
-    недоступны.
+    Каталог вложений приходит оттуда же, откуда его берёт хук перенаправления:
+    одна папка на сессию, один корень, одно имя. Отдельного пути у канала нет и
+    быть не должно — расхождение двух путей уже стоило того, что вложения из
+    PostgreSQL были агенту недоступны.
     """
-    p = Path(media_cache_dir)
-    if not p.is_absolute():
-        p = _WORKSPACE_DIR / media_cache_dir
-    parts = p.parts
-    if len(parts) >= 2 and parts[-1] == "sessions" and parts[-2] == "cache":
-        return Path(*parts[:-2])
-    if parts and parts[-1] == "sessions":
-        return p.parent
-    return p
+    resolver = current_session_file_resolver()
+    if resolver is None:
+        raise SessionFilesUnavailable(
+            "резолвер каталога сессии не опубликован: вложение не сохранено"
+        )
+    return resolver
+
+
+async def _ensure_session_dir(session_key: str) -> None:
+    """Дождаться каталога сессии до синхронного разбора вложений."""
+    await _session_dir_resolver().ensure(session_key)
+
+
+def _resolved_session_dir(session_key: str) -> Path:
+    """Каталог сессии из уже полученного ответа резолвера, синхронно.
+
+    Кодек ``utils.media.deserialize`` синхронен, а резолвер асинхронен, поэтому
+    канал дожидается каталога один раз (см. :func:`_ensure_session_dir`), и
+    дальше хранилище читает уже полученный ответ. Вычислять путь на стороне
+    канала или хранилища нельзя: это была бы вторая копия корня сессии.
+    """
+    return _session_dir_resolver().resolved_session_dir(session_key)
 
 
 class PostgresChannel(BaseChannel):
@@ -202,17 +210,23 @@ class PostgresChannel(BaseChannel):
         self._chat_inflight: set[str] = set()
 
         # ---- единое хранилище файлов сессии ----
-        # Канал делит SessionFileStore со всем приложением. Это та же
-        # инстанция, через которую tools/другие каналы кладут
-        # файлы в ``cache/sessions/{session_key}/attachments/`` и
-        # ``cache/sessions/{session_key}/results/``.
+        # Каталог сессии у хранилища — от резолвера, того же, что у хука
+        # перенаправления: одна папка на сессию и один корень на процесс.
+        # Настройка ``channels.postgres.media_cache_dir`` больше не читается —
+        # это был второй ответ на вопрос «где лежат вложения», и он уже разошёлся
+        # с хуком (см. ``PENDING-DELETIONS.md``).
         injected_store = _get("_file_store")
         if isinstance(injected_store, SessionFileStore):
+            # Инжектированное хранилище само владеет своими путями, поэтому
+            # канал не ждёт резолвер: иначе тест с подменённым хранилищем падал
+            # бы не из-за вложения, а из-за отсутствия платформы.
             self._file_store: SessionFileStore = injected_store
+            self._prepare_session_dir: Callable[[str], Awaitable[None]] | None = None
         else:
-            media_cache_dir = _get("media_cache_dir", "data_store/cache/sessions")
-            base = _resolve_sfs_base(media_cache_dir)
-            self._file_store = SessionFileStore(base, attachments_subdir="attachments")
+            self._file_store = SessionFileStore(
+                _resolved_session_dir, attachments_subdir="attachments"
+            )
+            self._prepare_session_dir = _ensure_session_dir
 
         self._msg_chat: dict[str, str] = {}
 
@@ -255,17 +269,40 @@ class PostgresChannel(BaseChannel):
         """
         return media_serialize(media)
 
-    async def _decode_media_from_db(
-        self, media: list[Any], session_key: str = "default"
-    ) -> list[Any]:
+    async def decode_media(self, media: list[Any], session_key: str) -> list[Any]:
         """Декодировать storage-медиа обратно в локальные файлы сессии.
+
+        Публичная точка входа канала: ``MessageExchange`` ходит в неё, а
+        ``_decode_media_from_db`` — обёртка для вызовов внутри канала. Одна
+        функция на разбор вложений, потому что только здесь дожидается каталога
+        сессии.
 
         Делегирует общему ``utils.media.deserialize`` — терпит legacy
         ``{filename, data}``, новый AW ``{filename, file_id, ...}`` и
-        ``{filename, path}``. Файлы пишутся через ``SessionFileStore`` →
-        ``cache/sessions/{session_key}/attachments/{uuid}_{имя}``.
+        ``{filename, path}``. Файлы пишутся через ``SessionFileStore`` в
+        ``files/attachments/`` каталога сессии, который отдал резолвер.
+
+        Недоступный резолвер — отказ **сохранения**, а не отказ разбора: запись
+        вложения не состоялась, но опрос не должен из-за этого терять сообщение.
+        Поэтому каталог не запрашивается на весь список, а кодек отказывает
+        поштучно, и неразобранное вложение уходит агенту как есть. В другой
+        каталог оно при этом не попадает: путь у хранилища один, и он от
+        резолвера.
         """
+        if self._prepare_session_dir is not None:
+            try:
+                await self._prepare_session_dir(session_key)
+            except SessionFilesUnavailable as exc:
+                self.logger.warning(
+                    "каталог сессии недоступен, вложения не сохраняются: {}", exc
+                )
         return media_deserialize(media, self._file_store, session_key)
+
+    async def _decode_media_from_db(
+        self, media: list[Any], session_key: str = "default"
+    ) -> list[Any]:
+        """То же, что :meth:`decode_media`, с дефолтным ключом сессии."""
+        return await self.decode_media(media, session_key)
 
     @staticmethod
     def _resolve_media_paths_and_hints(

@@ -37,6 +37,11 @@ def _auto_seed_context_bridge(monkeypatch):
     ``_attach_context_window`` не поднимал ``ContextWindowNotSeededError``
     (контракт после opencode change post-0.3.5-patches-cleanup).
     """
+    # Импортируем заранее: monkeypatch.setattr по точечному пути требует, чтобы
+    # модуль уже был в sys.modules, а чужие тестовые файлы в этом процессе
+    # sys.modules восстанавливают через patch.dict — и оставляют после себя
+    # пакет lib.services без подключённого runtime_patcher.
+    import lib.services.runtime_patcher  # noqa: F401
     from lib.hooks.database_logging_hook import (
         _CONTEXT_BRIDGE,
         _CONTEXT_BRIDGE_LOCK,
@@ -81,49 +86,64 @@ class _FakeSessionFileStore:
 
 
 @pytest.fixture(autouse=True)
-def mock_db():
+def mock_db(tmp_path):
     """Подставной клиент ``enterprise-mcp`` вместо мока ``utils.db``.
 
     Канал больше не ходит в PostgreSQL, поэтому мокать нечего: вложения
     наблюдаются как аргументы операций платформы.
+
+    Заодно публикуется настоящий резолвер каталога сессии на временный
+    каталог: канал берёт каталог вложений у резолвера процесса, и без него
+    разбор вложений — отказ. Резолвер без платформы, то есть корень
+    агентский, но контракт «каталог приходит от резолвера» проверяется
+    по-настоящему.
     """
-    with patch.dict("sys.modules"):
-        import importlib
+    from lib.services.session_files import (
+        SessionFileResolver,
+        install_session_file_resolver,
+    )
 
-        original_utils = sys.modules.get("utils")
-        if original_utils is not None:
-            real_utils_pkg = importlib.import_module("utils")
-        else:
-            import importlib.util as _iu
-            utils_init = _WORKSPACE / "utils" / "__init__.py"
-            spec = _iu.spec_from_file_location("utils", utils_init)
-            real_utils_pkg = _iu.module_from_spec(spec)
-            sys.modules["utils"] = real_utils_pkg
-            spec.loader.exec_module(real_utils_pkg)
-        assert real_utils_pkg is not None
+    install_session_file_resolver(SessionFileResolver(workspace_dir=tmp_path))
+    try:
+        with patch.dict("sys.modules"):
+            import importlib
 
-        from utils.session_file_store import SessionFileStore  # noqa: F401
+            original_utils = sys.modules.get("utils")
+            if original_utils is not None:
+                real_utils_pkg = importlib.import_module("utils")
+            else:
+                import importlib.util as _iu
+                utils_init = _WORKSPACE / "utils" / "__init__.py"
+                spec = _iu.spec_from_file_location("utils", utils_init)
+                real_utils_pkg = _iu.module_from_spec(spec)
+                sys.modules["utils"] = real_utils_pkg
+                spec.loader.exec_module(real_utils_pkg)
+            assert real_utils_pkg is not None
 
-        # Принудительный re-import: если предыдущие тестовые файлы уже
-        # импортировали канал, класс остался связан с другим транспортом.
-        sys.modules.pop("lib.channels.postgres_channel", None)
+            from utils.session_file_store import SessionFileStore  # noqa: F401
 
-        from lib.channels.postgres_channel import (
-            PostgresChannel,
-            _decode_jsonb,
-        )
+            # Принудительный re-import: если предыдущие тестовые файлы уже
+            # импортировали канал, класс остался связан с другим транспортом.
+            sys.modules.pop("lib.channels.postgres_channel", None)
 
-        from tests.conftest import FakeEnterpriseMcp
+            from lib.channels.postgres_channel import (
+                PostgresChannel,
+                _decode_jsonb,
+            )
+            from tests.conftest import FakeEnterpriseMcp
 
-        client = FakeEnterpriseMcp()
+            client = FakeEnterpriseMcp()
 
-        yield {
-            "PostgresChannel": PostgresChannel,
-            "_decode_jsonb": _decode_jsonb,
-            "db": client,
-            "mcp": client,
-            "SessionFileStore": SessionFileStore,
-        }
+            yield {
+                "PostgresChannel": PostgresChannel,
+                "_decode_jsonb": _decode_jsonb,
+                "db": client,
+                "mcp": client,
+                "SessionFileStore": SessionFileStore,
+            }
+    finally:
+        # Публикация процесса не должна утекать в следующие тестовые файлы.
+        install_session_file_resolver(None)
 
 
 def _make_outbound(content, media, chat_id="chat-1"):
@@ -256,7 +276,7 @@ async def test_media_round_trip_through_channel(mock_db, tmp_path):
     assert md_entry["mime_type"] == "text/markdown"
     assert md_entry["file_size"] > 0
 
-    runtime = ch.exchange.decode([md_entry], session_key="test:1")
+    runtime = await ch.exchange.decode([md_entry], session_key="test:1")
     assert len(runtime) == 1
     rt = runtime[0]
     assert isinstance(rt, dict)

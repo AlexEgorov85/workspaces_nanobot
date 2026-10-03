@@ -34,9 +34,6 @@ from contextlib import suppress
 from typing import Any
 
 from utils.media import (
-    deserialize as media_deserialize,
-)
-from utils.media import (
     resolve_paths_and_hints as media_resolve_paths_and_hints,
 )
 from utils.media import (
@@ -97,9 +94,15 @@ class MessageExchange:
         """Сериализовать вложения в storage AW-формат для БД/очереди."""
         return media_serialize(media or [])
 
-    def decode(self, media: list[Any], session_key: str) -> list[Any]:
-        """Декодировать вложения к runtime-формату (пути для агента)."""
-        return media_deserialize(media, self.channel.file_store, session_key)
+    async def decode(self, media: list[Any], session_key: str) -> list[Any]:
+        """Декодировать вложения к runtime-формату (пути для агента).
+
+        ``async``, а не синхронная обёртка над кодеком: каталог сессии даёт
+        резолвер, а он асинхронен. Разбор вложений поэтому один — в канале
+        (``PostgresChannel.decode_media``), и второй тут означал бы обход
+        шага, который дожидается каталога.
+        """
+        return await self.channel.decode_media(media, session_key)
 
     def resolve(self, media: list[Any]) -> tuple[list[str], list[str]]:
         """Распаковать media в пути для агента и подсказки."""

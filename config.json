@@ -239,7 +239,6 @@
       "msg_ctx_max_size": 100,
       "worker_id": "",
       "error_retry_delay": 60.0,
-      "media_cache_dir": "data_store/cache/sessions",
       "allow_from": [
         "*"
       ],
@@ -689,15 +688,6 @@
     "persist_threshold": 50000,
     "persist_max_files": 100,
     "persist_max_age_hours": 0,
-    "tool_result_limits": {
-      "exec_max_output_chars": 500000,
-      "exec_default_output_chars": 100000,
-      "read_file_max_chars": 512000,
-      "grep_head_limit": 500,
-      "grep_file_head_limit": 400,
-      "grep_max_file_bytes": 20000000,
-      "list_dir_max_entries": 500
-    },
     "llm_timeout": 300,
     "exec_timeout": 0,
     "exec_timeout_cap_sec": 3600,
@@ -882,6 +872,9 @@
         ],
         "cwd": "${NANOBOT_PROJECT_ROOT}/mcp-platform",
         "tool_timeout_sec": 30.0
+      },
+      "session_files": {
+        "root": "${NANOBOT_WORKSPACE}/data_store/sessions"
       }
     }
   },
@@ -902,7 +895,7 @@
       }
     },
     "exec": {
-      "enable": true,
+      "enable": false,
       "timeout": 60,
       "pathPrepend": "",
       "pathAppend": "",
@@ -922,7 +915,7 @@
       "enable": true
     },
     "cliApps": {
-      "enable": true,
+      "enable": false,
       "installTimeout": 300,
       "runTimeout": 60,
       "catalogTtlSeconds": 3600

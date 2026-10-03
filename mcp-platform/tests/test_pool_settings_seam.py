@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,9 @@ from libs.enterprise_common.settings import (  # noqa: E402
 #: разрешённый файл: DSN и ключ провайдера. Настоящие секреты живут в
 #: ``mcp-platform/.secrets.env`` и в тесты не попадают; набор тот же, что
 #: задаёт conftest на сессию, и расти он обязан вместе с файлом.
+#:
+#: ``NANOBOT_WORKSPACE`` в списке — не секрет, а подстановка пути: им объявлен
+#: ``execution.session_root``, и разворачивается он так же целиком.
 DUMMY_SECRETS: dict[str, str] = {
     "DB_USER": "test",
     "DB_PASSWORD": "test",
@@ -58,6 +62,7 @@ DUMMY_SECRETS: dict[str, str] = {
     "DB_NAME": "test",
     "LLM_API_KEY": "test",
     "EMBED_TOKEN": "test",
+    "NANOBOT_WORKSPACE": str(Path(tempfile.gettempdir()) / "nanobot-platform-tests"),
 }
 
 def _settings(
@@ -91,22 +96,14 @@ SERVER_PATH = PLATFORM_ROOT / "servers" / "enterprise" / "server.py"
 
 @pytest.fixture(autouse=True)
 def _restore_pool_config():
-    """Вернуть глобальную конфигурацию пула: её меняет каждый тест ниже.
-
-    Секция классов возвращается вместе с разделом ``pool``: это тоже
-    глобальная настройка того же владельца, и оставленная после теста, она
-    заставила бы следующий набор считать пул настроенным чужими пределами —
-    аренда модельной работы отказала бы там, где её не отказывали.
-    """
+    """Вернуть глобальную конфигурацию пула: её меняет каждый тест ниже."""
     from libs.enterprise_data import db as data_db
 
     saved = dict(data_db._pool_cfg)
-    saved_classes = {name: dict(values) for name, values in data_db._job_class_cfg.items()}
     try:
         yield
     finally:
         data_db._pool_cfg = saved
-        data_db._job_class_cfg = saved_classes
 
 
 def _pool_cfg() -> dict:
@@ -117,15 +114,11 @@ def _pool_cfg() -> dict:
 
 #: Полный набор ключей пула с нейтральными значениями. Основа для тестовых
 #: файлов: раздел обязан быть полным, иначе реестр откажется его читать.
-#: ``reserved_workers`` здесь ноль, а не два: нейтральный набор не должен
-#: содержать резерв, иначе он не годится для проверки конфигураций с пулом
-#: меньше трёх воркеров.
 POOL_BASE: dict[str, object] = {
     "min_conn": 1,
     "max_conn": 4,
-    "reserved_workers": 0,
     "pool_timeout": 5.0,
-    "queue_maxsize": 64,
+    "queue_maxsize": 10000,
     "reconnect_backoff_sec": 1.0,
     "reconnect_backoff_max_sec": 60.0,
     "connect_max_retries": 5,

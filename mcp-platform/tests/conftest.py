@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,13 @@ if str(PLATFORM_ROOT) not in sys.path:
 #: ключ провайдера. Пока в файле есть обе, заглушек быть должно обе — новая
 #: подстановка обязана заставлять поправить этот словарь, иначе она тихо
 #: валит половину прогона вместо одной понятной ошибки.
+#:
+#: Словарь — про подстановки, а не только про секреты: ``NANOBOT_WORKSPACE``
+#: в нём секретом не является, но объявляет ``execution.session_root``, и
+#: корень файлов сессии обязан лежать внутри рабочего каталога агента, иначе
+#: граница файловых инструментов откажет в записи. Значение уводится в TEMP:
+#: проверяется объявление, а не путь, и прогон не должен писать в каталог
+#: платформы.
 DUMMY_SECRETS: dict[str, str] = {
     "DB_USER": "test",
     "DB_PASSWORD": "test",
@@ -36,6 +44,7 @@ DUMMY_SECRETS: dict[str, str] = {
     "DB_NAME": "test",
     "LLM_API_KEY": "test",
     "EMBED_TOKEN": "test",
+    "NANOBOT_WORKSPACE": str(Path(tempfile.gettempdir()) / "nanobot-platform-tests"),
 }
 
 

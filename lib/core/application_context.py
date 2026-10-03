@@ -174,6 +174,13 @@ class ApplicationContext:
     # пока не понадобился, и не мешает старту агента, если платформа не собрана.
     enterprise_mcp: Any | None = None
 
+    # Единственное место на стороне агента, где вычисляется каталог сессии.
+    # Создаётся после клиента платформы, потому что при объявленной платформе
+    # корень спрашивается у неё операцией ``session_files``, а при выключенной —
+    # объявляется в ``config.json``. Оба объявления не могут быть активны
+    # одновременно, и какой из них — видно по ``has_platform``.
+    session_file_resolver: Any | None = None
+
     # Помощники
     config_service: Any = None
     runtime_patcher: Any = None
@@ -483,6 +490,15 @@ class ApplicationContext:
                 "enterprise-mcp: клиент создан (%s), соединение ленивое",
                 ctx.enterprise_mcp.describe(),
             )
+
+        # 7a-1. Резолвер каталога сессии.
+        #
+        # Отдельным шагом рядом с ``apply_all()`` и ``register_project_tools()``:
+        # резолвер — единственный источник пути сессии для агента, и создать его
+        # обязан composition root, а не тот потребитель, который первым
+        # позвонит. Иначе первый вызов сам бы объявил корень, и объявление
+        # зависело бы от порядка обращений.
+        ctx.session_file_resolver = _make_session_file_resolver(ctx)
 
         project_tools_result = register_project_tools(
             agent=ctx.agent,
@@ -1419,6 +1435,40 @@ def _make_cron_service(config: Any) -> Any:
     from nanobot.cron.service import CronService
 
     return CronService(config.workspace_path / "cron" / "jobs.json")
+
+
+def _make_session_file_resolver(ctx: Any) -> Any:
+    """Создать ``SessionFileResolver`` — единственный резолвер каталога сессии.
+
+    Резолвер получает клиента платформы, а не читает ``platform.json``:
+    корень каталога сессии объявляет платформа, и второй источник значения у
+    агента означал бы ровно тот рассинхрон, который эта правка убирает.
+
+    Публикуется дважды, и это не дублирование. В ``ctx`` — для сервисов, которые
+    composition root передаёт явно (скиллы, канал, 4-я фаза). В модуле — для
+    плагинов ``workspace/hooks/``: ``lib.cli.hook_loader.scan_and_register``
+    поднимает хук как ``cls(workspace_dir=workspace_dir)``, то есть с единственным
+    аргументом, и ни конструктор хука, ни ``AgentFactory.hook_factories`` (там
+    нужен свой инстанс на оборот, а резолвер на процесс один) не дают туда
+    положить службу. Чтение ленивое, поэтому хук, поднятый на шаге 6a, увидит
+    резолвер, опубликованный позже, — в момент обращения в обороте.
+    """
+    from lib.services.session_files import (
+        SessionFileResolver,
+        install_session_file_resolver,
+    )
+
+    resolver = SessionFileResolver(
+        enterprise_mcp=getattr(ctx, "enterprise_mcp", None),
+        workspace_dir=ctx.workspace_dir,
+        settings=ctx.settings,
+    )
+    install_session_file_resolver(resolver)
+    logger.info(
+        "session-files: резолвер создан, корень объявляет %s",
+        "платформа (операция session_files)" if resolver.has_platform else "агент (config.json)",
+    )
+    return resolver
 
 
 def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
