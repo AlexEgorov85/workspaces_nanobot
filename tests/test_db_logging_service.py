@@ -218,10 +218,6 @@ class TestNonBlocking:
         svc.log_tool_result("cli:1", "exec", "ok", latency_ms=1.0, tool_call_id="t2")
         assert svc._queue.queue[1].summary == "exec"
 
-    def test_log_error(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x")
-        assert svc.log_error("boom", session_id="k", context={"k": "v"}) is True
-
     def test_log_llm_call_fields(self, fake_psycopg2):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         prompt = [{"role": "user", "content": "привет"}]
@@ -232,7 +228,7 @@ class TestNonBlocking:
             usage={"total_tokens": 10}, request_id="m1",
         )
         event = svc._queue.queue[0]
-        assert event.event_type == "llm_call"
+        assert event.event_type == "llm.exchanged"
         assert event.actor == "agent"
         assert event.request_id == "m1"
         assert event.summary == "stop"
@@ -373,8 +369,8 @@ class TestWrittenByType:
             svc.stop(timeout_sec=2.0)
 
         counter = svc.get_stats()["written_by_type"]
-        assert counter.get("tool_call") == 5
-        assert counter.get("tool_result") == 3
+        assert counter.get("tool.started") == 5
+        assert counter.get("tool.completed") == 3
 
     def test_written_by_type_does_not_grow_on_flush_failure(
         self, fake_psycopg2,
@@ -407,7 +403,7 @@ class TestWrittenByType:
             svc.stop(timeout_sec=2.0)
 
         first = svc.get_stats()["written_by_type"]
-        assert first.get("tool_call") == 2
+        assert first.get("tool.started") == 2
 
         # Повторный start() — счётчик written_by_type НЕ сбрасывается.
         svc.start()
@@ -417,7 +413,7 @@ class TestWrittenByType:
         finally:
             svc.stop(timeout_sec=2.0)
         second = svc.get_stats()["written_by_type"]
-        assert second.get("tool_call") == 3
+        assert second.get("tool.started") == 3
 
 
 class TestOldestQueuedAge:
@@ -444,9 +440,9 @@ class TestOldestQueuedAge:
     def test_oldest_queued_age_returns_max_age(self, fake_psycopg2):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         # Два LogEvent с разным queued_at — старший даёт max возраста.
-        older = LogEvent(event_type="tool_call")
+        older = LogEvent(event_type="tool.started")
         older.queued_at = time.time() - 0.3
-        newer = LogEvent(event_type="tool_result")
+        newer = LogEvent(event_type="tool.completed")
         newer.queued_at = time.time() - 0.1
         # Добавляем напрямую в очередь, минуя _enqueue (чтобы queued_at
         # не переписался на текущий time).
@@ -464,7 +460,7 @@ class TestOldestQueuedAge:
         from lib.services.db_logging_service import _QuestionRunRecord
 
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
-        le = LogEvent(event_type="tool_call")
+        le = LogEvent(event_type="tool.started")
         le.queued_at = time.time() - 0.2
         # _QuestionRunRecord без queued_at — должно игнорироваться.
         svc._queue.put_nowait(le)
@@ -616,7 +612,13 @@ class TestNamePopulation:
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_outbound("cli:1", "cli", "ok")
         assert svc._queue.queue[0].name == "assistant"
-        svc.log_outbound("cli:1", "cli", "ok", kind="outbound_intermediate")
+        # Раньше вторая строка зову́ла ``log_outbound(..., kind=
+        # "outbound_intermediate")``: тест проверял, что ``name`` не зависит от
+        # ВИДА исходящего. Промежуточные ``message(...)`` больше не пишутся
+        # вовсе (не-событие), а параметра ``kind`` не существует — сравнивать
+        # нечего. Повторный вызов проверяет то же самое на единственном
+        # существующем виде: заполнение ``name`` стабильно.
+        svc.log_outbound("cli:1", "cli", "ещё один ответ")
         assert svc._queue.queue[1].name == "assistant"
 
     def test_llm_call_name_is_model(self):
@@ -625,11 +627,6 @@ class TestNamePopulation:
         assert svc._queue.queue[0].name == "mini"
         svc.log_llm_call("cli:1", "p", "r", model=None)
         assert svc._queue.queue[1].name == "llm"
-
-    def test_error_name_is_error(self):
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
-        svc.log_error("boom")
-        assert svc._queue.queue[0].name == "error"
 
     def test_tool_events_name_is_tool(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
@@ -647,7 +644,7 @@ class TestUserIdPropagation:
         """Явно заданный producer'ом ``LogEvent.user_id`` доходит до INSERT."""
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_event(LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id="r1",
             user_id="alice",
@@ -701,7 +698,7 @@ class TestUserIdPropagation:
         )
         # Producer создаёт событие БЕЗ user_id — auto-fill путь.
         event = LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id="req-A",
             user_id=None,
@@ -743,7 +740,7 @@ class TestUserIdPropagation:
             "cli:1", "req-A", user_id="alice", chat_id="c1",
         )
         stale_event = LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id="req-A",
             user_id=None,
@@ -776,7 +773,7 @@ class TestUserIdPropagation:
         )
         # Producer создаёт событие с явным request_id, но без user_id.
         event = LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id="r1",
         )
@@ -793,7 +790,7 @@ class TestUserIdPropagation:
             "cli:1", "r1", user_id="alice", chat_id="c1",
         )
         event = LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id="r1",
             user_id="bob",
@@ -816,7 +813,7 @@ class TestUserIdPropagation:
         )
         # Producer создал событие req-A с пустым user_id — НЕ в очередь.
         stale_event = LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id="req-A",
         )
@@ -840,7 +837,7 @@ class TestUserIdPropagation:
             "cli:1", "req-A", user_id="alice", chat_id="c1",
         )
         event = LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id=None,
         )
@@ -920,7 +917,7 @@ class TestUserIdPropagation:
         assert svc.get_request_id("cli:1") is None
         # После clear новые события НЕ получают user_id из индекса.
         event = LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             session_id="cli:1",
             request_id="r1",
         )

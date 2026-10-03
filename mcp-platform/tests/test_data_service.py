@@ -2,6 +2,18 @@
 
 Тесты идут на подставном модуле пула: сервис не должен требовать живой БД,
 иначе проверять его поведение можно только интеграционно, то есть дорого.
+
+Имена событий берутся из словаря
+--------------------------------
+
+Тесты механики — буфера, плейсхолдеров, счётчиков — пишут события под
+**каноническими** именами из ``libs/enterprise_common/eventing/types.py``.
+Выдуманное имя (``turn.completed``, ``a``, ``b``) не проверяет писатель: под
+``platform.json → data.log_unknown_event_type_policy = strict`` партия с таким
+именем отказывается целиком ещё до записи, и красный тест говорит о словаре,
+а не о буфере. Проверка «имя вне словаря отказывает партию» живёт отдельно, в
+``tests/test_journal_contract_visibility.py``; страж на выдуманные имена в
+тестах — в ``tests/test_journal_fabricated_event_names.py``.
 """
 
 from __future__ import annotations
@@ -18,6 +30,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from libs.enterprise_common.errors import (  # noqa: E402
     InfrastructureError,
     InvalidRequestError,
+)
+from libs.enterprise_common.eventing.types import (  # noqa: E402
+    AGENT_COMPLETED,
+    AGENT_STARTED,
+    TOOL_COMPLETED,
+    TOOL_STARTED,
 )
 from servers.enterprise.capabilities.data.service.main import DataService  # noqa: E402
 from servers.enterprise.capabilities.data.service.writer import (  # noqa: E402
@@ -72,7 +90,7 @@ def _log_row(row_id: str) -> tuple[object, ...]:
     Порядок колонок зафиксирован в SQL сервиса: id, timestamp, event_type,
     name, level, summary, payload.
     """
-    return (row_id, "2026-01-01T00:00:00Z", "turn.completed", "turn", "info", "ок", {})
+    return (row_id, "2026-01-01T00:00:00Z", AGENT_COMPLETED, "turn", "info", "ок", {})
 
 
 def _fake_db(rows: list[tuple[object, ...]] | None = None) -> ModuleType:
@@ -127,7 +145,7 @@ class TestTwoEntries:
         assert service.submit(lambda conn: 42) == 42
 
     def test_accept_never_raises_and_returns_accepted(self, service: DataService) -> None:
-        assert service.log_event("turn.completed", summary="ок") == "accepted"
+        assert service.log_event(AGENT_COMPLETED, summary="ок") == "accepted"
 
     def test_accept_does_not_write_immediately(self, service: DataService) -> None:
         """Неблокирующий вход не должен ждать воркер пула.
@@ -136,7 +154,7 @@ class TestTwoEntries:
         конкурировать с журналом — и проигрывает, потому что потеря события
         безвозвратна и не сопровождается ошибкой.
         """
-        service.log_event("turn.completed")
+        service.log_event(AGENT_COMPLETED)
         assert service._db.conn.statements == []  # type: ignore[union-attr]
 
     def test_overflow_drops_instead_of_blocking(self) -> None:
@@ -313,6 +331,23 @@ class TestSchemaCheck:
         with pytest.raises(InvalidRequestError, match="ни одной ожидаемой таблицы"):
             svc.schema_check()
 
+    def test_report_lists_the_tables_actually_checked(self) -> None:
+        """Ответ обязан содержать ИМЕНА, а не только их количество.
+
+        Агент сверяет по этому списку свои профильные таблицы с таблицами
+        платформы: без имён расхождение (перекрыли в одном файле, а не в
+        другом) видно только по содержимому боевого журнала.
+        """
+        rows = [("public", "a"), ("public", "b")]
+        svc = _service(
+            db=_fake_db(rows),
+            expected_tables=("public.a", "public.b"),
+            buffer_flush_interval=0.0,
+        )
+        report = svc.schema_check()
+        assert sorted(report["tables"]) == ["public.a", "public.b"]
+        assert report["expected"] == 2
+
 
 # --- log_event -------------------------------------------------------------
 
@@ -323,7 +358,7 @@ class TestLogEvent:
             service.log_event("  ")
 
     def test_stats_expose_buffer(self, service: DataService) -> None:
-        service.log_event("turn.started")
+        service.log_event(AGENT_STARTED)
         stats = service.stats()
         assert stats["event_buffer"]["pending"] == 1
         assert stats["max_rows"] > 0
@@ -342,8 +377,8 @@ class TestLogEvent:
         """
         db = _fake_db()
         svc = _service(db=db, buffer_flush_interval=0.0)
-        svc.log_event("a", summary="первое")
-        svc.log_event("b", name="tool", session_id="s1", user_id="u1")
+        svc.log_event(TOOL_STARTED, summary="первое")
+        svc.log_event(TOOL_COMPLETED, name="tool", session_id="s1", user_id="u1")
         svc._buffer.flush()
 
         inserts = [s for s in db.conn.statements if s[0].lstrip().startswith("INSERT")]
@@ -357,7 +392,7 @@ class TestLogEvent:
         """
         db = _fake_db()
         svc = _service(db=db, buffer_flush_interval=0.0)
-        svc.log_event("a", payload={"k": "v"}, session_id="s1")
+        svc.log_event(TOOL_STARTED, payload={"k": "v"}, session_id="s1")
         svc._buffer.flush()
 
         sql, params = next(
@@ -370,7 +405,7 @@ class TestLogEvent:
         """Ошибка записи не поднимается наружу, но видна в счётчике."""
         db = _fake_db()
         svc = _service(db=db, buffer_flush_interval=0.0)
-        svc.log_event("a")
+        svc.log_event(TOOL_STARTED)
 
         def _boom(*args: object, **kwargs: object) -> None:
             raise RuntimeError("db down")

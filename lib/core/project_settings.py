@@ -119,7 +119,7 @@ class ErrorMessagesSettings(_StrictOptional):
         internal_error: текст, который видит пользователь вместо upstream
             ``"Sorry, I encountered an error."``. По умолчанию — русская
             формулировка без раскрытия внутренних деталей.
-        log_to_db: писать ли ``event_type="turn_failed"`` в
+        log_to_db: писать ли ``event_type="agent.failed"`` в
             ``agent_gateway_logs`` через ``DbLoggingService.try_log_event``
             (см. ``lib/services/db_logging_service.py:34``). При
             ``False`` — детали остаются только в ``loguru``. По умолчанию

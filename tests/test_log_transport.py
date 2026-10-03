@@ -77,7 +77,7 @@ class SyncRunner:
 
 def _event(**kwargs: Any) -> LogEvent:
     base = {
-        "event_type": "tool_call",
+        "event_type": "tool.started",
         "session_id": "s1",
         "user_id": "u1",
         "request_id": "r1",
@@ -91,8 +91,8 @@ class TestGrouping:
 
     def test_same_identity_shares_one_call(self) -> None:
         events = [
-            _event(event_type="tool_call"),
-            _event(event_type="tool_result"),
+            _event(event_type="tool.started"),
+            _event(event_type="tool.completed"),
         ]
         client = RecordingClient()
         writer = McpLogWriter(call=client.call, run=SyncRunner())
@@ -105,9 +105,12 @@ class TestGrouping:
     def test_mixed_batch_is_split_per_identity(self) -> None:
         """Смешанный батч одним вызовом проставил бы всем событиям одну личность."""
         events = [
-            _event(event_type="a", session_id="s1", user_id="u1", request_id="r1"),
-            _event(event_type="b", session_id="s1", user_id="u1", request_id="r1"),
-            _event(event_type="c", session_id="s2", user_id="u2", request_id="r2"),
+            _event(event_type="agent.started", session_id="s1", user_id="u1",
+                    request_id="r1"),
+            _event(event_type="agent.responded", session_id="s1", user_id="u1",
+                    request_id="r1"),
+            _event(event_type="agent.completed", session_id="s2", user_id="u2",
+                    request_id="r2"),
         ]
         client = RecordingClient()
         writer = McpLogWriter(call=client.call, run=SyncRunner())
@@ -125,15 +128,15 @@ class TestGrouping:
     def test_group_preserves_order_of_first_appearance(self) -> None:
         """Перестановка батча переставила бы события оборота по времени."""
         events = [
-            _event(event_type="first", session_id="s1", user_id="u1"),
-            _event(event_type="second", session_id="s2", user_id="u2"),
-            _event(event_type="third", session_id="s1", user_id="u1"),
+            _event(event_type="agent.started", session_id="s1", user_id="u1"),
+            _event(event_type="agent.responded", session_id="s2", user_id="u2"),
+            _event(event_type="agent.completed", session_id="s1", user_id="u1"),
         ]
         groups = group_by_identity(events)
 
         assert [[e.event_type for e in g.events] for g in groups] == [
-            ["first", "third"],
-            ["second"],
+            ["agent.started", "agent.completed"],
+            ["agent.responded"],
         ]
 
     def test_request_id_difference_splits_groups(self) -> None:
@@ -192,7 +195,7 @@ class TestUnidentifiedEvents:
         writer.write_events([_event(session_id=None, user_id=None)])
 
         assert len(captured) == 1
-        assert captured[0].event_type == "tool_call"
+        assert captured[0].event_type == "tool.started"
 
     def test_identified_goes_to_platform_not_to_fallback(self) -> None:
         captured: list[Any] = []
@@ -228,7 +231,7 @@ class TestWireFormat:
             "channel",
             "actor",
         }
-        assert wire["event_type"] == "tool_call"
+        assert wire["event_type"] == "tool.started"
 
     def test_absent_optional_fields_become_empty_not_none_for_text(self) -> None:
         wire = event_to_wire(_event(name=None, summary=None, channel=None))
@@ -398,11 +401,13 @@ class TestLocalFallback:
 
     def test_writes_one_json_line_per_event(self, tmp_path: Path) -> None:
         sink = LocalFallbackSink(str(tmp_path / "fallback.jsonl"))
-        sink.write([_event(event_type="a"), _event(event_type="b")])
+        sink.write(
+            [_event(event_type="agent.started"), _event(event_type="agent.completed")]
+        )
 
         lines = (tmp_path / "fallback.jsonl").read_text(encoding="utf-8").splitlines()
         assert len(lines) == 2
-        assert json.loads(lines[0])["event_type"] == "a"
+        assert json.loads(lines[0])["event_type"] == "agent.started"
 
     def test_identity_is_kept_in_the_fallback_record(self) -> None:
         """Событие без личности должно остаться опознаваемым при разборе."""
@@ -522,7 +527,7 @@ class TestServiceWiring:
             if line
         ]
         assert len(lines) == 3, "файл непуст — отправная точка расследования есть"
-        assert {line["event_type"] for line in lines} == {"tool_call"}
+        assert {line["event_type"] for line in lines} == {"tool.started"}
 
     def test_question_run_goes_through_its_own_operation(self) -> None:
         """Контекст вопроса пишется не событием журнала, а отдельной операцией."""

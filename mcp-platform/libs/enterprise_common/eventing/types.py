@@ -19,16 +19,41 @@ AGENT_STARTED = "agent.started"
 AGENT_COMPLETED = "agent.completed"
 AGENT_FAILED = "agent.failed"
 
+#: Остальные точки оборота. Объявлены вместе с ``AGENT_STARTED``, потому что
+#: принадлежат той же шкале времени оборота, а не отдельной подсистеме:
+#: ``received`` — вход, ``responded`` — ответ сформирован, ``delivered`` —
+#: отдан каналу, ``compacted`` — контекст ужат, ``degraded`` — оборот жив, но
+#: что-то отказало. Пять разных фактов, пять разных имён: сведение их в одно
+#: имя означало бы потерю различия, и по таблице нельзя было бы сказать, дошёл
+#: ли ответ до пользователя.
+AGENT_RECEIVED = "agent.received"
+AGENT_RESPONDED = "agent.responded"
+AGENT_DELIVERED = "agent.delivered"
+AGENT_COMPACTED = "agent.compacted"
+AGENT_DEGRADED = "agent.degraded"
+
 #: Обращения к модели.
 LLM_REQUESTED = "llm.requested"
 LLM_COMPLETED = "llm.completed"
 LLM_FAILED = "llm.failed"
+
+#: Обмен телами с моделью за итерацию. Отдельное имя от ``llm.requested``/
+#: ``llm.completed`` не избыточностью, а носителем: только здесь лежат полные
+#: тела запроса и ответа, которых больше нигде в журнале нет. Считать длительностью
+#: оборота не по нему, а по паре границ.
+LLM_EXCHANGED = "llm.exchanged"
 
 #: Исполнение операций. Их порождает конвейер исполнения (§ runtime/tool-execution).
 TOOL_STARTED = "tool.started"
 TOOL_COMPLETED = "tool.completed"
 TOOL_FAILED = "tool.failed"
 TOOL_TIMEOUT = "tool.timeout"
+
+#: Вызов, который не состоялся по вине самого вызова (повтор под защитником).
+#: Отличать от ``tool.failed`` обязательно: там исполнение было и упало, а
+#: здесь его не было вовсе — сводить их в одно имя значило бы считать отказы
+#: защитника ошибками исполнения.
+TOOL_SUPPRESSED = "tool.suppressed"
 
 #: Вложения.
 ARTIFACT_CREATED = "artifact.created"
@@ -43,13 +68,20 @@ EVENT_TYPES: frozenset[str] = frozenset(
         AGENT_STARTED,
         AGENT_COMPLETED,
         AGENT_FAILED,
+        AGENT_RECEIVED,
+        AGENT_RESPONDED,
+        AGENT_DELIVERED,
+        AGENT_COMPACTED,
+        AGENT_DEGRADED,
         LLM_REQUESTED,
         LLM_COMPLETED,
         LLM_FAILED,
+        LLM_EXCHANGED,
         TOOL_STARTED,
         TOOL_COMPLETED,
         TOOL_FAILED,
         TOOL_TIMEOUT,
+        TOOL_SUPPRESSED,
         ARTIFACT_CREATED,
         ARTIFACT_READ,
         QUALITY_CHECK,

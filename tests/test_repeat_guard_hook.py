@@ -295,7 +295,7 @@ class TestModes:
         for _ in range(6):
             asyncio.run(warn.before_execute_tool(ctx, _call("t", args), None, args))
         assert len(warn_events.events) == 1, "ровно одно событие на crossing"
-        assert warn_events.events[0].event_type == "tool_repeat_warned"
+        assert warn_events.events[0].event_type == "tool.suppressed"
         assert warn_events.events[0].actor == "RepeatGuardHook"
 
         # block
@@ -316,7 +316,7 @@ class TestModes:
                 )
         assert str(exc_info.value).startswith("repeat-guard")
         assert len(block_events.events) == 1
-        assert block_events.events[0].event_type == "tool_repeat_blocked"
+        assert block_events.events[0].event_type == "tool.suppressed"
 
     def test_block_carries_call_context(self) -> None:
         """Исключение несёт контекст — патчу из него нужен tool-результат."""

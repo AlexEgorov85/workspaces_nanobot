@@ -113,17 +113,17 @@ class TestDatabaseLoggingHook:
 
         asyncio.run(hook.before_iteration(MagicMock(session_key="cli:1")))
         asyncio.run(hook.after_run(ctx))
-        # after_run пишет ДВА события: run_finished (текст ответа) и
+        # after_run пишет ДВА события: agent.responded (текст ответа) и
         # agent.completed (исход оборота с длительностью). Раньше исхода в
         # журнале не было вовсе, и «успешен ли оборот и сколько занял»
         # приходилось выводить вручную. Проверяем нужное событие по типу,
         # а не «последний вызов».
         events = [c.args[0] for c in service.log_event.call_args_list]
         assert [e.event_type for e in events] == [
-            "llm.requested", "run_finished", "agent.completed",
+            "llm.requested", "agent.responded", "agent.completed",
         ]
-        event = next(e for e in events if e.event_type == "run_finished")
-        assert event.event_type == "run_finished"
+        event = next(e for e in events if e.event_type == "agent.responded")
+        assert event.event_type == "agent.responded"
         assert event.summary == "hello"
         assert event.payload["tools_used"] == ["read", "write"]
         assert event.session_id == "cli:1"
@@ -405,7 +405,15 @@ class TestBusLoggers:
         asyncio.run(logger(msg))
         service.log_outbound.assert_called_once()
         kwargs = service.log_outbound.call_args.kwargs
-        assert kwargs["kind"] == "outbound_final"
+        # Имя события — литерал внутри ``log_outbound``, а НЕ параметр.
+        # Пока оно приходило параметром ``kind``, сравнение жило отдельно
+        # от литерала, и переименование в одной строке роняло подпись —
+        # финальный ответ оборота исчезал из журнала без ошибки. Регресс
+        # на возврат параметра: см. tests/test_final_delivery_is_signed.py
+        assert "kind" not in kwargs, (
+            "имя исходящего обязано быть литералом в log_outbound; параметр "
+            "kind — источник молчаливой потери финального ответа"
+        )
         assert kwargs["content"] == "final answer"
         assert kwargs["session_id"] == "cli:42"
         assert kwargs["request_id"] == "m1"
@@ -426,7 +434,18 @@ class TestBusLoggers:
         asyncio.run(logger(msg))
         service.log_outbound.assert_not_called()
 
-    def test_outbound_logger_intermediate_logged(self):
+    def test_outbound_logger_intermediate_dropped(self):
+        """Промежуточное ``message(...)`` агента — НЕ-событие, а не «другое имя».
+
+        Раньше тест ждал записи ``outbound_intermediate``. Канонического имени
+        для него в словаре платформы нет (заказчик отнёс промежуточные ответы к
+        непокрытым этапам), поэтому запись была бы отказом батча при ``strict``,
+        а подстановка чужого имени (``agent.delivered``) была бы ложью: один
+        и тот же тип означал бы и финальный ответ, и его черновик.
+
+        Ожидание несуществующего события заменено ожиданием его отсутствия —
+        иначе тест проверял бы то, чего в боевом журнале быть не может.
+        """
         from lib.services.db_logging_bus import make_outbound_logger
 
         service = MagicMock()
@@ -439,8 +458,7 @@ class TestBusLoggers:
         msg.metadata = {"message_id": "m1"}
         msg.media = []
         asyncio.run(logger(msg))
-        service.log_outbound.assert_called_once()
-        assert service.log_outbound.call_args.kwargs["kind"] == "outbound_intermediate"
+        service.log_outbound.assert_not_called()
 
     def test_outbound_logger_with_media(self):
         from lib.services.db_logging_bus import make_outbound_logger
@@ -563,12 +581,12 @@ class TestRunFinishedEventShape:
         asyncio.run(hook.before_iteration(MagicMock(session_key="cli:1")))
         asyncio.run(hook.after_run(ctx))
         events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
-        assert any(e.event_type == "run_finished" for e in events), (
-            "after_run должен положить LogEvent с event_type='run_finished'"
+        assert any(e.event_type == "agent.responded" for e in events), (
+            "after_run должен положить LogEvent с event_type='agent.responded'"
         )
 
     def test_after_run_payload_shape(self, sys_path):
-        """Payload ``run_finished`` содержит ожидаемые поля
+        """Payload ``agent.responded`` содержит ожидаемые поля
         (для ``history_search``-парсинга)."""
         from lib.hooks.database_logging_hook import DatabaseLoggingHook
         from lib.services.db_logging_service import (
@@ -591,19 +609,19 @@ class TestRunFinishedEventShape:
         asyncio.run(hook.before_iteration(MagicMock(session_key="cli:1")))
         asyncio.run(hook.after_run(ctx))
         events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
-        run_ev = next(e for e in events if e.event_type == "run_finished")
+        run_ev = next(e for e in events if e.event_type == "agent.responded")
         assert run_ev.payload["final_content"] == "ответ"
         assert run_ev.payload["tools_used"] == ["a", "b"]
         assert run_ev.payload["stop_reason"] == "stop"
         assert run_ev.payload["had_injections"] is False
 
     def test_run_finished_user_id_reaches_insert(self, sys_path):
-        """Регрессия на fix-history-search-user-isolation: ``run_finished``
+        """Регрессия на fix-history-search-user-isolation: ``agent.responded``
         доходит до INSERT с ``user_id`` (через автозаполнение из
         индекса в ``_enqueue`` по request_id matching).
 
         Сценарий: register_request с user_id="alice" → эмиттим
-        ``run_finished`` с тем же request_id → INSERT содержит user_id="alice".
+        ``agent.responded`` с тем же request_id → INSERT содержит user_id="alice".
         """
         from lib.hooks.database_logging_hook import DatabaseLoggingHook
         from lib.services.db_logging_service import (
@@ -618,10 +636,10 @@ class TestRunFinishedEventShape:
         )
         svc.register_request("cli:1", "r1", user_id="alice", chat_id="c1")
 
-        # Эмулируем прямой emit ``run_finished`` с request_id=r1 и
+        # Эмулируем прямой emit ``agent.responded`` с request_id=r1 и
         # пустым user_id — _enqueue должен подставить "alice" из индекса.
         event = LogEvent(
-            event_type="run_finished",
+            event_type="agent.responded",
             session_id="cli:1",
             request_id="r1",
             user_id=None,

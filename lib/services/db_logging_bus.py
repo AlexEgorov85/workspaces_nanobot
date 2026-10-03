@@ -22,8 +22,10 @@ async-callable-логгеры в ``ApplicationContext._create_bus`` — и те 
            → ``is_outbound_noise(msg)`` (stream-delta/stream-end/progress/
              reasoning/retry-wait) — drop (бесполезный шум, раздувает таблицу);
            → ``is_outbound_final(msg)`` (``_final_turn`` в meta / StreamedResponseEvent)
-             — ``outbound_final``;
-           → иначе (промежуточный ``message(...)`` агента) — ``outbound_intermediate``;
+             — пишется ``agent.delivered``;
+           → иначе (промежуточный ``message(...)`` агента) — НЕ пишется:
+             промежуточные ответы — не-событие (этап 10 непокрытых этапов,
+             канонического имени для них в словаре платформы нет);
            → service.log_outbound(...)
          → original publish_outbound(msg)
 
@@ -158,10 +160,15 @@ def make_outbound_logger(
          stream-end / progress / reasoning / retry-wait → drop (шум, не
          несёт аналитической ценности, только раздувает таблицу);
       2. ``is_outbound_final(msg)`` (``_final_turn`` в meta ИЛИ
-         ``StreamedResponseEvent``) — финальный ответ оборота,
-         ``kind="outbound_final"``;
-      3. иначе — промежуточный ``message(...)`` агента в течение оборота,
-         ``kind="outbound_intermediate"`` (ценен для анализа поведения).
+         ``StreamedResponseEvent``) — финальный ответ оборота, пишется
+         ``event_type="agent.delivered"``;
+      3. иначе — промежуточный ``message(...)`` агента в течение оборота:
+         **не пишется**. Это не потеря наблюдаемости, а решение заказчика:
+         промежуточные ответы внесены в список непокрытых этапов, которые
+         сознательно остаются не-событиями, и канонического имени для них в
+         словаре платформы нет. Подставлять сюда чужое имя (например
+         ``agent.delivered``) было бы ложью в журнале, а оставлять
+         ``outbound_intermediate`` — отказом батча при ``strict``.
 
     Контекст вопроса (user_id/agent_id/...) подхватывается из индекса
     сервиса по session_id (зарегистрирован при inbound).
@@ -177,8 +184,9 @@ def make_outbound_logger(
         try:
             if is_outbound_noise(msg):
                 return
+            if not is_outbound_final(msg):
+                return
             meta = getattr(msg, "metadata", {}) or {}
-            kind = "outbound_final" if is_outbound_final(msg) else "outbound_intermediate"
             latency = None
             tokens = None
             turn_meta = meta.get("_turn") or {}
@@ -198,7 +206,6 @@ def make_outbound_logger(
                 content=getattr(msg, "content", "") or "",
                 latency_ms=latency,
                 tokens_used=tokens,
-                kind=kind,
                 media=media or None,
             )
         except Exception as exc:  # noqa: BLE001 - публикацию не роняем

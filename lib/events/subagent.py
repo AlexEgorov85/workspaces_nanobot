@@ -13,7 +13,7 @@ Subagent исполняется ``SubagentManager._run_subagent`` /
 (``lib/services/runtime_patcher.py``; зовётся из ``after_run`` и
 ``on_error`` того же хука), подписка на ``SubagentTurnCompleted``
 регистрируется в ``RuntimeEventsSubscriber._handle_subagent_turn_completed``
-— контракт payload ``subagent_run_finished`` остаётся идентичен
+— контракт payload ``agent.completed`` (итог подагента) остаётся идентичен
 ``_SubagentLoggingHook._finalize`` (там же).
 """
 
@@ -29,7 +29,7 @@ from nanobot.events import AgentEvent
 class SubagentTurnCompleted(AgentEvent):
     """Финальное завершение subagent-оборота.
 
-    Поля соответствуют payload ``subagent_run_finished`` в
+    Поля соответствуют payload ``agent.completed`` (итог подагента) в
     ``agent_gateway_logs``: ``task_id``, ``task``, ``final_content``,
     ``tools_used``, ``stop_reason``, ``request_id``,
     ``parent_request_id``, ``parent_user_id``, ``usage``, ``had_error``,

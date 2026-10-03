@@ -561,7 +561,7 @@ class PostgresChannel(BaseChannel):
             return await self._poll_priority_once(exchange)
         except Exception as exc:
             self._journal_event(
-                event_type="channel_poll_error",
+                event_type="agent.degraded",
                 summary=f"poll_priority_inbound failed: {exc}",
                 payload={
                     "component": "_poll_priority_once",
@@ -684,7 +684,7 @@ class PostgresChannel(BaseChannel):
             return bool(had)
         except Exception as exc:
             self._journal_event(
-                event_type="channel_poll_error",
+                event_type="agent.degraded",
                 summary=f"poll_inbound/_poll_once failed: {exc}",
                 payload={
                     "component": "_poll_once",
@@ -764,7 +764,7 @@ class PostgresChannel(BaseChannel):
             except Exception as e:
                 self.logger.error("Unstick loop error: {}", e)
                 self._journal_event(
-                    event_type="channel_unstick_error",
+                    event_type="agent.degraded",
                     summary=f"unstick (восстановление processing) failed: {e}",
                     payload={
                         "component": "_unstick_loop",

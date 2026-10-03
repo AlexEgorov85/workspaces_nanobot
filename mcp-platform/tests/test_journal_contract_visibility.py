@@ -5,8 +5,11 @@
 
 * **словарь типов** объявлен, но на пути ``log_events`` не проверялся: в базу
   попадала любая непустая строка, и опечатка становилась новым постоянным
-  типом. Отказ по умолчанию поставить нельзя (агент шлёт свои snake_case-имена),
-  поэтому проверяется не приём, а измеримость расхождения;
+  типом. Сначала проверялся не приём, а измеримость расхождения (мягкий
+  режим): включать отказ по умолчанию было нельзя — агент шлёт свои
+  snake_case-имена. Имена сведены с каноническими, и режим стал жёстким:
+  ``platform.json → data.log_unknown_event_type_policy = "strict"``; мягкий
+  путь остался как явный режим, а не как состояние сервера;
 * **отказ по идентичности** не оставлял следа нигде: ни строки в журнале, ни
   строки в stderr — отказ на границе безопасности выглядел как тишина;
 * **размер батча** был литералом в коде, и вместе с периодом сброса давал
@@ -36,9 +39,10 @@ from conftest import call_meta, make_layer
 
 PLATFORM_ROOT = Path(__file__).resolve().parent.parent
 
-#: Имя, которого нет в словаре типов. Агент присылает такие (tool_call,
-#: outbound_final, …), поэтому «вне словаря» — не ошибка приёма, а предмет
-#: измерения.
+#: Имя, которого нет в словаре типов. Именно такие имена агент писал до
+#: сведения с каноническими (``tool_call``, ``outbound_final``, …), и именно
+#: их жёсткий режим теперь отказывает: это проверка не «ошибки приёма», а
+#: границы, за которой батч перестаёт писаться.
 FOREIGN_TYPE = "tool_call"
 #: Опечатка в имени при верном префиксе: её чинить иначе, чем чужую схему.
 TYPO_TYPE = "tool.complted"
@@ -55,8 +59,9 @@ def _service(**kw: Any) -> DataService:
 
 class TestUnknownEventTypesAreVisible:
     def test_foreign_type_is_counted_per_name(self) -> None:
-        """Расхождение считается по имени: «сколько имён осталось» — счётчик."""
-        service = _service()
+        """Мягкий режим: расхождение считается по имени («сколько имён
+        осталось» — счётчик). Режим задан явно, а не взят из умолчания."""
+        service = _service(unknown_event_type_policy="soft")
         service.log_events([{"event_type": FOREIGN_TYPE}])
         service.log_events([{"event_type": FOREIGN_TYPE}, {"event_type": "inbound"}])
         unknown = service.stats()["unknown_event_types"]
@@ -68,20 +73,30 @@ class TestUnknownEventTypesAreVisible:
         service.log_events([{"event_type": TOOL_FAILED}, {"event_type": "tool.failed"}])
         assert service.stats()["unknown_event_types"] == {}
 
-    def test_event_is_still_accepted_by_default(self) -> None:
-        """По умолчанию — soft: событие доходит, имя считается.
+    def test_event_is_still_accepted_in_soft_mode(self) -> None:
+        """Мягкий режим (явно заданный): событие доходит, имя считается.
 
-        Строгий режим снёс бы весь журнал агента: он присылает ~30 имён вне
-        словаря. Проверяется именно «событие дошло», а не «имя принято».
+        Раньше это был режим по умолчанию — он таким и остаётся как ВОЗМОЖНОСТЬ,
+        но выбирать его надо намеренно, а не получать по умолчанию.
         """
-        service = _service()
+        service = _service(unknown_event_type_policy="soft")
         result = service.log_events([{"event_type": FOREIGN_TYPE}])
         assert result == {"accepted": 1, "dropped": 0}
         assert service.stats()["event_buffer"]["pending"] == 1
 
+    def test_default_mode_refuses_instead_of_accepting(self) -> None:
+        """По умолчанию имя вне словаря роняет батч, а не проходит молча.
+
+        Обратная сторона ``test_default_policy_is_strict_and_reported``:
+        объявленная политика обязана быть и действующей, иначе переключатель
+        остался бы декоративным.
+        """
+        with pytest.raises(InvalidRequestError, match="вне объявленного словаря"):
+            _service().log_events([{"event_type": FOREIGN_TYPE}])
+
     def test_single_event_entry_point_is_covered_too(self) -> None:
         """``log_event`` — второй вход с именем извне, дыра там была та же."""
-        service = _service()
+        service = _service(unknown_event_type_policy="soft")
         assert service.log_event(FOREIGN_TYPE) == "accepted"
         assert service.stats()["unknown_event_types"] == {FOREIGN_TYPE: 1}
 
@@ -91,7 +106,7 @@ class TestUnknownEventTypesAreVisible:
         Оборота без ошибок пишет в журнал десятки событий; «предупреждение на
         каждое из них» — это способ убрать предупреждение из чтения.
         """
-        service = _service()
+        service = _service(unknown_event_type_policy="soft")
         with caplog.at_level("WARNING", logger="servers.enterprise.capabilities.data.service.main"):
             for _ in range(5):
                 service.log_events([{"event_type": FOREIGN_TYPE}])
@@ -108,7 +123,7 @@ class TestUnknownEventTypesAreVisible:
         """
         assert is_declared_prefix(TYPO_TYPE) is True
         assert is_declared_prefix(FOREIGN_TYPE) is False
-        service = _service()
+        service = _service(unknown_event_type_policy="soft")
         with caplog.at_level("WARNING", logger="servers.enterprise.capabilities.data.service.main"):
             service.log_events([{"event_type": TYPO_TYPE}, {"event_type": FOREIGN_TYPE}])
         messages = "\n".join(r.getMessage() for r in caplog.records)
@@ -118,18 +133,27 @@ class TestUnknownEventTypesAreVisible:
     def test_policy_is_read_from_platform_json(self) -> None:
         """Значение политики приходит из файла, а не из кода сервиса.
 
-        ``soft`` — состояние, в котором живёт сервер сейчас. Переключатель
+        ``strict`` — состояние, в котором живёт сервер сейчас: имена агента
+        сведены с каноническими, и имя вне словаря роняет батч. Переключатель
         полезен только вместе с файлом, который его объявляет.
         """
         settings = platform_settings()
         assert settings.source("ENTERPRISE_LOG_UNKNOWN_EVENT_TYPE_POLICY") == (
             "file:platform.json"
         )
-        assert settings.get("ENTERPRISE_LOG_UNKNOWN_EVENT_TYPE_POLICY") == "soft"
+        assert settings.get("ENTERPRISE_LOG_UNKNOWN_EVENT_TYPE_POLICY") == "strict"
 
-    def test_default_policy_is_soft_and_reported(self) -> None:
-        """Отказ по умолчанию выключен — и это объявлено, а не спрятано."""
-        assert _service().stats()["unknown_event_type_policy"] == "soft"
+    def test_default_policy_is_strict_and_reported(self) -> None:
+        """Жёсткий режим включён по умолчанию — и это объявлено, а не спрятано.
+
+        Возврат в ``soft`` без записанного обоснования означал бы, что словарь
+        снова перестал быть обязательным: батч проходил бы мимо него молча, и
+        следующий читатель счёл бы проверку декоративной. Обоснование (имя вне
+        словаря, которое агент пишет, и почему его нельзя свести) живёт в
+        ``SOFT_JUSTIFICATION`` стража имён агента:
+        ``tests/test_journal_event_name_alignment.py``.
+        """
+        assert _service().stats()["unknown_event_type_policy"] == "strict"
 
     def test_strict_policy_refuses_unknown_type(self) -> None:
         """Строгий режим доступен и отказывает до приёма батча."""
@@ -438,9 +462,12 @@ def test_stderr_is_the_only_diagnostic_channel(capsys: Any) -> None:
     Дешёвая проверка того же контракта, что и AST-стража выше, но на реальном
     объекте: если кто-то вернёт в код печать в stdout, тест поймает это даже
     без разбора исходников.
+
+    Имя берётся объявленное: проверка касается канала вывода, а в жёстком
+    режиме имя вне словаря уронило бы батч — и это проверяется отдельно.
     """
     service = _service()
-    service.log_events([{"event_type": FOREIGN_TYPE}])
+    service.log_events([{"event_type": TOOL_FAILED}])
     captured = capsys.readouterr()
     assert captured.out == "", captured.out
     assert sys.stdout is not None

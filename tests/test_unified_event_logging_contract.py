@@ -71,9 +71,9 @@ class TestTryLogEvent:
     def test_noop_when_service_none(self, caplog):
         from lib.services.db_logging_service import LogEvent, try_log_event
 
-        log_event = LogEvent(event_type="x")
+        log_event = LogEvent(event_type="tool.started")
         with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            ok = try_log_event(None, log_event, producer="TestProducer", event_type="x")
+            ok = try_log_event(None, log_event, producer="TestProducer", event_type="tool.started")
 
         assert ok is False
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -85,9 +85,9 @@ class TestTryLogEvent:
 
         svc = MagicMock()
         svc.is_running.return_value = False
-        log_event = LogEvent(event_type="x")
+        log_event = LogEvent(event_type="tool.started")
         with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="x")
+            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="tool.started")
 
         assert ok is False
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -99,10 +99,10 @@ class TestTryLogEvent:
         svc = MagicMock()
         svc.is_running.return_value = True
         svc.log_event.return_value = True
-        log_event = LogEvent(event_type="x")
+        log_event = LogEvent(event_type="tool.started")
 
         with caplog.at_level(logging.DEBUG, logger="lib.services.db_logging_service"):
-            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="x")
+            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="tool.started")
 
         assert ok is True
         svc.log_event.assert_called_once_with(log_event)
@@ -118,10 +118,10 @@ class TestTryLogEvent:
         svc = MagicMock()
         svc.is_running.return_value = True
         svc.log_event.return_value = False
-        log_event = LogEvent(event_type="x")
+        log_event = LogEvent(event_type="tool.started")
 
         with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="x")
+            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="tool.started")
 
         assert ok is False
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -135,10 +135,10 @@ class TestTryLogEvent:
         svc = MagicMock()
         svc.is_running.return_value = True
         svc.log_event.side_effect = RuntimeError("queue is full")
-        log_event = LogEvent(event_type="x")
+        log_event = LogEvent(event_type="tool.started")
 
         with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="x")
+            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="tool.started")
 
         assert ok is False
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -151,10 +151,10 @@ class TestTryLogEvent:
 
         svc = MagicMock()
         svc.is_running.side_effect = RuntimeError("oops")
-        log_event = LogEvent(event_type="x")
+        log_event = LogEvent(event_type="tool.started")
 
         with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="x")
+            ok = try_log_event(svc, log_event, producer="TestProducer", event_type="tool.started")
 
         assert ok is False
 

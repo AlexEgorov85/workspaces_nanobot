@@ -117,8 +117,8 @@ class TestShutdownMidFlight:
 
         with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
             ok = try_log_event(
-                svc, LogEvent(event_type="x"),
-                producer="TestProducer", event_type="x",
+                svc, LogEvent(event_type="tool.started"),
+                producer="TestProducer", event_type="tool.started",
             )
 
         assert ok is False

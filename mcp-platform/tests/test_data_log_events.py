@@ -31,6 +31,14 @@ import pytest
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.errors import InvalidRequestError
+from libs.enterprise_common.eventing.types import (
+    AGENT_COMPLETED,
+    AGENT_DEGRADED,
+    AGENT_STARTED,
+    QUALITY_CHECK,
+    TOOL_COMPLETED,
+    TOOL_STARTED,
+)
 from libs.enterprise_common.loader import discover_tool_files
 
 from servers.enterprise.capabilities.data.service.main import DataService
@@ -90,9 +98,9 @@ class TestLogEventsHappyPath:
         service = _service()
         result = service.log_events(
             [
-                {"event_type": "turn_started", "summary": "1"},
-                {"event_type": "tool_call", "name": "read_file"},
-                {"event_type": "turn_completed"},
+                {"event_type": AGENT_STARTED, "summary": "1"},
+                {"event_type": TOOL_STARTED, "name": "read_file"},
+                {"event_type": AGENT_COMPLETED},
             ]
         )
         assert result == {"accepted": 3, "dropped": 0}
@@ -100,7 +108,7 @@ class TestLogEventsHappyPath:
     def test_events_reach_the_buffer_normalised(self) -> None:
         service = _service()
         service.log_events(
-            [{"event_type": "x", "level": "warning"}],
+            [{"event_type": AGENT_DEGRADED, "level": "warning"}],
             "s1",
             "u1",
             "r1",
@@ -110,7 +118,7 @@ class TestLogEventsHappyPath:
     def test_missing_optional_fields_become_empty_not_none_keys(self) -> None:
         """Отсутствующее поле — пустая строка, иначе NOT NULL в базе."""
         service = _service()
-        service.log_events([{"event_type": "x"}])
+        service.log_events([{"event_type": AGENT_STARTED}])
         assert service._buffer.flush() == 1
 
     def test_empty_batch_is_rejected(self) -> None:
@@ -121,7 +129,7 @@ class TestLogEventsHappyPath:
     def test_non_list_is_rejected(self) -> None:
         service = _service()
         with pytest.raises(InvalidRequestError):
-            service.log_events({"event_type": "x"})  # type: ignore[arg-type]
+            service.log_events({"event_type": AGENT_STARTED})  # type: ignore[arg-type]
 
 
 class TestLogEventsOverflowIsVisible:
@@ -129,14 +137,25 @@ class TestLogEventsOverflowIsVisible:
         """Ключевое свойство: потеря видна вызывающему."""
         service = _service(maxlen=2)
         result = service.log_events(
-            [{"event_type": f"e{i}"} for i in range(5)]
+            [
+                {"event_type": name}
+                for name in (
+                    AGENT_STARTED,
+                    AGENT_COMPLETED,
+                    TOOL_STARTED,
+                    TOOL_COMPLETED,
+                    QUALITY_CHECK,
+                )
+            ]
         )
         assert result == {"accepted": 2, "dropped": 3}
 
     def test_overflow_does_not_raise(self) -> None:
         """Переполнение — не исключение: ход агента не должен вставать."""
         service = _service(maxlen=1)
-        assert service.log_events([{"event_type": "a"}, {"event_type": "b"}]) == {
+        assert service.log_events(
+            [{"event_type": AGENT_STARTED}, {"event_type": AGENT_COMPLETED}]
+        ) == {
             "accepted": 1,
             "dropped": 1,
         }
@@ -163,7 +182,11 @@ class TestLogEventsFailsFastOnGarbage:
         service = _service()
         with pytest.raises(InvalidRequestError):
             service.log_events(
-                [{"event_type": "ok"}, {"event_type": ""}, {"event_type": "ok"}]
+                [
+                    {"event_type": AGENT_STARTED},
+                    {"event_type": ""},
+                    {"event_type": AGENT_COMPLETED},
+                ]
             )
         # ни одно событие не принято — вызывающий решает, что делать
         assert service._buffer.stats()["pending"] == 0
@@ -172,7 +195,9 @@ class TestLogEventsFailsFastOnGarbage:
         """Позиция в сообщении — единственное, по чему агент поймёт, что чинить."""
         service = _service()
         with pytest.raises(InvalidRequestError) as exc:
-            service.log_events([{"event_type": "ok"}, {"event_type": ""}])
+            service.log_events(
+                [{"event_type": AGENT_STARTED}, {"event_type": ""}]
+            )
         assert "events[1]" in str(exc.value)
 
 
@@ -188,7 +213,7 @@ class TestIdentityComesFromCallContext:
     def test_identity_of_call_reaches_every_event(self) -> None:
         service = _service()
         service.log_events(
-            [{"event_type": "a"}, {"event_type": "b"}],
+            [{"event_type": AGENT_STARTED}, {"event_type": AGENT_COMPLETED}],
             "s-call",
             "u-call",
             "r-call",
@@ -205,7 +230,7 @@ class TestIdentityComesFromCallContext:
         service.log_events(
             [
                 {
-                    "event_type": "a",
+                    "event_type": AGENT_STARTED,
                     "session_id": "s-чужой",
                     "user_id": "u-чужой",
                     "request_id": "r-чужой",
@@ -223,7 +248,7 @@ class TestIdentityComesFromCallContext:
     def test_operation_passes_context_identity_to_the_service(self) -> None:
         """Шов целиком: обработчик получает ``ctx`` и не путает его с ``events``."""
         service = _service()
-        _tool(service).handler(ctx=_ctx(), events=[{"event_type": "a"}])
+        _tool(service).handler(ctx=_ctx(), events=[{"event_type": AGENT_STARTED}])
         row = _rows(service)[0]
         assert row["session_id"] == "s-ctx"
         assert row["request_id"] == "r-ctx"
@@ -260,7 +285,8 @@ class TestLogEventsOperation:
         service = _service()
         result = json.loads(
             _tool(service).handler(
-                ctx=_ctx(), events=[{"event_type": "a"}, {"event_type": "b"}]
+                ctx=_ctx(),
+                events=[{"event_type": AGENT_STARTED}, {"event_type": AGENT_COMPLETED}],
             )
         )
         assert result == {"status": "ok", "accepted": 2, "dropped": 0}
@@ -289,20 +315,24 @@ class TestLevelNormalisation:
         """
         service = _service()
         with pytest.raises(InvalidRequestError):
-            service.log_events([{"event_type": "x", "level": "не-уровень"}])
+            service.log_events([{"event_type": AGENT_DEGRADED, "level": "не-уровень"}])
         assert service._buffer.stats()["pending"] == 0
 
     @pytest.mark.parametrize("level", ["debug", "info", "warn", "error", "WARNING"])
     def test_known_levels_pass(self, level: str) -> None:
         service = _service()
-        assert service.log_events([{"event_type": "x", "level": level}])["accepted"] == 1
+        assert service.log_events(
+            [{"event_type": AGENT_DEGRADED, "level": level}]
+        )["accepted"] == 1
 
     def test_empty_level_becomes_info(self) -> None:
         service = _service()
-        assert service.log_events([{"event_type": "x", "level": ""}])["accepted"] == 1
+        assert service.log_events(
+            [{"event_type": AGENT_DEGRADED, "level": ""}]
+        )["accepted"] == 1
 
     def test_critical_is_not_a_level_this_journal_accepts(self) -> None:
         """Контракт задан DDL, а не фантазией: CHECK принимает четыре значения."""
         service = _service()
         with pytest.raises(InvalidRequestError):
-            service.log_events([{"event_type": "x", "level": "critical"}])
+            service.log_events([{"event_type": AGENT_DEGRADED, "level": "critical"}])

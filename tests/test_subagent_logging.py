@@ -1,9 +1,9 @@
 """Регрессионные тесты для subagent-логирования.
 
-Закрывает баг №3 из proposal: «пишется ли ``subagent_run_finished``
+Закрывает баг №3 из proposal: «пишется ли ``agent.completed``
 вообще». Тесты проверяют, что при finalize'е subagent-цикла
 ``_SubagentLoggingHook._finalize`` эмиттирует ``LogEvent`` с
-``event_type="subagent_run_finished"`` и характерной структурой payload.
+``event_type="agent.completed"`` и характерной структурой payload.
 
 Поскольку ``_SubagentLoggingHook`` — приватный класс, определённый
 внутри ``RuntimePatcher.patch_subagent_logging`` (``lib/services/runtime_patcher.py``),
@@ -28,11 +28,11 @@ if _WORKSPACE not in sys.path:
 
 
 class TestSubagentRunFinishedEventShape:
-    """``subagent_run_finished`` пишется как ``LogEvent`` с правильным
+    """``agent.completed`` пишется как ``LogEvent`` с правильным
     типом и payload."""
 
     def test_subagent_run_finished_event_type(self):
-        """Имитируем emit ``subagent_run_finished`` через реальный
+        """Имитируем emit ``agent.completed`` через реальный
         ``DbLoggingService`` (без БД — событие в очереди).
         """
         from lib.services.db_logging_service import (
@@ -47,7 +47,7 @@ class TestSubagentRunFinishedEventShape:
         # Эмулируем ровно тот путь, что использует ``_SubagentLoggingHook.
         # ``_finalize`` (см. lib/services/runtime_patcher.py:1512-1555):
         svc.log_event(LogEvent(
-            event_type="subagent_run_finished",
+            event_type="agent.completed",
             level="INFO",
             session_id="subagent:task-1",
             channel="subagent",
@@ -72,7 +72,7 @@ class TestSubagentRunFinishedEventShape:
 
         events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
         sub = next(
-            (e for e in events if e.event_type == "subagent_run_finished"),
+            (e for e in events if e.event_type == "agent.completed"),
             None,
         )
         assert sub is not None
@@ -85,7 +85,7 @@ class TestSubagentRunFinishedEventShape:
 
     def test_subagent_run_finished_written_by_type(self):
         """После успешного flush'а событие инкрементирует
-        ``written_by_type["subagent_run_finished"]``.
+        ``written_by_type["agent.completed"]``.
 
         Мокаем ``DbLoggingService._db_run``, чтобы ``_flush_batch``
         прошёл без реальной БД.
@@ -111,7 +111,7 @@ class TestSubagentRunFinishedEventShape:
             try:
                 for i in range(2):
                     svc.log_event(LogEvent(
-                        event_type="subagent_run_finished",
+                        event_type="agent.completed",
                         session_id=f"subagent:task-{i}",
                         channel="subagent",
                         actor="agent",
@@ -133,13 +133,13 @@ class TestSubagentRunFinishedEventShape:
                 svc.stop(timeout_sec=2.0)
 
         counter = svc.get_stats()["written_by_type"]
-        assert counter.get("subagent_run_finished") == 2
+        assert counter.get("agent.completed") == 2
 
     def test_subagent_logging_hook_finalize_writes_event(self):
         """Wiring-тест через реальный ``_SubagentLoggingHook``:
         патчер ``RuntimePatcher.patch_subagent_logging`` подменяет
         ``nanobot.agent.subagent._SubagentHook`` на подкласс, который
-        эмиттирует ``subagent_run_finished`` через ``_finalize``.
+        эмиттирует ``agent.completed`` через ``_finalize``.
         Мы напрямую вызываем ``_finalize`` через подменённый класс и
         проверяем, что ``db_logging_service.log_event`` получил
         ``LogEvent`` с правильным ``event_type`` и характерным payload.
@@ -199,7 +199,7 @@ class TestSubagentRunFinishedEventShape:
         # очередь ``svc``. Проверяем форму события.
         events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
         sub = next(
-            (e for e in events if e.event_type == "subagent_run_finished"),
+            (e for e in events if e.event_type == "agent.completed"),
             None,
         )
         assert sub is not None, (
@@ -223,7 +223,7 @@ class TestSubagentRunFinishedEventShape:
 
 class TestSubagentUserIdPropagation:
     """``_SubagentLoggingHook`` явно прокидывает ``user_id`` родителя
-    в ``LogEvent.user_id`` для ``subagent_run_finished`` (security
+    в ``LogEvent.user_id`` для ``agent.completed`` (security
     boundary для ``history_search(session_scope="all")``)."""
 
     def test_subagent_inherits_parent_user_id(self):
@@ -271,7 +271,7 @@ class TestSubagentUserIdPropagation:
 
         events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
         sub = next(
-            (e for e in events if e.event_type == "subagent_run_finished"),
+            (e for e in events if e.event_type == "agent.completed"),
             None,
         )
         assert sub is not None
@@ -325,7 +325,7 @@ class TestSubagentUserIdPropagation:
 
         events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
         sub = next(
-            (e for e in events if e.event_type == "subagent_run_finished"),
+            (e for e in events if e.event_type == "agent.completed"),
             None,
         )
         assert sub is not None
@@ -442,7 +442,7 @@ async def test_subagent_no_bus_means_no_publish() -> None:
 
     events = [e for e in svc._queue.queue if isinstance(e, _LogEvent)]
     sub = next(
-        (e for e in events if e.event_type == "subagent_run_finished"),
+        (e for e in events if e.event_type == "agent.completed"),
         None,
     )
     assert sub is not None
@@ -451,7 +451,7 @@ async def test_subagent_no_bus_means_no_publish() -> None:
 @pytest.mark.asyncio
 async def test_subagent_finalize_skips_log_event_when_subscriber_active() -> None:
     """Когда ``_subscriber_registered=True``, ``_finalize`` НЕ пишет
-    ``subagent_run_finished`` напрямую в БД (запись сделает
+    ``agent.completed`` напрямую в БД (запись сделает
     ``_handle_subagent_turn_completed`` через pub-sub).
 
     Также проверяет, что finish_request всё равно вызывается (для
@@ -498,7 +498,7 @@ async def test_subagent_finalize_skips_log_event_when_subscriber_active() -> Non
 
             events = [e for e in svc._queue.queue if isinstance(e, _LogEvent)]
             sub = next(
-                (e for e in events if e.event_type == "subagent_run_finished"),
+                (e for e in events if e.event_type == "agent.completed"),
                 None,
             )
             assert sub is None, (

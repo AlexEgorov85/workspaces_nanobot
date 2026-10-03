@@ -332,7 +332,7 @@ class ContextCompactionService:
     async def _record_event_log(
         self, session_key: str, report: dict, text: str,
     ) -> None:
-        """Записать событие ``context_compacted`` в долговечный журнал
+        """Записать событие ``agent.compacted`` в долговечный журнал
         ``agent_gateway_logs``.
 
         Закрывает gap №1 из ``docs/architecture/HISTORY_SEARCH_ANALYSIS.md``:
@@ -345,7 +345,7 @@ class ContextCompactionService:
         событие теряется (no-op for business) и пишется WARNING —
         observability-trail НЕ должен зависеть от ``notify_in_history``:
         даже если UI-уведомления выключены, ``history_search(event_type=
-        "context_compacted")`` должен находить событие (это закрывает
+        "agent.compacted")`` должен находить событие (это закрывает
         design D8 — факт сжатия пишется в журнал независимо от
         ``notify_in_history``, а не «если повезло»).
 
@@ -370,7 +370,7 @@ class ContextCompactionService:
             "raw_dump": report.get("raw_dump", False),
         }
         log_event = LogEvent(
-            event_type="context_compacted",
+            event_type="agent.compacted",
             level="INFO",
             session_id=session_key,
             channel="system",
@@ -385,7 +385,7 @@ class ContextCompactionService:
                 self._db_logging_service,
                 log_event,
                 producer="ContextCompactionService",
-                event_type="context_compacted",
+                event_type="agent.compacted",
             )
         except Exception as exc:
             logger.warning(
@@ -456,7 +456,7 @@ class ContextCompactionService:
         напрямую (минуя шину).
 
         Фаза ``succeeded`` соответствует фактической архивации: пишется
-        ``event_type="context_compacted"`` в ``agent_gateway_logs`` и
+        ``event_type="agent.compacted"`` в ``agent_gateway_logs`` и
         history-notice в ``agent_conversation_messages`` (через единый
         ``_notify`` путь). Для прочих фаз — только ``agent_gateway_logs``
         (observability-trail без UI-стикера).

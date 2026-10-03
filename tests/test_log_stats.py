@@ -129,7 +129,7 @@ class TestStatsAreVisible:
         service = _service(client=client)
         service.register_request("postgres:probe", "r1", user_id="u1")
         service._flush_batch([LogEvent(
-            event_type="tool_call", session_id="postgres:probe", user_id="u1",
+            event_type="tool.started", session_id="postgres:probe", user_id="u1",
             request_id="r1",
         )])
         service.start()
@@ -187,7 +187,7 @@ class TestBusDoesNotSwallow:
             asyncio.run(make_inbound_logger(service)(_FakeInbound()))
 
         inbound = [e for e in service._queue.queue if isinstance(e, LogEvent)]
-        assert [e.event_type for e in inbound] == ["inbound"], (
+        assert [e.event_type for e in inbound] == ["agent.received"], (
             "падение регистрации не должно уносить с собой событие входящего"
         )
 
@@ -291,7 +291,7 @@ class TestFinalAnswerIsSigned:
         asyncio.run(make_outbound_logger(service)(self._outbound(**kwargs)))
         finals = [
             e for e in service._queue.queue
-            if isinstance(e, LogEvent) and e.event_type == "outbound_final"
+            if isinstance(e, LogEvent) and e.event_type == "agent.delivered"
         ]
         assert len(finals) == 1
         return finals[0]
@@ -324,7 +324,7 @@ class TestFinalAnswerIsSigned:
 
         finals = [
             e for e in service._queue.queue
-            if isinstance(e, LogEvent) and e.event_type == "outbound_final"
+            if isinstance(e, LogEvent) and e.event_type == "agent.delivered"
         ]
         assert [e.user_id for e in finals] == [self.SENDER, None]
 

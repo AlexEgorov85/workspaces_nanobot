@@ -78,7 +78,7 @@
     "log_batch_size": 1024,
     "log_retention_days": 90,
     "log_purge_empty_outbound": true,
-    "log_unknown_event_type_policy": "soft",
+    "log_unknown_event_type_policy": "strict",
     "statement_timeout_ms": 30000,
     "max_rows": 1000
   },

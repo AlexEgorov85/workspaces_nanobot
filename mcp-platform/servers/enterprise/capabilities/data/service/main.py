@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -37,7 +39,7 @@ from typing import Any
 
 from libs.enterprise_common.errors import InfrastructureError, InvalidRequestError
 from libs.enterprise_data.jsonb import decode_jsonb
-from servers.enterprise.capabilities.data.service.writer import EventBuffer
+from servers.enterprise.capabilities.data.service.writer import DROPPED, EventBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +57,13 @@ AUDIENCE_RUNTIME = "runtime"
 #: регистром, который ``CHECK`` отвергает. Определение должно быть одно.
 
 from libs.enterprise_common.eventing.models import (  # noqa: E402
+    is_at_least,
     normalize_level as _normalize_level,
 )
 from libs.enterprise_common.eventing.types import (  # noqa: E402
     is_declared_prefix,
     is_known,
+    is_probe_event_type,
 )
 from libs.enterprise_common.settings import platform_settings  # noqa: E402
 
@@ -85,9 +89,16 @@ EVENT_TYPE_POLICIES = (EVENT_TYPE_POLICY_SOFT, EVENT_TYPE_POLICY_STRICT)
 #: в базе нет ни одной строки, то есть половина чистки была вечным no-op, а
 #: ``outbound_intermediate`` (сотни строк пустых чанков) не вычищалась никогда.
 #: Имена — по факту живых данных, а не по догадке: проверяется тестом.
+#:
+#: Переименование в единый словарь (``agent.delivered``) сняло ``outbound_final``
+#: и ``outbound_intermediate`` из кортежа: страж требует, чтобы в нём стояли
+#: только имена, которые агент реально пишет, а переименованные исторические
+#: имена в базе больше не появляются. Исторические 29 754 пустые строки
+#: ``outbound_final`` этой чисткой не трогаются и уходят вместе с остальными
+#: строками без ключа порядка при откате V008 (критерий — ``seq IS NULL``,
+#: а не имя события), то есть за один проход, а не двумя разными.
 EMPTY_OUTBOUND_EVENT_TYPES: tuple[str, ...] = (
-    "outbound_final",
-    "outbound_intermediate",
+    "agent.delivered",
 )
 
 #: Исход записи контекста прогона, который операция возвращает вызывающей
@@ -131,6 +142,180 @@ def normalize_level(value: str | None) -> str:
         return _normalize_level(value)
     except ValueError as exc:
         raise InvalidRequestError(str(exc)) from exc
+
+
+def _journal_min_level(value: str | None) -> str | None:
+    """Привести порог журнала к шкале; ``None`` — писать всё.
+
+    Порог присылает агент флагом ``--log-min-level`` при старте, из того же
+    ключа его конфигурации, что и у его писателя, поэтому объявлять его
+    ещё и в ``platform.json`` нельзя: два места — это два ответа на вопрос
+    «каким уровнем пишется журнал», и разъезд между ними молчалив.
+
+    Незнакомое значение — **отказ на старте**, а не откат к ``INFO`` (тот же
+    класс, что и у неизвестного профиля): подмена молча переключила бы
+    платформа на другую политику записи, и узнал бы об этом тот, кто уже
+    начал искать пропавшее событие. Проверка идёт через
+    :func:`~libs.enterprise_common.eventing.models.normalize_level` — правило
+    одно на обе стороны процесса, локальной шкалы здесь нет.
+
+    Ошибка — :class:`InfrastructureError`, а не
+    :class:`InvalidRequestError`: негодный порог приезжает один раз, при
+    подъёме процесса, и это проблема развёртывания, а не плохой запрос
+    вызывающей стороны.
+
+    Отсутствие флага — не ошибка и не «дефолт INFO»: платформа пишет всё,
+    как писала до появления флага.
+    """
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return _normalize_level(value)
+    except ValueError as exc:
+        raise InfrastructureError(f"--log-min-level: {exc}") from exc
+
+
+# -- момент события и ключ порядка ------------------------------------------
+#
+# Платформа — второй writer ``agent_gateway_logs`` наравне с агентом, поэтому
+# момент события и ключ порядка она ставит СВОИМ событиям сама. Требование
+# «Порядок и момент события переживают границу процессов»
+# (``openspec/specs/logging-db/spec.md``): событие, порождённое процессом
+# платформы, получает ``occurred_at`` и ``seq`` в момент своего возникновения
+# в ЭТОМ процессе, а не при приёме батча.
+#
+# Момент едет в ``metadata`` — это транспорт батча: он переживает и stdio-JSONB
+# батча агента, и постановку в буфер. В колонки его разбирает единственный
+# табличный писатель (:py:func:`event_time_columns`).
+
+#: Ключи в ``metadata`` — транспорт батча.
+EVENT_SEQ_KEY = "seq"
+EVENT_TIME_KEY = "occurred_at"
+
+#: Настоящие колонки ``agent_gateway_logs``, в которых момент события и ключ
+#: порядка хранятся (DDL: ``sql/migrations/V008__agent_gateway_logs_event_time_columns.sql``).
+#: Обе ``NOT NULL``: без них первая же строка без ключа уронила бы запись всей
+#: партии вместе с размеченными событиями агента.
+EVENT_SEQ_COLUMN = "seq"
+EVENT_TIME_COLUMN = "occurred_at"
+
+#: Пол монотонности для ``seq`` в этом процессе (см. ``next_event_seq``).
+_SEQ_FLOOR = 0
+_SEQ_FLOOR_LOCK = threading.Lock()
+
+
+def next_event_seq() -> int:
+    """Вернуть ключ порядка для нового события (наносекунды системных часов).
+
+    Зеркало ``lib/services/db_logging_service.py::next_event_seq``, и по той же
+    причине: журнал пишут ДВА процесса (агент и этот subprocess), и только часы
+    у них общие. Плотный счётчик «1, 2, 3» потребовал бы разделяемого
+    аллокатора — нового владельца состояния и новой точки отказа в горячем
+    пути — и всё равно не покрыл бы события второго процесса.
+
+    Пол держит порядок строго монотонным ВНУТРИ процесса: если часы уйдут на
+   зад (шаг NTP), два события не получат обратный порядок. Гонка за пол
+    безопасна — проигравший поток получит то же значение, а равные ``seq``
+    разводит ``id`` (UUID), то есть порядок восстановим всегда.
+    """
+    global _SEQ_FLOOR
+    raw = time.time_ns()
+    with _SEQ_FLOOR_LOCK:
+        if raw <= _SEQ_FLOOR:
+            raw = _SEQ_FLOOR + 1
+        _SEQ_FLOOR = raw
+    return raw
+
+
+def _iso_utc(epoch_sec: float) -> str:
+    """Момент события в ISO-8601 UTC (микросекунды) — читаемая форма ``seq``."""
+    return datetime.fromtimestamp(epoch_sec, tz=UTC).isoformat(
+        timespec="microseconds"
+    )
+
+
+def _event_seq(value: Any) -> int | None:
+    """Ключ порядка строки журнала или ``None``, если его нет.
+
+    В отличие от агентской половины (``db_logging_service._event_seq``) ключ,
+    пришедший СТРОКОЙ, ключом не считается: молча приведённый ``"7"`` —
+    это уже догадка о том, чего не было в теле батча, и поимённо спросить
+    потом некого. ``None`` означает «момент события НЕИЗВЕСТЕН», а не
+    «собылось позже всего».
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value
+
+
+def stamp_event_time(event: dict[str, Any]) -> None:
+    """Проставить событию момент события и ключ порядка — если их ещё нет.
+
+    **No-op для уже проштампованного события.** Батч агента приходит с
+    ``metadata``, в котором обе половины уже проставлены его writer'ом
+    (``lib/services/db_logging_service.py::log_event``), и платформа обязана
+    сохранить ТОТ ЖЕ момент: перебив его своим, в колонку ``occurred_at``
+    уехал бы момент ПРИЁМА батча, а не момент события (см. требование
+    «Порядок и момент события переживают границу процессов» и сценарий
+    ``test_platform_keeps_the_moment_given_by_the_agent``).
+
+    Оба значения выводятся из ОДНОГО мгновения: ``seq`` — наносекунды часов,
+    ``occurred_at`` — читаемая форма того же числа. Два независимых
+    ``now()`` разошлись бы на микросекунды, и расхождение было бы видно
+    только при сравнении ключа с моментом.
+
+    Частично проштампованное событие (есть ключ — нет момента, и наоборот)
+    дополняется недостающей половиной, выведенной из той же опоры, что и
+    ключ, — момент не берётся отдельным вызовом часов.
+    """
+    metadata = event.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        event["metadata"] = metadata
+    seq = _event_seq(metadata.get(EVENT_SEQ_KEY))
+    if seq is not None and isinstance(metadata.get(EVENT_TIME_KEY), str) and metadata[EVENT_TIME_KEY]:
+        return  # событие агента: не перебиваем его момент
+    if seq is None:
+        seq = next_event_seq()
+        metadata[EVENT_SEQ_KEY] = seq
+    if not (isinstance(metadata.get(EVENT_TIME_KEY), str) and metadata[EVENT_TIME_KEY]):
+        metadata[EVENT_TIME_KEY] = _iso_utc(seq / 1_000_000_000)
+
+
+def event_time_columns(metadata: Any) -> tuple[int, str]:
+    """Разобрать момент события и ключ порядка события в значения колонок.
+
+    Момент хранится ОДИН раз, в ``metadata``; таблицу заполняет разбор этого
+    словаря, поэтому у события нет второго поля с моментом — копия в
+    конверте и в метаданных рано или поздно разошлась бы, и разошлась бы
+    молча. Оба значения выведены из ОДНОГО мгновения, уже выбранного при
+    штамповке (:py:func:`stamp_event_time`).
+
+    Строка без ключа или без момента НЕ пишется: обе колонки ``NOT NULL``, и
+    частичная запись партии хуже, чем ничего. Отказ поимённый — названа
+    колонка и названа вторая половина пары, — иначе виноватой оказалась бы
+    база («violates not-null constraint») и искать причину пришлось бы в чужом
+    процессе. Проверяется отдельно на каждой половине:
+    ``test_row_without_key_is_refused_by_name`` и
+    ``test_row_without_moment_is_refused_by_name``.
+
+    Возвращает ``(seq, occurred_at)`` — ровно то, что уходит в колонки
+    ``seq bigint`` и ``occurred_at timestamptz``.
+    """
+    seq = _event_seq(metadata.get(EVENT_SEQ_KEY) if isinstance(metadata, dict) else None)
+    if seq is None:
+        raise InfrastructureError(
+            f"событие без ключа порядка не пишется: колонка {EVENT_SEQ_COLUMN} "
+            "объявлена NOT NULL, а писатель обязан проставить ключ на каждой строке"
+        )
+    occurred_at = metadata.get(EVENT_TIME_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(occurred_at, str) or not occurred_at:
+        raise InfrastructureError(
+            f"событие без момента события не пишется: колонка {EVENT_TIME_COLUMN} "
+            "объявлена NOT NULL, а писатель обязан проставить на каждой строке "
+            "пару — момент события и ключа порядка"
+        )
+    return seq, occurred_at
 
 
 @dataclass(frozen=True)
@@ -250,6 +435,7 @@ class DataService:
         buffer_batch_size: int | None = None,
         log_retention_days: int = 0,
         purge_empty_outbound: bool = True,
+        min_level: str | None = None,
         unknown_event_type_policy: str | None = None,
         snapshot: Any | None = None,
     ) -> None:
@@ -266,12 +452,12 @@ class DataService:
         # Дефолт здесь означал бы, что сервер поднимется и начнёт забирать
         # задачи из таблицы, которую никто не объявлял.
         self._task_table = tuple(task_table) if task_table else None
-        # Таблицы холодного зеркала сессий. Половинчатая пара — не
-        # настроенное зеркало, а настроенное наполовину: перезапись сессии
-        # всегда трогает обе таблицы, и оставить одну без второй можно было бы
-        # только ошибкой конфигурации. Поэтому пустота любой из них означает
-        # «зеркало ненастроено» целиком, и операции зеркала отвечают отказом, а
-        # не пишут в одну таблицу.
+        # Таблицы холодного зеркала сессий. Половинчатая пара — не настроенное
+        # зеркало, а настроенное наполовину: перезапись сессии всегда трогает обе
+        # таблицы, и оставить одну без второй можно было бы только ошибкой
+        # конфигурации. Поэтому пустота любой из них означает «зеркало
+        # ненастроено» целиком, и операции зеркала отвечают отказом, а не
+        # пишут в одну таблицу.
         self._session_meta_table = (
             tuple(session_meta_table) if session_meta_table else None
         )
@@ -300,6 +486,12 @@ class DataService:
         )
         self._unknown_event_types: dict[str, int] = {}
         self._reported_event_types: set[str] = set()
+        # Пробные имена, снятые на входах журнала (см. ``_suppress_probe``).
+        # Считаются по имени — оператору нужен не только факт, что вычистка
+        # включена, но и то, ЧТО продолжает приходить: иначе «проб в журнале
+        # нет» и «вычистка молча всё съела» выглядят одинаково.
+        self._suppressed_probe_events: dict[str, int] = {}
+        self._reported_probe_events: set[str] = set()
         # Владелец снимка (DuckDB) передаётся снаружи: сам сервис файл не
         # открывает и пути к нему не знает. Открывает его composition root
         # (server.py) через libs.enterprise_data.snapshot.open_snapshot_store.
@@ -310,6 +502,14 @@ class DataService:
         # аргумент операции не задан.
         self._log_retention_days = int(log_retention_days)
         self._purge_empty_outbound = bool(purge_empty_outbound)
+        # Порог журнала. ``None`` — флага не было: пишем всё, как писали до
+        # его появления. Незнакомое значение падает здесь, на подъёме, а не на
+        # первом событии (см. ``_journal_min_level``).
+        self._min_level = _journal_min_level(min_level)
+        # Счётчик отброшенных по порогу. Отдельный от ``event_buffer``:
+        # переполнение буфера и решение «не писать» — разные потери, и по
+        # одному числу их не различить.
+        self._suppressed_below_level = 0
 
     def _require_log_table(self, operation: str) -> tuple[str, str]:
         """Таблица журнала — из настройки, иначе явная ошибка.
@@ -345,6 +545,23 @@ class DataService:
                 f"операции очереди задач недоступны"
             )
         return self._task_table
+
+    def _require_session_tables(
+        self, operation: str,
+    ) -> tuple[tuple[str, str], tuple[str, str]]:
+        """Таблицы зеркала сессий — из настройки платформы, иначе явная ошибка.
+
+        Отказ, а не откат к именам по умолчанию: молчаливая подстановка означала
+        бы, что переименование таблицы в ``platform.json`` не мешает работе, и
+        зеркало писало бы мимо объявления.
+        """
+        if not self._session_meta_table or not self._session_messages_table:
+            raise InfrastructureError(
+                f"{operation}: таблицы зеркала сессий не заданы "
+                f"(data.session_meta_table / data.session_messages_table) — "
+                f"операции зеркала недоступны"
+            )
+        return self._session_meta_table, self._session_messages_table
 
     # -- снимок -------------------------------------------------------------
     #
@@ -483,14 +700,54 @@ class DataService:
                 f"задание в транзакции не выполнено: {exc}"
             ) from exc
 
-
     def accept(self, event: dict[str, Any]) -> str | None:
         """Неблокирующий вход: событие в буфер журнала.
 
+        **Единственная точка штамповки момента и ключа порядка.** Общего
+        ``_enqueue`` у сервиса нет, а ``log_event`` и ``log_events`` (оба
+        входа события в журнал) идут через этот метод, поэтому событие не
+        может уйти в буфер без своих ``seq``/``occurred_at`` — включая
+        батч агента, которому платформа их не перебивает
+        (:py:func:`stamp_event_time`). Проверяется отдельно:
+        ``test_accept_is_the_single_stamping_point``.
+
         Возвращает ``None`` либо маркер отброшенного события. Исключений не
         бросает: потеря события не должна останавливать ход.
+
+        **Порог журнала применяется здесь**, а не в ``log_event`` /
+        ``log_events``: это единственная точка, куда приходят все события
+        журнала — и внутренние события платформы (``tool.*``,
+        ``quality.check``, через :func:`servers.enterprise.server._event_sink`),
+        и батчи агента. Фильтр в операциях оставил бы внутренние события
+        платформы без порога, а это ровно те, чей объём задаёт журнал.
+
+        Порог приходит от агента и потому применяется **один раз, на
+        создании сервиса**: сравнение на каждом событии с перечитываемым
+        значением означало бы, что опечатка может пережить один вызов.
         """
+        if self._below_threshold(event.get("level")):
+            self._suppressed_below_level += 1
+            return DROPPED
+        stamp_event_time(event)
         return self._buffer.accept(event)
+
+    def _below_threshold(self, level: Any) -> bool:
+        """Ниже ли уровня события порог журнала.
+
+        ``None`` — порога нет, и тогда сравнивать не с чем: пишем всё.
+
+        Непарсящийся уровень — дефект производителя, а не решение о
+        настройке, и порогом он не отбрасывается: под порогом он не лежит,
+        а спрятать его в счётчик порога значило бы выдать поломку уровня за
+        настройку объёма журнала. Такой уровень уходит в буфер и отвергается
+        ``CHECK`` в базе — как отвергался до появления порога.
+        """
+        if self._min_level is None:
+            return False
+        try:
+            return not is_at_least(level, self._min_level)
+        except ValueError:
+            return False
 
     def _guarded(self, conn: Any, job: Any) -> Any:
         """Выставить предел стоимости, выполнить, сбросить предел."""
@@ -512,11 +769,23 @@ class DataService:
         return {
             "event_buffer": self._buffer.stats(),
             "max_rows": self._max_rows,
+            # Применённый порог и число отброшенных по нему. Порог виден
+            # именно здесь, а не в аргументах запуска: строка старта должна
+            # показывать то, что действительно пишется, иначе неизвестный
+            # уровень, упавший в дефолт, выглядел бы как заданный. ``None`` —
+            # флага не было, пишем всё.
+            "min_level": self._min_level,
+            "suppressed_below_level": self._suppressed_below_level,
             # Расхождение с объявленным словарём типов обязано быть видно
             # оператору без запроса к базе: счётчик — это и есть «сколько имён
             # ещё предстоит унифицировать с агентом».
             "unknown_event_type_policy": self._unknown_event_type_policy,
             "unknown_event_types": dict(self._unknown_event_types),
+            # Пробные имена, снятые на входах. Значение обязано быть непустым
+            # не «для красоты», а потому что вычистка шума не имеет права
+            # отключиться молча: ноль и «ничего не приходило» — разные вещи,
+            # и по журналу их не различить.
+            "suppressed_probe_events": dict(self._suppressed_probe_events),
         }
 
     def _observe_event_type(self, event_type: str, *, where: str) -> None:
@@ -557,6 +826,53 @@ class DataService:
             self._unknown_event_type_policy,
         )
 
+    def _suppress_probe(self, event_type: str, *, where: str) -> bool:
+        """Пробное ли имя — и тогда событие в журнал не пишется.
+
+        **Правило объявлено один раз**, в
+        ``libs.enterprise_common/eventing/types.py`` (``is_probe_event_type``
+        поверх ``PROBE_EVENT_PREFIXES``/``PROBE_EVENT_NAMES``), и здесь оно
+        только применяется. Вторая копия правила разъехалась бы с первой при
+        первой же правке — и ровно тем же способом, каким уже разъезжались
+        уровни журнала и имена событий.
+
+        Отбор — **подавление, а не отказ всего вызова**: имена пробных приходят
+        извне (агент присылает батч целиком), и одно пробное имя среди тридцати
+        событий оборота уронило бы весь батч. Тот же приём уже применён к
+        платформенной половине журнала
+        (``libs/enterprise_common/eventing/writer.py``, ``suppressed_probe``),
+        и это тот же случай — переименование не должно оставлять два ответа на
+        один вопрос.
+
+        Отказ **виден**, а не молчалив, и тремя способами сразу: вызывающий
+        получает событие в ``dropped`` вместо ``accepted`` (он и счётчик
+        переполнения читает тем же полем), имя один раз называется в
+        operational-логе процесса, а число снятых имён видно в ``stats()``.
+
+        Args:
+            event_type: Имя события из тела вызова.
+            where: Для текста в логе — какой вход отсёк (``log_events[3]``).
+
+        Returns:
+            ``True``, если событие пробное и его надо снять.
+        """
+        if not is_probe_event_type(event_type):
+            return False
+        self._suppressed_probe_events[event_type] = (
+            self._suppressed_probe_events.get(event_type, 0) + 1
+        )
+        if event_type not in self._reported_probe_events:
+            self._reported_probe_events.add(event_type)
+            logger.warning(
+                "%s: событие %r не записано — пробное имя не пишется в "
+                "продовую таблицу журнала (счётчик suppressed_probe_events "
+                "в stats()). Такие пробы идут в тестовый профиль "
+                "(infrastructure/test-profile-tables) либо в operational-лог",
+                where,
+                event_type,
+            )
+        return True
+
     # -- запись журнала -----------------------------------------------------
 
     def _write_events(self, events: list[dict[str, Any]]) -> None:
@@ -579,11 +895,23 @@ class DataService:
         # коррелировался, без `metadata` терялись source/component. Агентский
         # писатель (`lib/services/db_logging_service.py`) пишет те же двенадцать
         # полей, поэтому две половины журнала читались по разным схемам.
+        #
+        # Последние две колонки — `seq` и `occurred_at`, момент события и ключ
+        # порядка, разобранные из `metadata` (единственного места, где они
+        # живут). Они добавлены В КОНЕЦ списка колонок, чтобы порядок
+        # плейсхолдеров прежних полей не сдвинулся: по нему написан страж
+        # `tests/test_data_service.py::test_placeholder_count_matches_row_width`
+        # и по нему же платформенный тест разбора строки. Колонка `timestamp`
+        # остаётся моментом ЗАПИСИ строки (`now()`), а `occurred_at` — моментом
+        # СОБЫТИЯ: подставлять событийный момент в момент записи запрещено
+        # требованием «Порядок и момент события переживают границу процессов».
         sql = (
             f'INSERT INTO "{schema}"."{table}" '
             "(id, \"timestamp\", event_type, name, level, summary, payload, "
-            "session_id, user_id, request_id, channel, actor, metadata) "
-            "VALUES (%s, now(), %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)"
+            "session_id, user_id, request_id, channel, actor, metadata, "
+            "seq, occurred_at) "
+            "VALUES (%s, now(), %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, "
+            "%s::jsonb, %s, %s)"
         )
         rows = [
             (
@@ -602,6 +930,10 @@ class DataService:
                 event.get("channel"),
                 event.get("actor"),
                 json.dumps(event.get("metadata") or {}),
+                # Строка без ключа или без момента отказывает партию ЦЕЛИКОМ
+                # (см. `event_time_columns`): половина батча в журнале хуже,
+                # чем ничего, а причина отказа названа поимённо.
+                *event_time_columns(event.get("metadata")),
             )
             for event in events
         ]
@@ -635,7 +967,8 @@ class DataService:
         """Записать событие журнала. Неблокирующий вход.
 
         Возвращает ``"accepted"`` либо ``"dropped"``: агент должен видеть
-        переполнение, иначе он решит, что событие записано.
+        переполнение, иначе он решит, что событие записано. Тем же полем
+        возвращается и отказ по пробному имени (см. ``_suppress_probe``).
 
         Конверт события (§ ``runtime/event-model``) собирается целиком: кроме
         ``payload`` пишутся ``request_id``, ``channel``, ``actor`` и
@@ -646,6 +979,12 @@ class DataService:
         del audience  # логирование не пишет в журнал входа в журнал
         if not event_type.strip():
             raise InvalidRequestError("event_type не должен быть пустым")
+        # Пробное имя проверяется ПЕРВЫМ — до словаря типов и до уровня. Порядок
+        # не косметический: «smoke.x» нет и в словаре типов, и в пороге, и без
+        # этой оговорки событие попало бы ещё и в счётчик «имена вне словаря»,
+        # то есть вычистка шума выглядела бы как ещё одно расхождение схемы имён.
+        if self._suppress_probe(event_type, where="log_event"):
+            return "dropped"
         self._observe_event_type(event_type, where="log_event")
         if (
             self._unknown_event_type_policy == EVENT_TYPE_POLICY_STRICT
@@ -700,6 +1039,12 @@ class DataService:
         его — значит похоронить дефект. Частичный приём здесь был бы хуже:
         вызывающий увидел бы «принято 99 из 100» и не узнал бы, что потерял.
 
+        **Исключение из fail-fast — пробные имена** (см. ``_suppress_probe``):
+        они снимаются и считаются в ``dropped``, а не роняют вызов. Отказ всем
+        батчем здесь означал бы «одна проба в обороте стоила журнала всего
+        оборота», а требование «Пробные события не пишутся в продовую таблицу»
+        требует не отказа, а отсутствия этих строк в таблице.
+
         Идентичность приходит **на уровень вызова**, а не внутри события:
         ``session_id``, ``user_id`` и ``request_id`` — параметры метода, а в
         теле батча они игнорируются. Иначе батч, присланный под видом
@@ -712,14 +1057,23 @@ class DataService:
         ``valid_level CHECK``, унося с собой весь батч, хотя вызывающий уже
         получил бы «accepted».
 
+        Батч кладётся в буфер по одному событию через ``accept`` — тот же
+        вход, что и у ``log_event``: только так «accept — единственная точка
+        штамповки» остаётся правдой и для батча, а не только для одиночного
+        события. ``accept_many`` на буфере остаётся для тех, кому штамповка не
+        нужна (тесты буфера).
+
         Returns:
-            ``{"accepted": n, "dropped": m}``. Переполнение буфера видно
-            вызывающему, а не растворяется внутри.
+            ``{"accepted": n, "dropped": m}``. В ``dropped`` входят обе потери:
+            переполнение буфера и снятые пробные имена, и ``accepted + dropped``
+            всегда равно ``len(events)``. Потеря видна вызывающему, а не
+            растворяется внутри.
         """
         del audience  # логирование не пишет в журнал входа в журнал
         if not isinstance(events, list) or not events:
             raise InvalidRequestError("events должен быть непустым списком")
         prepared: list[dict[str, Any]] = []
+        suppressed = 0
         for position, event in enumerate(events):
             if not isinstance(event, dict):
                 raise InvalidRequestError(f"events[{position}] должен быть объектом")
@@ -728,6 +1082,13 @@ class DataService:
                 raise InvalidRequestError(
                     f"events[{position}].event_type не должен быть пустым"
                 )
+            # Пробное имя снимается до учёта в словаре и до приёма, и перед
+            # fail-fast по остальным правилам: иначе одно пробное имя уронило бы
+            # весь батч оборота, а именем пробным является как раз то, что в
+            # словарь не входит никогда.
+            if self._suppress_probe(event_type, where=f"log_events[{position}]"):
+                suppressed += 1
+                continue
             # Имя извне: сначала учёт, потом решение политики. В strict счётчик
             # остаётся наполненным — иначе «какие имена агент ещё шлёт» искать
             # было бы негде. Отказ — до приёма (fail-fast, как и остальная
@@ -760,8 +1121,11 @@ class DataService:
                     "metadata": event.get("metadata") or {},
                 }
             )
-        dropped = self._buffer.accept_many(prepared)
-        return {"accepted": len(prepared) - dropped, "dropped": dropped}
+        # Арифметика потерь: ``suppressed`` считается по events, ``prepared``
+        # — по остатку батча, поэтому складывать их в одном месте нельзя.
+        # Считать от переполнения: снятые пробы в ``prepared`` не попали.
+        overflowed = sum(1 for event in prepared if self.accept(event) is not None)
+        return {"accepted": len(prepared) - overflowed, "dropped": suppressed + overflowed}
 
     # -- чтение журнала -----------------------------------------------------
 
@@ -1816,23 +2180,6 @@ class DataService:
 
         return self.submit(_work, audience=audience)
 
-    def _require_session_tables(
-        self, operation: str,
-    ) -> tuple[tuple[str, str], tuple[str, str]]:
-        """Таблицы зеркала сессий — из настройки платформы, иначе явная ошибка.
-
-        Отказ, а не откат к именам по умолчанию: молчаливая подстановка означала
-        бы, что переименование таблицы в ``platform.json`` не мешает работе, и
-        зеркало писало бы мимо объявления.
-        """
-        if not self._session_meta_table or not self._session_messages_table:
-            raise InfrastructureError(
-                f"{operation}: таблицы зеркала сессий не заданы "
-                f"(data.session_meta_table / data.session_messages_table) — "
-                f"операции зеркала недоступны"
-            )
-        return self._session_meta_table, self._session_messages_table
-
     def mirror_session(
         self,
         *,
@@ -2485,7 +2832,18 @@ class DataService:
                 f"upsert_question_run: строка прогона {request_id!r} не записана — "
                 f"UPDATE и INSERT не затронули ни одной строки в {table}"
             )
-        return RUN_CREATED
+        # Исход читается из ТОГО ЖЕ ``rowcount``, на котором держится отказ выше.
+        # Раньше здесь стоял безусловный ``return RUN_CREATED``, то есть любой
+        # исход назывался «создана», даже когда шаг, затронувший строку, был
+        # UPDATE: вызывающая сторона получала «создана» для прогона, который
+        # зарегистрирован был давно. Проверяется на живых данных
+        # (``test_update_only_does_not_erase_the_recorded_context``) и без базы
+        # (``test_existing_row_is_reported_as_updated``).
+        #
+        # ``updated`` важнее ``inserted``: если UPDATE затронул строку, она
+        # существовала, и вставки не было — второй шаг нужен только для гонки
+        # «строки нет и после UPDATE».
+        return RUN_UPDATED if counters.get("updated") else RUN_CREATED
 
     def purge_logs(
         self,

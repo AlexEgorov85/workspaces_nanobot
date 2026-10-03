@@ -1,4 +1,4 @@
-"""Тесты личности событий конца оборота (``turn_completed``/``outbound_final``).
+"""Тесты личности событий конца оборота (``agent.completed``/``agent.delivered``).
 
 **Что чинится.** Журнал уходит на платформу операцией ``log_events``, которая
 берёт ``session_id``/``user_id``/``request_id`` из контекста ВЫЗОВА. Группировка
@@ -13,7 +13,9 @@
 ``RequestContext``. К этому моменту подписывать событие нечем. Отсюда
 живые данные: после перехода на MCP-транспорт из пяти оборотов дошли один
 ``outbound_final`` и один ``turn_completed`` — финальный ответ и завершение
-оборота, то есть ровно то, что нужно оператору.
+оборота, то есть ровно то, что нужно оператору. (Имена записаны как они были
+в боевой таблице ДО переименования; канонические — ``agent.delivered`` и
+``agent.completed``.)
 
 **Как чинится.** Личность снимается в середине оборота, на
 ``TurnRuntimeAdmitted``, где ``RequestContext`` привязан и индекс ещё полон;
@@ -140,7 +142,7 @@ def _clean_context_bridge():
 
 
 # ---------------------------------------------------------------------------
-# Критерий 3: turn_completed несёт полную личность
+# Критерий 3: agent.completed несёт полную личность
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +167,7 @@ class TestTurnCompletedCarriesIdentity:
 
         asyncio.run(subscriber._handle_turn_completed(_turn_completed()))
 
-        events = _by_type(svc, "turn_completed")
+        events = _by_type(svc, "agent.completed")
         assert len(events) == 1
         event = events[0]
         assert event.user_id == SENDER
@@ -179,7 +181,7 @@ class TestTurnCompletedCarriesIdentity:
         """Контроль: тест ловит именно потерю конца оборота, а не поломку
         механизма в целом — inbound с тем же request_id остаётся отправляемым.
 
-        Заодно видно, почему ``turn_completed`` не подписывался сам:
+        Заодно видно, почему ``agent.completed`` не подписывался сам:
         ``_resolve_event_user_id`` требует совпадения ``request_id``, а у
         события конца оборота его не было вовсе.
         """
@@ -192,7 +194,7 @@ class TestTurnCompletedCarriesIdentity:
             sender_id=SENDER,
             request_id=REQUEST_ID,
         )
-        assert _is_groupable(_by_type(svc, "inbound")[0])
+        assert _is_groupable(_by_type(svc, "agent.received")[0])
 
     def test_turn_completed_without_identity_is_not_faked(
         self, subscriber: RuntimeEventsSubscriber
@@ -206,7 +208,7 @@ class TestTurnCompletedCarriesIdentity:
         svc.clear_request(SESSION)
         asyncio.run(subscriber._handle_turn_completed(_turn_completed()))
 
-        event = _by_type(svc, "turn_completed")[0]
+        event = _by_type(svc, "agent.completed")[0]
         assert event.user_id is None
 
     def test_loss_without_identity_is_visible(
@@ -241,7 +243,7 @@ class TestTurnCompletedCarriesIdentity:
         asyncio.run(subscriber._handle_turn_completed(_turn_completed()))
         asyncio.run(subscriber._handle_turn_completed(_turn_completed()))
 
-        events = _by_type(svc, "turn_completed")
+        events = _by_type(svc, "agent.completed")
         assert [e.user_id for e in events] == [SENDER, None]
         assert subscriber.unidentified_turn_events() == 1
 
@@ -254,7 +256,7 @@ class TestTurnCompletedCarriesIdentity:
         svc.clear_request(SESSION)
         asyncio.run(subscriber._handle_turn_completed(_turn_completed()))
 
-        event = _by_type(svc, "turn_completed")[0]
+        event = _by_type(svc, "agent.completed")[0]
         assert event.user_id == SENDER
         assert event.request_id is None
         assert _is_groupable(event)
@@ -271,11 +273,11 @@ class TestTurnCompletedCarriesIdentity:
         subscriber.stop()
         svc.clear_request(SESSION)
         asyncio.run(subscriber._handle_turn_completed(_turn_completed()))
-        assert _by_type(svc, "turn_completed")[0].user_id is None
+        assert _by_type(svc, "agent.completed")[0].user_id is None
 
 
 # ---------------------------------------------------------------------------
-# Критерий 4: outbound_final
+# Критерий 4: agent.delivered
 # ---------------------------------------------------------------------------
 
 
@@ -293,21 +295,17 @@ def _final_outbound() -> Any:
     return _Msg()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Дефект не в этом слое: outbound_final формирует "
-        "lib/services/db_logging_bus.py:make_outbound_logger (принадлежит "
-        "другому владельцу). Подписчик на runtime-события этот путь не "
-        "видит. Тест оставлен как исполняемое ТЗ — после правки вызывающего "
-        "он начнёт проходить (XPASS)."
-    ),
-)
 def test_outbound_final_is_groupable_after_clear_request() -> None:
     """Критерий 4: финальный ответ оборота должен быть отправляемым.
 
-    Тот же сценарий, что и для ``turn_completed``: финальный outbound
+    Тот же сценарий, что и для ``agent.completed``: финальный outbound
     публикуется после ``clear_request``, поэтому подписать его нечем.
+
+    Маркер ``xfail`` снят: он срабатывал на ИМЕНИ события
+    (``outbound_final`` больше не существует, фильтр находил ноль строк, и
+    тест падал не по той причине, ради которой был помечен). Теперь фильтр
+    ловит настоящее событие, и тест проверяет свойство — а падение на нём
+    означает реальную потерю финального ответа из журнала.
     """
     from lib.services.db_logging_bus import make_outbound_logger
 
@@ -318,7 +316,7 @@ def test_outbound_final_is_groupable_after_clear_request() -> None:
 
     asyncio.run(make_outbound_logger(svc)(_final_outbound()))
 
-    events = _by_type(svc, "outbound_final")
+    events = _by_type(svc, "agent.delivered")
     assert len(events) == 1
     assert events[0].user_id == SENDER
     assert _is_groupable(events[0]), (

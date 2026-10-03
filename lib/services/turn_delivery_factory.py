@@ -20,7 +20,7 @@
   несовместимость всплывёт на старте, а не у пользователя.
 
 Ограничение, фиксируемое честно: переопределение дублирует ~8 строк
-upstream-логики ``fail()`` — публикация и ``turn_completed``. Это осознанный
+upstream-логики ``fail()`` — публикация и ``agent.completed``. Это осознанный
 размен: патч зависел от приватного метода и от порядка вызовов, а эти строки
 опираются на публичную сигнатуру.
 """
@@ -118,7 +118,7 @@ class FallbackTurnDelivery(TurnDelivery):
     def _log_turn_failed(
         self, lifecycle: Any, publish_completion: bool
     ) -> None:
-        """Записать ``turn_failed`` в журнал. Fail-open: сбой БД не важен."""
+        """Записать ``agent.failed`` в журнал. Fail-open: сбой БД не важен."""
         if not self._log_to_db or self._db_logging_service is None:
             return
         from lib.services.db_logging_service import LogEvent, try_log_event
@@ -142,14 +142,14 @@ class FallbackTurnDelivery(TurnDelivery):
             try_log_event(
                 self._db_logging_service,
                 LogEvent(
-                    event_type="turn_failed",
+                    event_type="agent.failed",
                     level="ERROR",
                     session_id=(
                         session_key if isinstance(session_key, str) else None
                     ),
                     channel=channel,
                     actor=None,
-                    summary=str(failure_error_kind or "turn_failed"),
+                    summary=str(failure_error_kind or "agent.failed"),
                     payload={
                         "kind": "internal",
                         "failure_error_kind": failure_error_kind,
@@ -169,7 +169,7 @@ class FallbackTurnDelivery(TurnDelivery):
                     user_id=sender_id if isinstance(sender_id, str) else None,
                 ),
                 producer="turn_delivery_factory",
-                event_type="turn_failed",
+                event_type="agent.failed",
             )
         except Exception as exc_log:  # noqa: BLE001 - fail-open
             _log.warning("turn_failed не записан: %s", exc_log)

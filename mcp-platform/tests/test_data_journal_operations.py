@@ -203,7 +203,7 @@ class TestPurgeLogs:
         pool = FakePool()
         counters = _service(pool).purge_logs(0)
         # Чистка пустых outbound-чанков не зависит от retention.
-        assert any("outbound_final" in s for s, _ in _statements(pool))
+        assert any("agent.delivered" in s for s, _ in _statements(pool))
         assert counters["events"] == 0 and counters["question_runs"] == 0
 
     def test_cleans_the_outbound_types_that_actually_exist(self) -> None:
@@ -213,13 +213,21 @@ class TestPurgeLogs:
         нет ни одной строки, то есть вечный no-op, — а ``outbound_intermediate``
         (пустые чанки потока) не вычищался никогда. Проверка идёт по SQL, а не
         по константе: иначе переименование обеих строк прошло бы молча.
+
+        Имя сменилось вместе с переходом на словарь: ``outbound_final`` стал
+        ``agent.delivered``. Проверка обязана идти по НОВОМУ имени — иначе
+        она бы охраняла уже несуществующий тип, то есть охраняла бы пустоту.
         """
         pool = FakePool()
         _service(pool).purge_logs(0)
-        delete = next(s for s, _ in _statements(pool) if "outbound" in s)
-        assert "'outbound_final'" in delete, delete
-        assert "'outbound_intermediate'" in delete, delete
+        delete = next(s for s, _ in _statements(pool) if "outbound" in s or "delivered" in s)
+        assert "'agent.delivered'" in delete, delete
         assert "outbound_delta" not in delete, delete
+        assert "outbound_intermediate" not in delete, delete
+        assert "outbound_final" not in delete, (
+            "дореформенное имя осталось в кортеже вычистки, а агент его больше "
+            f"не пишет: чистка стала бы вечным no-op. SQL: {delete}"
+        )
 
     def test_empty_outbound_keeps_rows_with_media(self) -> None:
         """Реальная отправка файла с пустым текстом — не мусор.

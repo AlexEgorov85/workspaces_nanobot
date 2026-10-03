@@ -370,15 +370,6 @@ class TestBootstrap:
             # Остальная часть оборота задачи: заглушка ответа, её откат,
             # потоковые патчи метаданных и возврат зависших задач.
             "append_assistant_message",
-            # Дописывание рассуждений. Отдельная операция, а не патч: патч
-            # затирает значение, а стрим присылает куски, и без атомарной
-            # конкатенации в SQL два параллельных сброса теряли бы друг
-            # друга. Блокировка в канале это признавала, просто молча.
-            "append_reasoning",
-            # Заметка о сжатии: строка истории без reply_to и сразу
-            # completed. Отдельная операция, потому что append_assistant_message
-            # создаёт плейсхолдер, который обязан закрыть finalize_turn.
-            "append_history_notice",
             "delete_assistant_message",
             "patch_message_metadata",
             "unstick_tasks",
@@ -397,6 +388,15 @@ class TestBootstrap:
             # дырявится ровно на чтениях.
             "get_message",
             "queue_stats",
+            # Дописывание рассуждений. Отдельная операция, а не патч: патч
+            # затирает значение, а стрим присылает куски, и без атомарной
+            # конкатенации в SQL два параллельных сброса теряли бы друг
+            # друга. Блокировка в канале это признавала, просто молча.
+            "append_reasoning",
+            # Заметка о сжатии: строка истории без reply_to и сразу
+            # completed. Отдельная операция, потому что append_assistant_message
+            # создаёт плейсхолдер, который обязан закрыть finalize_turn.
+            "append_history_notice",
         }
 
     def test_every_capability_has_a_registered_service(self) -> None:
@@ -602,6 +602,34 @@ class TestWireContract:
         assert {"tool_name", "until", "event_type", "level", "since", "query"} <= set(props)
 
     def test_call_returns_text(self) -> None:
+        """Провод отвечает текстом, а не ошибкой.
+
+        Имя события — каноническое, как и требует словарь: ``smoke.contract``
+        здесь означало бы пробное имя, которое по замыслу снимается подавлением,
+        и проверка «вызов дошёл до приёмника» превратилась бы в проверку
+        подавления. Проба на проводе проверяется отдельно, ниже.
+        """
+        import anyio
+
+        from libs.enterprise_common.eventing.types import TOOL_STARTED
+
+        transport, _, _ = enterprise_server.build()
+        result = anyio.run(
+            _call,
+            transport,
+            "log_event",
+            {"event_type": TOOL_STARTED, "summary": "проверка"},
+        )
+        assert not result.isError
+        assert "accepted" in result.content[0].text
+
+    def test_probe_name_on_the_wire_is_suppressed_not_an_error(self) -> None:
+        """Пробное имя по проводу — ``dropped``, а не отказ.
+
+        Проба не пишется в продовую таблицу, но и не роняет вызов: иначе одна
+        проба в обороте стоила бы всего батча, и подавление перестало бы быть
+        вычисткой мусора, а стало бы отказом обслуживания.
+        """
         import anyio
 
         transport, _, _ = enterprise_server.build()
@@ -612,7 +640,7 @@ class TestWireContract:
             {"event_type": "smoke.contract", "summary": "проверка"},
         )
         assert not result.isError
-        assert "accepted" in result.content[0].text
+        assert "dropped" in result.content[0].text
 
     def test_domain_error_carries_code_and_no_traceback(self) -> None:
         import anyio

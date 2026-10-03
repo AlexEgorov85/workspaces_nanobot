@@ -5,7 +5,7 @@
 ``bus.outbound`` при чтении каналом — см. ``lib/channels/postgres_channel.py``)
 и вызывает публичный API
 ``ContextCompactionService.notify_session_compacted(...)`` для записи факта
-в ``agent_gateway_logs`` (``event_type="context_compacted"``) и/или
+в ``agent_gateway_logs`` (``event_type="agent.compacted"``) и/или
 ``agent_conversation_messages`` (history-notice).
 
 Контракт:
@@ -39,7 +39,7 @@ class CompactionEventSubscriber:
     публичный API ``ContextCompactionService``.
 
     Для всех фаз (``started``/``succeeded``/``failed``/``cancelled``)
-    пишется ``event_type="context_compacted"`` в долговечный
+    пишется ``event_type="agent.compacted"`` в долговечный
     ``agent_gateway_logs``. History-notice в ``agent_conversation_messages``
     пишется **только** для ``succeeded``.
     """

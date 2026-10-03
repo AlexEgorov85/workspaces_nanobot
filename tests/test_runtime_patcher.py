@@ -486,7 +486,7 @@ class TestPatchSubagentLogging:
 
             # итог запуска записан один раз
             summary_events = [c.args[0] for c in svc.log_event.call_args_list
-                              if c.args[0].event_type == "subagent_run_finished"]
+                              if c.args[0].event_type == "agent.completed"]
             assert len(summary_events) == 1
             ev = summary_events[0]
             assert ev.session_id == "subagent:t456"
@@ -519,7 +519,7 @@ class TestPatchSubagentLogging:
             asyncio.run(hook.after_run(ctx))
 
             summaries = [c for c in svc.log_event.call_args_list
-                         if c.args[0].event_type == "subagent_run_finished"]
+                         if c.args[0].event_type == "agent.completed"]
             assert len(summaries) == 1
             assert summaries[0].args[0].level == "ERROR"
         finally:

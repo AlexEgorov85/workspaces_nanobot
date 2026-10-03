@@ -110,9 +110,9 @@ class TestDbLoggingTryLogEventIsSync:
 
         result = try_log_event(
             None,
-            LogEvent(event_type="contract-test"),
+            LogEvent(event_type="tool.started"),
             producer="test",
-            event_type="contract-test",
+            event_type="tool.started",
         )
         assert result is False
 

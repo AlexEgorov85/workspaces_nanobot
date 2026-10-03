@@ -269,7 +269,7 @@ def test_turn_completed_writes_log_event(
     asyncio.run(subscriber._handle_turn_completed(event))
     assert len(db_service.events) == 1
     log = db_service.events[0]
-    assert log.event_type == "turn_completed"
+    assert log.event_type == "agent.completed"
     assert log.payload["latency_ms"] == 250
     assert log.payload["outcome"] == "completed"
     assert log.payload["usage_tokens"] == 128
@@ -303,7 +303,7 @@ def test_subagent_turn_completed_writes_log_event(
     asyncio.run(subscriber._handle_subagent_turn_completed(event))
     assert len(db_service.events) == 1
     log = db_service.events[0]
-    assert log.event_type == "subagent_run_finished"
+    assert log.event_type == "agent.completed"
     payload = log.payload
     assert payload["task_id"] == "sub-1"
     assert payload["final_content"] == "done"
@@ -322,7 +322,7 @@ def test_subagent_turn_completed_error(
     event = _make_subagent_event(task_id="sub-2", had_error=True)
     asyncio.run(subscriber._handle_subagent_turn_completed(event))
     log = db_service.events[0]
-    assert log.event_type == "subagent_run_finished"
+    assert log.event_type == "agent.completed"
     assert log.level == "ERROR"
     assert log.payload["had_error"] is True
     assert log.payload["error"] == "boom"

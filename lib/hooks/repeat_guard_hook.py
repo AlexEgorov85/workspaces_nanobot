@@ -6,9 +6,10 @@
 подряд внутри окна, действует по режиму:
 
 * ``off``   — ничего не делает (дефолт, полная обратная совместимость);
-* ``warn``  — ровно одно событие ``tool_repeat_warned`` в журнал;
+* ``warn``  — ровно одно событие ``tool.suppressed`` в журнал
+  (``payload["mode"]="warn"``);
 * ``block`` — вызов подменяется синтетической ошибкой, ровно одно событие
-  ``tool_repeat_blocked``.
+  ``tool.suppressed`` (``payload["mode"]="block"``).
 
 **Почему ``raise``, а не возврат значения.** Hook-API nanobot не имеет
 «мягкого» способа отклонить вызов: у ``AgentHook`` нет возвращаемого
@@ -270,7 +271,11 @@ class RepeatGuardHook(AgentHook):
 
             event = LogEvent(
                 event_type=event_type,
-                level="WARNING",
+                # ``WARN``, а не ``WARNING``: CHECK ``valid_level`` в
+                # ``sql/logs/create_public_agent_gateway_logs.sql:30`` знает
+                # ровно четыре написания, синонима среди них нет, а отказ по
+                # уровню уносит весь батч, а не это событие.
+                level="WARN",
                 session_id=getattr(context, "session_key", None),
                 actor="RepeatGuardHook",
                 name="agent",
@@ -367,15 +372,16 @@ class RepeatGuardHook(AgentHook):
 
         published.add(fingerprint)
         summary = self._summary(tool_name, count)
-        event_type = (
-            "tool_repeat_blocked" if self._mode == "block" else "tool_repeat_warned"
-        )
+        # Одно имя на оба режима: различие не потеряно — оно в
+        # ``payload["mode"]`` (``warn``/``block``) и в том, что при ``block``
+        # вызов ниже заменяется синтетической ошибкой. Два имени ради одного
+        # факта держали в словаре платформы два лишних слова, которых там нет.
         self._publish(
             context=context,
             tool_name=tool_name,
             canonical=canonical,
             attempt=count,
-            event_type=event_type,
+            event_type="tool.suppressed",
             summary=summary,
         )
         # summary уже начинается с "repeat-guard:" — второй префикс был бы

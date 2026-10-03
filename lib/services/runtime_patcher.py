@@ -3,11 +3,11 @@
 Устраняет дублирование между gateway.py и cli_agent.py:
 
   1. ``patch_subagent_logging`` — БД-логирование подагентов: их tool-события,
-     итог запуска (``subagent_run_finished``) и история пишутся в
+     итог запуска (``agent.completed``) и история пишутся в
      ``DbLoggingService`` и ``session_manager`` (SubagentManager использует
      внутренний ``_SubagentHook``, который иначе пишет только debug в loguru).
 
-Фаза 6 (``enterprise-mcp-platform``) вынесла пять патчей из этого модуля в
+Фаза 6 (``enterprise-mcp-platform``) вынесла шесть патчей из этого модуля в
 нативные точки расширения — здесь их больше нет, и второй реализации
 механизма тоже нет:
 
@@ -895,7 +895,7 @@ class RuntimePatcher:
 
           1. проксирует tool-события подагента (call/result/error) в
              ``DatabaseLoggingHook`` → ``DbLoggingService``;
-          2. пишет итог запуска как ``subagent_run_finished``;
+          2. пишет итог запуска как ``agent.completed``;
           3. персистит историю подагента (``context.messages``) в
              ``session_manager`` под ключом ``subagent:<task_id>``.
 
@@ -930,7 +930,7 @@ class RuntimePatcher:
             _sessions = session_manager
             _default_bus: Any = None
             # Когда True — ``_finalize`` пропускает прямую запись
-            # ``subagent_run_finished`` в БД, потому что
+            # ``agent.completed`` в БД, потому что
             # ``RuntimeEventsSubscriber._handle_subagent_turn_completed``
             # уже записал событие через pub-sub. Флаг управляется
             # через ``RuntimeEventsSubscriber.start()/stop()`` (см.
@@ -942,7 +942,7 @@ class RuntimePatcher:
                 """Отметить, что ``SubagentLoggingSubscriber`` активен.
 
                 Когда True — ``_finalize`` не пишет
-                ``subagent_run_finished`` напрямую в БД
+                ``agent.completed`` напрямую в БД
                 (handler уже записал), оставляя только
                 ``finish_request`` (для question_runs) и
                 ``_persist_history``.
@@ -983,7 +983,7 @@ class RuntimePatcher:
                 # RuntimeEventsSubscriber может установить через
                 # ``_SubagentLoggingHook.set_default_bus(bus)``
                 # (см. lib/services/runtime_events_subscriber.py).
-                # Если None — публикация пропускается, subagent_run_finished
+                # Если None — публикация пропускается, agent.completed
                 # пишется через _finalize как раньше (backward compat).
                 # См. openspec/changes/post-0.3.5-patches-cleanup/design.md D3.
                 self._bus = bus if bus is not None else getattr(
@@ -1128,7 +1128,7 @@ class RuntimePatcher:
 
                 Используется ``RuntimeEventsSubscriber`` (см.
                 ``lib/services/runtime_events_subscriber.py``) для записи
-                ``subagent_run_finished`` в ``agent_gateway_logs`` через
+                ``agent.completed`` в ``agent_gateway_logs`` через
                 нативный pub-sub, заменяя прямое обращение к
                 ``DbLoggingService`` из ``_finalize``.
 
@@ -1193,7 +1193,7 @@ class RuntimePatcher:
                 except Exception:
                     pass
                 # Если подписчик активен, _finalize не пишет
-                # subagent_run_finished напрямую (handler уже записал);
+                # agent.completed напрямую (handler уже записал);
                 # только close_question_run. См. design.md D4.
                 if getattr(
                     _SubagentLoggingHook, "_subscriber_registered", False
@@ -1223,7 +1223,7 @@ class RuntimePatcher:
                     # побеждает согласно правилам _enqueue).
                     parent_user_id = self._resolve_parent_user_id(context)
                     self._db_hook._service.log_event(LogEvent(
-                        event_type="subagent_run_finished",
+                        event_type="agent.completed",
                         level="ERROR" if context.error else "INFO",
                         session_id=self._session_id,
                         channel="subagent",

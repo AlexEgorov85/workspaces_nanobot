@@ -13,13 +13,14 @@
 * `TurnRuntimeAdmitted` — seed лимита окна/модели в
   `DatabaseLoggingHook._CONTEXT_BRIDGE` (см. `design.md` в
   `openspec/changes/runtime-events-subscription`).
-* `TurnCompleted` — запись нового event_type `turn_completed` в
+* `TurnCompleted` — запись event_type `agent.completed` (метрики оборота) в
   `agent_gateway_logs` через `DbLoggingService.log_event(...)`. Метрики
   оборота: `latency_ms`, `outcome`, `failure_*`, `usage`.
 * `SubagentTurnCompleted` — кастомный event нашего namespace, см.
   `openspec/changes/post-0.3.5-patches-cleanup/design.md D1`.
   Публикуется из `_SubagentLoggingHook.after_run`. Подписчик пишет
-  `subagent_run_finished` в `agent_gateway_logs`.
+  `agent.completed` (итог подагента) в `agent_gateway_logs` — то же
+  каноническое имя, различие видно по `payload`/`name`.
 
 Lifecycle:
 
@@ -85,7 +86,7 @@ def _current_sender_id() -> str | None:
 class _TurnIdentity:
     """Личность оборота, снятая в тот момент, когда она ещё существует.
 
-    События конца оборота (``turn_completed``) публикуются уже ПОСЛЕ
+    События конца оборота (``agent.completed``) публикуются уже ПОСЛЕ
     ``DatabaseLoggingHook.after_run``, который дергает ``clear_request`` и
     опустошает индекс вопросов сервиса, и ПОСЛЕ снятия ``RequestContext``.
     К этому моменту подписать событие нечем, поэтому личность снимается на
@@ -121,7 +122,7 @@ def _set_subagent_subscriber_registered(registered: bool) -> None:
     """Отметить, что ``SubagentLoggingSubscriber`` активен.
 
     Это сигнал ``_SubagentLoggingHook._finalize`` пропустить прямую
-    запись ``subagent_run_finished`` в БД (подписчик уже записал).
+    запись ``agent.completed`` в БД (подписчик уже записал).
     No-op если класс ещё не подменён monkey-patch'ем.
 
     См. openspec/changes/post-0.3.5-patches-cleanup/design.md D4.
@@ -159,12 +160,12 @@ class RuntimeEventsSubscriber:
         # доступ под замком.
         self._turn_identities: dict[str, _TurnIdentity] = {}
         self._identity_lock = threading.Lock()
-        # События ``turn_completed``, у которых личность снять не удалось.
+        # События ``agent.completed``, у которых личность снять не удалось.
         # Считаются здесь, а не молча теряются в транспорте.
         self._unidentified_turn_events = 0
 
     def unidentified_turn_events(self) -> int:
-        """Сколько ``turn_completed`` ушло в журнал без полной личности.
+        """Сколько ``agent.completed`` ушло в журнал без полной личности.
 
         Ненулевое значение — прямое указание, что обороты теряются:
         транспорт не отправит событие без ``user_id``, а оператор об этом
@@ -178,7 +179,7 @@ class RuntimeEventsSubscriber:
         Пишется только непустой ``sender_id``: подставленное значение
         (``"unknown"`` и подобное) записало бы событие в чужую личность —
         ровно то, от чего журнал намеренно отказывается. Если личности нет,
-        снимок не создаётся вовсе, и ``turn_completed`` уйдёт без неё
+        снимок не создаётся вовсе, и ``agent.completed`` уйдёт без неё
         (с WARNING и счётчиком), а не с выдуманной.
         """
         if self._db_logging_service is None:
@@ -298,12 +299,12 @@ class RuntimeEventsSubscriber:
             )
 
     async def _handle_turn_completed(self, event: TurnCompleted) -> None:
-        """Записать ``LogEvent(event_type="turn_completed")`` в
+        """Записать ``LogEvent(event_type="agent.completed")`` в
         ``agent_gateway_logs`` через ``DbLoggingService``.
 
         Пишет метрики оборота: latency, outcome, failure_kind,
         usage_tokens, runtime_model. Не содержит ``final_content`` —
-        для пользовательского контента остаётся ``run_finished`` в
+        для пользовательского контента остаётся ``agent.responded`` в
         ``DatabaseLoggingHook.after_run``.
 
         Личность (``user_id``/``request_id``) берётся из снимка, снятого
@@ -390,7 +391,7 @@ class RuntimeEventsSubscriber:
                     self._unidentified_turn_events,
                 )
             self._db_logging_service.log_event(LogEvent(
-                event_type="turn_completed",
+                event_type="agent.completed",
                 actor="agent",
                 name="turn",
                 session_id=context.session_key,
@@ -409,7 +410,7 @@ class RuntimeEventsSubscriber:
     async def _handle_subagent_turn_completed(
         self, event: SubagentTurnCompleted
     ) -> None:
-        """Записать ``LogEvent(event_type="subagent_run_finished")``.
+        """Записать ``LogEvent(event_type="agent.completed")``.
 
         Контракт payload ИДЕНТИЧЕН ``_SubagentLoggingHook._finalize``
         (`lib/services/runtime_patcher.py:1712-1737`): ``task_id``,
@@ -440,7 +441,7 @@ class RuntimeEventsSubscriber:
             if event.error:
                 payload["error"] = event.error
             self._db_logging_service.log_event(LogEvent(
-                event_type="subagent_run_finished",
+                event_type="agent.completed",
                 level="ERROR" if event.had_error else "INFO",
                 actor="agent",
                 name=event.task_id,

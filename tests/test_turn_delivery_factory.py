@@ -242,7 +242,7 @@ class TestTurnFailedIsLogged:
 
         assert len(logged) == 1, "turn_failed не записан"
         event = logged[0]
-        assert event.event_type == "turn_failed"
+        assert event.event_type == "agent.failed"
         assert event.level == "ERROR"
         assert event.session_id == "sess-9"
         assert event.user_id == "u1"

@@ -72,7 +72,7 @@ class TestContextCompactedUserId:
 
         event = captured.get("event")
         assert isinstance(event, LogEvent)
-        assert event.event_type == "context_compacted"
+        assert event.event_type == "agent.compacted"
         assert event.user_id == "alice"
 
     @pytest.mark.asyncio

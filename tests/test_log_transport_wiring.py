@@ -176,7 +176,7 @@ class TestTransportIsWired:
             transport_pending=True,
         )
 
-        service._flush_batch([LogEvent(event_type="test_pending")])
+        service._flush_batch([LogEvent(event_type="agent.started")])
 
         assert direct == [], (
             "батч ушёл в прямую запись, хотя транспорт журнала не выбран"
@@ -210,7 +210,7 @@ class TestTransportIsWired:
             mcp_writer=None, fallback_sink=None, transport_pending=False
         )
 
-        service._flush_batch([LogEvent(event_type="test_direct")])
+        service._flush_batch([LogEvent(event_type="agent.started")])
 
         assert len(direct) == 1, "прямая запись отключена без решения оператора"
 

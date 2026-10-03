@@ -25,11 +25,124 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Правила журнала, объявленные платформой: уровни и пробные имена
+# ---------------------------------------------------------------------------
+#
+# Правило объявлено ОДИН раз — в ``mcp-platform/libs/enterprise_common/
+# eventing/`` (``models.normalize_level`` / ``level_rank``,
+# ``types.is_probe_event_type``). Ниже — копия, и копия вынужденная: агент НЕ
+# импортирует ``libs.*``, потому что ``mcp-platform`` — отдельная поставка,
+# поднимаемая подпроцессом со своим ``sys.path`` (тот же запрет без импорта
+# держит ``tests/test_journal_event_name_alignment.py``). По границе процессов
+# уходит только имя контура, поэтому «свести стороны импортом» нельзя —
+# это сломало бы ровно ту границу, ради которой второй писатель и вынесен.
+#
+# Отсюда — чем страж обязан быть: запрещать РАСХОЖДЕНИЕ ПОВЕДЕНИЯ (уровень ×
+# порог по всей области входов), а не сверять словари. Прежний страж требовал,
+# чтобы копия шкалы совпадала по значениям, — словари совпадали, а поведение
+# разошлось: ``WARNING`` агент считал как ``INFO`` и при пороге ``WARN``
+# ронял событие, которое платформа писала. Тихая потеря одного события в
+# тихом месте — и страж, который этого не запрещал.
+
+#: Уровни журнала. Регистр совпадает с ``CHECK valid_level`` в
+#: ``sql/logs/create_public_agent_gateway_logs.sql`` и со списком ``LEVELS``
+#: платформы. Числовой порядок выводится из этого набора, а не объявляется
+#: рядом: вторая шкала разъехалась бы с первой при первой же правке любой из
+#: них, и разъезд был бы молчащим.
+JOURNAL_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARN", "ERROR")
+
+#: ``WARNING`` — синоним, который встречается в конфигурации и в привычном
+#: ``logging``. В базу он не пишется: ``CHECK`` его не принимает. Разбор
+#: синонима здесь не украшение, а исправление тихой потери: без него
+#: ``WARNING`` уходил в ветку «неизвестно», то есть считался как ``INFO``, и
+#: событие при пороге ``WARN`` не доходило до таблицы — молча.
+JOURNAL_LEVEL_ALIASES: Mapping[str, str] = MappingProxyType({"WARNING": "WARN"})
+
+#: Числовой вес уровня — единственный счёт важности в проекте (копия
+#: ``LEVEL_RANKS`` платформы).
+JOURNAL_LEVEL_RANKS: Mapping[str, int] = MappingProxyType(
+    {name: rank for rank, name in enumerate(JOURNAL_LEVELS)}
+)
+
+#: Порог по умолчанию: факт оборота пишется, диагностика — нет. Тот же
+#: ``DEFAULT_MIN_LEVEL``, что на платформе, и он же дефолт конструктора
+#: сервиса; другое значение в боевом контуре берётся из ``config.json``.
+DEFAULT_MIN_LEVEL = "INFO"
+
+#: Пробные имена. **Копия** правила, объявленного на платформе в
+#: ``mcp-platform/libs/enterprise_common/eventing/types.py``
+#: (``PROBE_EVENT_PREFIXES`` / ``PROBE_EVENT_NAMES``). Набор не выдуман и не
+#: расширен: ровно те имена, что названы требованием «Пробные события не
+#: пишутся в продовую таблицу». Смысл копии не в том, чтобы правило стало
+#: одно, — оно и так одно; смысл в том, чтобы **обе половины журнала отвечали
+#: на вопрос одинаково**: до подавления на агенте пробное имя уходило в
+#: таблицу обычной строкой, и 20 таких строк в боевой базе нарисовала платформа.
+PROBE_EVENT_PREFIXES: tuple[str, ...] = ("smoke.", "probe_")
+PROBE_EVENT_NAMES: frozenset[str] = frozenset({"live.db_probe"})
+
+
+class JournalLevelError(ValueError):
+    """Уровень журнала вне шкалы.
+
+    Наследник ``ValueError`` — платформа на том же значении отказывает
+    ``ValueError``, и приравнивать два отказа должен один и тот же класс.
+    Отказ, а не тихая замена: неизвестный уровень, съеденный молча, попадает в
+    таблицу под чужим весом, а читатель журнала фильтрует именно по весу.
+    """
+
+
+def normalize_journal_level(value: str | None) -> str:
+    """Привести уровень к тому, что принимает ``CHECK valid_level``.
+
+    Зеркало ``mcp-platform/libs/enterprise_common/eventing/models.py::
+    normalize_level``, включая отказ на неизвестном значении: пустое значение —
+    ``INFO``, ``WARNING`` — ``WARN``, всё остальное — :class:`JournalLevelError`.
+
+    Аргумент ``None`` и пустая строка трактуются как ``INFO`` по той же
+    причине, что и на платформе: событие без уровня не «лёгкое» и не
+    «тяжёлое», оно обычное, и трактовка «нет уровня = диагностика» выбросила
+    бы часть оборота по настройке, о которой никто не знал.
+    """
+    candidate = (value or "").strip().upper()
+    candidate = JOURNAL_LEVEL_ALIASES.get(candidate, candidate)
+    if not candidate:
+        return DEFAULT_MIN_LEVEL
+    if candidate not in JOURNAL_LEVELS:
+        raise JournalLevelError(
+            f"неизвестный уровень журнала: {value!r}; "
+            f"допустимы {', '.join(JOURNAL_LEVELS)}"
+        )
+    return candidate
+
+
+def journal_level_rank(value: str | None) -> int:
+    """Числовой вес уровня. Регистр и синоним ``WARNING`` допускаются."""
+    return JOURNAL_LEVEL_RANKS[normalize_journal_level(value)]
+
+
+def is_probe_event_type(event_type: str) -> bool:
+    """Пробное ли это имя события.
+
+    Повторяет условие, объявленное платформой
+    (``libs.enterprise_common.eventing.types.is_probe_event_type``):
+    префиксы ``smoke.`` и ``probe_`` либо точное имя ``live.db_probe``.
+    Регистр нечувствителен — как и там: имя приходит извне, а ``SMOKE.x`` и
+    ``smoke.x`` в таблице это один и тот же мусор.
+    """
+    value = str(event_type or "").strip().lower()
+    if value in PROBE_EVENT_NAMES:
+        return True
+    return any(value.startswith(prefix) for prefix in PROBE_EVENT_PREFIXES)
 
 
 def try_log_event(
@@ -141,8 +254,25 @@ _QUEUE_CHANNELS = frozenset({"postgres"})
 # ---------------------------------------------------------------------------
 
 #: Ключи времени события в ``agent_gateway_logs.metadata``.
+#:
+#: Это ТРАНСПОРТ батча, а не место хранения: значения едут вместе с событием
+#: в JSONB и разбираются в колонки единственным табличным писателем
+#: (операция ``log_events`` платформы, а на прямом пути агента —
+#: :py:meth:`DbLoggingService._insert_batch`). Читать порядок и окно времени
+#: по текстовой копии нельзя: ``(metadata->>'occurred_at')::timestamptz``
+#: не индексируется (текст→timestamptz это STABLE, а индекс требует
+#: IMMUTABLE), а сортировка ISO-строкой не совпадает с хронологией
+#: (``...33.261Z`` встаёт после ``...33.261000Z``).
 EVENT_TIME_KEY = "occurred_at"
 EVENT_SEQ_KEY = "seq"
+
+#: Настоящие колонки ``agent_gateway_logs``, в которых момент события и ключ
+#: порядка хранятся (DDL: ``sql/migrations/V008__agent_gateway_logs_event_time_columns.sql``).
+#: Объявлены здесь, потому что читатель, писатель и guard-тест обязаны
+#: называть колонку одинаково: ``seq`` ещё и слово в SQL, а расхождение
+#: имени молча превращает чтение в чтение несуществующей колонки.
+EVENT_TIME_COLUMN = "occurred_at"
+EVENT_SEQ_COLUMN = "seq"
 
 #: Признак источника события (``metadata.source``) — по спецификации журнала
 #: он обязателен на каждой строке, и агент является writer'ом для всех
@@ -158,13 +288,14 @@ EVENT_SOURCE_NANOBOT = "nanobot"
 #: Каноническое выражение порядка строк оборота.
 #:
 #: Объявлено РОВНО в одном месте: читатели обязаны переиспользовать его, а
-#: не вписывать выражение заново (пока выбран вариант хранения в ``metadata``
-#: — выражение, и любое переписывание молча превращает индексное чтение в
-#: полный скан). Выбор варианта хранения ещё НЕ измерен
+#: не вписывать выражение заново (переписывание молча превращает индексное
+#: чтение в полный скан таблицы). Это порядок по КОЛОНКАМ, а не выражение
+#: по JSONB: хранилище выбрано замером плана запроса на 48 979 боевых
+#: строках — колонка выиграла 3 сценария из 3
 #: (``openspec/specs/logging-db/spec.md``, требование «Хранение момента
-#: события и идентификатора оборота выбрано замером плана запроса»), поэтому
-#: это выражение предварительное, а индекс по нему не заводится.
-TURN_ORDER_BY_SQL = "(metadata->>'seq')::bigint, id"
+#: события и идентификатора оборота выбрано замером плана запроса»).
+#: Индекс под это выражение заводит отдельный заход и только после backfill.
+TURN_ORDER_BY_SQL = "seq, id"
 
 #: Пол монотонности для ``seq`` в этом процессе (см. ``next_event_seq``).
 _SEQ_FLOOR = 0
@@ -180,7 +311,7 @@ def next_event_seq() -> int:
     бы разделяемого аллокатора (новый владелец состояния и новая точка отказа
     в горячем пути) и всё равно не покрыл бы события MCP-процесса. Часы дают
     сквозной, переживаемый ключ: обе половины оборота упорядочиваются одним
-    выражением ``ORDER BY (metadata->>'seq')::bigint, id``.
+    выражением ``ORDER BY seq, id`` по колонке.
 
     Пол держит порядок строго монотонным ВНУТРИ процесса: если часы уйдут
     назад (шаг NTP), два события не получат обратный порядок. Гонка за пол
@@ -203,8 +334,13 @@ def _iso_utc(epoch_sec: float) -> str:
     )
 
 
-def _event_seq(metadata: Any) -> int | None:
+def _event_seq(value: Any) -> int | None:
     """Ключ порядка строки журнала или ``None``, если его нет.
+
+    Берётся из КОЛОНКИ ``seq``, а не из ``metadata``: каноническое хранилище
+    измерено и им является колонка, а текстовая копия в ``metadata`` — это
+    транспорт батча. Читатель обязан смотреть туда же, куда пишет табличный
+    писатель, иначе «ключ есть» и «ключа нет» будут означать разные вещи.
 
     ``None`` означает «момент события НЕИЗВЕСТЕН», а не «собылось позже
     всего». Разница принципиальна: отсутствующий ключ, поставленный в конец
@@ -212,15 +348,39 @@ def _event_seq(metadata: Any) -> int | None:
     по выводу. Поэтому такие строки обязаны попадать в отдельный счётчик, а
     не в упорядоченную часть (см. :py:func:`order_turn_rows`).
     """
-    if not isinstance(metadata, dict):
-        return None
-    raw = metadata.get(EVENT_SEQ_KEY)
-    if raw is None or isinstance(raw, bool):
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return int(raw)
+        return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def event_time_columns(metadata: Any) -> tuple[int, str]:
+    """Разобрать момент события и ключ порядка события в значения колонок.
+
+    Момент хранится ОДИН раз, в ``metadata``; таблицу заполняет разбор этого
+    словаря, поэтому у :py:class:`LogEvent` нет второго поля с моментом —
+    копия в объекте и в метаданных рано или поздно разошлась бы, и разошёлся
+    бы молча. Оба значения выводятся из ОДНОГО мгновения, уже выбранного при
+    штамповке (:py:meth:`DbLoggingService._stamp_event_time`).
+
+    Возвращает ``(seq, occurred_at)`` — ровно то, что уходит в колонки
+    ``seq bigint`` и ``occurred_at timestamptz``.
+    """
+    seq = _event_seq(metadata.get(EVENT_SEQ_KEY) if isinstance(metadata, dict) else None)
+    if seq is None:
+        raise ValueError(
+            "событие без ключа порядка не пишется: колонка seq объявлена NOT NULL, "
+            "а писатель обязан проставить ключ на каждой строке"
+        )
+    occurred_at = metadata.get(EVENT_TIME_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(occurred_at, str) or not occurred_at:
+        raise ValueError(
+            f"событие без момента не пишется: колонка {EVENT_TIME_COLUMN} "
+            "объявлена NOT NULL, а писатель обязан проставить момент на каждой строке"
+        )
+    return seq, occurred_at
 
 
 @dataclass(frozen=True)
@@ -242,14 +402,16 @@ def order_turn_rows(rows: Any) -> TurnOrder:
     """Разложить строки оборота на упорядоченные и неатрибутированные.
 
     Читатель журнала: строки приходят как отображения (``dict``/``RealDict``)
-    с полями ``id`` и ``metadata``. Порядок — по ``TURN_ORDER_BY_SQL``,
-    приведённый к сортировке в памяти, потому что каноническое выражение
-    живёт в одном месте, а писать его в SQL читатель не обязан.
+    с полями ``id`` и ``seq``. Порядок — по ``TURN_ORDER_BY_SQL``, приведённый
+    к сортировке в памяти, потому что каноническое выражение живёт в одном
+    месте, а писать его в SQL читатель не обязан.
     """
     ordered: list[tuple[int, str, Any]] = []
     unattributed = 0
     for row in rows or ():
-        seq = _event_seq(row.get("metadata") if hasattr(row, "get") else None)
+        seq = _event_seq(
+            row.get(EVENT_SEQ_COLUMN) if hasattr(row, "get") else None
+        )
         if seq is None:
             unattributed += 1
             continue
@@ -369,7 +531,7 @@ class DbLoggingService:
         flush_interval_sec: float = 5.0,
         batch_size: int = 100,
         queue_maxsize: int = 10000,
-        min_level: str = "INFO",
+        min_level: str = DEFAULT_MIN_LEVEL,
         connect_backoff_sec: float = 1.0,
         connect_backoff_max_sec: float = 60.0,
         summary_max_chars: int = 200,
@@ -385,7 +547,13 @@ class DbLoggingService:
         self._dialect = (dialect or "postgres").lower()
         self._flush_interval = float(flush_interval_sec)
         self._batch_size = int(batch_size)
-        self._min_level = min_level
+        # Порог нормализуется один раз, на сборке, а не на каждом событии:
+        # опечатка в нём — это ошибка КОНФИГУРАЦИИ, и поймать её должен старт,
+        # а не первое же отброшенное событие оборота. В боевом контуре порог
+        # приходит из ``config.json → gateway.agent.logging.db.min_level`` и
+        # проверяется в ``ApplicationContext._make_db_logging``; дефолт выше —
+        # только для сборки без конфигурации.
+        self._min_level = normalize_journal_level(min_level)
         self._connect_backoff_sec = float(connect_backoff_sec)
         self._connect_backoff_max_sec = float(connect_backoff_max_sec)
         self._summary_max_chars = int(summary_max_chars)
@@ -474,13 +642,29 @@ class DbLoggingService:
             "dropped": 0,
             "fallback_written": 0,
             "dropped_by_type": {},
+            # Отказы по правилам, а не ошибки записи. Уровень вне шкалы
+            # платформа отвергает вызовом, агент обязан отказать событием и
+            # сказать об этом: иначе на месте первой тихой потери (событие,
+            # съеденное фильтром) появилась бы вторая. Ключ — значение, которое
+            # не разобрали, чтобы опечатку было видно поимённо.
+            "rejected_levels": {},
+            # Пробные имена, снятые на входе. Имя платформы из
+            # ``suppressed_probe_events`` — совпадение сделано намеренно:
+            # журнал читается по одному набору счётчиков, и «счётчик пробных
+            # у платформы» не должен означать разные вещи у агента.
+            "suppressed_probe_events": {},
         }
+        # Оба правила предупреждают ОДИН раз на значение, а не на событие:
+        # иначе поток проб в проде превратил бы предупреждение в шум, ради
+        # которого его и поднимают.
+        self._reported_probe_events: set[str] = set()
+        self._reported_rejected_levels: set[str] = set()
 
         # Индекс «текущий вопрос»: session_key -> контекст вопроса.
         # Парная запись {request_id, user_id} — обе поля обновляются
         # атомарно под _request_index_lock в register_request. Позволяет
         # пронести request_id/user_id/chat_id/parent_request_id
-        # на все события вопроса (tool_call/run_finished/outbound),
+        # на все события вопроса (tool.started/agent.responded/agent.delivered),
         # даже если сами события не несут этих полей.
         # В рамках сессии прогоны последовательны, разные сессии имеют
         # разные ключи — коллизий нет.
@@ -495,7 +679,7 @@ class DbLoggingService:
         # после конца оборота, когда индекс пуст, а подписать событие без
         # ``session_id``+``user_id`` транспорт не может (см.
         # ``_take_turn_identity``). Кладёт ``register_request``, забирает
-        # ``log_outbound`` для ``outbound_final`` — ровно один раз.
+        # ``log_outbound`` для ``agent.delivered`` — ровно один раз.
         self._turn_identity: dict[str, dict[str, str | None]] = {}
         self._request_index_lock = threading.Lock()
         self._schema_ok = False
@@ -588,7 +772,11 @@ class DbLoggingService:
 
         Момент хранится ОДИН раз, в ``metadata``: второго поля на
         ``LogEvent`` сознательно нет — копия момента в объекте и в метаданных
-        рано или поздно разошлась бы, и разошёлся бы молча.
+        рано или поздно разошлась бы, и разошёлся бы молча. В таблицу оба
+        значения попадают разбором этого словаря
+        (:py:func:`event_time_columns`) уже в колонках ``seq`` и
+        ``occurred_at``: колонки объявлены ``NOT NULL``, поэтому событие без
+        ключа не пишется вовсе, а не пишется «как получится».
 
         Ключи ставятся безусловно (перезаписывают значения producer'а): если
         разрешить событию принести свой ``seq``, гарантия порядка перестала бы
@@ -614,8 +802,26 @@ class DbLoggingService:
         база ставит ``timestamp`` в момент сброса батча, и без собственной
         метки событие теряет время своего этапа. Отфильтрованное по
         ``min_level`` событие метку не получает — в журнал оно не попадёт.
+
+        Порядок отбора — как на платформенном входе операции журнала: сначала
+        пробное имя, затем уровень. Проба снимается раньше разбора уровня
+        именно потому, что пробное имя не обязано быть каноническим: оно
+        приходит снаружи и про уровень своего не знает.
+
+        Returns:
+            ``True`` — событие в очереди. ``False`` — отбор по правилу (пробное
+            имя, уровень ниже порога, уровень вне шкалы) либо переполнение
+            очереди. Отказ виден: первые три увеличивают свои счётчики, и
+            ``False`` никогда не означает «просто не повезло».
         """
-        if not self._should_log(event.level):
+        if self._suppress_probe(event.event_type):
+            return False
+        try:
+            passes = self._should_log(event.level)
+        except JournalLevelError as exc:
+            self._reject_level(event.level, exc)
+            return False
+        if not passes:
             return False
         self._stamp_event_time(event)
         return self._enqueue(event)
@@ -815,7 +1021,7 @@ class DbLoggingService:
         if media:
             payload["media"] = list(media)
         return self.log_event(LogEvent(
-            event_type="inbound",
+            event_type="agent.received",
             level=level,
             session_id=session_id,
             channel=channel,
@@ -834,7 +1040,6 @@ class DbLoggingService:
         *,
         latency_ms: float | None = None,
         tokens_used: int | None = None,
-        kind: str = "outbound_final",
         request_id: str | None = None,
         level: str = "INFO",
         media: list | None = None,
@@ -848,18 +1053,24 @@ class DbLoggingService:
         # транспорт отбросил бы группу, и в журнале не оказалось бы самого
         # важного события. Личность берётся из одноразового снимка ВХОДА
         # (см. ``_take_turn_identity``): выдумывать её нельзя, а взять свою —
-        # можно. Промежуточные сообщения снимок не трогают: конец оборота у
-        # них один.
+        # можно.
+        #
+        # Имя события здесь — литерал, а НЕ параметр ``kind``, и это не
+        # вкусовое предпочтение. Пока имя приходило параметром, его сравнение
+        # жило отдельно от литерала (``if kind == "outbound_final"``), и
+        # переименование в одной строке роняло подпись — финальный ответ
+        # оборота исчезал из журнала целиком, без ошибки. Исходящее у агента
+        # одно, а промежуточные ``message(...)`` не пишутся вовсе (не-событие
+        # по этапу 10), поэтому параметру нечего было передавать.
         user_id: str | None = None
         effective_request_id = request_id
-        if kind == "outbound_final":
-            snapshot = self._take_turn_identity(session_id)
-            if snapshot:
-                user_id = snapshot.get("user_id")
-                if not effective_request_id:
-                    effective_request_id = snapshot.get("request_id")
+        snapshot = self._take_turn_identity(session_id)
+        if snapshot:
+            user_id = snapshot.get("user_id")
+            if not effective_request_id:
+                effective_request_id = snapshot.get("request_id")
         return self.log_event(LogEvent(
-            event_type=kind,
+            event_type="agent.delivered",
             level=level,
             session_id=session_id,
             channel=channel,
@@ -883,7 +1094,7 @@ class DbLoggingService:
         level: str = "INFO",
     ) -> bool:
         return self.log_event(LogEvent(
-            event_type="tool_call",
+            event_type="tool.started",
             level=level,
             session_id=session_id,
             actor="agent",
@@ -915,7 +1126,7 @@ class DbLoggingService:
         if status == "error" and error:
             summary = str(error)[: self._summary_max_chars]
         return self.log_event(LogEvent(
-            event_type="tool_result",
+            event_type="tool.completed",
             level=level,
             session_id=session_id,
             actor="agent",
@@ -947,12 +1158,12 @@ class DbLoggingService:
         (``_json_safe``), поэтому писать можно сразу на оборот агента.
         """
         return self.log_event(LogEvent(
-            event_type="llm_call",
+            event_type="llm.exchanged",
             level=level,
             session_id=session_id,
             actor="agent",
             name=model or "llm",
-            summary=finish_reason or "llm_call",
+            summary=finish_reason or "llm.exchanged",
             payload={
                 "prompt": _json_safe(prompt),
                 "response": _json_safe(response),
@@ -963,25 +1174,6 @@ class DbLoggingService:
                 "finish_reason": finish_reason,
                 "usage": usage or {},
             },
-            request_id=request_id,
-        ))
-
-    def log_error(
-        self,
-        error: str,
-        *,
-        session_id: str | None = None,
-        context: dict | None = None,
-        request_id: str | None = None,
-        level: str = "ERROR",
-    ) -> bool:
-        return self.log_event(LogEvent(
-            event_type="error",
-            level=level,
-            session_id=session_id,
-            name="error",
-            summary=error[:200],
-            payload={"error": error, "context": context or {}},
             request_id=request_id,
         ))
 
@@ -1051,6 +1243,16 @@ class DbLoggingService:
             (например, в баннере), не печатая второй раз.
         """
         stats = self.get_stats()
+        # Отказ по правилу — потеря строки журнала, и потеря эта (событие до
+        # таблицы не дошло по известной причине), поэтому она попадает в
+        # ``losses`` и поднимает итог до WARNING. Снятые пробные имена туда
+        # НЕ входят: они сняты по замыслу, и их наличие — не авария. Но они
+        # названы в той же строке, иначе счётчик есть, а читатель журнала о нём
+        # не узнает.
+        rejected = sum(int(v) for v in (stats.get("rejected_levels") or {}).values())
+        suppressed = sum(
+            int(v) for v in (stats.get("suppressed_probe_events") or {}).values()
+        )
         losses = (
             int(stats.get("failed") or 0)
             + int(stats.get("dropped") or 0)
@@ -1058,11 +1260,13 @@ class DbLoggingService:
             + int(stats.get("question_runs_skipped") or 0)
             + int(stats.get("registration_failures") or 0)
             + int(stats.get("queue_full") or 0)
+            + rejected
         )
         summary = (
             "журнал агента: событий записано %s, потеряно %s, батчей %s, "
             "контекстов вопроса записано %s (пропущено %s, отказов %s), "
-            "регистраций с ошибкой %s, в очереди %s%s"
+            "регистраций с ошибкой %s, в очереди %s, "
+            "уровней вне шкалы отброшено %s, пробных имён снято %s%s"
         )
         args = (
             stats.get("written", 0),
@@ -1073,6 +1277,8 @@ class DbLoggingService:
             stats.get("question_runs_failed", 0),
             stats.get("registration_failures", 0),
             stats.get("queue_size", 0),
+            rejected,
+            suppressed,
             f", последняя ошибка: {stats['last_error']}" if stats.get("last_error") else "",
         )
         # Потери — это WARNING, а не INFO: оператор с уровнем INFO увидит и
@@ -1111,11 +1317,86 @@ class DbLoggingService:
     def _should_log(self, level: str) -> bool:
         """Проверить, что ``level`` не ниже ``self._min_level``.
 
-        Сравнение по числовой шкале (``DEBUG=0``, ``INFO=1``, ``WARN=2``,
-        ``ERROR=3``). Неизвестные уровни считаются как ``INFO``.
+        Сравнение по весу уровня, и вес этот — общий с платформенным
+        (``JOURNAL_LEVEL_RANKS`` есть копия ``LEVEL_RANKS``). Правила ровно
+        три, и все три — как на платформе:
+
+          * синоним разбирается: ``WARNING`` — это ``WARN``, а не «неизвестно»;
+          * пустое значение — обычный ``INFO``, а не «лёгкое»;
+          * неизвестное значение — **отказ** (:class:`JournalLevelError`), а
+            не подмена. Подмена здесь стоила тихой потери события: неизвестный
+            уровень считался как ``INFO`` и при пороге ``WARN`` событие
+            отбрасывалось, тогда как платформа то же событие писала.
+
+        Raises:
+            JournalLevelError: значение вне шкалы. Ловится в :meth:`log_event`,
+                который превращает его в видимый отказ, а не роняет оборот.
         """
-        order = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
-        return order.get(level, 1) >= order.get(self._min_level, 1)
+        return journal_level_rank(level) >= journal_level_rank(self._min_level)
+
+    def _suppress_probe(self, event_type: str) -> bool:
+        """Пробное ли имя — и тогда событие в журнал не пишется.
+
+        Правило объявлено один раз на платформе
+        (``libs.enterprise_common.eventing.types.is_probe_event_type``) и
+        скопировано здесь как :func:`is_probe_event_type`; вторая копия
+        разъехалась бы с первой при первой же правке — и ровно тем же
+        способом, каким уже разъехались уровни.
+
+        Отбор — **подавление, а не отказ вызова**: имена пробных приходят
+        извне, и одно пробное имя среди тридцати событий оборота уронило бы
+        весь батч. Платформа применяет тот же приём на обоих своих входах
+        (``DataService._suppress_probe``).
+
+        Отказ **виден** и тремя способами сразу, как у платформы: имя один раз
+        называется в operational-логе, число снятых имён видно в
+        ``get_stats()`` под тем же ключом ``suppressed_probe_events``, а
+        вызывающий получает ``False`` — тот же ответ, что и на переполнение.
+        """
+        if not is_probe_event_type(event_type):
+            return False
+        with self._state_lock:
+            suppressed = self._stats["suppressed_probe_events"]
+            suppressed[event_type] = suppressed.get(event_type, 0) + 1
+            first_time = event_type not in self._reported_probe_events
+            if first_time:
+                self._reported_probe_events.add(event_type)
+        if first_time:
+            logger.warning(
+                "%s: событие не записано — пробное имя не пишется в продовую "
+                "таблицу журнала (счётчик suppressed_probe_events в "
+                "get_stats()). Правило объявлено у платформы: "
+                "mcp-platform/libs/enterprise_common/eventing/types.py",
+                event_type,
+            )
+        return True
+
+    def _reject_level(self, level: Any, exc: JournalLevelError) -> None:
+        """Отказать событию с уровнем вне шкалы — и сказать об этом.
+
+        Отказ не бросается наружу: вызывающий живёт в обороте, и обрыв оборота
+        из-за чужой опечатки в уровне хуже потерянной строки журнала. Но и
+        молчать нельзя — тогда на месте тихого отбрасывания появилась бы вторая
+        тихая потеря, и обе были бы неотличимы от работы штатно. Поэтому:
+        счётчик по значению, одно предупреждение на значение и подъём итоговой
+        строки журнала до WARNING через :meth:`report_stats`.
+        """
+        key = str(level)
+        with self._state_lock:
+            rejected = self._stats["rejected_levels"]
+            rejected[key] = rejected.get(key, 0) + 1
+            first_time = key not in self._reported_rejected_levels
+            if first_time:
+                self._reported_rejected_levels.add(key)
+        if first_time:
+            logger.warning(
+                "%s — событие отброшено, уровень вне шкалы журнала. Шкала и "
+                "синонимы объявлены у платформы "
+                "(mcp-platform/libs/enterprise_common/eventing/models.py); "
+                "уровень приходит из писателя, а не из уровня порога в "
+                "config.json. Счётчик rejected_levels в get_stats().",
+                exc,
+            )
 
     def _enqueue(self, event: LogEvent) -> bool:
         """Неблокирующе положить событие в очередь.
@@ -1312,7 +1593,8 @@ class DbLoggingService:
         сам режет список на страницы и выполняет несколько ``INSERT`` с одним
         statement. На каждой строке — ``id`` (UUID), ``level``/``event_type``/
         ``summary`` (простые VARCHAR/TEXT), и ``payload``/``metadata`` как
-        ``psycopg2.extras.Json`` (→ JSONB).
+        ``psycopg2.extras.Json`` (→ JSONB), плюс ``seq``/``occurred_at``,
+        разобранные из ``metadata`` (см. :py:func:`event_time_columns`).
 
         При исключении (битый JSONB, отвалившееся соединение, deadlock):
           * батч целиком выбрасывается (``failed += len(batch)``);
@@ -1485,7 +1767,15 @@ class DbLoggingService:
         self._write_fallback([rec])  # type: ignore[list-item]
 
     def _insert_batch(self, conn: Any, batch: list[LogEvent]) -> None:
-        """Выполнить ``execute_batch`` INSERT на данном соединении."""
+        """Выполнить ``execute_batch`` INSERT на данном соединении.
+
+        Последние две колонки — ``seq`` и ``occurred_at``: момент события и
+        ключ порядка, разобранные из ``metadata`` (единственного места, где
+        они живут). Они добавлены В КОНЕЦ списка колонок, чтобы порядок
+        плейсхолдеров прежних полей не сдвинулся: по нему написан страж
+        ``tests/test_journal_writer_columns_contract.py`` и по нему же
+        платформенный тест разбора строки.
+        """
         import psycopg2.extras
 
         cur = conn.cursor()
@@ -1494,14 +1784,15 @@ class DbLoggingService:
                 cur,
                 f'INSERT INTO "{self._schema}"."{self._table_name}" '
                 '(id, level, event_type, user_id, session_id, channel, actor, summary, payload, '
-                'metadata, request_id, name) '
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                'metadata, request_id, name, seq, occurred_at) '
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 [(
                     e.id, e.level, e.event_type, e.user_id, e.session_id, e.channel, e.actor,
                     e.summary,
                     psycopg2.extras.Json(e.payload or {}),
                     psycopg2.extras.Json(e.metadata or {}),
                     e.request_id, e.name,
+                    *event_time_columns(e.metadata),
                 ) for e in batch],
                 page_size=self._batch_size,
             )
@@ -1649,10 +1940,12 @@ class DbLoggingService:
     def purge_empty_outbound(self) -> int:
         """Удалить пустые outbound-события (stream-чанки / синтетические финалы).
 
-        Удаляются ``outbound_final``/``outbound_delta`` с пустым/whitespace
-        ``content`` И без ``media`` (реальные доставки файлов с пустым
-        текстом сохраняются — у них есть media). Возвращает число удалённых
-        строк. Работает через общий пул ``utils.db`` (своего соединения нет).
+        Удаляются ``agent.delivered`` (исторические ``outbound_final``/
+        ``outbound_delta`` — строки, писанные до переименования, они в таблице
+        уже лежат) с пустым/whitespace ``content`` И без ``media`` (реальные
+        доставки файлов с пустым текстом сохраняются — у них есть media).
+        Возвращает число удалённых строк. Работает через общий пул
+        ``utils.db`` (своего соединения нет).
         """
         if not self._dsn:
             return 0
@@ -1662,7 +1955,8 @@ class DbLoggingService:
                 try:
                     cur.execute(
                         f'DELETE FROM "{self._schema}"."{self._table_name}" '
-                        "WHERE event_type IN ('outbound_final', 'outbound_delta') "
+                        "WHERE event_type IN ('agent.delivered', 'outbound_final', "
+                        "'outbound_delta') "
                         "AND coalesce(btrim(payload->>'content'), '') = '' "
                         "AND (payload->'media') IS NULL"
                     )
