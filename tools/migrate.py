@@ -84,7 +84,26 @@ def resolve_dsn() -> str:
     return str(dsn)
 
 
+def is_greenplum(conn) -> bool:  # noqa: ANN001 — psycopg2 connection
+    """Greenplum называет себя в ``version()``.
+
+    Ответ важен не для красоты, а для DDL ниже: Greenplum не создаёт таблицу с
+    первичным ключом, если не задано ``DISTRIBUTED BY``, а обычный PostgreSQL
+    такую клаузу не понимает вовсе. Клауза выбирается по факту движка, а не
+    по предположению о том, где запущен runner.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT version()")
+        row = cur.fetchone()
+    return bool(row) and "greenplum" in str(row[0]).lower()
+
+
 def ensure_tracking_table(conn) -> None:  # noqa: ANN001 — psycopg2 connection
+    # ``version`` — первичный ключ, поэтому на Greenplum он же обязан быть и
+    # ключом распределения: без ``DISTRIBUTED BY`` такую таблицу движок не
+    # создаст вовсе, и реестр миграций, а с ним и любое применение, не
+    # поднимется.
+    distributed = "DISTRIBUTED BY (version)" if is_greenplum(conn) else ""
     with conn.cursor() as cur:
         cur.execute(
             f"""
@@ -96,6 +115,7 @@ def ensure_tracking_table(conn) -> None:  # noqa: ANN001 — psycopg2 connection
                 applied_by  text NOT NULL DEFAULT current_user,
                 duration_ms integer
             )
+            {distributed}
             """
         )
 
@@ -137,11 +157,22 @@ def apply_migration(conn, mig: Migration, force: bool = False) -> bool:  # noqa:
 def stamp_migration(conn, mig: Migration) -> None:  # noqa: ANN001
     cur = conn.cursor()
     try:
+        # Не ON CONFLICT DO NOTHING: конструкция появилась в PostgreSQL 9.5, а
+        # ядро Greenplum 6.5 — 9.4. Проверка и вставка идут в одной транзакции,
+        # что для одиночного запуска даёт ту же гарантию. Гонку двух
+        # одновременных ``--baseline`` в честном случае не сглаживаем: она
+        # обязана упасть на нарушении первичного ключа, потому что выигравшая
+        # из двух штамповок всё равно оставила бы базу в состоянии, которого
+        # никто не планировал.
         cur.execute(
-            f"INSERT INTO {TRACKING_TABLE} (version, name, checksum, duration_ms) "
-            "VALUES (%s, %s, %s, 0) ON CONFLICT (version) DO NOTHING",
-            (mig.version, mig.name, mig.checksum),
+            f"SELECT 1 FROM {TRACKING_TABLE} WHERE version = %s", (mig.version,)
         )
+        if cur.fetchone() is None:
+            cur.execute(
+                f"INSERT INTO {TRACKING_TABLE} (version, name, checksum, duration_ms) "
+                "VALUES (%s, %s, %s, 0)",
+                (mig.version, mig.name, mig.checksum),
+            )
         conn.commit()
     finally:
         cur.close()

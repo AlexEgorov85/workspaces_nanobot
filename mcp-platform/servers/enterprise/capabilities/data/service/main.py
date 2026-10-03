@@ -2202,9 +2202,10 @@ class DataService:
         Решение о записи принимает платформа, а не вызывающая сторона, и это не
         перенос ответственности, а единственный способ закрыть окно гонки:
         раньше чтение зеркала, решение и запись были тремя разными транзакциями,
-        и между ними успевал вклиниться второй писатель. Сравнение и запись под
-        одной транзакцией и под ``SELECT ... FOR UPDATE`` делают состояние
-        зеркала таким, каким оно было в момент решения.
+        и между ними успевал вклиниться второй писатель. Всё решение — чтение,
+        сравнение, удаление сообщений и запись метаданных — идёт одной
+        транзакцией; арбитраж записи делает условный UPDATE, а не блокировка
+        строки (на Greenplum 6.5 ``FOR UPDATE`` заблокировал бы всю таблицу).
 
         **Признак изменения — ``source_digest``, а не ``updated_at``.** Upstream
         не поднимает ``updated_at`` при изменении метаданных сессии
@@ -2270,10 +2271,18 @@ class DataService:
         messages_sql = _qualified(
             session_messages_table or messages_table
         )
+        # Без FOR UPDATE намеренно. На Greenplum 6.5 (ядро 9.4) SELECT ... FOR
+        # UPDATE берёт блокировку уровня таблицы, а не строки — зеркальный цикл
+        # каждые 30 секунд встал бы на всю таблицу метаданных сессий (см.
+        # docs/ARCHITECTURE.md, «Почему не FOR UPDATE SKIP LOCKED»). Гонку, ради
+        # которой блокировка и бралась, снял составной первичный ключ
+        # (replica_id, session_key): одну сессию пишет ровно одна реплика. Остался
+        # случай двух процессов с одинаковым replica_id — это неверная настройка
+        # реплики, и он обязан упасть на нарушении первичного ключа, а не
+        # сглаживаться блокировкой.
         select_sql = (
             f"SELECT updated_at, source_digest, message_count "
-            f"FROM {meta_sql} WHERE replica_id = %s AND session_key = %s "
-            f"FOR UPDATE"
+            f"FROM {meta_sql} WHERE replica_id = %s AND session_key = %s"
         )
         delete_sql = (
             f"DELETE FROM {messages_sql} WHERE replica_id = %s AND session_key = %s"
@@ -2286,19 +2295,29 @@ class DataService:
             f"INSERT INTO {messages_sql} "
             f"({', '.join(MIRROR_MESSAGE_COLUMNS)}) VALUES %s"
         )
-        upsert_sql = (
+        # Upsert через ON CONFLICT на Greenplum 6.5 невозможен: конструкция
+        # появилась в PostgreSQL 9.5, ядро Greenplum 6.5 — 9.4. Поэтому
+        # условный UPDATE, а при отсутствии совпадения — INSERT.
+        #
+        # Решение принимает UPDATE (по rowcount), а не вывод из SELECT выше:
+        # между чтением и записью строку могла удалить уборка той же реплики, и
+        # UPDATE без вставки потерял бы запись сессии молча.
+        meta_update_sql = (
+            f"UPDATE {meta_sql} SET "
+            "updated_at = %s, "
+            "last_consolidated = %s, "
+            "metadata = %s::jsonb, "
+            "source_digest = %s, "
+            "missing_cycles = 0, "
+            "message_count = %s, "
+            "synced_at = NOW() "
+            "WHERE replica_id = %s AND session_key = %s"
+        )
+        meta_insert_sql = (
             f"INSERT INTO {meta_sql} "
             "(replica_id, session_key, created_at, updated_at, last_consolidated, "
             "metadata, source_digest, missing_cycles, message_count, synced_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, 0, %s, NOW()) "
-            f"ON CONFLICT (replica_id, session_key) DO UPDATE SET "
-            "updated_at = EXCLUDED.updated_at, "
-            "last_consolidated = EXCLUDED.last_consolidated, "
-            "metadata = EXCLUDED.metadata, "
-            "source_digest = EXCLUDED.source_digest, "
-            "missing_cycles = 0, "
-            "message_count = EXCLUDED.message_count, "
-            "synced_at = NOW()"
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, 0, %s, NOW())"
         )
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
 
@@ -2414,18 +2433,31 @@ class DataService:
                         template=insert_template, page_size=200,
                     )
                 cur.execute(
-                    upsert_sql,
+                    meta_update_sql,
                     [
-                        replica_id,
-                        session_key,
-                        hot_created_at,
                         hot_updated_at,
                         max(0, int(last_consolidated)),
                         metadata_json,
                         source_digest,
                         len(rows),
+                        replica_id,
+                        session_key,
                     ],
                 )
+                if cur.rowcount == 0:
+                    cur.execute(
+                        meta_insert_sql,
+                        [
+                            replica_id,
+                            session_key,
+                            hot_created_at,
+                            hot_updated_at,
+                            max(0, int(last_consolidated)),
+                            metadata_json,
+                            source_digest,
+                            len(rows),
+                        ],
+                    )
 
             previous = None if cold is None else _as_utc(cold[0])
             lag_seconds = 0
@@ -2482,10 +2514,17 @@ class DataService:
         messages_sql = _qualified(session_messages_table or messages_table)
 
         def _work(conn: Any) -> dict[str, Any]:
+            # Без FOR UPDATE: на Greenplum 6.5 он взял бы блокировку уровня
+            # таблицы на все строки зеркала реплики. Гонка с параллельным
+            # mirror_session безопасна и без него: рассинхронизация может лишь
+            # добавить одну лишнюю инкременту счётчика пропусков, а тот
+            # обнуляется при следующем успешном зеркалировании этой сессии.
+            # Удаление идёт только после нескольких циклов подряд, поэтому
+            # одиночный лишний счётчик удаления не вызывает.
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT session_key, missing_cycles FROM {meta_sql} "
-                    f"WHERE replica_id = %s FOR UPDATE",
+                    f"WHERE replica_id = %s",
                     [replica_id],
                 )
                 own_rows = cur.fetchall()
@@ -2563,9 +2602,9 @@ class DataService:
         и ни одного из них не меняло данных.
 
         Результат — только фильтр, а не основание для решения: решение принимает
-        ``mirror_session``, который перечитывает строку под ``FOR UPDATE``. Поэтому
-        гонка между этим чтением и решением безопасна — рассинхронизация может
-        лишь заставить сделать лишний вызов, но не записать устаревшее.
+        ``mirror_session``, который перечитывает строку в своей транзакции.
+        Поэтому рассинхронизация может лишь заставить сделать лишний вызов, но
+        не записать устаревшее.
         """
         self._require_runtime(audience, "session_mirror_state")
         if not replica_id or not str(replica_id).strip():
