@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -37,7 +38,15 @@ from libs.enterprise_common.eventing.types import (  # noqa: E402
     TOOL_COMPLETED,
     TOOL_STARTED,
 )
-from servers.enterprise.capabilities.data.service.main import DataService  # noqa: E402
+from libs.enterprise_data.audience import (  # noqa: E402
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+)
+from libs.enterprise_data.db import PoolBusyError  # noqa: E402
+from servers.enterprise.capabilities.data.service.main import (  # noqa: E402
+    AUDIENCE_RUNTIME,
+    DataService,
+)
 from servers.enterprise.capabilities.data.service.writer import (  # noqa: E402
     DROPPED,
     EventBuffer,
@@ -79,6 +88,11 @@ class ScriptedConn:
     def __init__(self, rows: list[tuple[object, ...]] | None = None) -> None:
         self.rows = list(rows or [])
         self.statements: list[tuple[str, object]] = []
+        # Партии, ушедшие в БД одной вставкой. Сброс журнала больше не пишет
+        # по строке: одна партия — одна запись, и считать надо партии, а не
+        # строки, иначе тест продолжил бы требовать ровно того, что волна
+        # классов работ как раз убрала.
+        self.batches: list[tuple[str, list[tuple[object, ...]]]] = []
 
     def cursor(self) -> ScriptedCursor:
         return ScriptedCursor(self)
@@ -97,15 +111,57 @@ def _fake_db(rows: list[tuple[object, ...]] | None = None) -> ModuleType:
     conn = ScriptedConn(rows)
     module = ModuleType("fake_db")
     module.conn = conn  # type: ignore[attr-defined]
+    # Свободные места в пуле. Считаются, а не выдаются всегда: ``try_submit``
+    # по контракту не ждёт места, и проверка «сброс отложен» держится ровно на
+    # этом — при нуле свободных мест пул обязан отказать, а не подождать.
+    module.free_workers = 1  # type: ignore[attr-defined]
+    # Классы работ, в которых пул выполнял задания.
+    module.audiences: list[str] = []  # type: ignore[attr-defined]
 
-    def run(job):  # noqa: ANN001, ANN202
+    def _accept(audience: str) -> None:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        module.audiences.append(audience)  # type: ignore[attr-defined]
+
+    def run(job, *, audience=JOB_AUDIENCE_MODEL):  # noqa: ANN001, ANN202
+        _accept(audience)
         return job(conn)
 
-    def execute(sql: str, params: object = None) -> None:
-        conn.statements.append((sql, params))
+    def try_submit(job, *, audience=JOB_AUDIENCE_MODEL):  # noqa: ANN001, ANN202
+        """Постановка без ожидания места: место есть — выполняем, нет — отказ."""
+        _accept(audience)
+        if module.free_workers <= 0:  # type: ignore[attr-defined]
+            raise PoolBusyError(f"у класса {audience!r} нет свободного места")
+        module.free_workers -= 1  # type: ignore[attr-defined]
+        try:
+            return job(conn)
+        finally:
+            module.free_workers += 1  # type: ignore[attr-defined]
+
+    def execute_values_on(  # noqa: ANN001, ANN202
+        conn_: ScriptedConn,
+        sql: str,
+        rows: list[Sequence[object]],
+        *,
+        template: str | None = None,
+        page_size: int = 200,
+    ) -> int:
+        """Одна пакетная вставка на партию — и одна запись в ``batches``.
+
+        Партия кладётся в журнал вызовов одной строкой по намерению: разбивать
+        её на строки здесь — значило бы вернуть воркер в очередь на весь обход,
+        ради чего сброс и уходит через ``try_submit`` вместо ``run``.
+        """
+        batch = [tuple(row) for row in rows]
+        conn_.batches.append((sql, batch))
+        return len(batch)
 
     module.run = run  # type: ignore[attr-defined]
-    module.execute = execute  # type: ignore[attr-defined]
+    module.try_submit = try_submit  # type: ignore[attr-defined]
+    module.execute_values_on = execute_values_on  # type: ignore[attr-defined]
     return module
 
 
@@ -142,7 +198,7 @@ def service() -> DataService:
 
 class TestTwoEntries:
     def test_submit_is_blocking_and_returns_result(self, service: DataService) -> None:
-        assert service.submit(lambda conn: 42) == 42
+        assert service.submit(lambda conn: 42, audience=JOB_AUDIENCE_MODEL) == 42
 
     def test_accept_never_raises_and_returns_accepted(self, service: DataService) -> None:
         assert service.log_event(AGENT_COMPLETED, summary="ок") == "accepted"
@@ -195,7 +251,7 @@ class TestStatementTimeout:
     def test_timeout_is_set_and_reset_around_job(self) -> None:
         db = _fake_db()
         svc = _service(db=db, statement_timeout_ms=1234, buffer_flush_interval=0.0)
-        svc.submit(lambda conn: None)
+        svc.submit(lambda conn: None, audience=JOB_AUDIENCE_MODEL)
         statements = [sql for sql, _ in db.conn.statements]  # type: ignore[union-attr]
         assert "SET statement_timeout = 1234" in statements
         assert statements[-1].strip() == "SET statement_timeout = 0"
@@ -208,7 +264,7 @@ class TestStatementTimeout:
             raise RuntimeError("сбой")
 
         with pytest.raises(InfrastructureError):
-            svc.submit(boom)
+            svc.submit(boom, audience=JOB_AUDIENCE_MODEL)
         statements = [sql for sql, _ in db.conn.statements]  # type: ignore[union-attr]
         assert statements[-1].strip() == "SET statement_timeout = 0"
 
@@ -365,8 +421,8 @@ class TestLogEvent:
 
     # -- запись батча -------------------------------------------------------
 
-    def test_flush_writes_one_insert_per_event(self) -> None:
-        """Сброс батча реально доходит до БД.
+    def test_flush_writes_one_batch_per_flush(self) -> None:
+        """Сброс батча реально доходит до БД — одной вставкой на партию.
 
         Регрессия: ``_write_events`` звал ``execute(sql, rows)``, а контракт
         ``db.execute(sql, *args)`` — один параметр на плейсхолдер. Список
@@ -374,6 +430,12 @@ class TestLogEvent:
         на нём падал, и ``log_event`` отвечал «accepted», не записав
         ничего. На фейковом пуле это не ловилось: падение жило внутри
         ``EventBuffer.flush``, который глотает исключение по замыслу.
+
+        Считается партия, а не строки: сброс ходит в пул через ``try_submit``
+        и пишет через ``execute_values_on`` именно затем, чтобы обойтись
+        одним воркером на весь батч. Возврат к построчной записи занял бы
+        место в пуле на всё время обхода — и на тесте этого было бы не видно,
+        потому что фейковый пул безусловно выдаёт место.
         """
         db = _fake_db()
         svc = _service(db=db, buffer_flush_interval=0.0)
@@ -381,8 +443,12 @@ class TestLogEvent:
         svc.log_event(TOOL_COMPLETED, name="tool", session_id="s1", user_id="u1")
         svc._buffer.flush()
 
-        inserts = [s for s in db.conn.statements if s[0].lstrip().startswith("INSERT")]
-        assert len(inserts) == 2, f"ожидался INSERT на каждое событие, получили {inserts}"
+        assert len(db.conn.batches) == 1, (  # type: ignore[union-attr]
+            f"ожидалась одна вставка на партию, получили {db.conn.batches!r}"  # type: ignore[union-attr]
+        )
+        sql, rows = db.conn.batches[0]  # type: ignore[union-attr]
+        assert sql.lstrip().startswith("INSERT"), sql
+        assert len(rows) == 2, f"в партии должны быть оба события, получили {rows!r}"
 
     def test_placeholder_count_matches_row_width(self) -> None:
         """Ширина строки обязана совпадать с числом плейсхолдеров.
@@ -395,11 +461,11 @@ class TestLogEvent:
         svc.log_event(TOOL_STARTED, payload={"k": "v"}, session_id="s1")
         svc._buffer.flush()
 
-        sql, params = next(
-            s for s in db.conn.statements if s[0].lstrip().startswith("INSERT")
-        )
-        assert sql.count("%s") == len(params)
-        assert json.loads(params[5]) == {"k": "v"}
+        sql, rows = db.conn.batches[0]  # type: ignore[union-attr]
+        assert len(rows) == 1, rows
+        row = rows[0]
+        assert sql.count("%s") == len(row)
+        assert json.loads(row[5]) == {"k": "v"}
 
     def test_failed_flush_is_counted_not_raised(self) -> None:
         """Ошибка записи не поднимается наружу, но видна в счётчике."""
@@ -410,8 +476,79 @@ class TestLogEvent:
         def _boom(*args: object, **kwargs: object) -> None:
             raise RuntimeError("db down")
 
-        db.run = _boom
+        # Падать должен путь, по которому журнал уходит в базу, то есть
+        # постановка без ожидания. Раньше это был ``run``; подмена ``run``
+        # после волны классов работ проверяла бы уже не тот путь.
+        db.try_submit = _boom  # type: ignore[attr-defined]
         svc._buffer.flush()
 
         assert svc.stats()["event_buffer"]["flush_errors"] == 1
         assert svc.stats()["event_buffer"]["written"] == 0
+
+    def test_busy_pool_defers_the_flush_instead_of_losing_events(self) -> None:
+        """Занятый пул откладывает сброс, а не теряет партию.
+
+        Это единственная новая гарантия журнала. Сброс ходит в пул через
+        ``try_submit``, который не ждёт места, поэтому «место занято» —
+        нормальный исход, а не авария: партия обязана вернуться в буфер и
+        уйти следующим тиком. Считать отказ тем же числом, что и потерю
+        (``dropped``), нельзя — по нему судят, теряется ли журнал, а он не
+        теряется. Отдельно от потери: обычная ошибка записи батч отбрасывает
+        и увеличивает ``flush_errors``, потому что повторять тот же батч
+        бесконечно — значит забить память событиями, которые никто не запишет.
+        """
+        db = _fake_db()
+        svc = _service(db=db, buffer_flush_interval=0.0)
+        svc.log_event(TOOL_STARTED, summary="событие")
+        db.free_workers = 0  # type: ignore[attr-defined]
+
+        assert svc._buffer.flush() == 0
+
+        stats = svc.stats()["event_buffer"]
+        assert stats["flush_rejected"] == 1, stats
+        assert stats["dropped"] == 0, "отказ пула — не потеря события"
+        assert stats["flush_errors"] == 0, "отказ пула — не ошибка записи"
+        assert stats["written"] == 0
+        assert stats["pending"] == 1, "партия обязана вернуться в буфер целиком"
+        assert db.conn.batches == []  # type: ignore[union-attr]
+
+        # Место освободилось — следующий тик проходит без потерь.
+        db.free_workers = 1  # type: ignore[attr-defined]
+        assert svc._buffer.flush() == 1
+        assert svc.stats()["event_buffer"]["written"] == 1
+        assert svc.stats()["event_buffer"]["flush_rejected"] == 1
+        assert len(db.conn.batches) == 1  # type: ignore[union-attr]
+
+    def test_flush_never_waits_for_a_free_worker(self) -> None:
+        """Сброс не должен ждать место: иначе журнал становится виновником
+        задержки запроса модели.
+
+        Журнал — побочный след оборота. Если его сброс встаёт в очередь за
+        местом в пуле, запрос модели конкурирует с журналом и проигрывает:
+        потеря события безвозвратна и не сопровождается ошибкой. Проверка
+        на подставном пуле возможна только потому, что ``try_submit`` считает
+        места: при нуле он обязан отказать, а не выполнить задание.
+        """
+        db = _fake_db()
+        svc = _service(db=db, buffer_flush_interval=0.0)
+        svc.log_event(TOOL_STARTED)
+        db.free_workers = 0  # type: ignore[attr-defined]
+
+        svc._buffer.flush()  # не бросает наружу
+
+        assert db.conn.batches == []  # type: ignore[union-attr]
+        assert svc.stats()["event_buffer"]["pending"] == 1
+
+    def test_journal_flush_runs_in_the_runtime_job_class(self) -> None:
+        """Журнал — внутренний поток платформы, а не работа модели.
+
+        Сброс ждёт места без ожидания и повторяется следующим тиком, то есть
+        занимает место в классе намеренно и надолго. В классе модели, где
+        место ограничено и за это отвечает вызов инструмента агента, журнал
+        вытеснил бы работу, ради которой он и пишется.
+        """
+        db = _fake_db()
+        svc = _service(db=db, buffer_flush_interval=0.0)
+        svc.log_event(TOOL_STARTED)
+        svc._buffer.flush()
+        assert db.audiences == [AUDIENCE_RUNTIME]  # type: ignore[union-attr]

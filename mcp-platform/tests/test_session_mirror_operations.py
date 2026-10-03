@@ -33,6 +33,11 @@ from libs.enterprise_common.errors import (  # noqa: E402
     InfrastructureError,
     InvalidRequestError,
 )
+from libs.enterprise_data.audience import (  # noqa: E402
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+    JOB_AUDIENCE_RUNTIME,
+)
 from servers.enterprise.capabilities.data.service.main import (  # noqa: E402
     MIRROR_MESSAGE_COLUMNS,
     DataService,
@@ -118,6 +123,11 @@ class MirrorConn:
         self.returning: list[tuple[object, ...]] = []
         self.statements: list[tuple[str, object]] = []
         self.bulk: list[dict[str, object]] = []
+        # Классы работ, в которых пул выполнял операции зеркала. Пул выполняет
+        # работу одного класса за другим, и тест обязан видеть, в каком именно:
+        # подставной пул, принимающий любой класс, не отличил бы «зеркало ушло
+        # в служебный класс» от «зеркало ушло в класс модели».
+        self.audiences: list[str] = []
         # По умолчанию UPDATE считается совпавшим с той строкой, которую тест
         # подготовил для чтения: пустой список строк — это «сессии в зеркале
         # нет», то есть UPDATE ничего не изменит и должна сработать вставка.
@@ -142,13 +152,19 @@ def _fake_db(
     module = ModuleType("fake_db")
     module.conn = conn  # type: ignore[attr-defined]
 
-    def run(job):  # noqa: ANN001, ANN202
+    def run(job, *, audience=JOB_AUDIENCE_MODEL):  # noqa: ANN001, ANN202
         raise AssertionError(
             "обычный run() не даёт атомарности: операция зеркала обязана идти "
-            "через run_transaction"
+            f"через run_transaction (класс работы: {audience})"
         )
 
-    def run_transaction(job):  # noqa: ANN001, ANN202
+    def run_transaction(job, *, audience=JOB_AUDIENCE_MODEL):  # noqa: ANN001, ANN202
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"run_transaction: класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        conn.audiences.append(audience)
         return job(conn)
 
     def execute_values(cur, sql, rows, *, template=None, page_size=200):  # noqa: ANN001
@@ -272,6 +288,20 @@ class TestAtomicity:
         assert writes, "перезапись ничего не писала"
         for sql in writes:
             assert "replica_id" in sql, sql
+
+    def test_mirror_runs_in_the_runtime_job_class(self) -> None:
+        """Зеркало — внутренний поток платформы, а не работа модели.
+
+        Классы работ разведены по потолку ожидания: работа модели ограничена, а
+        служебная (зеркало, журнал, очередь задач) — нет. Зеркало, ушедшее в
+        класс модели, заняло бы ограниченный класс на ровно столько, сколько
+        идёт холодная синхронизация, и вытеснило бы вызовы инструментов.
+        """
+        service = _service()
+        _mirror(service)
+        conn = service._test_conn
+        assert conn.audiences, "работа зеркала не дошла до пула"
+        assert set(conn.audiences) == {JOB_AUDIENCE_RUNTIME}
 
 
 # --- вердикты ---------------------------------------------------------------

@@ -33,8 +33,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from libs.enterprise_common.errors import InfrastructureError  # noqa: E402
+from libs.enterprise_data.audience import (  # noqa: E402
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+)
+from libs.enterprise_data.db import PoolBusyError  # noqa: E402
 from servers.enterprise.capabilities.data.service import main as data_main  # noqa: E402
-from servers.enterprise.capabilities.data.service.main import DataService  # noqa: E402
+from servers.enterprise.capabilities.data.service.main import (  # noqa: E402
+    AUDIENCE_RUNTIME,
+    DataService,
+)
 
 LOG_TABLE = ("public", "agent_gateway_logs")
 QUESTION_RUNS_TABLE = ("public", "agent_question_runs")
@@ -67,6 +75,10 @@ class ScriptedConn:
     def __init__(self) -> None:
         self.rows: list[tuple[object, ...]] = []
         self.statements: list[tuple[str, object]] = []
+        # Партии, ушедшие в журнал одной вставкой: (sql, строки). Сброс ходит
+        # в пул через ``try_submit`` и пишет через ``execute_values_on``, поэтому
+        # «дошло до БД» читается отсюда, а не из следов курсора.
+        self.batches: list[tuple[str, list[tuple[object, ...]]]] = []
 
     def cursor(self) -> ScriptedCursor:
         return ScriptedCursor(self)
@@ -76,11 +88,49 @@ def _fake_db() -> ModuleType:
     conn = ScriptedConn()
     module = ModuleType("fake_db")
     module.conn = conn  # type: ignore[attr-defined]
+    # Свободные места в пуле. Считаются, а не выдаются всегда: ``try_submit``
+    # не ждёт места, и «занято» — обычный исход сброса, а не потеря батча.
+    module.free_workers = 1  # type: ignore[attr-defined]
+    # Классы работ, в которых пул выполнял задания.
+    module.audiences: list[str] = []  # type: ignore[attr-defined]
 
-    def run(job):  # noqa: ANN001, ANN202
+    def _accept(audience: str) -> None:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        module.audiences.append(audience)  # type: ignore[attr-defined]
+
+    def run(job, *, audience=JOB_AUDIENCE_MODEL):  # noqa: ANN001, ANN202
+        _accept(audience)
         return job(conn)
 
+    def try_submit(job, *, audience=JOB_AUDIENCE_MODEL):  # noqa: ANN001, ANN202
+        _accept(audience)
+        if module.free_workers <= 0:  # type: ignore[attr-defined]
+            raise PoolBusyError(f"у класса {audience!r} нет свободного места")
+        module.free_workers -= 1  # type: ignore[attr-defined]
+        try:
+            return job(conn)
+        finally:
+            module.free_workers += 1  # type: ignore[attr-defined]
+
+    def execute_values_on(  # noqa: ANN001, ANN202
+        conn_: ScriptedConn,
+        sql: str,
+        rows: list[tuple[object, ...]],
+        *,
+        template: str | None = None,
+        page_size: int = 200,
+    ) -> int:
+        batch = [tuple(row) for row in rows]
+        conn_.batches.append((sql, batch))
+        return len(batch)
+
     module.run = run  # type: ignore[attr-defined]
+    module.try_submit = try_submit  # type: ignore[attr-defined]
+    module.execute_values_on = execute_values_on  # type: ignore[attr-defined]
     return module
 
 
@@ -95,14 +145,18 @@ def service() -> DataService:
     )
 
 
-def _flushed(service: DataService) -> list[tuple[str, tuple]]:
-    """SQL-ы батчей, дошедшие до БД, с параметрами строк."""
-    out: list[tuple[str, tuple]] = []
-    for sql, params in service._db.conn.statements:  # type: ignore[union-attr]
-        if "INSERT INTO" not in sql:
-            continue
-        out.append((sql, params if isinstance(params, list) else [params]))
-    return out
+def _flushed(service: DataService) -> list[tuple[str, list[tuple[object, ...]]]]:
+    """Партии батчей, дошедших до БД, с их строками.
+
+    Раньше здесь разбирались ``INSERT`` среди заявлений курсора. Сброс идёт в
+    пул без ожидания места и пишет одной вставкой, поэтому доказательство
+    «дошло до БД» — это партия, а не пообъектный след курсора.
+    """
+    return [
+        (sql, rows)
+        for sql, rows in service._db.conn.batches  # type: ignore[union-attr]
+        if "INSERT INTO" in sql
+    ]
 
 
 def _param_index(sql: str, name: str) -> int:
@@ -188,6 +242,28 @@ class TestPlatformStampsItsOwnEvents:
         assert len(seqs) == 5
         assert seqs == sorted(seqs), "ключи платформенных событий не монотонны"
         assert len(set(seqs)) == 5, "ключи платформенных событий повторились"
+
+    def test_batch_leaves_as_one_insert_in_the_runtime_class(
+        self, service: DataService,
+    ) -> None:
+        """Батч уходит одной вставкой, и уходит в служебный класс работы.
+
+        Две разные вещи, оба проверяются на одном батче. Одна вставка — потому
+        что сброс идёт в пул через ``try_submit`` и пишет через
+        ``execute_values_on``: разбиение на строки вернуло бы воркер в очередь
+        на весь обход, и штамповка событий журнала стала бы конкурировать с
+        вызовами инструментов за место. Служебный класс — потому что сброс
+        повторяется следующим тиком, пока пул занят, и в классе модели он
+        занял бы место, отведённое работе агента.
+        """
+        for i in range(3):
+            service.log_event("tool.started", name=f"step-{i}")
+        service._buffer.flush()
+
+        flushed = _flushed(service)
+        assert len(flushed) == 1, f"ожидалась одна вставка на батч, получили {len(flushed)}"
+        assert len(flushed[0][1]) == 3, flushed[0][1]
+        assert service._db.audiences == [AUDIENCE_RUNTIME]  # type: ignore[union-attr]
 
     def test_stamping_survives_a_json_round_trip(self, service: DataService) -> None:
         """Событие агента доходит по stdio как JSON: типы обязаны выжить."""

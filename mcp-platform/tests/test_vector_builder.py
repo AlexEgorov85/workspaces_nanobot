@@ -31,20 +31,27 @@ class _RecordingDb:
         self._source = source_rows or []
         self._max_track = max_track
         self.executed: list[tuple[str, tuple]] = []
+        #: Классы работы, которыми сборщик пометил каждый вызов. Проверяется
+        #: тестом: сборка идёт при подъёме платформы, то есть это работа
+        #: системы, и ушедшая в класс модели отказ уронил бы чужую сборку.
+        self.audiences: list[str] = []
 
-    def fetch(self, sql: str, *args):
+    def fetch(self, sql: str, *args, audience: str):
+        self.audiences.append(audience)
         if "content_hash" in sql and "SELECT pk_value" in sql:
             return list(self._existing)
         if sql.lstrip().upper().startswith("SELECT * FROM"):
             return [dict(r) for r in self._source]
         raise AssertionError(f"непредвиденный SELECT: {sql}")
 
-    def fetchone(self, sql: str, *args):
+    def fetchone(self, sql: str, *args, audience: str):
+        self.audiences.append(audience)
         if "MAX(" in sql:
             return {"mx": self._max_track}
         raise AssertionError(f"непредвиденный fetchone: {sql}")
 
-    def execute(self, sql: str, *args):
+    def execute(self, sql: str, *args, audience: str):
+        self.audiences.append(audience)
         self.executed.append((" ".join(sql.split()), args))
         return None
 
@@ -118,6 +125,11 @@ class TestIncremental:
         assert result.inserted == 1
         assert result.errors == 0
         assert len(embed.calls) == 1
+        # Класс работы объявлен на каждом вызове и он именно системный: сборка
+        # идёт при подъёме платформы, и ушедшая в модельный класс работа
+        # заняла бы место, объявленное резервом.
+        assert db.audiences, "сборщик обязан объявлять класс каждого вызова"
+        assert set(db.audiences) == {"runtime"}, db.audiences
         assert len(db.inserts()) == 1
         sql, args = db.inserts()[0]
         assert '"table"' in sql

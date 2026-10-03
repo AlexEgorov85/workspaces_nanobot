@@ -35,6 +35,10 @@ from libs.enterprise_common.errors import (  # noqa: E402
     InfrastructureError,
     InvalidRequestError,
 )
+from libs.enterprise_data.audience import (  # noqa: E402
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+)
 from servers.enterprise.capabilities.data.service.main import (  # noqa: E402
     AUDIENCE_MODEL,
     AUDIENCE_RUNTIME,
@@ -77,6 +81,10 @@ class _Conn:
     def __init__(self) -> None:
         self.statements: list[tuple[str, object]] = []
         self.jobs: list[object] = []
+        # Классы работ, в которых пул выполнял операции. Подставной пул, который
+        # принимает любой класс, не отличил бы заметку, ушедшую в служебный
+        # класс, от ушедшей в класс модели, — а это разные потолки ожидания.
+        self.audiences: list[str] = []
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
@@ -87,7 +95,13 @@ def _service(*, task_table: tuple[str, str] | str | None = TASK_TABLE):
     module = ModuleType("fake_db")
     module.conn = conn  # type: ignore[attr-defined]
 
-    def _run(job: object) -> object:
+    def _run(job: object, *, audience: str = JOB_AUDIENCE_MODEL) -> object:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"run: класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        conn.audiences.append(audience)
         conn.jobs.append(job)
         return job(conn)  # type: ignore[operator]
 
@@ -220,6 +234,19 @@ class TestAppendHistoryNotice:
         assert not re.search(r"\bSELECT\b", _insert(conn)[0], re.IGNORECASE), (
             "заметка не требует чтения"
         )
+
+    def test_work_reaches_the_pool_in_the_runtime_class(self) -> None:
+        """Класс работы виден на той работе, которая ушла в пул.
+
+        ``test_runtime_audience_is_the_default`` смотрит в сигнатуру, а здесь
+        видно результат: подставной пул пишет класс каждой выполненной работы,
+        поэтому «уехало в служебный класс» — проверяемое утверждение, а не
+        соглашение. Иначе подпись вроде бы правильная, а работа ушла бы в
+        класс модели и заняла место, отведённое вызовам инструментов.
+        """
+        service, conn = _service()
+        service.append_history_notice(chat_id="chat-1", text="x")
+        assert conn.audiences == [AUDIENCE_RUNTIME]
 
     def test_runtime_audience_is_the_default(self) -> None:
         import inspect

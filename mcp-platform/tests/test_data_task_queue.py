@@ -36,6 +36,10 @@ from libs.enterprise_common.errors import (  # noqa: E402
     InfrastructureError,
     InvalidRequestError,
 )
+from libs.enterprise_data.audience import (  # noqa: E402
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+)
 from servers.enterprise.capabilities.data.service.main import (  # noqa: E402
     AUDIENCE_MODEL,
     AUDIENCE_RUNTIME,
@@ -178,6 +182,10 @@ class ScriptedConn:
         #: операции оборота обязаны укладываться ровно в одну, иначе обрыв
         #: между вызовами оставит задачу в processing.
         self.jobs: list[object] = []
+        #: Классы работ, в которых пул выполнял задания. Обслуживание очереди
+        #: задач — внутренний поток платформы, а не работа модели; пул,
+        #: принимающий любой класс, этой разницы не проверял бы.
+        self.audiences: list[str] = []
 
     def cursor(self) -> ScriptedCursor:
         return ScriptedCursor(self)
@@ -212,7 +220,13 @@ def _service(
     module = ModuleType("fake_db")
     module.conn = conn  # type: ignore[attr-defined]
 
-    def _run(job: object) -> object:
+    def _run(job: object, *, audience: str = JOB_AUDIENCE_MODEL) -> object:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"run: класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        conn.audiences.append(audience)
         conn.jobs.append(job)
         return job(conn)  # type: ignore[operator]
 
@@ -350,7 +364,10 @@ class TestClaimTaskGuards:
         conn = ScriptedConn()
         module = ModuleType("fake_db")
         module.conn = conn  # type: ignore[attr-defined]
-        module.run = lambda job: job(conn)  # type: ignore[attr-defined]
+        # Пул здесь только чтобы отсечь «отказ таблицей случился уже после
+        # постановки задания»: если бы сервис дошёл до пула, тест упал бы на
+        # его подписи, а не на ``ENTERPRISE_TASK_TABLE``.
+        module.run = lambda job, *, audience=JOB_AUDIENCE_MODEL: job(conn)  # type: ignore[attr-defined]
         service = DataService(db=module)
         with pytest.raises(InfrastructureError) as excinfo:
             service.claim_task()
@@ -364,6 +381,19 @@ class TestClaimTaskGuards:
     def test_runtime_audience_allowed(self) -> None:
         service, _ = _service(claim_rows=[_task_row()])
         assert service.claim_task(audience=AUDIENCE_RUNTIME) is not None
+
+    def test_work_reaches_the_pool_in_the_runtime_class(self) -> None:
+        """Класс проверяется на выполненной работе, а не в подписи.
+
+        Отказ модели выше — это проверка входа. Здесь видно, куда ушла сама
+        работа: обслуживание очереди задач ведёт внутренний поток платформы,
+        и в классе модели он занял бы место, отведённое вызовам инструментов.
+        Подставной пул пишет класс каждой постановки, поэтому утверждение
+        проверяемо, а не согласовательно.
+        """
+        service, conn = _service(claim_rows=[_task_row()])
+        service.claim_task()
+        assert conn.audiences == [AUDIENCE_RUNTIME]
 
 
 class TestAppendAssistantMessage:

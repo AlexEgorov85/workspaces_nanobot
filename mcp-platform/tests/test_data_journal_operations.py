@@ -23,8 +23,13 @@ from typing import Any
 
 import pytest
 
-from libs.enterprise_common.errors import InvalidRequestError
+from libs.enterprise_common.errors import InfrastructureError, InvalidRequestError
 
+from libs.enterprise_data.audience import (
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+    JOB_AUDIENCE_RUNTIME,
+)
 from servers.enterprise.capabilities.data.service.main import DataService
 
 LOGS = ("public", "agent_gateway_logs")
@@ -72,8 +77,19 @@ class FakePool:
     def __init__(self, rowcounts: dict[str, int] | None = None) -> None:
         self.log: list[tuple[str, list[Any]]] = []
         self._rowcounts = rowcounts or {}
+        # Классы работ, в которых пул выполнял операции журнала. Пустой класс
+        # нельзя пропустить: подставной пул, принимающий что угодно, проверил бы
+        # только то, что SQL правильный, и молча согласился бы на журнал,
+        # записанный в класс модели.
+        self.audiences: list[str] = []
 
-    def run(self, job: Any) -> Any:
+    def run(self, job: Any, *, audience: str = JOB_AUDIENCE_MODEL) -> Any:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"run: класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        self.audiences.append(audience)
         return job(FakeConn(self.log, self._rowcounts))
 
 
@@ -344,3 +360,15 @@ class TestOperationsAreNotModelFacing:
         tool = create_purge(container)
         properties = set((tool.input_schema.get("properties") or {}))
         assert properties <= {"retention_days", "remove_empty_outbound"}, properties
+
+    def test_work_reaches_the_pool_in_the_runtime_class(self) -> None:
+        """Класс проверяется на выполненной работе, а не в подписи.
+
+        Метки «runtime-only» у операций нет смысла проверять в одиночку: она
+        объявляет намерение. Подставной пул пишет класс каждой работы, поэтому
+        здесь видно, что запись прогона вопроса ушла в служебный класс, а не в
+        класс модели с его потолком ожидания.
+        """
+        pool = FakePool()
+        _service(pool).upsert_question_run("req-1", question="вопрос")
+        assert pool.audiences == [JOB_AUDIENCE_RUNTIME]

@@ -43,14 +43,19 @@ class CountingPool:
         self.peak = 0
         self.calls = 0
         self.threads: set[str] = set()
+        #: Классы работы, которыми загрузчик пометил каждый вызов: проверяется
+        #: тестом, что загрузка объявляет себя работой системы, а не уходит
+        #: в класс модели по умолчанию.
+        self.audiences: list[str] = []
 
     def configure(self, dsn: str) -> None:
         self.configured.append(dsn)
 
-    def run(self, fn):
+    def run(self, fn, *, audience: str):
         with self._lock:
             self._inside += 1
             self.calls += 1
+            self.audiences.append(audience)
             self.peak = max(self.peak, self._inside)
             self.threads.add(threading.current_thread().name)
             if self._inside >= self._parties:
@@ -229,12 +234,14 @@ def test_loader_does_not_own_the_pool() -> None:
     class StrictPool:
         def __init__(self) -> None:
             self.calls: list[str] = []
+            self.audiences: list[str] = []
 
         def configure(self, dsn: str) -> None:
             self.calls.append("configure")
 
-        def run(self, fn: Any) -> Any:
+        def run(self, fn: Any, *, audience: str) -> Any:
             self.calls.append("run")
+            self.audiences.append(audience)
             return fn(_EmptyConn())
 
         def close(self) -> None:  # pragma: no cover - вызов означал бы ошибку

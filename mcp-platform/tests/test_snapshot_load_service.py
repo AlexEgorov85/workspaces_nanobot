@@ -102,12 +102,17 @@ class ScriptedPool:
         self.conn = ScriptedConn(rows_for)
         self.configured: list[str] = []
         self.runs = 0
+        #: Классы работы, которыми загрузчик пометил каждый вызов. Проверяется
+        #: тестом: загрузка идёт при подъёме платформы, и ушедшая в класс
+        #: модели работа отказала бы при нескольких нитях загрузки.
+        self.audiences: list[str] = []
 
     def configure(self, dsn: str) -> None:
         self.configured.append(dsn)
 
-    def run(self, fn):
+    def run(self, fn, *, audience: str):
         self.runs += 1
+        self.audiences.append(audience)
         return fn(self.conn)
 
 
