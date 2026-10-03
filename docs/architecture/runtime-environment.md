@@ -105,14 +105,14 @@ Greenplum 6.5 требование, которого тот не выполня�
 Известные и зафиксированные нарушения. Список отдан стражу как карантин:
 он зелёный сегодня и красный при **любом новом** нарушении.
 
-**Закрыто 2026-10-03: было 25, стало 8.** Реестр миграций больше не падает на
+**Закрыто 2026-10-03: было 25, стало 7.** Реестр миграций больше не падает на
 синтаксисе; зеркало сессий не блокирует таблицу и не требует `ON CONFLICT`;
 `IDENTITY` заменена на `BIGSERIAL`; весь DDL сессий, журнала, каналов и `oarb`
 получил ограждённое объявление распределения, а конструкции 9.5/9.6 заменены
 на `DO`-блоки с проверкой `pg_indexes` и `information_schema.columns`.
 
 Оставшийся долг — только два вида: применённые миграции (переписывать нельзя,
-DRIFT по checksum) и два seed-скрипта с `ON CONFLICT`.
+DRIFT по checksum) и один seed-скрипт с `ON CONFLICT`.
 
 | Файл | Нарушение | Почему не закрыто |
 |------|-----------|-------------------|
@@ -122,8 +122,7 @@ DRIFT по checksum) и два seed-скрипта с `ON CONFLICT`.
 | `sql/migrations/V009__agent_gateway_logs_event_time_indexes.sql` | `CREATE INDEX IF NOT EXISTS` (9.5) | то же |
 | `sql/migrations/V010__agent_session_mirror_replica_key.sql` | `ADD COLUMN IF NOT EXISTS` (9.6), `SET NOT NULL` (12.0) | то же |
 | `sql/migrations/V011__agent_session_mirror_indexes.sql` | `CREATE INDEX IF NOT EXISTS` (9.5) | то же |
-| `sql/audit_analyzer/seed_predefined_scripts.sql` | `ON CONFLICT` (9.5) | нужна эмуляция многострочного upsert |
-| `sql/audit_analyzer/seed_default_indexes.sql` | `ON CONFLICT` (9.5) ×3 | то же; файл помечен LEGACY |
+| `sql/audit_analyzer/seed_default_indexes.sql` | `ON CONFLICT` (9.5) ×3 | помечен LEGACY, обслуживает только ранее развёрнутые инстансы |
 
 ### Закрытый блокер: два ключа на одной таблице
 

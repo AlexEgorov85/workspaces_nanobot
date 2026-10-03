@@ -129,13 +129,10 @@ KNOWN_DEBT: dict[str, str] = {
         "ADD COLUMN IF NOT EXISTS (9.6), SET NOT NULL (12.0). Тот же DRIFT",
     "sql/migrations/V011__agent_session_mirror_indexes.sql":
         "CREATE INDEX IF NOT EXISTS (9.5). Тот же DRIFT",
-    "sql/audit_analyzer/seed_predefined_scripts.sql":
-        "ON CONFLICT (9.5) в многострочном VALUES. Нужна эмуляция upsert через "
-        "DO-блок с циклом: VALUES-литерал нельзя переиспользовать во втором "
-        "запросе, а дублировать данные сида нельзя — копии разойдутся",
     "sql/audit_analyzer/seed_default_indexes.sql":
-        "ON CONFLICT (9.5) ×3, то же препятствие. Файл помечен LEGACY и "
-        "обслуживает только ранее развёрнутые инстансы",
+        "ON CONFLICT (9.5) ×3, то же препятствие с эмуляцией многострочного "
+        "upsert. Файл помечен LEGACY и обслуживает только ранее развёрнутые "
+        "инстансы, поэтому переписан последним из пары — раньше выгоднее",
 }
 
 

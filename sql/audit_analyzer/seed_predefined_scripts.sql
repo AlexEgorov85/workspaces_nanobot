@@ -6,8 +6,9 @@
 -- (Python REGISTRY). После миграции DB становится source of truth,
 -- Python REGISTRY остаётся как transitional fallback (deprecated).
 --
--- Идемпотентно: ON CONFLICT (name) DO UPDATE — повторный запуск обновляет
--- существующие строки и не создаёт дубликатов.
+-- Идемпотентно: повторный запуск обновляет существующие строки по имени и не
+-- создаёт дубликатов. Реализовано через DO-блок с циклом, а не через
+-- ON CONFLICT (9.5) — см. пояснение перед ним.
 --
 -- Применение:
 --   psql "$DATABASE_URL" -f sql/audit_analyzer/seed_predefined_scripts.sql
@@ -24,9 +25,22 @@
 --     Изменения — через новые миграционные файлы, не правкой этого.
 -- ========================================================================= */
 
-INSERT INTO public.agent_predefined_scripts
-    (name, description, returns, long_description, sql_template, parameters, max_rows_default)
-VALUES
+-- Идемпотентно: повторный запуск обновляет существующие строки по имени и не
+-- создаёт дубликатов.
+--
+-- Раньше это было `INSERT ... ON CONFLICT (name) DO UPDATE`, но ON CONFLICT
+-- появился в PostgreSQL 9.5, а боевая среда — Greenplum 6.5 с ядром 9.4.
+-- Эмуляция сделана через DO-блок с циклом, а не через два запроса с
+-- UPDATE...FROM (VALUES ...) и INSERT...SELECT FROM (VALUES ...) именно
+-- поэтому, что VALUES-литерал нельзя переиспользовать во втором запросе:
+-- пришлось бы продублировать все пять сидов целиком, и две копии данных
+-- рано или поздно разошлись бы — тихая порча сида вместо явной ошибки.
+DO $seed$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN
+        SELECT * FROM (VALUES
     (
         'audit_status_summary',
         'Сводка по статусам аудитов',
@@ -111,14 +125,32 @@ GROUP BY a.id, a.title, a.actual_date
         $params5${"min_violations": {"type": "number", "required": false, "default": null, "description": "Минимальное число нарушений для включения проверки в отчёт. Полезно, чтобы исключить «Без нарушений»-строки и сосредоточиться на проблемных проверках (рекомендуется 1+)."}}$params5$::jsonb,
         1000
     )
-ON CONFLICT (name) DO UPDATE SET
-    description      = EXCLUDED.description,
-    returns          = EXCLUDED.returns,
-    long_description = EXCLUDED.long_description,
-    sql_template     = EXCLUDED.sql_template,
-    parameters       = EXCLUDED.parameters,
-    max_rows_default = EXCLUDED.max_rows_default,
-    updated_at       = NOW();
+        ) AS v(name, description, returns_col, long_description,
+               sql_template, parameters, max_rows_default)
+    LOOP
+        UPDATE public.agent_predefined_scripts
+           SET description      = r.description,
+               returns          = r.returns_col,
+               long_description = r.long_description,
+               sql_template     = r.sql_template,
+               parameters       = r.parameters,
+               max_rows_default = r.max_rows_default,
+               updated_at       = NOW()
+         WHERE name = r.name;
+
+        -- NOT FOUND относится к UPDATE выше: если строка была, она обновлена,
+        -- и вставка была бы нарушением первичного ключа.
+        IF NOT FOUND THEN
+            INSERT INTO public.agent_predefined_scripts
+                (name, description, returns, long_description,
+                 sql_template, parameters, max_rows_default)
+            VALUES
+                (r.name, r.description, r.returns_col, r.long_description,
+                 r.sql_template, r.parameters, r.max_rows_default);
+        END IF;
+    END LOOP;
+END
+$seed$;
 
 -- Проверка: скриптов должно быть 5 (audit_types_stats — отдельный, см. fix_audit_types_stats_avg.sql).
 SELECT COUNT(*) AS scripts_seeded
