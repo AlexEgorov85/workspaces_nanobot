@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import ast
+import tempfile
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -133,6 +134,7 @@ DUMMY_SECRETS: dict[str, str] = {
     "DB_NAME": "test",
     "LLM_API_KEY": "test",
     "EMBED_TOKEN": "test",
+    "NANOBOT_WORKSPACE": str(Path(tempfile.gettempdir()) / "nanobot-platform-tests"),
 }
 
 

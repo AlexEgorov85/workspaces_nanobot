@@ -688,6 +688,15 @@
     "persist_threshold": 50000,
     "persist_max_files": 100,
     "persist_max_age_hours": 0,
+    "tool_result_limits": {
+      "exec_max_output_chars": 500000,
+      "exec_default_output_chars": 100000,
+      "read_file_max_chars": 512000,
+      "grep_head_limit": 500,
+      "grep_file_head_limit": 400,
+      "grep_max_file_bytes": 20000000,
+      "list_dir_max_entries": 500
+    },
     "llm_timeout": 300,
     "exec_timeout": 0,
     "exec_timeout_cap_sec": 3600,

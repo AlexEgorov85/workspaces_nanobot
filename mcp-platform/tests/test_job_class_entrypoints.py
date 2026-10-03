@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,7 @@ DUMMY_SECRETS: dict[str, str] = {
     "DB_NAME": "test",
     "LLM_API_KEY": "test",
     "EMBED_TOKEN": "test",
+    "NANOBOT_WORKSPACE": str(Path(tempfile.gettempdir()) / "nanobot-platform-tests"),
 }
 
 #: Ключ контракта класса, на котором проверяется доезд до пула. Потолок

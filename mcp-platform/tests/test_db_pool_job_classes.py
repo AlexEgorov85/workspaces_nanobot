@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,6 +38,11 @@ _DUMMY_SECRETS = {
     "DB_NAME": "test",
     "LLM_API_KEY": "test",
     "EMBED_TOKEN": "test",
+    # Не секрет, а подстановка пути: ею объявлен ``execution.session_root``
+    # (change 2026-10-03-session-files, п. 1.1). ``Settings`` разворачивает
+    # файл по ПЕРЕДАННОМУ ``env``, а не по ``os.environ``, поэтому переменная
+    # обязана быть здесь же — иначе сбор модуля падает на разборе platform.json.
+    "NANOBOT_WORKSPACE": str(Path(tempfile.gettempdir()) / "nanobot-platform-tests"),
 }
 
 _SETTINGS = Settings(env=dict(_DUMMY_SECRETS), secrets={})

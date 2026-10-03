@@ -25,6 +25,10 @@ sys.path.insert(0, str(PLATFORM_ROOT))
 
 from libs.enterprise_common.errors import InfrastructureError  # noqa: E402
 from libs.enterprise_common.settings import Settings  # noqa: E402
+from libs.enterprise_data.audience import (  # noqa: E402
+    ALL_AUDIENCES,
+    JOB_AUDIENCE_MODEL,
+)
 from servers.enterprise import server as enterprise_server  # noqa: E402
 
 
@@ -108,8 +112,18 @@ class _FakePool:
     def __init__(self, rows: list[tuple[Any, ...]] | None = None, delay: float = 0.0) -> None:
         self.rows = list(rows or ())
         self.delay = delay
+        #: Классы работ, в которых пул выполнял операции. Диагностика по
+        #: проводу зовётся моделью, и подставной пул не должен соглашаться
+        #: ни на какой класс молча.
+        self.audiences: list[str] = []
 
-    def run(self, job: Any) -> Any:
+    def run(self, job: Any, *, audience: str = JOB_AUDIENCE_MODEL) -> Any:
+        if audience not in ALL_AUDIENCES:
+            raise InfrastructureError(
+                f"run: класс работы {audience!r} не объявлен; "
+                f"объявлены: {sorted(ALL_AUDIENCES)}"
+            )
+        self.audiences.append(audience)
         if self.delay:
             time.sleep(self.delay)
         return job(_FakeConn(self.rows))
@@ -715,9 +729,8 @@ class TestWireContract:
         import anyio
 
         transport, _, container = enterprise_server.build()
-        container.get("data")._db = _FakePool(  # noqa: SLF001 - подмена пула под провод
-            rows=[("public", "present_table")]
-        )
+        pool = _FakePool(rows=[("public", "present_table")])
+        container.get("data")._db = pool  # noqa: SLF001 - подмена пула под провод
 
         result = anyio.run(
             _call,
@@ -736,6 +749,10 @@ class TestWireContract:
         assert report["missing"] == ["public.absent_table"]
         assert report["found"] == 1
         assert report["expected"] == 2
+        # Диагностика — работа модели: видно на выполненной работе, а не в
+        # подписи. Подставной пул отвергает необъявленный класс, поэтому
+        # записанное значение не могло подставиться молча.
+        assert pool.audiences == [JOB_AUDIENCE_MODEL], pool.audiences
 
     def test_timeout_is_reported_and_server_survives(
         self, monkeypatch: pytest.MonkeyPatch
