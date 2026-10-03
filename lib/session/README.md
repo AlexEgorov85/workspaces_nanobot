@@ -112,19 +112,29 @@ dbname,user}` + `DB_PASSWORD` (или `dsn` override), а не передаёт�
 
 | Колонка | Тип | Описание |
 |---------|-----|----------|
-| `session_key` | TEXT PK | Уникальный ключ сессии (например `user:dev`) |
+| `replica_id` | TEXT PK | Владелец строки; вторая половина составного ключа |
+| `session_key` | TEXT PK | Ключ сессии (например `user:dev`) |
 | `created_at` | TIMESTAMPTZ | Дата создания |
-| `updated_at` | TIMESTAMPTZ | Последнее обновление |
+| `updated_at` | TIMESTAMPTZ | Последнее обновление. **Поле разрешения конфликта, не признак изменения** |
 | `last_consolidated` | INT | Номер последней консолидации |
 | `metadata` | JSONB | Произвольные метаданные (title и т.д.) |
+| `source_digest` | TEXT | SHA-256 файла сессии. **Признак изменения** — сравнение с `updated_at` замирало, потому что upstream не поднимает метку при правке `metadata` |
+| `missing_cycles` | INT | Сколько циклов подряд сессии не было в списке upstream; удаление по порогу, не по первому пропуску |
+| `message_count` | INT | Сколько строк сообщений зеркала принадлежит сессии |
+| `synced_at` | TIMESTAMPTZ | Момент последней записи строки зеркала |
+
+Ключ — составной `(replica_id, session_key)`, а не `session_key`. Одна и та
+же сессия на двух репликах — это две строки, а не одна под общим
+last-write-wins.
 
 ### agent_session_messages
 
 | Колонка | Тип | Описание |
 |---------|-----|----------|
-| `id` | BIGSERIAL | Первичный ключ |
-| `session_key` | TEXT | Ключ сессии (FK логический, без constraint для GP) |
-| `seq` | INT | Порядковый номер сообщения |
+| `id` | BIGSERIAL NOT NULL | Суррогатный номер строки, **ключом не является**. Нужен для разбора неустойчивых позиций: `seq` меняет смысл при сдвиге нумерации |
+| `replica_id` | TEXT PK | Владелец строки |
+| `session_key` | TEXT PK | Ключ сессии (FK логический, без constraint для GP) |
+| `seq` | INT PK | Порядковый номер сообщения |
 | `role` | TEXT | `user` / `assistant` / `system` |
 | `content` | TEXT | Текст сообщения |
 | `msg_timestamp` | TEXT | Временная метка сообщения |
@@ -141,8 +151,22 @@ dbname,user}` + `DB_PASSWORD` (или `dsn` override), а не передаёт�
 | `_channel_delivery` | BOOLEAN | Флаг доставки через канал |
 | `created_at` | TIMESTAMPTZ | Дата создания |
 
-Индекс `(session_key, seq)` в create-скриптах не создаётся (только таблица +
-COMMENT) — при необходимости подавайте его отдельно при развёртывании.
+Ключ таблицы — составной `(replica_id, session_key, seq)`, и он **единственный**.
+Greenplum 6 допускает на хеш-распределённой таблице ровно один
+`UNIQUE`/`PRIMARY KEY`, поэтому прежняя пара «`PRIMARY KEY (id)` плюс
+`UNIQUE (replica_id, session_key, seq)`» делала таблицу не создаваемой вовсе.
+Уникальность по составному ключу держит писатель: `mirror_session` удаляет
+все сообщения сессии и вставляет заново с `seq = 0…N-1`, поэтому дубль на
+одну позицию не может возникнуть в принципе.
+
+Распределение сообщений — по `(replica_id, session_key)`, то есть
+подмножество ключа и ровно как у `agent_session_meta`. Сообщения сессии
+оказываются на том же сегменте, что и её метаданные, поэтому восстановление
+сессии не собирает данные со всего кластера.
+
+Индексы сверх первичного ключа создаёт `V011`
+(`agent_session_messages_replica_session_seq_idx`); на новой установке он
+избыточен, потому что те же столбцы уже под ключом.
 
 ## Создание таблиц
 
@@ -151,7 +175,12 @@ psql -d nanobot -f sql/session/create_public_agent_session_meta.sql
 psql -d nanobot -f sql/session/create_public_agent_session_messages.sql
 ```
 
-Оба скрипта — Greenplum 6.5: `DISTRIBUTED BY (...)`, `pgcrypto`, без FK.
+Оба скрипта рассчитаны на Greenplum 6.5 (ядро PostgreSQL 9.4) и одновременно
+применяются к PostgreSQL 13.22 (тестовый контур): клауза распределения
+вынесена в ограждённый шаг `SET DISTRIBUTED BY`, а не стоит в теле
+`CREATE TABLE`, где она была бы синтаксической ошибкой на PostgreSQL.
+`pgcrypto` — для UUID, FK не объявляется (GP 6.5 не поддерживает
+referential integrity; каскад и так выполняет писатель).
 
 ## Архитектурный инвариант
 
