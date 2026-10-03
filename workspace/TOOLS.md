@@ -299,31 +299,23 @@ JSON-string. Изменение формы данных требует отде�
   есть `legal_summarizer_query`. Это и быстрее, и кириллица не сломается.
 - Не передавай в `field` значения вне списка — будет отказ с понятной ошибкой.
 
-## audit_analyzer — доступ через CLI
+## audit_analyzer — операции платформы
 
-Для работы с `audit_analyzer` Agent вызывает CLI навыка через `exec`
-(прямые tools `duckdb_query` / `vector_search` удалены):
+Данные аудита читаются операциями capability `audit`, а не командами в
+консоли. Кликабельный вход — `mcp_enterprise_list_scripts`,
+`mcp_enterprise_run_script`, `mcp_enterprise_generate_sql` и
+`mcp_enterprise_vector_search`; доменный разбор — в навыке
+`workspace/skills/audit_analyzer/SKILL.md`, общий контракт вызовов — в
+навыке `workspace/skills/enterprise_mcp/SKILL.md`.
 
-```bash
-# Predefined script (единственный Agent-контракт)
-python workspace/skills/audit_analyzer/scripts/cli.py --mode predefined \
-    --script violations_by_type --params '{"date_from": "2024-01-01"}'
-
-# Каталог predefined-скриптов (имя, описание, параметры)
-python workspace/skills/audit_analyzer/scripts/cli.py --list-scripts
-
-# Каталог FAISS-индексов
-python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
-```
-
-| Способ | Назначение | Когда |
+| Операция | Назначение | Когда |
 |---|---|---|
-| `--mode predefined` | Точный SELECT по 6 predefined-скриптам | Числовые/структурные запросы; predefined-скрипты |
-| `--list-scripts` | Актуальный каталог скриптов из БД | Выбор скрипта |
-| `--list-indexes` | Актуальный каталог FAISS-индексов | Discovery индексов |
+| `mcp_enterprise_generate_sql` | Ответ на вопрос по данным фразой | Числовые и структурные запросы |
+| `mcp_enterprise_run_script` | Точный расчёт готовым скриптом из каталога | Есть подходящий скрипт |
+| `mcp_enterprise_vector_search` | Семантический поиск по снимку | Похожие формулировки, «найди похожее» |
+| `mcp_enterprise_list_scripts` | Каталог доступных скриптов | Не знаешь, что можно спросить |
 
-Агент сам читает `SKILL.md` и делает выбор. Ни один режим не делает
-auto-routing или классификацию запроса. Режимы `--mode vector` и
-`--mode generated_sql` доступны в CLI, но не являются частью контракта
-агента.
+**Не делать:** не звать `exec`/`python` ради данных аудита. Операции
+платформы — единственный путь, который даёт изоляцию вызова и запись в
+журнал; обходной путь не увидит ни того, ни другого.
 
