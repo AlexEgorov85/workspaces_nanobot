@@ -464,6 +464,14 @@ class _Watchdog:
         started = time.monotonic()
         while not self._stop.wait(0.2):
             if self._proc.poll() is not None:
+                # Последний замер ПЕРЕД выходом. Без него прогон, упавший в
+                # потолок быстро, классифицировался бы как обычный: цикл
+                # опрашивает раз в 0,2 с, а процесс к тому моменту уже мёртв
+                # и опроса не будет. Именно так и выглядел отказ ОС при нулевой
+                # диагностике — худший вид поломки: потолок сработал, а
+                # отчёт сказал «прогон просто упал». Пик задания переживает
+                # смерть процесса, поэтому показание доступно и после неё.
+                self._sample_once()
                 return
             if time.monotonic() - started >= self._max_seconds:
                 self.timeout_hit = True
@@ -482,6 +490,25 @@ class _Watchdog:
                     self.active_processes = 0
                 self._kill_tree()
                 return
+
+    def _sample_once(self) -> None:
+        """Снять пик задания один раз; ничего не убивать и не классифицировать.
+
+        Вызывается после смерти процесса, поэтому единственное, что тут
+        уместно, — обновить показание. Потолок уже сработал на стороне ОС, и
+        повторный ``kill`` тут был бы выстрелом в мёртвое дерево.
+        """
+        if self._job is None:
+            return
+        peak = _windows_job_peak(self._job)
+        if peak > self.peak_bytes:
+            self.peak_bytes = peak
+        if peak >= self._cap_bytes and not self.memory_hit:
+            self.memory_hit = True
+            try:
+                self.active_processes = _windows_active_processes(self._job)
+            except OSError:
+                self.active_processes = 0
 
     def _kill_tree(self) -> None:
         try:
@@ -560,7 +587,38 @@ def _banner(args, cap_mb, cap_source, seconds, seconds_source, mechanism, comman
     sys.stdout.flush()
 
 
+def _harden_streams() -> None:
+    """Сделать вывод непадающим при любой кодировке консоли.
+
+    Скрипт печатает по-русски, а кодировка stdout на Windows по умолчанию
+    cp1251. Раньше это ничем не грызло ровно до тех пор, пока скрипт не
+    запускали из чужого окружения: ``--help`` через ``argparse`` печатает
+    русские строки описаний, и на cp1251 процесс падал с
+    ``UnicodeEncodeError`` прямо во время разбора аргументов — то есть
+    ещё до какого-либо прогона. Обход был внешний: ``PYTHONUTF8=1`` в
+    вызывающей оболочке. Скрипт, который обязаны запускать и из pytest, и из
+    CI, и из cron, не должен требовать настройки консоли вызывающего.
+
+    Поэтому потоки переводятся в UTF-8 с ``errors="replace"``: непредставимый
+    символ заменяется, а не роняет прогон. Замена вместо исключения выбрана
+    сознательно — потеря одного символа в баннере не стоит трассировки,
+    которая не даёт ни запустить прогон, ни прочитать его.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if encoding in ("utf8",):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # поток подменён — оставляем как есть
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _harden_streams()
     raw = list(sys.argv[1:] if argv is None else argv)
     own, pytest_args = _split_argv(raw)
 
