@@ -69,11 +69,17 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 - **AND** запись в PG НЕ блокирует hot path
   (`get_or_create` / `save`).
 - **AND** DDL `agent_session_meta` / `agent_session_messages`
-  НЕ изменяется в рамках этого change: колонка `updated_at`
-  уже присутствует (см.
-  `sql/session/create_public_agent_session_meta.sql`).
-  Колонка `version` НЕ вводится — конфликт-резолюция
-  опирается на существующий `updated_at`.
+  ИЗМЕНЁН этим change: в ключ добавлен `replica_id`, введены
+  `source_digest`, `missing_cycles`, `message_count`, `synced_at`
+  (миграции `V010`, `V011`). Прежняя редакция требовала DDL не трогать
+  и обосновывалась тем, что «конфликт-резолюция опирается на
+  существующий `updated_at`» — а этот столбец и оказался непригоден как
+  признак изменения (см. требование про stale-detection).
+- **AND** сообщения зеркалируются ВСЕМИ колонками DDL, а не пятью:
+  прежняя запись теряла `tool_calls`, `tool_call_id`, `name`,
+  `reasoning_content`, `thinking_blocks`, `media`, `cli_apps`,
+  `mcp_presets`, `injected_event`, `_command`, `_channel_delivery`, и для
+  аварийного восстановления это была невосстановимая потеря.
 
 #### Scenario: Зеркалирование agent_session_messages (full re-read)
 
@@ -98,12 +104,18 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   либо старую версию сообщений (до DELETE), либо новую
   (после INSERT), но НЕ промежуточное состояние (после
   DELETE и до INSERT) — благодаря явной транзакции.
-- **AND** если `agent_session_meta.updated_at` в PG ==
-  `upstream_session.updated_at` (с точностью до
-  микросекунды), sync пропускает эту сессию — данные
-  идентичны, `SessionManager.save` атомарно перезаписывает
-  JSONL через `os.replace`, что гарантирует identical
-  `updated_at` ⇔ identical content.
+- **AND** если `agent_session_meta.source_digest` в PG ==
+  `source_digest` файла сессии — sync пропускает эту сессию, содержимое
+  идентично.
+- **AND** если метки времени равны, но дайджесты разошлись — sync
+  ВЫПОЛНЯЕТСЯ. Прежняя формулировка («identical `updated_at` ⇔ identical
+  content») была ложным инвариантом: `JsonlSessionStore.update_metadata`
+  переписывает только поле `metadata` первой строки файла, оставляя
+  `updated_at` прежним, а `SessionManager.save` сохраняет метку как есть.
+  На правке metadata это правило замирало навсегда, и разошедшееся зеркало
+  было уже нечем починить. Признак изменения — дайджест; `updated_at` решает
+  только направление конфликта. См. change
+  `2026-10-03-session-mirror-mcp`.
 - **AND** для первой синхронизации (новая upstream JSONL-сессия)
   сообщения ВСЕГДА перечитываются (это доминирующий
   сценарий для первой записи в PG).
@@ -186,7 +198,47 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 - **AND** эти метрики экспортируются в health-check endpoint
   через `RuntimeHealth` (см. `lib/services/runtime_health.py`).
 
-### Requirement: Multi-instance политика через pg_advisory_xact_lock
+### Requirement: Multi-instance изоляция через replica_id в ключе
+
+При нескольких репликах gateway зеркало разграничивается СОСТАВНЫМ
+первичным ключом `(replica_id, session_key)`, а не соглашением в коде.
+`SessionColdSyncService` SHALL передавать `replica_id` в каждую операцию
+зеркала; цикл очистки SHALL ограничиваться своей репликой.
+
+> **Заменяет leader-election на advisory lock.** Предыдущая редакция требовала
+> `pg_try_advisory_xact_lock` на весь цикл. Требование снято: xact-lock живёт
+> до COMMIT, а цикл состоит из нескольких вызовов платформы и такой транзакции
+> не образует. Замена lock'а — не упрощение, а починка: без `replica_id` в
+> ключе реплики затирали зеркала друг друга, и advisory lock этого не
+> предотвращал (он сериализовал циклы, но не разграничивал принадлежность).
+> См. change `2026-10-03-session-mirror-mcp`.
+
+Идентичность реплики SHALL переживать перезапуск: по умолчанию это имя
+машины (`gateway.session_cold_sync.replica_id` переопределяет для нескольких
+реплик на одной). `os.getpid()` запрещён — после рестарта реплика получила бы
+новое имя, её прежние строки осиротели бы, и очистка их не видела бы.
+
+#### Scenario: Ровно одна строка на (реплика, сессия)
+
+- **WHEN** две реплики зеркалируют одну и ту же сессию `K`
+- **THEN** каждая пишет в СВОЮ строку `(replica_id, K)`, а не конкурирует
+  за одну общую.
+- **AND** очистка реплики `A` SHALL удалять только строки с
+  `replica_id = A`; строки реплики `B` не читаются и не трогаются.
+- **AND** следствие: сценарий «зеркало впереди, но принадлежит другой
+  реплике» невозможен, и «холодное впереди» однозначно означает откат
+  СОБСТВЕННОГО файла (восстановление, смена машины).
+
+#### Scenario: Удалённая сессия удаляется не с первого пропуска
+
+- **WHEN** сессия `K` реплики `A` отсутствует в `list_sessions()` N циклов
+  подряд
+- **THEN** строки зеркала удаляются при `N >= missing_cycles_threshold`
+  (default `2`), не при первом пропуске.
+- **AND** пустой список сессий SHALL НЕ являться основанием для уборки при
+  непустом зеркале: каталог сессий лежит на диске, и пуст он бывает не
+  «потому что всё удалили», а потому что не подмонтирован. Уборка
+  пропускается с записью `cleanup_guarded_total`.
 
 При наличии нескольких реплик gateway `SessionColdSyncService`
 SHALL использовать `pg_try_advisory_xact_lock(hashtext(
@@ -341,15 +393,18 @@ observability для диагностики сломанного sync.
   через `SessionColdSyncService` (не блокирует hot path)
   и сохраняет обновлённые метаданные в `agent_session_meta.metadata`.
 
-#### Scenario: delete_session и set_delete_observer
+#### Scenario: delete_session ловится diff-циклом
 
 - **WHEN** upstream `SessionManager.delete_session(key)` вызывается
   для удаления сессии
 - **THEN** сессия удаляется из upstream JSONL-стора.
-- **AND** `SessionColdSyncService` подписан на
-  `set_delete_observer(...)` upstream API и удаляет
-  соответствующие строки из PG `agent_session_meta` /
-  `agent_session_messages` в своём цикле (не блокирует hot path).
+- **AND** `SessionColdSyncService` НЕ подписывается на
+  `set_delete_observer(...)`: требование снято, подписка не была
+  реализована ни в одной версии, а удаление ловится diff-циклом —
+  сессия исчезает из `list_sessions()`, и операция `cleanup_session_mirror`
+  убирает её строки по своему `replica_id` после подтверждения
+  (`missing_cycles_threshold`).
+- **AND** удаление НЕ блокирует hot path: оно происходит в своём цикле.
 
 #### Scenario: save_runtime_checkpoint и restore_sessions_to_workspace
 
@@ -389,16 +444,18 @@ SHALL всегда писаться первым; PG SHALL обновлятьс�
 - **AND** mirror-операция в PG идёт асинхронно через
   `SessionColdSyncService` (не блокирует hot path).
 
-#### Scenario: Равные updated_at (LWW tie-break)
+#### Scenario: Равные updated_at при разных дайджестах
 
 - **WHEN** `upstream_session.updated_at` ==
-  `agent_session_meta.updated_at` в PG
-- **THEN** `SessionColdSyncService` SHALL пропустить
-  обновление mirror (апдейт не нужен — данные идентичны).
-- **AND** tie-break через `>=` НЕ используется: точное
-  равенство трактуется как «нет изменений» (SessionManager
-  атомарно перезаписывает JSONL через `os.replace`, что
-  гарантирует identical `updated_at` ⇔ identical content).
+  `agent_session_meta.updated_at` в PG, но `source_digest` разошлись
+- **THEN** `SessionColdSyncService` SHALL зеркалировать сессию.
+- **AND** tie-break по `>=`/`==` к меткам времени НЕ применяется: равенство
+  меток не означает тождества содержимого. Атомарная перезапись JSONL через
+  `os.replace` гарантирует согласованность ФАЙЛА, а не равенство метки
+  времени и содержимого — `update_metadata` меняет содержимое, не трогая
+  метку.
+- **AND** вердикт операции несёт `reason="digest_only_change"`, чтобы
+  отличать этот случай от обычного отставания зеркала.
 
 #### Scenario: Удалённая upstream-сессия → diff-based cleanup в PG
 

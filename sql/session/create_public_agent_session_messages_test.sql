@@ -1,15 +1,21 @@
 -- ============================================================================
 -- public.agent_session_messages_test — test-клон public.agent_session_messages
--- Append-only по (session_key, seq). Без FK (GP 6.5 не поддерживает FK).
--- Каскадное удаление выполняется в коде (pg_session_manager.py).
--- Совместимость: Greenplum 6.5.
 --
--- Этот файл живёт ТОЛЬКО для psql-ручного применения; для версионированного
--- применения через runner — V005__test_profile_tables.sql.
+-- Структурный клон боевой таблицы зеркала сессий под профилем test.
+--
+-- НЕ append-only: синхронизация перезаписывает сообщения сессии целиком.
+-- seq — позиция, а не устойчивый идентификатор.
+--
+-- Совместимость: PostgreSQL 13.22 (фактическая база). Ранее здесь стояло
+-- «Совместимость: Greenplum 6.5», «Без FK (GP 6.5 не поддерживает FK)» и
+-- `DISTRIBUTED BY (session_key)` — объявления ложные.
+--
+-- Этот файл живёт ТОЛЬКО для psql-ручного применения.
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.agent_session_messages_test (
     id                BIGSERIAL,
+    replica_id        TEXT NOT NULL,
     session_key       TEXT NOT NULL,
     seq               INT NOT NULL,
     role              TEXT NOT NULL,
@@ -27,13 +33,16 @@ CREATE TABLE IF NOT EXISTS public.agent_session_messages_test (
     _command          BOOLEAN,
     _channel_delivery BOOLEAN,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id)
+    PRIMARY KEY (id),
+    CONSTRAINT agent_session_messages_test_replica_session_seq_idx
+        UNIQUE (replica_id, session_key, seq)
 );
 
-COMMENT ON TABLE  public.agent_session_messages_test IS 'Test-профиль: сообщения чата в рамках сессии (append-only по session_key+seq). Структурный клон public.agent_session_messages.';
-COMMENT ON COLUMN public.agent_session_messages_test.id                IS 'PK сообщения.';
-COMMENT ON COLUMN public.agent_session_messages_test.session_key       IS 'FK-логически на agent_session_meta_test.session_key (FK не объявлено для GP).';
-COMMENT ON COLUMN public.agent_session_messages_test.seq               IS 'Порядковый номер сообщения в сессии (0, 1, 2, ...).';
+COMMENT ON TABLE  public.agent_session_messages_test IS 'Test-профиль: холодное зеркало сообщений сессии. Структурный клон public.agent_session_messages.';
+COMMENT ON COLUMN public.agent_session_messages_test.id                IS 'PK строки. Суррогатный: настоящий ключ — (replica_id, session_key, seq).';
+COMMENT ON COLUMN public.agent_session_messages_test.replica_id        IS 'Реплика-владелец строки; часть ключа наравне с session_key.';
+COMMENT ON COLUMN public.agent_session_messages_test.session_key       IS 'FK-логически на agent_session_meta_test (replica_id, session_key).';
+COMMENT ON COLUMN public.agent_session_messages_test.seq               IS 'Позиция сообщения в текущем списке сессии. Не устойчивый идентификатор.';
 COMMENT ON COLUMN public.agent_session_messages_test.role              IS 'Роль: user / assistant / system / tool.';
 COMMENT ON COLUMN public.agent_session_messages_test.content           IS 'Текст сообщения.';
 COMMENT ON COLUMN public.agent_session_messages_test.msg_timestamp     IS 'Оригинальный timestamp из upstream (text для совместимости).';
