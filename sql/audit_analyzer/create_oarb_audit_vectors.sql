@@ -23,8 +23,26 @@ CREATE TABLE IF NOT EXISTS oarb.audit_vectors (
     synced_at      TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (id)
-)
-DISTRIBUTED BY (source);
+);
+
+-- Распределение объявлено ограждённым шагом, а не в теле CREATE TABLE:
+-- файлы из sql/ применяются и к PostgreSQL 13.22 (тестовый контур), где
+-- клаузы DISTRIBUTED в синтаксисе нет. Проверка служебного каталога
+-- pg_dist_partition отличает Greenplum, поэтому на PostgreSQL шаг — no-op.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE oarb.audit_vectors
+                 SET DISTRIBUTED BY (source)';
+    END IF;
+END
+$distribution$;
 
 COMMENT ON TABLE  oarb.audit_vectors IS 'Векторные эмбеддинги для семантического поиска audit_analyzer.';
 COMMENT ON COLUMN oarb.audit_vectors.id            IS 'PK эмбеддинга (BIGSERIAL).';

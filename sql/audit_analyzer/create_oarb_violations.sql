@@ -21,8 +21,26 @@ CREATE TABLE IF NOT EXISTS oarb.violations (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (id)
-)
-DISTRIBUTED BY (audit_id);
+);
+
+-- Распределение объявлено ограждённым шагом, а не в теле CREATE TABLE:
+-- файлы из sql/ применяются и к PostgreSQL 13.22 (тестовый контур), где
+-- клаузы DISTRIBUTED в синтаксисе нет. Проверка служебного каталога
+-- pg_dist_partition отличает Greenplum, поэтому на PostgreSQL шаг — no-op.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE oarb.violations
+                 SET DISTRIBUTED BY (audit_id)';
+    END IF;
+END
+$distribution$;
 
 COMMENT ON TABLE  oarb.violations IS 'Отклонения (нарушения, проблемы), выявленные в ходе аудита. REFERENCE — уточняется владельцем данных.';
 COMMENT ON COLUMN oarb.violations.id             IS 'PK нарушения.';

@@ -26,6 +26,25 @@ CREATE TABLE IF NOT EXISTS public.agent_conversation_messages_test (
     PRIMARY KEY (id)
 );
 
+-- Ключ распределения — первичный ключ: в Greenplum ограничение «ключ
+-- распределения должен быть подмножеством ключа» иначе не выполняется.
+-- Ограждён проверкой pg_dist_partition, потому что файлы из sql/ применяются
+-- и к PostgreSQL 13.22, где SET DISTRIBUTED BY не существует.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_conversation_messages_test
+                 SET DISTRIBUTED BY (id)';
+    END IF;
+END
+$distribution$;
+
 COMMENT ON TABLE  public.agent_conversation_messages_test IS 'Test-профиль: обмен сообщениями канала PostgresChannel / Web-чата. Структурный клон public.agent_conversation_messages; используется под профилем test для изоляции тестовых прогонов от prod.';
 COMMENT ON COLUMN public.agent_conversation_messages_test.id         IS 'PK — уникальный ID сообщения (UUID).';
 COMMENT ON COLUMN public.agent_conversation_messages_test.chat_id    IS 'ID чата / диалога.';

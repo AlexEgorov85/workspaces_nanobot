@@ -25,6 +25,24 @@ CREATE TABLE IF NOT EXISTS public.agent_session_meta_test (
     PRIMARY KEY (replica_id, session_key)
 );
 
+-- Ключ распределения — составной первичный ключ, как в боевом файле.
+-- Ограждён проверкой pg_dist_partition: файлы из sql/ применяются и к
+-- PostgreSQL 13.22, где SET DISTRIBUTED BY не существует.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_session_meta_test
+                 SET DISTRIBUTED BY (replica_id, session_key)';
+    END IF;
+END
+$distribution$;
+
 COMMENT ON TABLE  public.agent_session_meta_test IS 'Test-профиль: холодное зеркало метаданных сессий. Структурный клон public.agent_session_meta.';
 COMMENT ON COLUMN public.agent_session_meta_test.replica_id       IS 'Реплика-владелец строки; часть первичного ключа.';
 COMMENT ON COLUMN public.agent_session_meta_test.session_key      IS 'Ключ сессии. Уникален только в пределах реплики.';

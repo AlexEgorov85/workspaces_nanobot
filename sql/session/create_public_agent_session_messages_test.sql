@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS public.agent_session_messages_test (
         UNIQUE (replica_id, session_key, seq)
 );
 
+-- КЛЮЧ РАСПРЕДЕЛЕНИЯ НЕ ОБЪЯВЛЕН, и это не пропуск. Greenplum 6 разрешает на
+-- хеш-распределённой таблице ровно один UNIQUE/PRIMARY KEY, и он обязан
+-- включать все столбцы распределения; здесь их два, поэтому на Greenplum 6.5
+-- таблица не создаётся. См. подробности в боевом файле
+-- create_public_agent_session_messages.sql и в каноне среды.
+
 COMMENT ON TABLE  public.agent_session_messages_test IS 'Test-профиль: холодное зеркало сообщений сессии. Структурный клон public.agent_session_messages.';
 COMMENT ON COLUMN public.agent_session_messages_test.id                IS 'PK строки. Суррогатный: настоящий ключ — (replica_id, session_key, seq).';
 COMMENT ON COLUMN public.agent_session_messages_test.replica_id        IS 'Реплика-владелец строки; часть ключа наравне с session_key.';

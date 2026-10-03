@@ -7,12 +7,13 @@
 -- Python); уникальный индекс — отдельная задача, и до неё файл не должен
 -- утверждать обратного.
 -- Управляется: lib/services/db_logging_service.py.
--- Совместимость: PostgreSQL 13.22 — фактическая база (служебная таблица
--- pg_dist_partition на сервере отсутствует). Клауза распределения таблицы
--- удалена: файл нельзя было применить к фактической СУБД, а ложное
--- объявление о совместимости удерживало в коде решения, продиктованные
--- чужими ограничениями (см. openspec/specs/logging-db/spec.md, требование
--- «DDL соответствует фактической СУБД»).
+-- Совместимость: Greenplum 6.5 (ядро PostgreSQL 9.4) — боевая среда;
+-- PostgreSQL 13.22 — тестовый контур. Файлы из sql/ применяются к обоим
+-- движкам, поэтому клаузы, которых нет на одном из них, в теле CREATE TABLE
+-- не пишутся: распределение объявляется ограждённым шагом ниже, а
+-- идемпотентные конструкции 9.5/9.6 заменены на DO-блоки с проверкой
+-- pg_indexes и information_schema.columns. Повторный запуск файла обязан
+-- оставаться no-op, иначе psql -f перестал бы быть идемпотентным.
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -45,19 +46,79 @@ CREATE TABLE IF NOT EXISTS public.agent_gateway_logs (
     CONSTRAINT valid_level CHECK (level IN ('DEBUG', 'INFO', 'WARN', 'ERROR'))
 );
 
-CREATE INDEX IF NOT EXISTS agent_gateway_logs_user_id_timestamp_idx
-    ON public.agent_gateway_logs (user_id, "timestamp" DESC);
+-- Ключ распределения объявлен отдельным шагом, а не в теле CREATE TABLE:
+-- файлы из sql/ применяются к обоим движкам (тестовый контур — PostgreSQL
+-- 13.22, боевая среда — Greenplum 6.5), а в теле клауза DISTRIBUTED упала бы
+-- на PostgreSQL как синтаксическая ошибка.
+--
+-- Выбран id: таблица без PK и без уникального ключа, поэтому ограничение
+-- «ключ распределения — подмножество ключа» к ней не относится, и по
+-- документации Greenplum при отсутствии уникального ключа выбирается «ключ,
+-- уникальный для каждой записи». id — UUID, генерируемый приложением: он
+-- уникален и даёт равномерную запись по сегментам. Хеш по времени или по seq
+-- дал бы обратный эффект: строки с текущим моментом времени ушли бы на один
+-- сегмент, то есть запись журнала упёрлась бы в один сегмент. Безявная
+-- клауза тоже не годится: Greenplum по умолчанию взял бы первый столбец
+-- таблицы — здесь это id, но это его выбор, а не наш.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_gateway_logs
+                 SET DISTRIBUTED BY (id)';
+    END IF;
+END
+$distribution$;
 
--- Индексы под момент события и ключ порядка. Создаются здесь для свежей
--- установки; на существующей базе их добавляет
--- V009__agent_gateway_logs_event_time_indexes.sql — строго после backfill и
--- очистки V008, потому что до очистки NULL держит часть строк и индексы
--- не окупаются.
-CREATE INDEX IF NOT EXISTS idx_agent_logs_seq
-    ON public.agent_gateway_logs (seq);
+DO $indexes$
+BEGIN
+    -- Индексы под момент события и ключ порядка создаются здесь для свежей
+    -- установки; на существующей базе их добавляет
+    -- V009__agent_gateway_logs_event_time_indexes.sql — строго после backfill и
+    -- очистки V008, потому что до очистки NULL держит часть строк и индексы
+    -- не окупаются.
+    --
+    -- Обслуживает access-pattern history_search(session_scope="all"):
+    -- WHERE user_id = ? ORDER BY "timestamp" DESC.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND tablename  = 'agent_gateway_logs'
+          AND indexname  = 'agent_gateway_logs_user_id_timestamp_idx'
+    ) THEN
+        CREATE INDEX agent_gateway_logs_user_id_timestamp_idx
+            ON public.agent_gateway_logs (user_id, "timestamp" DESC);
+    END IF;
 
-CREATE INDEX IF NOT EXISTS idx_agent_logs_occurred_at
-    ON public.agent_gateway_logs (occurred_at DESC);
+    -- Канонический порядок чтения оборота: ORDER BY seq, id.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND tablename  = 'agent_gateway_logs'
+          AND indexname  = 'idx_agent_logs_seq'
+    ) THEN
+        CREATE INDEX idx_agent_logs_seq
+            ON public.agent_gateway_logs (seq);
+    END IF;
+
+    -- Окно времени СОБЫТИЯ; "timestamp" для этого не годится — он ставится
+    -- базой при сбросе батча.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND tablename  = 'agent_gateway_logs'
+          AND indexname  = 'idx_agent_logs_occurred_at'
+    ) THEN
+        CREATE INDEX idx_agent_logs_occurred_at
+            ON public.agent_gateway_logs (occurred_at DESC);
+    END IF;
+END
+$indexes$;
 
 COMMENT ON TABLE  public.agent_gateway_logs IS 'Структурированный журнал событий агента. Связан с agent_question_runs по request_id.';
 COMMENT ON COLUMN public.agent_gateway_logs.id          IS 'PK события (UUID, генерируется в приложении).';

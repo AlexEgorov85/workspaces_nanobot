@@ -11,11 +11,13 @@
 -- двух репликах — это две строки, а не одна под общим last-write-wins: иначе
 -- реплики затирают друг друга, а очистка одной реплики стирает сессии другой.
 --
--- Совместимость: PostgreSQL 13.22 (фактическая база). Ранее здесь стояло
--- «Совместимость: Greenplum 6.5» и `DISTRIBUTED BY (session_key)` — объявление
--- было ложным (pg_dist_partition на сервере отсутствует), а локальность,
--- которую оно давало в Greenplum, заменена индексом
--- agent_session_meta_replica_updated_at_idx (см. V011).
+-- Совместимость: Greenplum 6.5 (ядро PostgreSQL 9.4) — боевая среда;
+-- PostgreSQL 13.22 — тестовый контур. Ранее здесь стояло объявление
+-- «PostgreSQL 13.22 (фактическая база)» и клауза распределения была снята по
+-- нему. Объявление описывало тестовый контур и выдавало его за боевую среду:
+-- боевой средой объявлен Greenplum 6.5, а файлы из sql/ применяются к обоим
+-- движкам. Поэтому распределение возвращено, но не в теле CREATE TABLE
+-- (на PostgreSQL такой клаузы нет), а ограждённым шагом после него.
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.agent_session_meta (
@@ -31,6 +33,28 @@ CREATE TABLE IF NOT EXISTS public.agent_session_meta (
     synced_at        TIMESTAMPTZ,
     PRIMARY KEY (replica_id, session_key)
 );
+
+-- Ключ распределения — составной первичный ключ. Ограничение Greenplum
+-- «ключ распределения должен быть подмножеством ключа» требует именно его
+-- целиком: распределение по одной лишь session_key оставило бы все сессии
+-- одной реплики на одном сегменте, а реплик обычно одна.
+--
+-- Шаг ограждён проверкой служебного каталога pg_dist_partition: файлы из sql/
+-- применяются и к PostgreSQL 13.22, где SET DISTRIBUTED BY не существует.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_session_meta
+                 SET DISTRIBUTED BY (replica_id, session_key)';
+    END IF;
+END
+$distribution$;
 
 COMMENT ON TABLE  public.agent_session_meta IS 'Холодное зеркало метаданных сессий nanobot. Источник истины — upstream JSONL-стор SessionManager. Пишет фоновая синхронизация, не hot path.';
 COMMENT ON COLUMN public.agent_session_meta.replica_id       IS 'Реплика-владелец строки; часть первичного ключа. Пишет операция mirror_session платформы, не вызывающая сторона.';

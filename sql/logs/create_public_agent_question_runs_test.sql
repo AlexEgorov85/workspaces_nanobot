@@ -34,6 +34,26 @@ CREATE TABLE IF NOT EXISTS public.agent_question_runs_test (
     PRIMARY KEY (request_id)
 );
 
+-- Ключ распределения — первичный ключ: в Greenplum ограничение «ключ
+-- распределения должен быть подмножеством ключа» иначе не выполняется.
+-- Ограждён проверкой pg_dist_partition, потому что файлы из sql/ применяются
+-- и к PostgreSQL 13.22 (тестовый контур), где SET DISTRIBUTED BY не
+-- существует.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_question_runs_test
+                 SET DISTRIBUTED BY (request_id)';
+    END IF;
+END
+$distribution$;
+
 COMMENT ON TABLE  public.agent_question_runs_test IS 'Test-профиль: контекст вопроса/прогона. Структурный клон public.agent_question_runs; используется под профилем test.';
 COMMENT ON COLUMN public.agent_question_runs_test.request_id        IS 'PK — ID сообщения, вызвавшего обработку.';
 COMMENT ON COLUMN public.agent_question_runs_test.created_at        IS 'Время регистрации вопроса.';

@@ -9,9 +9,13 @@
 -- ниже: тестовый профиль повторяет форму prod-таблицы, иначе замеры и
 -- проверки чтения оборота проверяли бы не тот состав колонок.
 -- Управляется: lib/services/db_logging_service.py.
--- Совместимость: PostgreSQL 13.22 (фактическая база; служебная таблица
--- pg_dist_partition на сервере отсутствует — объявление о совместимости с
--- распределённой СУБД здесь было ложным).
+-- Совместимость: Greenplum 6.5 (ядро PostgreSQL 9.4) — боевая среда;
+-- PostgreSQL 13.22 — тестовый контур. Файлы из sql/ применяются к обоим
+-- движкам, поэтому клаузы, которых нет на одном из них, в теле CREATE TABLE
+-- не пишутся (см. ограждённый шаг распределения ниже), а идемпотентные
+-- конструкции 9.5/9.6 заменены на DO-блоки с проверкой pg_indexes и
+-- information_schema.columns. Повторный запуск файла обязан оставаться
+-- no-op.
 --
 -- Этот файл живёт ТОЛЬКО для psql-ручного применения; для версионированного
 -- применения через runner — V005__test_profile_tables.sql.
@@ -39,18 +43,66 @@ CREATE TABLE IF NOT EXISTS public.agent_gateway_logs_test (
     CONSTRAINT valid_level CHECK (level IN ('DEBUG', 'INFO', 'WARN', 'ERROR'))
 );
 
-CREATE INDEX IF NOT EXISTS agent_gateway_logs_test_user_id_timestamp_idx
-    ON public.agent_gateway_logs_test (user_id, "timestamp" DESC);
+-- Ключ распределения — id, как в боевом файле: уникальный UUID даёт
+-- равномерную запись по сегментам, а хеш по времени упирал бы запись
+-- журнала в один сегмент. PK у таблицы нет, поэтому ограничение «ключ
+-- распределения — подмножество ключа» здесь не действует. Клауза объявлена
+-- ограждённым шагом, а не в теле CREATE TABLE, потому что файлы из sql/
+-- применяются и к PostgreSQL 13.22, где её нет в синтаксисе.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_gateway_logs_test
+                 SET DISTRIBUTED BY (id)';
+    END IF;
+END
+$distribution$;
 
--- Парные боевым индексам под момент события и ключ порядка (см. V009).
--- Колонки здесь nullable намеренно, но индексы нужны те же: иначе
--- тестовый профиль проверял бы чтение по seq на плане сортировки, а боевой —
--- по индексу, и расхождение всплыло бы только в бою.
-CREATE INDEX IF NOT EXISTS idx_agent_gateway_logs_test_seq
-    ON public.agent_gateway_logs_test (seq);
+DO $indexes$
+BEGIN
+    -- Аналог V004 для prod: индекс на user_id создаётся сразу при создании
+    -- таблицы, отдельной миграции не требуется.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND tablename  = 'agent_gateway_logs_test'
+          AND indexname  = 'agent_gateway_logs_test_user_id_timestamp_idx'
+    ) THEN
+        CREATE INDEX agent_gateway_logs_test_user_id_timestamp_idx
+            ON public.agent_gateway_logs_test (user_id, "timestamp" DESC);
+    END IF;
 
-CREATE INDEX IF NOT EXISTS idx_agent_gateway_logs_test_occurred_at
-    ON public.agent_gateway_logs_test (occurred_at DESC);
+    -- Парные боевым индексам под момент события и ключ порядка (см. V009).
+    -- Колонки здесь nullable намеренно, но индексы нужны те же: иначе
+    -- тестовый профиль проверял бы чтение по seq на плане сортировки, а
+    -- боевой — по индексу, и расхождение всплыло бы только в бою.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND tablename  = 'agent_gateway_logs_test'
+          AND indexname  = 'idx_agent_gateway_logs_test_seq'
+    ) THEN
+        CREATE INDEX idx_agent_gateway_logs_test_seq
+            ON public.agent_gateway_logs_test (seq);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND tablename  = 'agent_gateway_logs_test'
+          AND indexname  = 'idx_agent_gateway_logs_test_occurred_at'
+    ) THEN
+        CREATE INDEX idx_agent_gateway_logs_test_occurred_at
+            ON public.agent_gateway_logs_test (occurred_at DESC);
+    END IF;
+END
+$indexes$;
 
 COMMENT ON TABLE  public.agent_gateway_logs_test IS 'Test-профиль: структурированный журнал событий агента. Структурный клон public.agent_gateway_logs; используется под профилем test. Связан с agent_question_runs_test по request_id.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.id          IS 'PK события (UUID, генерируется в приложении).';
@@ -89,10 +141,33 @@ ALTER TABLE public.agent_gateway_logs_test
 -- тестовый профиль для этого не предназначен, и объём удаления задаёт
 -- замер, а не файл DDL. Порядок проверяется отдельным тестом на самом файле
 -- миграции.
+--
+-- ADD COLUMN IF NOT EXISTS (9.6) на 9.4 недоступен, поэтому каждая колонка
+-- добавляется через проверку information_schema.columns. Проверка нужна и
+-- ради идемпотентности: файл применяют повторно, и без неё второй прогос
+-- упал бы на «column already exists».
 -- ---------------------------------------------------------------------------
-ALTER TABLE public.agent_gateway_logs_test
-    ADD COLUMN IF NOT EXISTS seq         BIGINT,
-    ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ;
+DO $columns$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'agent_gateway_logs_test'
+          AND column_name  = 'seq'
+    ) THEN
+        ALTER TABLE public.agent_gateway_logs_test ADD COLUMN seq BIGINT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'agent_gateway_logs_test'
+          AND column_name  = 'occurred_at'
+    ) THEN
+        ALTER TABLE public.agent_gateway_logs_test ADD COLUMN occurred_at TIMESTAMPTZ;
+    END IF;
+END
+$columns$;
 
 COMMENT ON COLUMN public.agent_gateway_logs_test.seq IS
     'Test-профиль: ключ порядка строки журнала (момент события в наносекундах). Nullable намеренно — см. комментарий выше: контракт чтения без ключа проверяется здесь. Канонический порядок — ORDER BY seq, id.';

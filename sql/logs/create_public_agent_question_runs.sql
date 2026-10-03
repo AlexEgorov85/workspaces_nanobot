@@ -29,8 +29,26 @@ CREATE TABLE IF NOT EXISTS public.agent_question_runs (
     media             TEXT,
 
     PRIMARY KEY (request_id)
-)
-DISTRIBUTED BY (request_id);
+);
+
+-- Распределение объявлено ограждённым шагом, а не в теле CREATE TABLE:
+-- файлы из sql/ применяются и к PostgreSQL 13.22 (тестовый контур), где
+-- клаузы DISTRIBUTED в синтаксисе нет. Проверка служебного каталога
+-- pg_dist_partition отличает Greenplum, поэтому на PostgreSQL шаг — no-op.
+DO $distribution$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'pg_dist_partition'
+          AND n.nspname = 'pg_catalog'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.agent_question_runs
+                 SET DISTRIBUTED BY (request_id)';
+    END IF;
+END
+$distribution$;
 
 COMMENT ON TABLE  public.agent_question_runs IS 'Контекст вопроса/прогона: пользователь, агент, статус, вопрос/ответ, summary. Одна строка на request_id.';
 COMMENT ON COLUMN public.agent_question_runs.request_id        IS 'PK — ID сообщения, вызвавшего обработку.';
