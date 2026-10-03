@@ -151,11 +151,11 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
         f"(nanobot {__version__}) · profile={args.profile}..."
     )
 
-    # Кэш к этому моменту уже загружен: загрузка — разовая
-    # синхронная операция, выполненная в composition root
-    # (``ApplicationContext.create`` -> ``_init_cache_runtime``) до возврата сюда. Ожидать
-    # «первый sync» нечего: колбэков записи и фонового потока
-    # больше не существует.
+    # Локальный кэш агента снят вместе с ``_init_cache_runtime``, поэтому
+    # ждать «первый sync» нечего: ни колбэков записи, ни фонового потока
+    # в агенте не осталось. Снимком владеет capability ``data`` платформы,
+    # и её ленивое подключение — отдельная сессия, поднимаемая рукопожатием
+    # в ``_connect_enterprise_mcp`` ниже.
 
     ctx.start()
 
@@ -529,20 +529,6 @@ def _configure_logging(settings) -> None:
     from lib.utils.logging_utils import configure_loguru
 
     configure_loguru(log_level)
-
-
-def _gateway_print_llm_calls() -> bool:
-    """Прочитать флаг вывода токенов LLM в терминал из ``gateway.print_llm_calls``.
-
-    Отключаемая опция: `false` по умолчанию, включается в `project.json`.
-    """
-    try:
-        from lib.services.config_service import ConfigService
-
-        value = ConfigService().settings_section("gateway").get("print_llm_calls", False)
-    except Exception:
-        return False
-    return bool(value)
 
 
 def _gateway_print_worker_activity() -> bool:

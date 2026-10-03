@@ -106,8 +106,3 @@ class GatewayRunner:
                 )
                 self._sleep(delay)
                 delay = min(delay * 2, self._max_delay)
-
-    def reset_backoff(self) -> float:
-        """Вернуть начальную задержку. Используется в тестах и при
-        явном сбросе backoff после успешного цикла."""
-        return self._initial_delay

@@ -248,12 +248,6 @@ def _run_cli_repl(ctx, args: argparse.Namespace, *, background_task_factory=None
         ctx.stop()
 
 
-def __get_cron(_ctx):
-    """CronService уже создан в ApplicationContext — возвращаем None,
-    потому что AgentFactory уже подключила его из hooks."""
-    return None
-
-
 def _configure_logging(settings) -> None:
     """loguru из cli.log_level."""
     cli = settings.get("cli") if isinstance(settings, dict) else getattr(settings, "cli", None)
