@@ -297,6 +297,9 @@ class McpHealthMonitor:
         if self._publish is None:
             return
         try:
-            await self._publish(event_type, name, payload, level)
+            # Уровень — keyword-only: так его дефолт остаётся каноническим
+            # для стража уровней и не попадает в перебор имён событий, который
+            # идёт по позиционным дефолтам.
+            await self._publish(event_type, name, payload, level=level)
         except Exception as exc:  # noqa: BLE001 - сигнал не должен стоить цикла
             logger.debug("enterprise-mcp: событие не опубликовано: %s", exc)

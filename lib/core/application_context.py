@@ -1723,6 +1723,7 @@ def _make_mcp_health_monitor(ctx: ApplicationContext) -> Any | None:
         event_type: str,
         name: str,
         payload: dict,
+        *,
         level: str = "WARN",
     ) -> None:
         """Записать событие наблюдателя в журнал.
