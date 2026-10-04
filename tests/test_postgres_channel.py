@@ -213,7 +213,11 @@ class TestPostgresChannelInit:
     def test_defaults(self, mock_db_and_psycopg):
         ch = _make_channel(mock_db_and_psycopg)
         assert ch._schema == "public"
-        assert ch._table_name == runtime_table("conversation_messages")
+        # Подпись объявления вызывающей стороны, а не адрес опроса: очередь
+        # живёт в таблице, которую выбрала платформа.
+        assert ch._declared_table.endswith(
+            runtime_table("conversation_messages")
+        )
         assert ch._max_concurrent == 1
         assert ch._poll_interval == 0.1
 
@@ -227,7 +231,16 @@ class TestPostgresChannelInit:
         )
         assert ch._max_concurrent == 5
         assert ch._processing_timeout == 999
-        assert "custom" in ch._fq_table
+        assert ch._declared_table == "custom.my_msgs"
+
+    def test_table_name_is_a_label_not_a_requirement(self, mock_db_and_psycopg):
+        """Вызывающий не обязан называть таблицу — её объявляет платформа.
+
+        Обязательным ключ оставался по инерции от удалённого прямого SQL:
+        канал без объявления не поднимался, хотя обращаться ему было не к чему.
+        """
+        ch = _make_channel(mock_db_and_psycopg, table_name="")
+        assert ch._declared_table == ""
 
     def test_default_config(self, mock_db_and_psycopg):
         PostgresChannel, _, _ = mock_db_and_psycopg
@@ -236,6 +249,128 @@ class TestPostgresChannelInit:
         assert cfg["max_concurrent"] == 1
         assert cfg["poll_interval"] == 2.0
 
+
+class TestPostgresChannelQueueWire:
+    """Форма ответа очереди на живом пути канала, а не у заглушки.
+
+    Проверять форму здесь пришлось отдельно от проверки поведения: канал
+    прежде проверял текст SQL, а подставной клиент отдавал форму ответа.
+    Платформа сделала захват батчевым и отдаёт ``claimed`` списком всегда.
+    Пока подмена повторяла прежнюю форму, обе стороны были согласны между
+    собой и не согласны с платформой: очередь на боевом вызове не проходила
+    опрос вовсе. Формы ниже - платформенные.
+    """
+
+    ROW = {
+        "id": "m-1",
+        "chat_id": "chat-1",
+        "user_id": "u-1",
+        "status": "pending",
+        "created_at": None,
+    }
+
+    @pytest.mark.asyncio
+    async def test_claim_one_returns_first_task_of_the_batch(
+        self, mock_db_and_psycopg
+    ):
+        PostgresChannel, _, client = mock_db_and_psycopg
+        client.responses["claim_task"] = {"claimed": [self.ROW]}
+        ch = _make_channel((PostgresChannel, None, client))
+
+        assert await ch._claim_one() == self.ROW
+        # Размер пачки уходит явно, а не подставляется под умолчание.
+        assert client.last_call("claim_task")["arguments"]["batch"] == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_batch_is_an_empty_queue(self, mock_db_and_psycopg):
+        PostgresChannel, _, client = mock_db_and_psycopg
+        client.responses["claim_task"] = {"claimed": []}
+        ch = _make_channel((PostgresChannel, None, client))
+
+        assert await ch._claim_one() is None
+
+    @pytest.mark.asyncio
+    async def test_legacy_dict_form_is_refused_by_name(self, mock_db_and_psycopg):
+        """Форма, которой у платформы нет, отвергается и называется."""
+        from lib.channels.queue_ops import QueueOpsError
+
+        PostgresChannel, _, client = mock_db_and_psycopg
+        client.responses["claim_task"] = {"claimed": self.ROW}
+        ch = _make_channel((PostgresChannel, None, client))
+
+        with pytest.raises(QueueOpsError) as caught:
+            await ch._claim_one()
+        assert "списком" in str(caught.value), str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_no_call_argument_names_a_table(self, mock_db_and_psycopg):
+        """Имя таблицы приходит от платформы, а не от вызывающей стороны.
+
+        Иначе вызывающая сторона снова выбирала бы, в какой таблице живут
+        задачи, и объявление платформы перестало бы быть единственным.
+        """
+        PostgresChannel, _, client = mock_db_and_psycopg
+        client.responses["claim_task"] = {"claimed": [self.ROW]}
+        client.responses["unstick_tasks"] = {"recovered": []}
+        client.responses["append_assistant_message"] = {"assistant_msg_id": "a-1"}
+        client.responses["fail_task"] = {"status": "error", "retry_count": 1}
+        ch = _make_channel((PostgresChannel, None, client))
+
+        await ch._claim_one()
+        await ch._unstick_processing()
+        await ch._insert_assistant_message("u-1", "chat-1")
+        await ch._mark_failed("m-1", "a-1", "dispatch_error")
+
+        assert client.calls, "ни одного вызова операции - страж зелёный вхолостую"
+        declared = runtime_table("conversation_messages")
+        for call in client.calls:
+            for key, value in call["arguments"].items():
+                assert declared not in str(value), (
+                    f"вызов {call['operation']} несёт имя таблицы в аргументе "
+                    f"{key!r}: {value!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_banner_does_not_claim_to_poll_the_declared_table(
+        self, mock_db_and_psycopg
+    ):
+        """Опрос идёт по таблице платформы; объявление вызывающего - подпись."""
+        import io
+        from loguru import logger as _loguru
+
+        PostgresChannel, _, client = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, client))
+        sink = io.StringIO()
+        handler_id = _loguru.add(sink, level="INFO", format="{message}")
+        try:
+            await ch.start()
+        finally:
+            _loguru.remove(handler_id)
+            await ch.stop()
+
+        joined = sink.getvalue()
+        assert "Polling platform queue" in joined, joined
+        assert f"Polling {runtime_table('conversation_messages')}" not in joined
+        assert "declared table:" in joined, joined
+
+    @pytest.mark.asyncio
+    async def test_banner_says_platform_owned_when_nothing_declared(
+        self, mock_db_and_psycopg
+    ):
+        import io
+        from loguru import logger as _loguru
+
+        PostgresChannel, _, client = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, client), table_name="")
+        sink = io.StringIO()
+        handler_id = _loguru.add(sink, level="INFO", format="{message}")
+        try:
+            await ch.start()
+        finally:
+            _loguru.remove(handler_id)
+            await ch.stop()
+
+        assert "declared table: platform-owned" in sink.getvalue()
 
 class TestPostgresChannelReleaseSlot:
     def test_noop_on_none(self, mock_db_and_psycopg):

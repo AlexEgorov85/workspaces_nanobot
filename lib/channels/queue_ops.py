@@ -29,11 +29,24 @@
 транзакции на операцию. Именно поэтому операций шесть, а не пятнадцать: две
 транзакции, разнесённые на вызовы, тихо разрушают то, ради чего и
 затевался перенос.
+
+**Форма ответа захвата объявлена, а не угадана.** Поле ``claimed`` платформа
+возвращает **списком всегда**, в том числе при ``batch = 1``: одиночный захват
+у неё — представление ``claim_tasks(batch=1)``, а не отдельная форма ответа.
+Потребитель при этом получает словарь задачи, как и раньше, и это преобразование
+делает :class:`QueueOps`, а не платформа: форма ответа известна в одной точке, и
+каждый новый потребитель не разбирает её заново.
+
+Держать словарь и список одновременно «на всякий случай» здесь нельзя. Разбор
+словаря в списке означал бы, что угодно, что не список, считается задачей: опрос
+увёл бы в обработку мусор, и заметить это можно было бы только по содержимому
+ответа. Не-list отвергается поимённо (:meth:`QueueOps._claimed_tasks`).
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from lib.services.enterprise_mcp_client import CallIdentity
@@ -56,6 +69,20 @@ class QueueOpsError(RuntimeError):
     Тихое ``{}`` на месте ответа выглядело бы как «задача не найдена» — то
     есть канал решил бы, что очередь пуста, и пошёл дальше.
     """
+
+
+@dataclass(frozen=True)
+class ClaimedBatch:
+    """Выдача захвата: задачи пачки и курсор продолжения.
+
+    ``next_cursor`` заполнен только по полному батчу (``claim_task`` на
+    платформе, ``capabilities/data/service/main.py::ClaimedBatch``) — то есть
+    это сигнал «есть ещё». ``None`` на неполном батче означает «очередь дошла
+    до конца, следующий опрос начинай с головы».
+    """
+
+    tasks: list[dict[str, Any]]
+    next_cursor: str | None = None
 
 
 class QueueOps:
@@ -133,13 +160,28 @@ class QueueOps:
     # захват и откат
     # ------------------------------------------------------------------
 
-    async def claim_task(
+    async def claim_tasks(
         self,
         *,
+        batch: int = 1,
+        cursor: str | None = None,
         error_retry_delay_sec: float = 5.0,
         priority_contents: list[str] | None = None,
-    ) -> dict[str, Any] | None:
-        """Атомарно захватить одну задачу. ``None`` — очередь пуста."""
+    ) -> ClaimedBatch:
+        """Атомарно захватить до ``batch`` задач, начиная с ``cursor``.
+
+        ``batch`` и ``cursor`` уходят в вызов **явно**, а не подставляются под
+        умолчание платформы: молчаливое умолчание означало бы, что размер
+        пачки — решение, о котором в коде не знает никто, и что однажды
+        поменяется без предупреждения. Границы значения проверяет платформа
+        (``1 <= batch <= 100``); дублировать их здесь нельзя — второе место,
+        где правило могло бы разойтись с платформой, и есть тот самый класс
+        расхождений, который этот класс ошибок заменил.
+
+        Возвращает пачку (список задач + курсор продолжения). Имена задач
+        приходят от платформы: канал их не выбирает, поэтому в аргументах
+        никаких имён нет (см. модульную строку).
+        """
         payload = await self._invoke(
             "claim_task",
             {
@@ -150,17 +192,79 @@ class QueueOps:
                 # платформа добавит ``AND content = ANY(%s)``, и отбор не
                 # найдёт ничего, то есть очередь молча покажется пустой.
                 "priority_contents": list(priority_contents or []) or None,
+                "batch": batch,
+                "cursor": cursor,
             },
             identity=self._service_identity(),
         )
-        task = payload.get("claimed")
-        if task is None:
-            return None
-        if not isinstance(task, dict):
+        return ClaimedBatch(
+            tasks=self._claimed_tasks(payload),
+            next_cursor=self._next_cursor(payload),
+        )
+
+    async def claim_task(
+        self,
+        *,
+        error_retry_delay_sec: float = 5.0,
+        priority_contents: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Атомарно захватить одну задачу. ``None`` — очередь пуста.
+
+        Прежний контракт потребителя сохранён целиком: **одна** задача или
+        пусто. Это представление ``claim_tasks(batch=1)``, а не отдельный
+        вызов с отдельной формой ответа: словарь задачи, который возвращался
+        здесь всегда, теперь берётся первым элементом платформенного списка.
+        """
+        batch = await self.claim_tasks(
+            batch=1,
+            error_retry_delay_sec=error_retry_delay_sec,
+            priority_contents=priority_contents,
+        )
+        return batch.tasks[0] if batch.tasks else None
+
+    @staticmethod
+    def _claimed_tasks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Разобрать ``claimed``: **всегда список**.
+
+        Форма платформы — список, в том числе при ``batch=1``. Прежний разбор
+        ждал словарь или ``None``, то есть форму, которой у платформы нет:
+        подставной клиент в тестах отдавал словарь, поэтому расхождение не
+        всплывало, а на боевом вызове поднимало ``QueueOpsError`` — опрос не
+        проходил вовсе. Словарь отвергается поимённо, а не принимается за
+        задачу: иначе следующая смена формы снова прошла бы молча.
+        """
+        claimed = payload.get("claimed")
+        if claimed is None:
+            # Ключа нет вовсе: операция отработала вхолостую. Это не форма
+            # ответа, а пустая очередь, и она норма.
+            return []
+        if not isinstance(claimed, list):
             raise QueueOpsError(
-                f"claim_task: claimed - не объект: {type(task).__name__}"
+                "claim_task: claimed - "
+                f"{type(claimed).__name__}, а платформа отдаёт claimed "
+                "списком всегда, в том числе при batch=1; словарь — форма, "
+                "которой у платформы нет"
             )
-        return task
+        for index, task in enumerate(claimed):
+            if not isinstance(task, dict):
+                raise QueueOpsError(
+                    f"claim_task: claimed[{index}] - не объект: "
+                    f"{type(task).__name__}"
+                )
+        return list(claimed)
+
+    @staticmethod
+    def _next_cursor(payload: dict[str, Any]) -> str | None:
+        """Разобрать курсор продолжения: строка либо «продолжения нет»."""
+        cursor = payload.get("next_cursor")
+        if cursor is None:
+            return None
+        if not isinstance(cursor, str):
+            raise QueueOpsError(
+                "claim_task: next_cursor - не строка: "
+                f"{type(cursor).__name__}"
+            )
+        return cursor or None
 
     async def release_claimed_tasks(self, task_ids: list[str]) -> dict[str, Any]:
         """Вернуть незавершённые задачи в очередь при остановке."""

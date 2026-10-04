@@ -98,7 +98,7 @@ class TestClaimOneSqlAudit:
         client, pg_mod = mock_db
         ch = _make_channel(pg_mod, client)
         row = {"id": "msg-1", "chat_id": "chat-1"}
-        client.responses["claim_task"] = {"claimed": row}
+        client.responses["claim_task"] = {"claimed": [row]}
 
         import asyncio
         result = asyncio.run(ch._claim_one())

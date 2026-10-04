@@ -140,7 +140,7 @@ class TestPollOnceRaceCheck:
             "metadata": "{}",
             "created_at": None,
         }
-        db.responses["claim_task"] = {"claimed": claim_row}
+        db.responses["claim_task"] = {"claimed": [claim_row]}
         # re-check fetchval возвращает 'cancelled'.
         db.responses["get_message"] = {"message": {"status": "cancelled"}}
 
@@ -177,7 +177,7 @@ class TestPollOnceRaceCheck:
             "metadata": "{}",
             "created_at": None,
         }
-        db.responses["claim_task"] = {"claimed": claim_row}
+        db.responses["claim_task"] = {"claimed": [claim_row]}
         db.responses["get_message"] = {"message": {"status": "processing"}}
         # _insert_assistant_message возвращает UUID assistant.
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")

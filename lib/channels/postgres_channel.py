@@ -139,14 +139,21 @@ class PostgresChannel(BaseChannel):
 
         # ---- настройки подключения к БД ----
         self._dsn: str = _get("dsn", "")
-        self._schema: str = _get("schema", "public")
-        self._table_name: str = _get("table_name", "")
-        if not self._table_name:
-            raise ValueError(
-                "PostgresChannel: channels.postgres.table_name обязателен "
-                "(нет авто-дефолтов в коде)"
-            )
-        self._fq_table: str = f"{self._schema}.{self._table_name}"
+        self._schema: str = str(_get("schema", "public") or "public")
+        # Имя таблицы очереди выбирает НЕ вызывающая сторона: его объявляет
+        # платформа (``mcp-platform/platform.json`` → ``data.task_table``),
+        # поверх — оверлей профиля. Канал к этому имени не обращается и в
+        # вызовы операций его не несёт, поэтому ключ
+        # ``channels.postgres.table_name`` больше не обязателен. Обязательным
+        # он оставался по инерции от удалённого пути: «вызывающий называет
+        # таблицу» было ровно тем, что пункт 2.18 спеки
+        # ``enterprise-mcp-platform`` отменил. Дальше он читается только как
+        # подпись для диагностики — чтобы оператор видел расхождение своего
+        # объявления с профилем платформы, а не молчал о нём.
+        declared_table = str(_get("table_name", "") or "")
+        self._declared_table: str = (
+            f"{self._schema}.{declared_table}" if declared_table else ""
+        )
 
         # ---- тайминги ----
         # как часто опрашивать БД на новые сообщения (сек)
@@ -341,13 +348,16 @@ class PostgresChannel(BaseChannel):
         self._unstick_task = asyncio.create_task(self._unstick_loop())
         await self.exchange.start()
         self.logger.info(
-            "Polling {} every {}s (processing timeout {}s, worker_id={}, "
-            "unstick_interval={}s)",
-            self._fq_table,
+            "Polling platform queue every {}s (processing timeout {}s, "
+            "worker_id={}, unstick_interval={}s, declared table: {})",
             self._poll_interval,
             self._processing_timeout,
             self._worker_id,
             self._unstick_interval,
+            # Имя таблицы — подпись вызывающей стороны, а не адрес опроса:
+            # пустая строка означает «вызывающий ничего не объявлял, таблицу
+            # взяла платформа».
+            self._declared_table or "platform-owned",
         )
 
     async def stop(self) -> None:

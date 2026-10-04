@@ -271,7 +271,7 @@ class TestSingleModeHotPath:
             "metadata": "{}",
             "created_at": None,
         }
-        rec.client.responses["claim_task"] = {"claimed": row}
+        rec.client.responses["claim_task"] = {"claimed": [row]}
         result = await ch._claim_one()
         assert result == row
         rec.assert_no_claims_access("in _claim_one")
@@ -356,7 +356,7 @@ class TestSingleModeFullLifecycle:
             "metadata": "{}",
             "created_at": None,
         }
-        rec.client.responses["claim_task"] = {"claimed": row}
+        rec.client.responses["claim_task"] = {"claimed": [row]}
         claimed_row = await ch._claim_one()
         rec.reset()  # дальше проверяем только finalize/failed
 
