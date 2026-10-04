@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import sys
+import re
 import threading
 import time
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from lib.services.db_logging_service import DbLoggingService, LogEvent
 from config import runtime_table  # noqa: F401
+
+SERVICE_PATH = Path(__file__).resolve().parent.parent / "lib" / "services" / "db_logging_service.py"
 
 
 def _svc(**kw):
@@ -23,51 +24,64 @@ def _svc(**kw):
     return DbLoggingService(**kwargs)
 
 
+class RecordingWriter:
+    """Писатель-заглушка: у сервиса больше нет своей записи в базу.
+
+    Повторяет те три метода, которые ``DbLoggingService`` вызывает у
+    ``McpLogWriter``. Проверяемое поведение переехало сюда целиком: кто пишет,
+    каким вызовом и с каким телом. Собственного соединения у сервиса не
+    осталось, поэтому подменять тут нечего — и подменять было бы нечего.
+    """
+
+    def __init__(
+        self,
+        *,
+        purge_counters: dict[str, int] | None = None,
+        question_run_written: bool = True,
+        purge_error: Exception | None = None,
+    ) -> None:
+        self.batches: list[list] = []
+        self.runs: list = []
+        self.purges: list[dict] = []
+        self.purge_counters = (
+            purge_counters
+            if purge_counters is not None
+            else {"empty_outbound": 0, "events": 0, "question_runs": 0}
+        )
+        self.question_run_written = question_run_written
+        self.purge_error = purge_error
+        self.on_fallback = None
+
+    def write_events(self, batch):
+        from lib.services.log_transport import WriteResult
+
+        self.batches.append(list(batch))
+        return WriteResult(accepted=len(batch), dropped=0)
+
+    def upsert_question_run(self, record) -> bool:
+        self.runs.append(record)
+        return self.question_run_written
+
+    def purge_logs(self, *, retention_days, remove_empty_outbound=None):
+        self.purges.append(
+            {
+                "retention_days": retention_days,
+                "remove_empty_outbound": remove_empty_outbound,
+            }
+        )
+        if self.purge_error is not None:
+            raise self.purge_error
+        return dict(self.purge_counters)
+
+
 @pytest.fixture
-def fake_psycopg2(monkeypatch):
-    """Подменяем connect/session в реальном psycopg2, чтобы не поднимать БД."""
-    real = __import__("psycopg2")
-    __import__("psycopg2.extras")
-    __import__("psycopg2.extensions")
-    real_extras = sys.modules["psycopg2.extras"]
-    real_extensions = sys.modules["psycopg2.extensions"]
-
-    cursor = MagicMock()
-    cursor.close = MagicMock()
-    conn = MagicMock()
-    conn.cursor = MagicMock(return_value=cursor)
-    conn.close = MagicMock()
-    conn.closed = False
-
-    execute_batch = MagicMock()
-
-    monkeypatch.setattr(real, "connect", MagicMock(return_value=conn), raising=False)
-    monkeypatch.setattr(real_extras, "Json", lambda x: x, raising=False)
-    monkeypatch.setattr(real_extras, "execute_batch", execute_batch, raising=False)
-    monkeypatch.setattr(real_extras, "register_json", MagicMock(), raising=False)
-    monkeypatch.setattr(real_extensions, "register_adapter", MagicMock(), raising=False)
-
-    ws = str(Path(__file__).resolve().parent.parent / "workspace")
-    if ws not in sys.path:
-        sys.path.insert(0, ws)
-    import utils.db as _db
-
-    yield {
-        "conn": conn,
-        "cursor": cursor,
-        "execute_batch": execute_batch,
-    }
-
-    # Каждый тест получает свежее соединение/pool: воркер закрывается, конфиг
-    # и менеджер сбрасываются, чтобы не переиспользовать mock-conn и настройки
-    # из прошлого теста.
-    _db.shutdown()
-    _db._manager = None
-    _db._pool_cfg = dict(_db._DEFAULT_POOL)
+def writer() -> RecordingWriter:
+    """Свежий писатель на тест: батчи не должны течь между тестами."""
+    return RecordingWriter()
 
 
 class TestBasicLifecycle:
-    def test_start_stop(self, fake_psycopg2):
+    def test_start_stop(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05)
         svc.start()
         try:
@@ -76,7 +90,7 @@ class TestBasicLifecycle:
             svc.stop(timeout_sec=2.0)
         assert not svc.is_running()
 
-    def test_no_dsn_drops_events(self, tmp_path):
+    def test_no_writer_drops_events(self, tmp_path):
         svc = _svc(dsn="", flush_interval_sec=0.05)
         svc.start()
         try:
@@ -90,12 +104,12 @@ class TestBasicLifecycle:
 
 
 class TestNonBlocking:
-    def test_log_inbound_enqueue(self, fake_psycopg2):
+    def test_log_inbound_enqueue(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.log_inbound("cli:1", "cli", "hello") is True
         assert svc.get_stats()["queued"] >= 1
 
-    def test_log_inbound_sender_and_chat(self, fake_psycopg2):
+    def test_log_inbound_sender_and_chat(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.log_inbound(
             "cli:1", "cli", "hello",
@@ -107,25 +121,25 @@ class TestNonBlocking:
         assert event.payload["chat_id"] == "c7"
         assert event.payload["message_id"] == "m1"
 
-    def test_log_inbound_default_actor_is_user(self, fake_psycopg2):
+    def test_log_inbound_default_actor_is_user(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_inbound("cli:1", "cli", "hello")
         assert svc._queue.queue[0].actor == "user"
 
-    def test_log_inbound_request_id_defaults_to_message_id(self, fake_psycopg2):
+    def test_log_inbound_request_id_defaults_to_message_id(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_inbound("cli:1", "cli", "hello", message_id="m1")
         event = svc._queue.queue[0]
         assert event.request_id == "m1"
         assert event.payload["message_id"] == "m1"
 
-    def test_log_outbound_request_id(self, fake_psycopg2):
+    def test_log_outbound_request_id(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_outbound("cli:1", "cli", "ok", request_id="m1")
         event = svc._queue.queue[0]
         assert event.request_id == "m1"
 
-    def test_log_tool_event_request_id(self, fake_psycopg2):
+    def test_log_tool_event_request_id(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_tool_call("cli:1", "read", {"p": 1}, tool_call_id="t1", request_id="m1")
         svc.log_tool_result("cli:1", "read", "r", 10.0, tool_call_id="t1", request_id="m1")
@@ -133,7 +147,7 @@ class TestNonBlocking:
         assert call.request_id == "m1" and call.name == "read"
         assert result.request_id == "m1" and result.name == "read"
 
-    def test_request_index_lifecycle(self, fake_psycopg2):
+    def test_request_index_lifecycle(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.get_request_id("cli:1") is None
         svc.register_request(
@@ -147,7 +161,7 @@ class TestNonBlocking:
         svc.register_request("", "x")
         assert svc.get_request_id("") is None
 
-    def test_question_run_records(self, fake_psycopg2):
+    def test_question_run_records(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         # контекст вопроса + финиш — это _QuestionRunRecord'ы, не LogEvent'ы
         assert svc.register_request(
@@ -165,7 +179,7 @@ class TestNonBlocking:
         assert records[1].update_only is True and records[1].status == "finished"
         assert records[1].response == "полный ответ"
 
-    def test_log_tool_event_dimensions(self, fake_psycopg2):
+    def test_log_tool_event_dimensions(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_tool_call(
             "cli:1", "read", {"p": 1}, tool_call_id="t1", request_id="m1",
@@ -174,19 +188,19 @@ class TestNonBlocking:
         assert event.name == "read"
         assert event.request_id == "m1"
 
-    def test_log_event_min_level(self, fake_psycopg2):
+    def test_log_event_min_level(self):
         svc = _svc(dsn="postgresql://x", min_level="WARN")
         assert svc.log_event(LogEvent("x", "DEBUG")) is False
         assert svc.log_event(LogEvent("x", "INFO")) is False
         assert svc.log_event(LogEvent("x", "ERROR")) is True
 
-    def test_log_outbound_with_meta(self, fake_psycopg2):
+    def test_log_outbound_with_meta(self):
         svc = _svc(dsn="postgresql://x")
         assert svc.log_outbound(
             "cli:1", "cli", "ok", latency_ms=12.5, tokens_used=42
         ) is True
 
-    def test_log_media_in_payload(self, fake_psycopg2):
+    def test_log_media_in_payload(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_inbound("cli:1", "cli", "привет", media=["doc.pdf"])
         svc.log_outbound("cli:1", "cli", "ответ", media=["report.xlsx"])
@@ -194,14 +208,14 @@ class TestNonBlocking:
         assert inbound.payload["media"] == ["doc.pdf"]
         assert outbound.payload["media"] == ["report.xlsx"]
 
-    def test_log_tool_call_and_result(self, fake_psycopg2):
+    def test_log_tool_call_and_result(self):
         svc = _svc(dsn="postgresql://x")
         assert svc.log_tool_call("cli:1", "read", {"path": "x"}) is True
         assert svc.log_tool_result(
             "cli:1", "read", "content", latency_ms=15.0
         ) is True
 
-    def test_tool_result_error_summary_carrier(self, fake_psycopg2):
+    def test_tool_result_error_summary_carrier(self):
         svc = _svc(dsn="postgresql://x")
         svc.log_tool_result(
             "cli:1", "exec", None, latency_ms=10.0,
@@ -218,7 +232,7 @@ class TestNonBlocking:
         svc.log_tool_result("cli:1", "exec", "ok", latency_ms=1.0, tool_call_id="t2")
         assert svc._queue.queue[1].summary == "exec"
 
-    def test_log_llm_call_fields(self, fake_psycopg2):
+    def test_log_llm_call_fields(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         prompt = [{"role": "user", "content": "привет"}]
         response = {"content": "ответ", "tool_calls": [], "finish_reason": "stop"}
@@ -239,7 +253,7 @@ class TestNonBlocking:
         assert event.metadata["finish_reason"] == "stop"
         assert event.metadata["usage"] == {"total_tokens": 10}
 
-    def test_log_llm_call_sanitizes_non_json(self, fake_psycopg2):
+    def test_log_llm_call_sanitizes_non_json(self):
         from pathlib import Path
 
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
@@ -253,7 +267,7 @@ class TestNonBlocking:
         assert event.payload["prompt"] == [{"role": "tool", "content": "x.txt"}]
         assert event.payload["response"] == {"content": "ок", "finish_reason": "stop"}
 
-    def test_queue_full_returns_false(self, fake_psycopg2):
+    def test_queue_full_returns_false(self):
         svc = _svc(dsn="postgresql://x", queue_maxsize=2)
         # Не запускаем worker — очередь наполнится до запуска.
         for _ in range(2):
@@ -263,9 +277,9 @@ class TestNonBlocking:
 
 
 class TestFlush:
-    def test_batch_writes_to_db(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05,
-                                batch_size=3)
+    def test_batch_reaches_the_writer(self, writer):
+        """Батч уходит единственному писателю, а не в базу из агента."""
+        svc = _svc(flush_interval_sec=0.05, batch_size=3, mcp_writer=writer)
         svc.start()
         try:
             for i in range(3):
@@ -274,16 +288,19 @@ class TestFlush:
         finally:
             svc.stop(timeout_sec=2.0)
 
-        fake_psycopg2["execute_batch"].assert_called()
+        assert writer.batches, "писатель не вызван"
+        assert sum(len(b) for b in writer.batches) >= 3
         written = svc.get_stats()["written"]
         assert written >= 3
 
-    def test_drop_when_no_dsn(self, tmp_path):
-        svc = _svc(
-            dsn="",
-            flush_interval_sec=0.05,
-            batch_size=2,
-        )
+    def test_drop_when_no_writer(self, tmp_path):
+        """Писателя нет — события потеряны, и потеря названа.
+
+        Раньше тест назывался ``test_drop_when_no_dsn``: DSN был условием
+        доступа к базе. Теперь доступа к базе нет вообще, и условие потери —
+        отсутствие писателя. Название оставлено бы прежним, оно бы врало.
+        """
+        svc = _svc(flush_interval_sec=0.05, batch_size=2)
         svc.start()
         try:
             svc.log_inbound("cli:1", "cli", "a")
@@ -296,29 +313,32 @@ class TestFlush:
         assert not (tmp_path / "log.jsonl").exists()
         assert svc.get_stats()["failed"] >= 2
 
-    def test_connect_failure_drops(self, fake_psycopg2, tmp_path):
-        from utils.db import set_pool_config
+    def test_writer_failure_drops_and_names_the_reason(self, writer, tmp_path):
+        """Отказ писателя виден и назван, а не проглочен.
 
-        set_pool_config({"connect_max_retries": 1, "reconnect_backoff_sec": 0.05})
-        psycopg2 = sys.modules["psycopg2"]
-        psycopg2.connect = MagicMock(side_effect=RuntimeError("no db"))
-        svc = _svc(
-            dsn="postgresql://x",
-            flush_interval_sec=0.05,
-            batch_size=1,
-        )
+        Путь прежний: падение записи должно оставить след в счётчиках. Раньше
+        источником отказа был «не поднялся PostgreSQL», теперь — платформа,
+        и подменять его отказ писателя проверяет ровно то же самое, что раньше
+        проверял отказ соединения.
+        """
+
+        def _boom(batch):
+            raise RuntimeError("платформа не отвечает")
+
+        writer.write_events = _boom  # type: ignore[method-assign]
+        svc = _svc(flush_interval_sec=0.05, batch_size=1, mcp_writer=writer)
         svc.start()
         try:
             svc.log_inbound("cli:1", "cli", "x")
             time.sleep(0.2)
         finally:
             svc.stop(timeout_sec=2.0)
-        assert svc.get_stats()["failed"] >= 1
+        stats = svc.get_stats()
+        assert stats["failed"] >= 1
         assert not (tmp_path / "log.jsonl").exists()
 
-    def test_stop_flushes_remaining(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0,
-                                batch_size=100)
+    def test_stop_flushes_remaining(self, writer):
+        svc = _svc(flush_interval_sec=5.0, batch_size=100, mcp_writer=writer)
         svc.start()
         try:
             svc.log_inbound("cli:1", "cli", "left")
@@ -328,7 +348,7 @@ class TestFlush:
 
 
 class TestGetStats:
-    def test_keys_present(self, fake_psycopg2):
+    def test_keys_present(self):
         svc = _svc(dsn="postgresql://x")
         stats = svc.get_stats()
         for k in ("running", "queued", "written", "failed", "queue_size",
@@ -338,11 +358,11 @@ class TestGetStats:
 
 
 class TestWrittenByType:
-    def test_written_by_type_empty_on_start(self, fake_psycopg2):
+    def test_written_by_type_empty_on_start(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.get_stats()["written_by_type"] == {}
 
-    def test_enqueue_does_not_increment_written_by_type(self, fake_psycopg2):
+    def test_enqueue_does_not_increment_written_by_type(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         before = time.time()
         svc.log_tool_call("cli:1", "read", {})
@@ -355,9 +375,8 @@ class TestWrittenByType:
                 assert item.queued_at is not None
                 assert item.queued_at >= before
 
-    def test_written_by_type_grows_after_flush(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05,
-                                batch_size=8)
+    def test_written_by_type_grows_after_flush(self, writer):
+        svc = _svc(flush_interval_sec=0.05, batch_size=8, mcp_writer=writer)
         svc.start()
         try:
             for _ in range(5):
@@ -372,15 +391,12 @@ class TestWrittenByType:
         assert counter.get("tool.started") == 5
         assert counter.get("tool.completed") == 3
 
-    def test_written_by_type_does_not_grow_on_flush_failure(
-        self, fake_psycopg2,
-    ):
-        from utils.db import set_pool_config
+    def test_written_by_type_does_not_grow_on_flush_failure(self, writer):
+        def _boom(batch):
+            raise RuntimeError("платформа не отвечает")
 
-        set_pool_config({"connect_max_retries": 1, "reconnect_backoff_sec": 0.05})
-        psycopg2 = sys.modules["psycopg2"]
-        psycopg2.connect = MagicMock(side_effect=RuntimeError("no db"))
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05, batch_size=2)
+        writer.write_events = _boom  # type: ignore[method-assign]
+        svc = _svc(flush_interval_sec=0.05, batch_size=2, mcp_writer=writer)
         svc.start()
         try:
             for _ in range(3):
@@ -392,8 +408,8 @@ class TestWrittenByType:
         assert svc.get_stats()["written_by_type"] == {}
         assert svc.get_stats()["failed"] >= 3
 
-    def test_written_by_type_not_reset_by_restart(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05, batch_size=4)
+    def test_written_by_type_not_reset_by_restart(self, writer):
+        svc = _svc(flush_interval_sec=0.05, batch_size=4, mcp_writer=writer)
         svc.start()
         try:
             for _ in range(2):
@@ -417,12 +433,12 @@ class TestWrittenByType:
 
 
 class TestOldestQueuedAge:
-    def test_oldest_queued_age_none_when_empty(self, fake_psycopg2):
+    def test_oldest_queued_age_none_when_empty(self):
         svc = _svc(dsn="postgresql://x")
         assert svc.get_stats()["oldest_queued_age_sec"] is None
 
     def test_oldest_queued_age_only_counts_log_events(
-        self, fake_psycopg2,
+        self,
     ):
         from lib.services.db_logging_service import _QuestionRunRecord
 
@@ -437,7 +453,7 @@ class TestOldestQueuedAge:
         )
         assert svc.get_stats()["oldest_queued_age_sec"] is None
 
-    def test_oldest_queued_age_returns_max_age(self, fake_psycopg2):
+    def test_oldest_queued_age_returns_max_age(self):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         # Два LogEvent с разным queued_at — старший даёт max возраста.
         older = LogEvent(event_type="tool.started")
@@ -455,7 +471,7 @@ class TestOldestQueuedAge:
         assert age < 0.5
 
     def test_oldest_queued_age_ignores_records_without_queued_at(
-        self, fake_psycopg2,
+        self,
     ):
         from lib.services.db_logging_service import _QuestionRunRecord
 
@@ -471,125 +487,132 @@ class TestOldestQueuedAge:
         assert age < 0.4
 
 
-class TestSchemaCheck:
-    def test_ensure_schema_raises_when_missing_tables(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x")
-        conn = fake_psycopg2["conn"]
-        cursor = fake_psycopg2["cursor"]
-        cursor.fetchone.return_value = None  # таблиц нет ни в одном information_schema запросе
-        conn.cursor.reset_mock()
-        with pytest.raises(RuntimeError, match="таблица не найдена"):
-            svc._ensure_schema(conn)
+class TestSingleWriter:
+    """Прямого SQL у сервиса нет: писатель один, и он не агент.
 
-    def test_ensure_schema_passes_when_tables_exist(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x")
-        conn = fake_psycopg2["conn"]
-        cursor = fake_psycopg2["cursor"]
-        cursor.fetchone.return_value = ("1",)
-        conn.cursor.reset_mock()
-        svc._ensure_schema(conn)  # не должно падать
-        # проверяем обе таблицы
-        assert cursor.execute.call_count == 2
+    Раньше здесь стояли проверки текста ``INSERT``/``UPDATE`` и схемы таблиц.
+    Проверяемое поведение не исчезло, а уехало туда, где теперь пишут:
+    двухшаговый ``upsert`` без ``ON CONFLICT`` (Greenplum 6.5) и правила
+    чистки охраняет ``mcp-platform/tests/test_data_journal_operations.py``.
+    Дублировать его тут было бы проверкой чужого файла.
 
-    def test_no_ddl_executed(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x")
-        conn = fake_psycopg2["conn"]
-        cursor = fake_psycopg2["cursor"]
-        cursor.fetchone.return_value = ("1",)
-        conn.cursor.reset_mock()
-        svc._ensure_schema(conn)
-        for call in cursor.execute.call_args_list:
-            assert "CREATE" not in call.args[0].upper()
+    Что осталось за агентом — и что проверяется здесь — это передача: сервис
+    зовёт операцию платформы и не строит SQL сам.
+    """
 
-    def test_upsert_question_run_no_on_conflict(self, fake_psycopg2):
+    def test_no_sql_is_built_anywhere_in_the_service(self):
+        """В модуле writer'а не осталось ни одного SQL-выражения.
+
+        Разбор дерева, а не поиск подстроки: мёртвый код, оставшийся после
+        переноса, не поймал бы ни один функциональный тест — он просто не
+        звался бы. Именно такой остаток и возвращает путь записи в базу,
+        когда его начинают звать снова.
+
+        Проверяется код, а не текст: в docstring'ах слова ``psycopg2`` и
+        ``utils.db`` остаться обязаны — они объясняют, почему их нет в коде.
+        Проверка словом искала бы не код, а упоминание.
+        """
+        import ast
+
+        tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        sql_literals: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if re.search(
+                    r"\b(INSERT\s+INTO|DELETE\s+FROM|UPDATE\s+\"|information_schema|"
+                    r"ON\s+CONFLICT|SELECT\s+1\s+FROM)",
+                    node.value,
+                    re.IGNORECASE,
+                ):
+                    sql_literals.append(node.value)
+        assert "utils.db" not in imported, "пул записи журнала в дереве агента не нужен"
+        assert not any(name.split(".")[0] == "psycopg2" for name in imported), (
+            "драйвер БД в дереве агента не нужен вовсе"
+        )
+        assert not sql_literals, (
+            "db_logging_service.py вернул SQL: писатель один, и он не агент: "
+            + repr(sql_literals)
+        )
+
+    def test_question_run_goes_through_the_operation(self, writer):
+        """Контекст вопроса уходит операцией, а не ``INSERT``-ом агента."""
         from lib.services.db_logging_service import _QuestionRunRecord
 
-        svc = _svc(dsn="postgresql://x")
-        conn = fake_psycopg2["conn"]
-        conn.cursor.reset_mock()
-        cursor = fake_psycopg2["cursor"]
-        svc._upsert_question_run(conn, _QuestionRunRecord(
-            request_id="m1", session_id="cli:1", user_id="u1", chat_id="c1",
-            channel="cli", agent_id="main", status="running",
-        ))
-        calls = [c.args[0] for c in cursor.execute.call_args_list]
-        assert len(calls) == 2
-        assert calls[0].lstrip().startswith("UPDATE")
-        assert "ON CONFLICT" not in calls[0]
-        assert calls[1].lstrip().startswith("INSERT")
-        assert "WHERE NOT EXISTS" in calls[1]
-        assert "ON CONFLICT" not in calls[1]
+        svc = _svc(mcp_writer=writer)
+        svc._handle_question_run(
+            _QuestionRunRecord(
+                request_id="m1", session_id="cli:1", user_id="u1",
+                chat_id="c1", channel="cli", agent_id="main", status="running",
+            )
+        )
+        assert [r.request_id for r in writer.runs] == ["m1"]
+        assert svc.get_stats()["question_runs"] == 1
 
-    def test_upsert_question_run_update_only(self, fake_psycopg2):
+    def test_question_run_without_writer_is_a_named_loss(self):
+        """Нет писателя — потеря названа, а не замаскирована под запись."""
         from lib.services.db_logging_service import _QuestionRunRecord
 
-        svc = _svc(dsn="postgresql://x")
-        conn = fake_psycopg2["conn"]
-        conn.cursor.reset_mock()
-        cursor = fake_psycopg2["cursor"]
-        svc._upsert_question_run(conn, _QuestionRunRecord(
-            request_id="m1", status="finished", summary="ok",
-            response="полный ответ", update_only=True,
-        ))
-        calls = [c.args[0] for c in cursor.execute.call_args_list]
-        assert len(calls) == 2
-        assert calls[0].lstrip().startswith("UPDATE")
-        assert "status = %s" in calls[0]
-        assert "response = COALESCE(%s, response)" in calls[0]
-        assert "media = COALESCE(%s, media)" in calls[0]
-        assert calls[1].lstrip().startswith("INSERT")
-        assert "WHERE NOT EXISTS" in calls[1]
-
-    def test_upsert_question_run_question_media(self, fake_psycopg2):
-        from lib.services.db_logging_service import _QuestionRunRecord
-
-        svc = _svc(dsn="postgresql://x")
-        conn = fake_psycopg2["conn"]
-        conn.cursor.reset_mock()
-        cursor = fake_psycopg2["cursor"]
-        svc._upsert_question_run(conn, _QuestionRunRecord(
-            request_id="m1", session_id="cli:1", user_id="u1",
-            status="running", question="вопрос", media=["f.pdf"],
-        ))
-        calls = [c.args[0] for c in cursor.execute.call_args_list]
-        assert len(calls) == 2
-        assert "question = %s" in calls[0]
-        assert "media = %s" in calls[0]
-        assert "media" in calls[1]
+        svc = _svc()
+        svc._handle_question_run(_QuestionRunRecord(request_id="m1"))
+        stats = svc.get_stats()
+        assert stats["question_runs"] == 0
+        assert stats["failed"] == 1
+        assert any("писатель" in reason for reason in stats["loss_reasons"]), (
+            f"причина потери не названа: {stats['loss_reasons']}"
+        )
 
 
 class TestPurge:
-    def test_purge_empty_outbound_deletes(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x")
-        fake_psycopg2["cursor"].rowcount = 7
-        removed = svc.purge_empty_outbound()
-        assert removed == 7
-        sqls = [str(c.args[0]) for c in fake_psycopg2["cursor"].execute.call_args_list]
-        delete = [s for s in sqls if s.lstrip().upper().startswith("DELETE")]
-        assert delete
-        assert "outbound_final" in delete[0] and "outbound_delta" in delete[0]
-        assert "btrim(payload->>'content')" in delete[0]
+    """Чистка журнала — операция платформы, и агент выбирает только режим.
 
-    def test_purge_empty_outbound_no_dsn(self, fake_psycopg2):
-        svc = _svc(dsn="")
-        assert svc.purge_empty_outbound() == 0
+    Сами ``DELETE`` и список «пустых» типов событий охраняет
+    ``mcp-platform/tests/test_data_journal_operations.py``. Здесь проверяется
+    то, что реально решает агент: какой режим уходит в вызов.
+    """
 
-    def test_purge_old_respects_retention(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x", retention_days=10)
-        fake_psycopg2["cursor"].rowcount = 4
-        ev, runs = svc.purge_old(10)
-        assert ev == 4 and runs == 4
-        sqls = [str(c.args[0]) for c in fake_psycopg2["cursor"].execute.call_args_list]
-        delete = [s for s in sqls if s.lstrip().upper().startswith("DELETE")]
-        assert len(delete) == 2  # события + question_runs
-        assert "days" in delete[0]
+    def test_purge_empty_outbound_asks_for_that_mode_only(self):
+        writer = RecordingWriter(purge_counters={"empty_outbound": 7})
+        svc = _svc(mcp_writer=writer)
+        assert svc.purge_empty_outbound() == 7
+        assert writer.purges == [
+            {"retention_days": 0, "remove_empty_outbound": True}
+        ], "retention выключен — иначе подчистилось бы лишнее"
 
-    def test_purge_old_disabled_when_zero(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x", retention_days=0)
+    def test_purge_old_sends_retention_and_not_empty_outbound(self):
+        writer = RecordingWriter(purge_counters={"events": 4, "question_runs": 3})
+        svc = _svc(retention_days=10, mcp_writer=writer)
+        assert svc.purge_old(10) == (4, 3)
+        assert writer.purges == [
+            {"retention_days": 10, "remove_empty_outbound": False}
+        ]
+
+    def test_purge_old_disabled_when_zero_calls_nothing(self):
+        writer = RecordingWriter()
+        svc = _svc(retention_days=0, mcp_writer=writer)
         assert svc.purge_old(0) == (0, 0)
+        assert writer.purges == [], (
+            "выключенный retention не должен ходить в платформу на каждом тике"
+        )
 
-    def test_stats_expose_purge_counters(self, fake_psycopg2):
-        svc = _svc(dsn="postgresql://x")
+    def test_purge_without_writer_does_not_delete_anything(self):
+        svc = _svc()
+        assert svc.purge_empty_outbound() == 0
+        assert svc.purge_old(10) == (0, 0)
+        assert "purge" in (svc.get_stats()["last_error"] or "")
+
+    def test_purge_failure_is_reported_not_swallowed(self):
+        writer = RecordingWriter(purge_error=RuntimeError("отказ платформы"))
+        svc = _svc(mcp_writer=writer)
+        assert svc.purge_empty_outbound() == 0
+        assert "отказ платформы" in (svc.get_stats()["last_error"] or "")
+
+    def test_stats_expose_purge_counters(self):
+        svc = _svc()
         stats = svc.get_stats()
         for k in ("last_purged_events", "last_purged_runs", "last_purge_at"):
             assert k in stats
@@ -638,32 +661,29 @@ class TestNamePopulation:
 
 
 class TestUserIdPropagation:
-    """``LogEvent.user_id`` доходит до INSERT и автозаполняется из индекса."""
+    """``LogEvent.user_id`` доходит до писателя и автозаполняется из индекса.
 
-    def test_log_event_user_id_reaches_insert(self, fake_psycopg2):
-        """Явно заданный producer'ом ``LogEvent.user_id`` доходит до INSERT."""
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+    Проверяется граница «сервис → писатель», а не текст SQL: писателя у
+    сервиса больше нет. Дальше ``user_id`` едет не в теле батча, а в
+    контексте вызова — операция ``log_events`` берёт личность оттуда, и
+    ``event_to_wire`` её в батч не кладёт намеренно. Этот шаг охраняет
+    ``tests/test_log_transport.py`` (разбиение по личности вызова).
+    """
+
+    def test_log_event_user_id_reaches_the_writer(self, writer):
+        """Явно заданный producer'ом ``LogEvent.user_id`` доходит до писателя."""
+        svc = _svc(mcp_writer=writer)
         svc.log_event(LogEvent(
             event_type="tool.started",
             session_id="cli:1",
             request_id="r1",
             user_id="alice",
         ))
-        event = svc._queue.queue[0]
-        assert event.user_id == "alice"
-        # _insert_batch использует psycopg2.extras.execute_batch
-        # (мокается в fake_psycopg2), который вызывается с SQL и
-        # списком параметров-строк. Проверяем, что user_id попал в оба.
-        svc._insert_batch(fake_psycopg2["conn"], [event])
-        call = fake_psycopg2["execute_batch"].call_args
-        sql, rows = call.args[1], call.args[2]
-        assert "user_id" in sql
-        # Параметры — список кортежей: первый кортеж содержит user_id
-        # на позиции сразу после event_type.
-        assert "alice" in rows[0]
+        svc._flush_batch([i for i in svc._queue.queue if isinstance(i, LogEvent)])
+        assert writer.batches[0][0].user_id == "alice"
 
-    def test_auto_filled_user_id_reaches_insert_via_index(self, fake_psycopg2):
-        """End-to-end прокидывание auto-filled ``user_id`` в INSERT.
+    def test_auto_filled_user_id_reaches_the_writer(self, writer):
+        """End-to-end прокидывание auto-filled ``user_id`` писателю.
 
         Полная security-boundary цепочка:
 
@@ -673,26 +693,24 @@ class TestUserIdPropagation:
                 ↓ _resolve_event_user_id
           event.user_id = alice  (через request_id matching)
                 ↓
-          _insert_batch()
+          write_events()
                 ↓
-          SQL params содержат ``alice`` в позиции user_id
+          событие, ушедшее платформе, помечено user_id = ``alice``
 
         Без этого теста покрытие было бы разорвано: explicit value
-        проверялся отдельно (test_log_event_user_id_reaches_insert),
+        проверялся отдельно (test_log_event_user_id_reaches_the_writer),
         auto-fill — отдельно (test_enqueue_fills_user_id_when_request_id_matches),
-        но именно «auto-filled → INSERT» — нет. Это критично для
+        но именно «auto-filled → у писателя» — нет. Это критично для
         history_search(session_scope="all") как security boundary:
-        если бы между ``log_event`` и ``_insert_batch`` значение
+        если бы между ``log_event`` и ``write_events`` значение
         терялось, фильтр ``user_id = %s`` возвращал бы 0 строк.
 
         Событие идёт через ``log_event``, а не напрямую в ``_enqueue``:
         ``log_event`` — единственная точка входа в журнал, и именно она
-        ставит событию момент (``_stamp_event_time``). Колонки ``seq`` и
-        ``occurred_at`` объявлены ``NOT NULL``, поэтому событие без метки
-        честно не пишется — и тест, обходящий точку входа, проверял бы
-        путь, которого в жизни нет.
+        ставит событию момент (``_stamp_event_time``). Обход точки входа
+        проверял бы путь, которого в жизни нет.
         """
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(mcp_writer=writer)
         svc.register_request(
             "cli:1", "req-A", user_id="alice", chat_id="c1",
         )
@@ -707,35 +725,25 @@ class TestUserIdPropagation:
         # После разрешения event.user_id заполнен индексом.
         assert event.user_id == "alice"
 
-        # Полный путь в INSERT: execute_batch должен получить SQL с
-        # колонкой user_id и параметры с ``alice`` в нужной позиции.
-        fake_psycopg2["execute_batch"].reset_mock()
-        svc._insert_batch(fake_psycopg2["conn"], [event])
+        svc._flush_batch([i for i in svc._queue.queue if isinstance(i, LogEvent)])
 
-        call = fake_psycopg2["execute_batch"].call_args
-        sql = call.args[1]
-        rows = call.args[2]
-        assert "user_id" in sql
-        # В execute_batch первый аргумент — SQL, второй — список
-        # кортежей; в каждом кортеже позиция user_id — сразу после
-        # event_type (порядок колонок фиксирован в _insert_batch).
-        assert "alice" in rows[0], (
-            f"alice должна быть в позиции user_id INSERT-параметров; "
-            f"получено: {rows[0]!r}"
+        assert writer.batches[0][0].user_id == "alice", (
+            f"alice обязана дойти до писателя; получено: "
+            f"{writer.batches[0][0].user_id!r}"
         )
 
-    def test_auto_filled_user_id_does_not_reach_insert_when_request_mismatch(
-        self, fake_psycopg2,
+    def test_auto_filled_user_id_does_not_reach_the_writer_when_request_mismatch(
+        self, writer,
     ):
-        """End-to-end: stale-event auto-fill не «протекает» в INSERT.
+        """End-to-end: stale-event auto-fill не «протекает» к платформе.
 
         register A/alice → LogEvent(req-A, user_id=None) →
         register B/bob → log_event того же события →
-        _insert_batch: SQL params содержат ``None`` в позиции user_id,
-        НЕ ``bob``. Это primary logging-security acceptance на уровне
-        реальной INSERT-цепочки (не только очереди).
+        write_events: ушедшее событие помечено ``user_id=None``, НЕ ``bob``.
+        Это primary logging-security acceptance на уровне реальной цепочки
+        записи (не только очереди).
         """
-        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(mcp_writer=writer)
         svc.register_request(
             "cli:1", "req-A", user_id="alice", chat_id="c1",
         )
@@ -753,18 +761,16 @@ class TestUserIdPropagation:
         # Stale event остался без user_id (не подхватил bob).
         assert stale_event.user_id is None
 
-        # INSERT содержит None в позиции user_id.
-        fake_psycopg2["execute_batch"].reset_mock()
-        svc._insert_batch(fake_psycopg2["conn"], [stale_event])
-        rows = fake_psycopg2["execute_batch"].call_args.args[2]
-        # Позиция user_id — после event_type: (id, level, event_type, user_id, ...)
-        user_id_value = rows[0][3]
-        assert user_id_value is None, (
-            f"stale event должен сохранить user_id=None, "
-            f"получено: {user_id_value!r}"
+        svc._flush_batch([i for i in svc._queue.queue if isinstance(i, LogEvent)])
+
+        # Событие уходит платформе вообще — и уходит БЕЗ чужого user_id.
+        assert writer.batches, "событие должно уйти платформе, а не затеряться"
+        assert writer.batches[0][0].user_id is None, (
+            f"stale event должен сохранить user_id=None, получено: "
+            f"{writer.batches[0][0].user_id!r}"
         )
 
-    def test_enqueue_fills_user_id_when_request_id_matches(self, fake_psycopg2):
+    def test_enqueue_fills_user_id_when_request_id_matches(self):
         """register_request + LogEvent(user_id=None) с тем же request_id
         автозаполняет ``user_id`` из индекса при ``_enqueue``."""
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
@@ -783,7 +789,7 @@ class TestUserIdPropagation:
         # После _enqueue event.user_id подставлен из индекса.
         assert event.user_id == "alice"
 
-    def test_explicit_user_id_overrides_index(self, fake_psycopg2):
+    def test_explicit_user_id_overrides_index(self):
         """Явный ``LogEvent.user_id`` от producer'а побеждает индекс."""
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.register_request(
@@ -800,7 +806,7 @@ class TestUserIdPropagation:
         assert event.user_id == "bob"
 
     def test_stale_event_does_not_inherit_next_request_user_id(
-        self, fake_psycopg2,
+        self,
     ):
         """Primary logging-security тест: stale event с request_id=A,
         созданный до ``register_request(B, user_id='bob')``, остаётся с
@@ -828,7 +834,7 @@ class TestUserIdPropagation:
         assert stale_event.user_id is None
 
     def test_event_without_request_id_does_not_inherit_user_id(
-        self, fake_psycopg2,
+        self,
     ):
         """Событие без ``request_id`` НЕ получает ``user_id`` из индекса,
         даже если для session_key индекс заполнен."""
@@ -845,7 +851,7 @@ class TestUserIdPropagation:
         # request_id=None → никакого matching → user_id остаётся None.
         assert event.user_id is None
 
-    def test_register_request_updates_pair_atomically(self, fake_psycopg2):
+    def test_register_request_updates_pair_atomically(self):
         """Атомарность пары ``{request_id, user_id}``: параллельный
         reader во время ``register_request`` видит либо полностью старое
         состояние, либо полностью новое — не смесь."""
@@ -906,7 +912,7 @@ class TestUserIdPropagation:
                 "(security boundary)"
             )
 
-    def test_clear_request_removes_pair(self, fake_psycopg2):
+    def test_clear_request_removes_pair(self):
         """``clear_request`` удаляет всю парную запись {request_id, user_id}."""
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.register_request(

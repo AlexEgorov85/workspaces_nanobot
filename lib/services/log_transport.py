@@ -68,6 +68,8 @@ logger = logging.getLogger(__name__)
 OP_LOG_EVENTS = "log_events"
 #: Операция записи контекста вопроса.
 OP_UPSERT_QUESTION_RUN = "upsert_question_run"
+#: Операция очистки журнала. Имя совпадает с ``data/tools/purge_logs.py``.
+OP_PURGE_LOGS = "purge_logs"
 
 
 class LogWriteUnavailable(RuntimeError):
@@ -342,6 +344,63 @@ class McpLogWriter:
             sent,
         )
         return WriteResult(accepted=sent)
+
+    def purge_logs(
+        self,
+        *,
+        retention_days: int,
+        remove_empty_outbound: bool | None = None,
+    ) -> dict[str, int] | None:
+        """Чистка журнала операцией ``purge_logs``. Вернуть счётчики ответа.
+
+        Раньше чистку делал сам ``DbLoggingService`` двумя ``DELETE`` по
+        PostgreSQL. Теперь удаление строк — тоже дело платформы: у неё объявлена
+        операция ``purge_logs`` с тем же разбором режимов, и второй ``DELETE``
+        из агента означал бы ровно то, чего change и добивается: второй
+        писатель в базу журнала.
+
+        Разбор режимов — платформенный, и это важно именно потому, что
+        значения у сторон не совпадают. Платформа отвергает отрицательный
+        ``retention_days`` (``InvalidRequestError``), а ``0`` означает «старые
+        записи не трогаются» — то есть retention выключен, а не «удалить всё».
+        Поэтому «убрать только пустые исходящие» — это ``retention_days=0`` плюс
+        ``remove_empty_outbound=True``, и никакого ``-1`` в протоколе нет.
+
+        Возвращаются все три счётчика ответа (``empty_outbound``, ``events``,
+        ``question_runs``) или ``None``, если вызов не состоялся. Смешивать их
+        в одно число нельзя: у вызывающего они попадают в разные строки
+        статистики, и ``purge_old`` обязан вернуть пару. Ключ ``status``
+        отбрасывается — он строка, и в счётчики ему не место.
+
+        Личность вызова не нужна и не выдумывается: чистка журнала не оборот и
+        не сессия. Единственное, что здесь важно, — не подставлять ``session_id``
+        от какого-нибудь оборота: у платформы это означало бы «прибери мою
+        сессию», а чистится всё подряд.
+        """
+        payload: dict[str, Any] = {"retention_days": int(retention_days)}
+        if remove_empty_outbound is not None:
+            payload["remove_empty_outbound"] = bool(remove_empty_outbound)
+        try:
+            text = self.run(self._invoke_purge(payload))
+        except (EnterpriseMcpUnavailable, LogWriteUnavailable) as exc:
+            logger.warning("purge_logs: транспорт недоступен, чистка не выполнена: %s", exc)
+            return None
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            logger.warning("purge_logs: ответ не разобран (%r)", str(text)[:200])
+            return None
+        if not isinstance(data, dict):
+            logger.warning("purge_logs: ответ не словарь (%r)", str(text)[:200])
+            return None
+        return {
+            key: int(value)
+            for key, value in data.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+
+    async def _invoke_purge(self, payload: dict[str, Any]) -> str:
+        return await self.call(OP_PURGE_LOGS, payload)
 
     def upsert_question_run(self, record: Any) -> bool:
         """Записать контекст вопроса операцией ``upsert_question_run``.

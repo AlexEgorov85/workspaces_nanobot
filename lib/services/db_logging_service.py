@@ -1,18 +1,18 @@
-"""DbLoggingService — структурированное логирование событий агента в PostgreSQL.
+"""DbLoggingService — структурированное логирование событий агента.
 
-Импортируется БЕЗ nanobot (psycopg2 импортируется лениво — модуль годен
-для тестов с мок-подключением и для сред без psycopg2).
+Импортируется БЕЗ nanobot и без ``psycopg2``: драйвера в дереве агента не
+осталось, модуль годен для тестов с мок-транспортом и для сред без СУБД.
 
 Архитектура:
   * единственный worker-поток (``self._thread``) дренит очередь батчами;
-  * сам сервис НЕ держит psycopg2-соединение: вставки идут через общий
-    пул ``utils.db`` (``run(lambda conn: …)``) — воркер пула владеет
-    соединением, сервис не плодит лишних подключений;
+  * сервис не держит ни соединения, ни пула: записью владеет платформа, и
+    батч уходит ей операцией ``log_events`` (см. ``lib/services/log_transport.py``);
   * неблокирующие ``log_*`` методы ставят события в ``queue.Queue``;
-  * worker батчем вставляет записи по ``flush_interval_sec`` или ``batch_size``;
-  * если подключение к БД недоступно или вставка падает — события НЕ пишутся
-    в JSONL-файл: они выбрасываются, а ошибка фиксируется в ``stats``
-    (``failed`` / ``last_error``). Скрытой записи в файл нет;
+  * worker отдаёт батч по ``flush_interval_sec`` или ``batch_size``;
+  * писателя нет — потеря видна и измерима, а не замаскирована обходным
+    путём: событие попадает в локальный след, в ``failed`` и в
+    ``loss_reasons`` под названной причиной. Обхода базы в обход платформы
+    здесь нет и не было смысла оставлять;
   * ``stop(timeout_sec=15)`` отправляет SHUTDOWN-сентинел и дожидается
     опустошения очереди.
 """
@@ -497,8 +497,8 @@ def _json_safe(value: Any) -> Any:
 
     Промпт/ответ могут содержать несеризуемые объекты (dataclass, Path,
     bytes и т.п.). Рекурсивно обходим структуры; неподдерживаемые скаляры
-    сводим к ``str(value)``, чтобы ``psycopg2.extras.Json`` не уронил весь
-    батч событий.
+    сводим к ``str(value)``, чтобы один такой не уронил весь батч событий
+    при кодировании ``payload``/``metadata`` в JSON на стороне платформы.
     """
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
@@ -629,7 +629,12 @@ class _QuestionRunRecord:
 
 
 class DbLoggingService:
-    """Фоновый writer событий агента в PostgreSQL (без fallback-JSONL)."""
+    """Фоновый writer событий агента. Писатель один — платформа.
+
+    Собственного соединения и пула у сервиса нет: события, контекст вопроса и
+    чистка журнала уходят операциями ``enterprise-mcp``. Локальный файл
+    остаётся следом на случай отказа платформы, а не вторым писателем.
+    """
 
     def __init__(
         self,
@@ -651,6 +656,11 @@ class DbLoggingService:
         mcp_writer: Any | None = None,
         fallback_sink: Any | None = None,
     ) -> None:
+        # Имена таблиц и DSN больше не участвуют в записи: писатель один, и он
+        # не агент. Параметры оставлены на месте, потому что их передаёт
+        # composition root, а убирать их из подписи — правка вызова и десятков
+        # мест сборки, ничего не меняющая в поведении. Читать их здесь больше
+        # нечему: значения выше помечены как оставшиеся, а не рабочие.
         self._dsn = dsn or ""
         self._table_name = table_name
         self._question_runs_table = question_runs_table
@@ -672,16 +682,16 @@ class DbLoggingService:
         self._purge_interval_sec = float(purge_interval_sec)
         self._last_purge = 0.0
 
-        # Транспорт записи. ``None`` — прямая запись в PostgreSQL через
-        # ``utils.db``: это поведение по умолчанию и исторический путь, он
-        # остаётся рабочим, пока журналирование не переведено на платформу
-        # целиком. Заданый ``mcp_writer`` означает, что запись идёт операцией
-        # ``log_events`` и агент пул записи не держит (change
-        # ``enterprise-mcp-platform``, фаза 7).
+        # Транспорт записи. ``None`` — писатель не задан: писать в обход
+        # платформы нечем и нельзя, поэтому события уходят в локальный след и
+        # в счётчик потерь. Заданный ``mcp_writer`` означает, что запись идёт
+        # операциями ``log_events`` / ``upsert_question_run`` / ``purge_logs``,
+        # и агент не держит ни пула записи, ни своего соединения с базой.
         #
-        # Оба пути не смешиваются: transport выбирается при сборке, а не
-        # «попробовать MCP, а не вышло — писать в базу». Такой fallback был бы
-        # вторым владельцем пула записи, которого change и устраняет.
+        # Пути не смешиваются и не подменяют друг друга: транспорт выбирается
+        # при сборке, а не «попробовать MCP, а не вышло — писать в базу».
+        # Такой обход был бы вторым владельцем пула записи, которого change и
+        # устраняет.
         self._mcp_writer = mcp_writer
         self._fallback_sink = fallback_sink
         # Транспорт ещё не ВЫБРАН composition root'ом — в отличие от «выбран,
@@ -822,7 +832,6 @@ class DbLoggingService:
         # именно из-за ``at_seq``.
         self._turn_identity: dict[str, dict[str, Any]] = {}
         self._request_index_lock = threading.Lock()
-        self._schema_ok = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1863,12 +1872,13 @@ class DbLoggingService:
              ``time.time() >= deadline`` — выполнить flush.
 
         При flush:
-          * запись идёт через общий пул ``utils.db`` (``run(lambda conn: …)``) —
-            сервис своего psycopg2-соединения не держит;
-          * нет DSN → события выбрасываются (счётчик ``failed``),
-            JSONL-файл не пишется;
-          * при ошибке batch — события выбрасываются (``failed``),
-            ``connected = False``.
+          * батч уходит единственному писателю — платформе операцией
+            ``log_events``; собственного соединения у сервиса нет;
+          * транспорт ещё не выбран — батч откладывается до решения
+            (``_defer_batch``), а не пишется в обход;
+          * писателя нет — события считаются потерянными (``failed``) и
+            уходят в локальный след под названной причиной;
+          * отказ платформы — те же счётчики, причина в ``loss_reasons``.
 
         В блоке ``finally`` — финальный flush (иначе при штатной остановке
         теряем события из буфера).
@@ -1924,68 +1934,24 @@ class DbLoggingService:
                 self._flush_batch(buffer)
 
     # ------------------------------------------------------------------
-    # Запись через общий пул utils.db
+    # Запись журнала: единственный писатель — платформа
     # ------------------------------------------------------------------
 
-    def _db_run(self, fn):
-        """Выполнить ``fn(conn)`` на свободном соединении общего пула ``utils.db``."""
-        from utils.db import configure, run
-
-        if self._dsn:
-            configure(self._dsn)
-        return run(fn)
-
-    def _ensure_schema(self, conn: Any) -> None:
-        """Проверить существование таблиц логов/контекста вопросов.
-
-        Сервис НЕ провижинит схему: таблицы ``agent_question_runs`` /
-        ``agent_gateway_logs`` должны быть созданы заранее
-        (``sql/logs/create_public_agent_question_runs.sql`` /
-        ``sql/logs/create_public_agent_gateway_logs.sql``).
-        Если таблица логов отсутствует — поднимается исключение; вызывающий
-        ``_flush_batch`` логирует его (``last_error`` + ``logger.error``),
-        а события выбрасываются (счётчик ``failed``).
-
-        Имя таблицы берётся из конструктора (``table_name``, параметр), а не
-        хардкодится. Инлайн-DDL в коде нет и не выполняется.
-        """
-        check_tables = [self._table_name]
-        if self._question_runs_table:
-            check_tables.append(self._question_runs_table)
-        cur = conn.cursor()
-        try:
-            for tbl in check_tables:
-                cur.execute(
-                    "SELECT 1 FROM information_schema.tables "
-                    "WHERE table_schema = %s AND table_name = %s",
-                    [self._schema, tbl],
-                )
-                if cur.fetchone() is None:
-                    raise RuntimeError(
-                        f"DbLoggingService: таблица не найдена: "
-                        f"{self._schema}.{tbl} — создайте её миграцией, "
-                        "сервис DDL не выполняет"
-                    )
-        finally:
-            try:
-                cur.close()
-            except Exception:
-                pass
-
     def _flush_batch(self, batch: list[LogEvent]) -> None:
-        """Вставить батч через общий пул ``utils.db`` (без своего соединения).
+        """Отдать батч единственному писателю — платформе.
 
-        Использует ``psycopg2.extras.execute_batch`` с
-        ``page_size=self._batch_size`` для chunked-вставки — ``execute_batch``
-        сам режет список на страницы и выполняет несколько ``INSERT`` с одним
-        statement. На каждой строке — ``id`` (UUID), ``level``/``event_type``/
-        ``summary`` (простые VARCHAR/TEXT), и ``payload``/``metadata`` как
-        ``psycopg2.extras.Json`` (→ JSONB), плюс ``seq``/``occurred_at``,
-        разобранные из ``metadata`` (см. :py:func:`event_time_columns`).
+        Прямого ``INSERT`` в PostgreSQL у сервиса больше нет, и это не
+        упрощение, а требование: канал, которым батч уходил в базу, когда
+        платформа не отвечала, был вторым владельцем базы журнала. Отсутствие
+        писателя — это потеря, а не повод писать в обход, поэтому потеря
+        названа, посчитана и остаётся в локальном следе.
 
-        При исключении (битый JSONB, отвалившееся соединение, deadlock):
-          * батч целиком выбрасывается (``failed += len(batch)``);
-          * ``connected = False``.
+        Три исхода, все наблюдаемые:
+
+          * ``mcp_writer`` задан — батч уходит операцией ``log_events``;
+          * транспорт ещё выбирается — батч откладывается (``_defer_batch``),
+            потому что позже его ещё можно отдать платформе;
+          * писателя нет — ``failed``, локальный след и причина потерь.
 
         No-op при пустом батче.
         """
@@ -1995,39 +1961,15 @@ class DbLoggingService:
             self._flush_batch_via_mcp(batch)
             return
         if self._transport_pending:
-            # Решение о транспорте ещё не принято. Прямая запись здесь -
-            # это возврат пула записи журнала в руки агента, и вернуться
-            # к ней можно было бы молча, не оставив следа.
             self._defer_batch(batch)
             return
-        if not self._dsn:
-            self._note_loss("нет DSN и нет транспорта журнала")
-            self._drop_batch(batch)
-            return
-        try:
-
-            def _work(conn: Any) -> None:
-                if not self._schema_ok:
-                    self._ensure_schema(conn)
-                    self._schema_ok = True
-                self._insert_batch(conn, batch)
-
-            self._db_run(_work)
-            with self._state_lock:
-                self._stats["written"] += len(batch)
-                self._stats["batch_count"] += 1
-                self._stats["connected"] = True
-                for etype, count in _count_by_type(batch).items():
-                    self._stats["written_by_type"][etype] = (
-                        self._stats["written_by_type"].get(etype, 0) + count
-                    )
-        except Exception as exc:
-            self._schema_ok = False
-            with self._state_lock:
-                self._stats["failed"] += len(batch)
-                self._stats["last_error"] = f"flush: {exc}"
-                self._stats["connected"] = False
-            self._note_loss(f"прямая запись в PostgreSQL отказала: {exc}", len(batch))
+        self._note_loss(
+            "писатель журнала не задан: enterprise-mcp не подключён, "
+            "прямая запись в PostgreSQL упразднена",
+            len(batch),
+        )
+        self._drop_batch(batch)
+        self._write_fallback(batch)
 
     def _defer_batch(self, batch: list[LogEvent]) -> None:
         """Батч, для которого транспорт ещё не выбран.
@@ -2181,54 +2123,19 @@ class DbLoggingService:
         # после её смерти в файле останется хотя бы факт попытки.
         self._write_fallback([rec])  # type: ignore[list-item]
 
-    def _insert_batch(self, conn: Any, batch: list[LogEvent]) -> None:
-        """Выполнить ``execute_batch`` INSERT на данном соединении.
-
-        Последние две колонки — ``seq`` и ``occurred_at``: момент события и
-        ключ порядка, разобранные из ``metadata`` (единственного места, где
-        они живут). Они добавлены В КОНЕЦ списка колонок, чтобы порядок
-        плейсхолдеров прежних полей не сдвинулся: по нему написан страж
-        ``tests/test_journal_writer_columns_contract.py`` и по нему же
-        платформенный тест разбора строки.
-        """
-        import psycopg2.extras
-
-        cur = conn.cursor()
-        try:
-            psycopg2.extras.execute_batch(
-                cur,
-                f'INSERT INTO "{self._schema}"."{self._table_name}" '
-                '(id, level, event_type, user_id, session_id, channel, actor, summary, payload, '
-                'metadata, request_id, name, seq, occurred_at) '
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                [(
-                    e.id, e.level, e.event_type, e.user_id, e.session_id, e.channel, e.actor,
-                    e.summary,
-                    psycopg2.extras.Json(e.payload or {}),
-                    psycopg2.extras.Json(e.metadata or {}),
-                    e.request_id, e.name,
-                    *event_time_columns(e.metadata),
-                ) for e in batch],
-                page_size=self._batch_size,
-            )
-        finally:
-            try:
-                cur.close()
-            except Exception:
-                pass
-
     def _handle_question_run(self, rec: _QuestionRunRecord) -> None:
-        """Обработать контекст вопроса: upsert в agent_question_runs.
+        """Обработать контекст вопроса единственным писателем.
 
-        Через общий пул ``utils.db``. При неудаче запись выбрасывается
-        (``failed++``), локальный след не пишется. При ошибке upsert —
-        ``connected = False``.
+        Прямого ``upsert`` в ``agent_question_runs`` у сервиса больше нет по
+        той же причине, что и у батча: это был второй путь записи в базу
+        журнала. Писать контекст вопроса должен тот же, кто пишет события, —
+        платформа, операцией ``upsert_question_run``.
 
-        При заданном ``mcp_writer`` путь другой: запись уходит платформе
-        операцией ``upsert_question_run`` (см. ``_handle_question_run_via_mcp``).
-        При невыбранном транспорте — третий: локальный след, потому что
-        контекст вопроса связывает журнал с ``request_id``, и потерять его
-        молча значит потерять эту связь для всего оборота.
+        Три исхода, как у батча: платформа (``_handle_question_run_via_mcp``),
+        транспорт ещё не выбран (локальный след: терять связь журнала с
+        ``request_id`` молча нельзя) и писателя нет (потери и след).
+
+        Успех не выдаётся за неудачу и наоборот: ``failed`` и причина.
         """
         if self._mcp_writer is not None:
             self._handle_question_run_via_mcp(rec)
@@ -2236,205 +2143,115 @@ class DbLoggingService:
         if self._transport_pending:
             with self._state_lock:
                 self._stats["failed"] += 1
-                self._stats["last_error"] = (
-                    "question_run: транспорт журнала не выбран"
-                )
+                self._stats["question_runs_failed"] += 1
+                self._stats["last_error"] = "question_run: транспорт журнала не выбран"
+            self._note_loss("контекст вопроса: транспорт журнала не выбран")
             self._write_fallback([rec])  # type: ignore[list-item]
             return
-        if not self._dsn:
-            with self._state_lock:
-                self._stats["failed"] += 1
-                self._stats["last_error"] = "question_run: нет соединения с БД"
-            return
-        try:
-
-            def _work(conn: Any) -> None:
-                if not self._schema_ok:
-                    self._ensure_schema(conn)
-                    self._schema_ok = True
-                self._upsert_question_run(conn, rec)
-
-            self._db_run(_work)
-            with self._state_lock:
-                self._stats["question_runs"] += 1
-                self._stats["connected"] = True
-        except Exception as exc:
-            self._schema_ok = False
-            with self._state_lock:
-                self._stats["failed"] += 1
-                self._stats["last_error"] = f"question_run upsert: {exc}"
-                self._stats["connected"] = False
-
-    def _upsert_question_run(self, conn: Any, rec: _QuestionRunRecord) -> None:
-        """Upsert контекста вопроса в agent_question_runs (без ON CONFLICT).
-
-        Greenplum 6.x (база PostgreSQL 9.4) НЕ поддерживает
-        ``INSERT ... ON CONFLICT (…) DO UPDATE`` — он появился только в
-        Greenplum 7. Поэтому используем переносимый двухшаговый паттерн,
-        работающий и на PostgreSQL 13, и на Greenplum 6.5:
-
-          1. ``UPDATE ... WHERE request_id = …`` — обновить существующую строку;
-          2. ``INSERT ... SELECT … WHERE NOT EXISTS (…)`` — вставить, если
-             строки ещё нет (закрывает гонку "нет строки после UPDATE").
-
-        ``update_only`` (вызов finish_request) обновляет только
-        ``updated_at``/``status``/``summary``, не затирая контекст вопроса.
-        Обычная регистрация upsert-ит все поля (новый вопрос — вставка,
-        повторная регистрация — перезапись контекста).
-        """
-        cur = conn.cursor()
-        try:
-            # media хранится как JSON-строка в TEXT-колонке
-            media_json = json.dumps(rec.media, ensure_ascii=False) if rec.media else None
-            if rec.update_only:
-                cur.execute(
-                    f'UPDATE "{self._schema}"."{self._question_runs_table}" '
-                    "SET updated_at = now(), status = %s, summary = %s, "
-                    "response = COALESCE(%s, response), media = COALESCE(%s, media) "
-                    "WHERE request_id = %s",
-                    (rec.status, rec.summary, rec.response, media_json, rec.request_id),
-                )
-                cur.execute(
-                    f'INSERT INTO "{self._schema}"."{self._question_runs_table}" '
-                    "(request_id, status, summary, response, media) "
-                    "SELECT %s, %s, %s, %s, %s "
-                    f'WHERE NOT EXISTS (SELECT 1 FROM "{self._schema}"."{self._question_runs_table}" '
-                    "WHERE request_id = %s)",
-                    (rec.request_id, rec.status, rec.summary, rec.response, media_json, rec.request_id),
-                )
-            else:
-                cur.execute(
-                    f'UPDATE "{self._schema}"."{self._question_runs_table}" '
-                    "SET session_id = %s, user_id = %s, chat_id = %s, "
-                    "channel = %s, parent_request_id = %s, agent_id = %s, "
-                    "parent_agent_id = %s, is_subagent = %s, status = %s, "
-                    "summary = %s, question = %s, media = %s, updated_at = now() "
-                    "WHERE request_id = %s",
-                    (
-                        rec.session_id, rec.user_id, rec.chat_id, rec.channel,
-                        rec.parent_request_id, rec.agent_id,
-                        rec.parent_agent_id, rec.is_subagent, rec.status,
-                        rec.summary, rec.question, media_json, rec.request_id,
-                    ),
-                )
-                cur.execute(
-                    f'INSERT INTO "{self._schema}"."{self._question_runs_table}" '
-                    "(request_id, session_id, user_id, chat_id, channel, "
-                    "parent_request_id, agent_id, parent_agent_id, is_subagent, "
-                    "status, summary, question, media) "
-                    "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
-                    f'WHERE NOT EXISTS (SELECT 1 FROM "{self._schema}"."{self._question_runs_table}" '
-                    "WHERE request_id = %s)",
-                    (
-                        rec.request_id, rec.session_id, rec.user_id, rec.chat_id,
-                        rec.channel, rec.parent_request_id, rec.agent_id,
-                        rec.parent_agent_id, rec.is_subagent, rec.status,
-                        rec.summary, rec.question, media_json, rec.request_id,
-                    ),
-                )
-        finally:
-            try:
-                cur.close()
-            except Exception:
-                pass
+        with self._state_lock:
+            self._stats["failed"] += 1
+            self._stats["question_runs_failed"] += 1
+            self._stats["last_error"] = "question_run: писатель журнала не задан"
+        self._note_loss("контекст вопроса: писатель журнала не задан")
+        self._write_fallback([rec])  # type: ignore[list-item]
 
     def _drop_batch(self, batch: list[LogEvent]) -> None:
-        """Выбросить батч, когда БД недоступна (без записи в JSONL-файл).
+        """Посчитать батч потерянным, раз писателя нет.
 
-        Увеличивает ``stats["failed"]`` и фиксирует ``last_error`` — скрытая
-        запись в файл не производится, событие считается потерянным.
+        Раньше здесь стояло «БД недоступна»: батч выбрасывался, когда агент не
+        мог до неё дотянуться. Теперь такого пути не существует — батч
+        теряется, когда писателя нет вообще, и называть это недоступностью
+        базы было бы ложью, уводящей искать не туда.
         """
         with self._state_lock:
             self._stats["failed"] += len(batch)
-            self._stats["last_error"] = "flush: БД недоступна, батч выброшен"
+            self._stats["last_error"] = "flush: писатель журнала не задан"
 
     # ------------------------------------------------------------------
     # Очистка (retention + удаление пустого мусора)
     # ------------------------------------------------------------------
 
-    def purge_empty_outbound(self) -> int:
-        """Удалить пустые outbound-события (stream-чанки / синтетические финалы).
+    def _purge_via_platform(
+        self, *, retention_days: int, remove_empty_outbound: bool
+    ) -> dict[str, int] | None:
+        """Чистка журнала операцией ``purge_logs``. ``None`` — вызова не было.
 
-        Удаляются ``agent.delivered`` (исторические ``outbound_final``/
-        ``outbound_delta`` — строки, писанные до переименования, они в таблице
-        уже лежат) с пустым/whitespace ``content`` И без ``media`` (реальные
-        доставки файлов с пустым текстом сохраняются — у них есть media).
-        Возвращает число удалённых строк. Работает через общий пул
-        ``utils.db`` (своего соединения нет).
+        Отдельный метод, потому что у чистки теперь ровно один писатель, и обе
+        точки вызова обязаны это разделять. Иначе «нужна платформа» и «платформа
+        есть» снова разойдутся, и одна из двух чисток получит свой обход —
+        то есть вернёт ровно тот второй путь, который здесь снимается.
+
+        Отсутствие писателя — потеря, а не повод удалять строки самому.
         """
-        if not self._dsn:
-            return 0
+        if self._mcp_writer is None:
+            self._note_loss("очистка журнала: писатель не задан, purge_logs не вызван")
+            with self._state_lock:
+                self._stats["last_error"] = "purge: писатель журнала не задан"
+            return None
         try:
-            def _work(conn: Any) -> int:
-                cur = conn.cursor()
-                try:
-                    cur.execute(
-                        f'DELETE FROM "{self._schema}"."{self._table_name}" '
-                        "WHERE event_type IN ('agent.delivered', 'outbound_final', "
-                        "'outbound_delta') "
-                        "AND coalesce(btrim(payload->>'content'), '') = '' "
-                        "AND (payload->'media') IS NULL"
-                    )
-                    return int(cur.rowcount)
-                finally:
-                    try:
-                        cur.close()
-                    except Exception:
-                        pass
-
-            removed = self._db_run(_work) or 0
-            with self._state_lock:
-                self._stats["last_purged_events"] += removed
-                self._stats["last_purge_at"] = time.time()
-            return removed
+            return self._mcp_writer.purge_logs(
+                retention_days=retention_days,
+                remove_empty_outbound=remove_empty_outbound,
+            )
         except Exception as exc:
+            logger.warning("purge_logs не выполнился: %s", exc)
             with self._state_lock:
-                self._stats["last_error"] = f"purge_empty: {exc}"
+                self._stats["last_error"] = f"purge: {exc}"
+            return None
+
+    def purge_empty_outbound(self) -> int:
+        """Убрать пустые outbound-события операцией ``purge_logs``.
+
+        Раньше это был ``DELETE`` по PostgreSQL из агента. Теперь строки
+        удаляет платформа, и режим задан явно: retention выключен
+        (``retention_days=0``), иначе подчистилось бы лишнее, а мусор убран
+        (``remove_empty_outbound=True``).
+
+        Какие строки считаются пустыми решает платформа
+        (``EMPTY_OUTBOUND_EVENT_TYPES`` и проверка на ``media``), и это
+        правильно: список имён событий агента не должен второй раз жить в его
+        же коде. Возвращает число удалённых строк; ``0`` означает, что чистка
+        не состоялась, и причина названа в ``last_error``.
+        """
+        counters = self._purge_via_platform(
+            retention_days=0, remove_empty_outbound=True
+        )
+        if counters is None:
             return 0
+        removed = int(counters.get("empty_outbound", 0))
+        with self._state_lock:
+            self._stats["last_purged_events"] += removed
+            self._stats["last_purge_at"] = time.time()
+        return removed
 
     def purge_old(self, retention_days: int | None = None) -> tuple[int, int]:
-        """Удалить события и question_runs старее ``retention_days``.
+        """Убрать записи старше ``retention_days`` операцией ``purge_logs``.
 
-        Возвращает ``(удалено_событий, удалено_question_runs)``. Если
-        ``retention_days <= 0`` или нет DSN — ничего не делает. Интервал
-        считается через ``NOW() - (%s || ' days')::interval`` (совместимо
-        с Greenplum 6.5, без ``make_interval``).
+        Возвращает ``(удалено_событий, удалено_question_runs)``. Retention
+        выключен (``days <= 0``) — не делает ничего. Это проверяется ДО
+        вызова, а не после: платформа на ``0`` тоже ничего не трогает, но
+        повторять её решение значило бы делать вызов впустую на каждом тике
+        очистки, то есть каждые ``purge_interval_sec``.
+
+        ``retention_days=None`` берётся из настройки сервиса. Сам интервал
+        считает платформа — ``NOW() - (days || ' days')::interval``, совместимо
+        с Greenplum 6.5, где нет ``make_interval``.
         """
         days = int(retention_days if retention_days is not None else self._retention_days)
-        if days <= 0 or not self._dsn:
+        if days <= 0:
             return (0, 0)
-        try:
-            def _work(conn: Any) -> tuple[int, int]:
-                cur = conn.cursor()
-                try:
-                    cur.execute(
-                        f'DELETE FROM "{self._schema}"."{self._table_name}" '
-                        "WHERE \"timestamp\" < NOW() - (%s || ' days')::interval",
-                        (str(days),),
-                    )
-                    ev = int(cur.rowcount)
-                    cur.execute(
-                        f'DELETE FROM "{self._schema}"."{self._question_runs_table}" '
-                        "WHERE updated_at < NOW() - (%s || ' days')::interval",
-                        (str(days),),
-                    )
-                    return (ev, int(cur.rowcount))
-                finally:
-                    try:
-                        cur.close()
-                    except Exception:
-                        pass
-
-            res = self._db_run(_work) or (0, 0)
-            with self._state_lock:
-                self._stats["last_purged_events"] += res[0]
-                self._stats["last_purged_runs"] += res[1]
-                self._stats["last_purge_at"] = time.time()
-            return res
-        except Exception as exc:
-            with self._state_lock:
-                self._stats["last_error"] = f"purge_old: {exc}"
+        counters = self._purge_via_platform(
+            retention_days=days, remove_empty_outbound=False
+        )
+        if counters is None:
             return (0, 0)
+        events = int(counters.get("events", 0))
+        runs = int(counters.get("question_runs", 0))
+        with self._state_lock:
+            self._stats["last_purged_events"] += events
+            self._stats["last_purged_runs"] += runs
+            self._stats["last_purge_at"] = time.time()
+        return (events, runs)
 
     def _purge_old(self) -> None:
         """Один шаг периодической очистки из worker-цикла.

@@ -87,51 +87,65 @@ class TestSubagentRunFinishedEventShape:
         """После успешного flush'а событие инкрементирует
         ``written_by_type["agent.completed"]``.
 
-        Мокаем ``DbLoggingService._db_run``, чтобы ``_flush_batch``
-        прошёл без реальной БД.
+        Writer подменён на заглушку: своего соединения у сервиса больше нет,
+        и «успешный flush» — это батч, принятый писателем.
         """
         from lib.services.db_logging_service import (
             DbLoggingService,
             LogEvent,
         )
-        from unittest.mock import MagicMock, patch
+        from lib.services.log_transport import WriteResult
 
+        class _Writer:
+            def __init__(self) -> None:
+                self.batches: list[list] = []
+                self.on_fallback = None
+
+            def write_events(self, batch):
+                self.batches.append(list(batch))
+                return WriteResult(accepted=len(batch), dropped=0)
+
+        writer = _Writer()
         svc = DbLoggingService(
             dsn="postgresql://x",
             table_name="x",
             question_runs_table="y",
             flush_interval_sec=0.05,
             batch_size=4,
+            mcp_writer=writer,
         )
 
-        # ``_flush_batch`` вызывает ``self._db_run(_work)`` —
-        # мокаем, чтобы INSERT прошёл без реальной БД.
-        with patch.object(svc, "_db_run", return_value=None):
-            svc.start()
-            try:
-                for i in range(2):
-                    svc.log_event(LogEvent(
-                        event_type="agent.completed",
-                        session_id=f"subagent:task-{i}",
-                        channel="subagent",
-                        actor="agent",
-                        name=f"task-{i}",
-                        summary=f"answer {i}",
-                        payload={
-                            "final_content": f"ответ {i}",
-                            "tools_used": [],
-                            "stop_reason": "stop",
-                            "task_id": f"task-{i}",
-                            "task": "task desc",
-                            "request_id": f"subagent:task-{i}",
-                            "parent_request_id": "rid",
-                        },
-                        metadata={},
-                    ))
-                time.sleep(0.3)
-            finally:
-                svc.stop(timeout_sec=2.0)
+        svc.start()
+        try:
+            for i in range(2):
+                svc.log_event(LogEvent(
+                    event_type="agent.completed",
+                    session_id=f"subagent:task-{i}",
+                    user_id="u1",
+                    request_id=f"req-{i}",
+                    channel="subagent",
+                    actor="agent",
+                    name=f"task-{i}",
+                    summary=f"answer {i}",
+                    payload={
+                        "final_content": f"ответ {i}",
+                        "tools_used": [],
+                        "stop_reason": "stop",
+                        "task_id": f"task-{i}",
+                        "task": "task desc",
+                        "request_id": f"subagent:task-{i}",
+                        "parent_request_id": "rid",
+                    },
+                    metadata={},
+                ))
+            time.sleep(0.3)
+        finally:
+            svc.stop(timeout_sec=2.0)
 
+        assert [e.event_type for b in writer.batches for e in b] == [
+            "agent.completed",
+            "agent.completed",
+        ]
         counter = svc.get_stats()["written_by_type"]
         assert counter.get("agent.completed") == 2
 

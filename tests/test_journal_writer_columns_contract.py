@@ -1,18 +1,23 @@
-"""Сверка множеств колонок двух писателей журнала.
+"""Сверка множеств колонок писателей журнала.
 
-Журнал ``agent_gateway_logs`` наполняют два независимых писателя: агент
-(``DbLoggingService``) и платформа (``enterprise-mcp``, capability ``data``).
-Пока оба писали один и тот же набор полей, журнал читался одним запросом.
+Журнал ``agent_gateway_logs`` наполняет писатель — платформа (``enterprise-mcp``,
+capability ``data``). Раньше их было два: агент (``DbLoggingService``) писал
+ещё и сам, и журнал читался двумя разными наборами полей.
 
 Расхождение не заметно в момент появления — и очень заметно потом. Именно так
 и вышло: ``INSERT`` платформы объявлял девять колонок и терял ``request_id``,
 ``metadata``, ``channel`` и ``actor``. События писались, а оборот не
 коррелировался, и «где его события» приходилось выяснять по косвенным признакам.
 
-Контракт задан один раз — ``JOURNAL_FIELDS`` в платформе
-(``libs/enterprise_common/eventing/models.py``). Тест читает оба исходника
-статически: он проверяет **объявленные** поля и не требует ни PostgreSQL, ни
-работающего сервера. ``timestamp`` в списке не значит — его заполняет база.
+Поэтому контракт задан один раз — ``JOURNAL_FIELDS`` в платформе
+(``libs/enterprise_common/eventing/models.py``), и тест читает его статически:
+он проверяет **объявленные** поля и не требует ни PostgreSQL, ни работающего
+сервера. ``timestamp`` в списке не значит — его заполняет база.
+
+Сторона, которой эти строки теперь не касаются, проверяется отдельно: у агента
+не должно быть ни одного ``INSERT`` в журнал. Отрицание тут не слабее
+сравнения — писатель, вернувшийся в агента, расходился бы с платформой
+молча, ровно так, как расходился в 2026-09.
 """
 
 from __future__ import annotations
@@ -100,12 +105,12 @@ def _format_value(node: ast.AST, consts: dict[str, str]) -> str:
     return "{}"
 
 
-def _journal_insert_columns(path: Path) -> set[str]:
-    """Колонки INSERT **журнала событий** из исходника.
+def _journal_insert_groups(path: Path) -> list[set[str]]:
+    """Все группы колонок ``INSERT`` в журнал событий, по порядку появления.
 
-    Выбирается группа, содержащая ``event_type``: в том же файле есть и другие
-    ``INSERT`` — в ``agent_question_runs``, — и их колонки к контракту журнала
-    отношения не имеют.
+    Выбирается группа, содержащая ``event_type``: в одном файле могут быть и
+    другие ``INSERT`` — в ``agent_question_runs``, — и их колонки к контракту
+    журнала отношения не имеют.
     """
     consts = _module_string_constants(path)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -124,10 +129,26 @@ def _journal_insert_columns(path: Path) -> set[str]:
             }
             if "event_type" in group and group not in groups:
                 groups.append(group)
+    return groups
+
+
+def _journal_insert_columns(path: Path) -> set[str]:
+    """Колонки INSERT **журнала событий** из исходника.
+
+    Групп может быть несколько, если в файле пишут в несколько таблиц; берём
+    самую широкую — контракт журнала ожидается полным.
+    """
+    groups = _journal_insert_groups(path)
     assert groups, f"в {path.name} не найдено INSERT в журнал событий"
-    # Групп может быть несколько, если в файле пишут в несколько таблиц; берём
-    # самую широкую — контракт журнала ожидается полным.
     return max(groups, key=len)
+
+
+def _journal_insert_columns_or_none(path: Path) -> set[str] | None:
+    """То же, но ``None`` вместо падения, когда INSERT'а в журнал нет."""
+    groups = _journal_insert_groups(path)
+    if not groups:
+        return None
+    return max(groups, key=len) - {"timestamp"}
 
 
 def _journal_fields() -> set[str]:
@@ -197,30 +218,47 @@ def test_event_time_columns_are_not_part_of_the_envelope() -> None:
     )
 
 
-def test_agent_writer_writes_the_whole_envelope() -> None:
-    """Писатель агента пишет ровно канонический набор."""
-    written = _journal_insert_columns(AGENT_WRITER) - {"timestamp"}
-    assert written == _full_contract()
+def test_agent_writer_writes_nothing() -> None:
+    """У агента не осталось ни одного ``INSERT`` в журнал событий.
+
+    Проверяется исходником, а не вызовом: мёртвый ``_insert_batch``, оставшийся
+    после переноса, не поймал бы ни один функциональный тест — он просто не
+    звался бы. А вернётся он первым, как только кто-нибудь поднимет
+    ``_flush_batch`` без писателя, и журнал снова станут наполнять двое.
+    """
+    offenders = [
+        group
+        for group in _journal_insert_groups(AGENT_WRITER)
+        if "event_type" in group
+    ]
+    assert not offenders, (
+        f"{AGENT_WRITER.name} вернул INSERT в журнал: {offenders!r}. "
+        "Писатель один, и он не агент."
+    )
 
 
 def test_platform_writer_writes_the_whole_envelope() -> None:
-    """Писатель платформы пишет ровно тот же набор — иначе журнал читают двое."""
+    """Писатель платформы пишет ровно канонический набор."""
     written = _journal_insert_columns(PLATFORM_WRITER) - {"timestamp"}
     assert written == _full_contract()
 
 
-def test_both_writers_agree() -> None:
-    """Проверка, ради которой файл и написан: сравнение, а не два теста выше.
+def test_agent_agrees_with_the_platform_by_writing_nothing() -> None:
+    """Проверка, ради которой файл и написан: расхождение писателей.
 
-    Падение здесь означает расхождение, даже если обе стороны по отдельности
-    удовлетворяют какому-то внешнему ожиданию.
+    Раньше здесь сравнивались два множества колонок. Теперь писатель один, и
+    расхождение выглядит иначе: агент либо пишет свой набор (тогда чтение
+    журнала снова расщеплено), либо не пишет ничего (тогда и расходиться
+    нечему). Второе и проверяется — здесь и в тесте выше, раздельно, чтобы
+    падение называло, что именно сломалось.
     """
-    agent = _journal_insert_columns(AGENT_WRITER) - {"timestamp"}
+    agent = _journal_insert_columns_or_none(AGENT_WRITER)
     platform = _journal_insert_columns(PLATFORM_WRITER) - {"timestamp"}
-    assert agent == platform, (
-        f"множества колонок разошлись; только агент: {sorted(agent - platform)}; "
-        f"только платформа: {sorted(platform - agent)}"
+    assert agent in (None, platform), (
+        f"множества колонок разошлись; агент пишет {sorted(agent or ())}, "
+        f"платформа — {sorted(platform)}"
     )
+    assert platform == _full_contract()
 
 
 # ---------------------------------------------------------------------------

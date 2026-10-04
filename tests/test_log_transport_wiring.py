@@ -146,17 +146,16 @@ class TestTransportIsWired:
             "считает, что писать можно напрямую"
         )
 
-    def test_pending_transport_never_touches_postgres(self, tmp_path) -> None:
+    def test_pending_transport_never_writes_anything(self, tmp_path) -> None:
         """Пока транспорт не выбран, батч уходит в локальный след.
 
-        Проверяется не состояние флага, а последствие: прямой путь записи
-        не выполняется ни разу, а потеря учтена счётчиком.
+        Проверяется не состояние флага, а последствие: батч не отдан
+        НИКОМУ — ни платформе, ни базе, — а потеря учтена счётчиком.
 
-        DSN задан намеренно. Без него сервис и так ушёл бы в ``_drop_batch``,
-        и проверка прошла бы и без нового флага - то есть не отличала бы
-        новое поведение от прежнего. Различать должен ровно тот случай,
-        ради которого флаг и добавлен: подключение есть, писать можно, но
-        решение о том, КАК писать, ещё не принято.
+        Проверять тут нечем и не на что: у сервиса больше нет пути записи в
+        базу, поэтому «не пошло в базу» стало тождественно. Проверка
+        переехала на то, что отличает это состояние от готового писателя, —
+        на вызов ``write_events`` и на отсутствие потери при нём.
         """
         from lib.services.config_service import ConfigService
         from lib.services.db_logging_service import DbLoggingService, LogEvent
@@ -168,8 +167,6 @@ class TestTransportIsWired:
             table_name=section["table_name"],
             question_runs_table=section["question_runs_table"],
         )
-        direct: list[object] = []
-        service._db_run = lambda work: direct.append(work)  # type: ignore[method-assign]
         service.attach_transport(
             mcp_writer=None,
             fallback_sink=LocalFallbackSink(str(tmp_path / "fallback.jsonl")),
@@ -178,22 +175,26 @@ class TestTransportIsWired:
 
         service._flush_batch([LogEvent(event_type="agent.started")])
 
-        assert direct == [], (
-            "батч ушёл в прямую запись, хотя транспорт журнала не выбран"
-        )
         stats = service.get_stats()
         assert stats["dropped"] == 1
         assert stats["fallback_written"] == 1
         assert "не выбран" in str(stats["last_error"])
+        assert service.get_stats()["written"] == 0
 
-    def test_declared_but_absent_mcp_still_writes_directly(self, tmp_path) -> None:
-        """Отключённая платформа - законное «писать напрямую».
+    def test_declared_but_absent_mcp_does_not_fall_back_to_the_database(
+        self, tmp_path
+    ) -> None:
+        """Отключённая платформа больше не означает «писать напрямую».
 
         Состояние «транспорт не выбран» и состояние «оператор решил писать
-        в базу» выглядят снаружи одинаково (``mcp_writer is None``), и
-        поведение у них должно быть противоположным. Если этот тест
-        начнёт падать вместе с предыдущим - значит флаг расползся на оба
-        состояния и выключил прямую запись там, где она разрешена.
+        в базу» раньше выглядели снаружи одинаково (``mcp_writer is None``) и
+        различались только тем, что у второго была база. Теперь базы у
+        агента нет вовсе, и различие схлопнулось: оба состояния — это «нет
+        писателя», и оба означают потерю с названной причиной.
+
+        Раньше этот тест утверждал обратное и охранял прямой путь записи.
+        Отрицание здесь не слабее прежнего утверждения: прямого пути больше
+        нет, и проверить, что он не вернулся, можно только таким способом.
         """
         from lib.services.config_service import ConfigService
         from lib.services.db_logging_service import DbLoggingService, LogEvent
@@ -204,15 +205,18 @@ class TestTransportIsWired:
             table_name=section["table_name"],
             question_runs_table=section["question_runs_table"],
         )
-        direct: list[object] = []
-        service._db_run = lambda work: direct.append(work)  # type: ignore[method-assign]
         service.attach_transport(
             mcp_writer=None, fallback_sink=None, transport_pending=False
         )
 
         service._flush_batch([LogEvent(event_type="agent.started")])
 
-        assert len(direct) == 1, "прямая запись отключена без решения оператора"
+        stats = service.get_stats()
+        assert stats["written"] == 0, "писателя нет — записать негде"
+        assert stats["failed"] == 1
+        assert any("писатель" in reason for reason in stats["loss_reasons"]), (
+            f"потеря не названа: {stats['loss_reasons']}"
+        )
 
     def test_fallback_file_stays_inside_the_project(self, tmp_path) -> None:
         """Файл отказа не должен уезжать за пределы проекта."""

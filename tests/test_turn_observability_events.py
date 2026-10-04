@@ -10,11 +10,12 @@
 ``tool_call_id`` имели начало и конец в ОДНУ миллисекунду. Длительность ни
 одного этапа по таблице не считалась.
 
-Ключевой тест класса ``TestEventTimeThroughRealBuffering`` гонит события
-через НАСТОЯЩИЙ путь батчирования (очередь → worker-поток → ``_flush_batch``
-→ ``_insert_batch`` → ``execute_batch``), а не напрямую в писатель: проверка
-прямого вызова в обход буфера не доказала бы ничего, потому что именно
-буферизация раньше съедала время.
+Ключевой тест класса ``TestEventTimeThroughMcpTransport`` гонит события через
+НАСТОЯЩИЙ путь батчирования (очередь → worker-поток → ``_flush_batch`` →
+``log_events``), а не напрямую в писатель: проверка прямого вызова в обход
+буфера не доказала бы ничего, потому что именно буферизация раньше съедала
+время. Раньше тот же тест гонял события через ``execute_batch``; писателя у
+агента больше нет, и проверять его нечего.
 """
 
 from __future__ import annotations
@@ -107,195 +108,17 @@ class _FakeNs:
         self.now -= int(seconds * 1_000_000_000)
 
 
-@pytest.fixture
-def capture_psycopg2(monkeypatch):
-    """Подменяет psycopg2 и СНИМАЕТ реальные строки ``execute_batch``.
-
-    ВАЖНО: снимается именно то, что уходит в БД (SQL + параметры строк),
-    а не объекты ``LogEvent``. Иначе тест доказывал бы работу писателя в
-    обход батча.
-    """
-    real = __import__("psycopg2")
-    __import__("psycopg2.extras")
-    __import__("psycopg2.extensions")
-    real_extras = sys.modules["psycopg2.extras"]
-    real_extensions = sys.modules["psycopg2.extensions"]
-
-    cursor = MagicMock()
-    cursor.close = MagicMock()
-    conn = MagicMock()
-    conn.cursor = MagicMock(return_value=cursor)
-    conn.close = MagicMock()
-    conn.closed = False
-
-    calls: list[tuple[str, list, int]] = []
-
-    def _execute_batch(cur, sql, rows, page_size=None):
-        calls.append((sql, list(rows), page_size))
-        return None
-
-    monkeypatch.setattr(real, "connect", MagicMock(return_value=conn), raising=False)
-    monkeypatch.setattr(real_extras, "Json", lambda x: x, raising=False)
-    monkeypatch.setattr(real_extras, "execute_batch", _execute_batch, raising=False)
-    monkeypatch.setattr(real_extras, "register_json", MagicMock(), raising=False)
-    monkeypatch.setattr(real_extensions, "register_adapter", MagicMock(), raising=False)
-
-    ws = str(REPO_ROOT / "workspace")
-    if ws not in sys.path:
-        sys.path.insert(0, ws)
-    import utils.db as _db
-
-    # Пул записи ОБЩИЙ на процесс (`utils.db`). Пока файл шёл в одиночку,
-    # это было незаметно; в общем прогоне тесты соседних файлов оставляют в
-    # пуле потоки, которые бьются в несуществующий хост с ретраями по 2 с, и
-    # батч этих тестов уезжает на десятки секунд. Собственные батчи здесь
-    # ждали бы их в общей очереди. Одна попытка без backoff убирает это
-    # ожидание, не меняя ничего в проверяемом поведении.
-    _db.set_pool_config({"connect_max_retries": 1, "reconnect_backoff_sec": 0.0})
-
-    yield calls
-
-    _db.shutdown()
-    _db._manager = None
-    _db._pool_cfg = dict(_db._DEFAULT_POOL)
-
-
-def _stop_and_wait(svc, sink, *, timeout_sec: float = 30.0) -> None:
-    """Остановить сервис и дождаться, пока батч дойдёт до подменённого слоя.
-
-    ``stop()`` ждёт worker-поток до своего таймаута и возвращается, если тот
-    ещё занят. Проверять содержимое батча, не дождавшись самого батча, —
-    проверка чужой гонки: она падает не по существу и нестабильна от прогона
-    к прогону. Здесь ожидание ограничено и снимается само, как только батч
-    дошёл.
-    """
-    svc.stop(timeout_sec=5.0)
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline and not sink:
-        time.sleep(0.05)
-
-
-def _metadata_col_index(sql: str) -> int:
-    """Индекс колонки ``metadata`` в списке колонок INSERT-а."""
-    return _column_index(sql, "metadata")
-
-
-def _column_index(sql: str, name: str) -> int:
-    """Индекс колонки по имени в списке колонок INSERT-а.
-
-    Читать значения события полагается по КОЛОНКАМ, а не по JSONB: момент и
-    ключ порядка переехали в ``seq``/``occurred_at``, и тест, который смотрит
-    на ``metadata``, проверял бы уже не то место, куда пишет таблица.
-    """
-    columns = re.search(r"\(([^)]*)\)\s*VALUES", sql).group(1)
-    names = [c.strip().strip('"') for c in columns.split(",")]
-    return names.index(name)
-
-
-class TestEventTimeThroughRealBuffering:
-    """Сквозная честность времени через НАСТОЯЩИЙ путь батчирования."""
-
-    def test_distinct_moments_stay_distinct_and_ordered(
-        self, capture_psycopg2, monkeypatch
-    ):
-        clock = _FakeNs(step_ns=1_000_000)  # события за 1 мс друг от друга
-        monkeypatch.setattr(dbl.time, "time_ns", clock)
-        svc = _svc(flush_interval_sec=30.0, batch_size=100)
-        svc.start()
-        try:
-            # 12 событий подряд: worker не успевает сбросить батч между ними,
-            # поэтому ВСЕ они обязаны уехать ОДНИМ execute_batch.
-            #
-            # Наполнитель обязан быть НЕ-пробным: правило подавления
-            # (smoke.*, probe_*, live.db_probe) теперь честно снимает такие
-            # имена на входе писателя, и раньше выбранное ``probe_{i}``
-            # просто перестало доходить до батча. Тест проверяет выживание
-            # момента при буферизации, а не подавление проб.
-            for i in range(12):
-                assert svc.log_event(LogEvent(
-                    event_type=f"turn.evt_{i}", summary=str(i), session_id="s:1",
-                )) is True
-        finally:
-            _stop_and_wait(svc, capture_psycopg2)
-
-        # --- батчирование действительно произошло ---------------------------
-        assert len(capture_psycopg2) == 1, (
-            "события разъехались по батчам — тест не проверяет выживание "
-            "момента при буферизации"
-        )
-        sql, rows, _page = capture_psycopg2[0]
-        assert len(rows) == 12
-
-        # --- значения берутся из НАСТОЯЩИХ колонок, а не из JSONB ---------
-        # `seq`/`occurred_at` — каноническое хранилище (выбор замером), и
-        # читать их из metadata здесь означало бы проверять не то место, куда
-        # пишет таблица.
-        meta_idx = _metadata_col_index(sql)
-        seq_idx = _column_index(sql, "seq")
-        moment_idx = _column_index(sql, "occurred_at")
-        seqs = [row[seq_idx] for row in rows]
-        moments = [row[moment_idx] for row in rows]
-        assert all(s is not None for s in seqs), "ключ порядка не доехал до колонки"
-        assert all(m is not None for m in moments), "момент не доехал до колонки"
-
-        # --- моменты СОБЫТИЯ разные и в порядке создания -------------------
-        assert len(set(moments)) == 12, "моменты событий склеились при батчировании"
-        assert moments == sorted(moments), "порядок моментов перемешан"
-        # Разнесение моментов равно заданному шагу часов (1 мс): значит
-        # событие принесло СВОЙ момент, а не момент сброса батча.
-        parsed = [datetime.fromisoformat(m).timestamp() for m in moments]
-        deltas = [round(b - a, 6) for a, b in zip(parsed, parsed[1:], strict=False)]
-        assert deltas and all(d == pytest.approx(0.001, abs=1e-6) for d in deltas), (
-            f"моменты не сохранили заданное разнесение: {deltas}"
-        )
-
-        # --- ключ порядка монотонен и однозначно восстанавливает порядок ---
-        assert seqs == sorted(seqs)
-        assert len(set(seqs)) == 12
-        by_seq = [row for row in sorted(rows, key=lambda r: r[seq_idx])]
-        assert [r[seq_idx] for r in by_seq] == seqs
-        # Порядок по seq совпадает с порядком появления в батче — то есть
-        # разбор оборота восстанавливается выражением ORDER BY seq.
-        assert [r[moment_idx] for r in by_seq] == moments
-
-        # --- колонка и её текстовая копия в metadata — одно и то же -------
-        # metadata остаётся транспортом батча, и разбирает его в колонки тот
-        # же писатель. Расхождение означало бы, что колонка и её копия
-        # рассказывают о разных моментах одного события.
-        for row in rows:
-            assert row[meta_idx]["seq"] == row[seq_idx]
-            assert row[meta_idx]["occurred_at"] == row[moment_idx]
-
-        # --- колонка timestamp НЕ несёт момент события ---------------------
-        # Она не попадает в список колонок INSERT-а, поэтому её значение —
-        # DEFAULT CURRENT_TIMESTAMP на момент СБРОСА, одинаковое для всего
-        # батча. Именно это и было разрушительно.
-        columns = [c.strip().strip('"') for c in
-                   re.search(r"\(([^)]*)\)\s*VALUES", sql).group(1).split(",")]
-        assert "timestamp" not in columns, (
-            "колонка timestamp начала заполняться писателем: её смысл "
-            "разошёлся с платформенным log_events, где это now() в SQL"
-        )
-
-    def test_queue_enqueue_path_is_intact(self, capture_psycopg2, monkeypatch):
-        """``queued_at`` (очередь) не должен сломаться от нового поля."""
-        monkeypatch.setattr(dbl.time, "time_ns", _FakeNs(step_ns=5_000_000))
-        svc = _svc(flush_interval_sec=30.0)
-        svc.start()
-        try:
-            for i in range(3):
-                svc.log_event(LogEvent(event_type=f"q_{i}", session_id="s:1"))
-        finally:
-            _stop_and_wait(svc, capture_psycopg2)
-        _sql, rows, _page = capture_psycopg2[0]
-        assert len(rows) == 3
-        assert svc.get_stats()["written"] == 3
-        # Момент постановки в очередь продолжает ставиться писателем.
-        assert all(r[0] for r in rows)
+# Класс ``TestEventTimeThroughRealBuffering``, гонявший события через
+# ``execute_batch``, удалён вместе с прямым писателем: пути, который он
+# проверял, в агенте больше нет, и оставлять его было бы значило
+# охранять мёртвый код. Те же свойства — батчинг, разные моменты в
+# порядке появления, монотонный ключ порядка, выживание ``metadata`` —
+# охраняет ``TestEventTimeThroughMcpTransport`` ниже, на транспорте,
+# который теперь единственный.
 
 
 class _SyncRunner:
-    """Запуск корутины прямо в потоке worker'а.
+    """Запуск корутины прямо в потоке worker'a.
 
     Живой event loop агента тесту не нужен: проверяется тело батча, а не
     работа моста ``LoopCallRunner`` (она закрыта в ``tests/test_log_transport.py``).
@@ -309,8 +132,9 @@ class _SyncRunner:
 class _RecordingMcp:
     """Подмена MCP-клиента: снимает ТЕЛО батча операции ``log_events``.
 
-    Как и ``capture_psycopg2``, снимает то, что реально уходит наружу, а не
-    объекты ``LogEvent`` до буферизации.
+    Снимает то, что реально уходит наружу, а не объекты ``LogEvent`` до
+    буферизации: иначе тест доказывал бы работу писателя в обход батча, а
+    именно буферизация раньше и съедала время события.
     """
 
     def __init__(self) -> None:
@@ -327,12 +151,12 @@ class _RecordingMcp:
 class TestEventTimeThroughMcpTransport:
     """Ключ порядка и момент переживают БОЕВОЙ транспорт записи журнала.
 
-    После ``attach_log_transport`` журнал пишет операция ``log_events``: таблицу
-    заполняет платформа, а агент лишь формирует тело батча. Проверка только на
-    ``execute_batch`` доказывала бы не то — этот путь в бою не используется, а
-    потеря ``metadata`` в теле батча унесла бы момент и ключ порядка вместе с
-    собой молча: в таблице просто не оказалось бы ``seq``, и это выглядело бы
-    ровно как «старые строки без ключа», а не как потеря.
+    Журнал пишет операция ``log_events``: таблицу заполняет платформа, а агент
+    лишь формирует тело батча. Проверять было бы не на чём, если бы агент
+    сохранил путь прямой вставки, — и потеря ``metadata`` в теле батча унесла
+    бы момент и ключ порядка вместе с собой молча: в таблице просто не
+    оказалось бы ``seq``, и это выглядело бы ровно как «старые строки без
+    ключа», а не как потеря.
     """
 
     def test_moment_and_order_key_reach_the_batch_body(self, monkeypatch):
@@ -362,11 +186,15 @@ class TestEventTimeThroughMcpTransport:
             svc.stop(timeout_sec=5.0)
 
         # --- батчирование действительно произошло ---------------------------
-        assert len(client.calls) == 1, (
+        # Считаются вызовы ``log_events``, а не все: тот же worker на первом
+        # тике чистит журнал (``_last_purge`` стартует с нуля), и к батчу этот
+        # вызов отношения не имеет.
+        journal_calls = [c for c in client.calls if c[0] == "log_events"]
+        assert len(journal_calls) == 1, (
             "события разъехались по вызовам — тест не проверяет выживание "
-            "момента при буферизации"
+            f"момента при буферизации: {[c[0] for c in client.calls]}"
         )
-        operation, arguments = client.calls[0]
+        operation, arguments = journal_calls[0]
         assert operation == "log_events"
         events = arguments["events"]
         assert len(events) == 4
@@ -456,21 +284,23 @@ class TestSeqContract:
         assert after == sorted(after)
 
     def test_stamp_sets_both_keys_from_one_instant(self, monkeypatch):
+        """Момент и ключ порядка выводятся из ОДНОГО мгновения.
+
+        Worker-поток не поднимается: проверяется мутация события в
+        ``log_event``, а путь батчирования охраняет
+        ``TestEventTimeThroughMcpTransport``. Поднимать поток ради
+        этого не нужно, а очередь подменять моком нельзя вовсе:
+        ``queue.get()`` на моке возвращается мгновенно, и поток
+        вращался бы без сентинела остановки.
+        """
         monkeypatch.setattr(dbl.time, "time_ns", _FakeNs(step_ns=1_000_000))
         svc = _svc()
-        svc.start()
-        try:
-            captured: list[LogEvent] = []
-            svc._queue = MagicMock()
-            svc._queue.put_nowait.side_effect = captured.append
-            svc._queue.Full = RuntimeError
-            event = LogEvent(
-                event_type="tool.started", metadata={"tool_call_id": "t1"}
-            )
-            svc.log_event(event)
-        finally:
-            svc.stop(timeout_sec=2.0)
-        assert event.metadata["tool_call_id"] == "t1", "исходный metadata затёрт"
+        event = LogEvent(
+            event_type="tool.started", metadata={"tool_call_id": "t1"}
+        )
+        assert svc.log_event(event) is True
+        queued = svc._queue.queue[0]
+        assert queued.metadata["tool_call_id"] == "t1", "исходный metadata затёрт"
         assert event.metadata[dbl.EVENT_TIME_KEY].endswith("+00:00")
         # Оба ключа выведены из ОДНОГО мгновения: ISO и наносекунды расходятся
         # только на точность float64 (доли микросекунды).
@@ -483,31 +313,19 @@ class TestSeqContract:
         """Событие не приносит свой ``seq``: иначе порядок перестал бы быть гарантией."""
         monkeypatch.setattr(dbl.time, "time_ns", _FakeNs(step_ns=1_000_000))
         svc = _svc()
-        svc.start()
-        try:
-            svc._queue = MagicMock()
-            svc._queue.Full = RuntimeError
-            event = LogEvent(
-                event_type="tool.started",
-                metadata={dbl.EVENT_SEQ_KEY: 1, dbl.EVENT_TIME_KEY: "1999-01-01T00:00:00+00:00"},
-            )
-            svc.log_event(event)
-        finally:
-            svc.stop(timeout_sec=2.0)
+        event = LogEvent(
+            event_type="tool.started",
+            metadata={dbl.EVENT_SEQ_KEY: 1, dbl.EVENT_TIME_KEY: "1999-01-01T00:00:00+00:00"},
+        )
+        assert svc.log_event(event) is True
         assert event.metadata[dbl.EVENT_SEQ_KEY] > 1
         assert not event.metadata[dbl.EVENT_TIME_KEY].startswith("1999")
 
     def test_level_filtered_event_gets_no_time(self):
         svc = _svc(min_level="ERROR")
-        svc.start()
-        try:
-            svc._queue = MagicMock()
-            svc._queue.Full = RuntimeError
-            event = LogEvent(event_type="agent.degraded", level="DEBUG")
-            assert svc.log_event(event) is False
-            assert event.metadata is None, "событие, не попавшее в журнал, размечено временем"
-        finally:
-            svc.stop(timeout_sec=2.0)
+        event = LogEvent(event_type="agent.degraded", level="DEBUG")
+        assert svc.log_event(event) is False
+        assert event.metadata is None, "событие, не попавшее в журнал, размечено временем"
 
 
 class TestEventVocabulary:
@@ -874,31 +692,17 @@ class TestEventAttribution:
 
 
 class TestEventAttributionRuntime:
-    def test_writer_stamps_source_on_every_event(self, capture_psycopg2, monkeypatch):
-        monkeypatch.setattr(dbl.time, "time_ns", _FakeNs(step_ns=1_000_000))
-        svc = _svc(flush_interval_sec=30.0)
-        svc.start()
-        try:
-            svc.log_event(LogEvent(event_type="agent.started", session_id="s:1"))
-        finally:
-            _stop_and_wait(svc, capture_psycopg2)
-        _sql, rows, _page = capture_psycopg2[0]
-        meta_idx = _metadata_col_index(capture_psycopg2[0][0])
-        assert rows[0][meta_idx]["source"] == "nanobot"
-
+    # ``test_writer_stamps_source_on_every_event`` был тут: он смотрел
+    # в ``metadata`` строки, дошедшей до ``execute_batch``. Признак
+    # источника охраняет ``TestEventTimeThroughMcpTransport`` — на
+    # боевом транспорте, где и ставится ``source``.
     def test_producer_cannot_relabel_source(self, monkeypatch):
         monkeypatch.setattr(dbl.time, "time_ns", _FakeNs())
         svc = _svc()
-        svc.start()
-        try:
-            svc._queue = MagicMock()
-            svc._queue.Full = RuntimeError
-            event = LogEvent(
-                event_type="agent.started", metadata={"source": "enterprise_mcp"}
-            )
-            svc.log_event(event)
-        finally:
-            svc.stop(timeout_sec=2.0)
+        event = LogEvent(
+            event_type="agent.started", metadata={"source": "enterprise_mcp"}
+        )
+        assert svc.log_event(event) is True
         assert event.metadata["source"] == "nanobot"
 
 

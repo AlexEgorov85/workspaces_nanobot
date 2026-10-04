@@ -14,9 +14,10 @@ acceptance-критерий —
 
   * собираем минимальный bootstrap ``ApplicationContext`` через
     фикстуру ``full_fake_modules`` (как в ``tests/test_application_context.py``),
-    но разрешаем ``enable_db_logging=True`` и закрываем
-    ``DbLoggingService._db_run`` так, чтобы worker-thread не пытался
-    реально открыть psycopg2-соединение;
+    но разрешаем ``enable_db_logging=True``. Подменять запись журнала больше
+    нечем и незачем: у ``DbLoggingService`` нет пути в базу, писатель один, и
+    он не агент. Worker-поток без писателя считает события потерянными и
+    больше ничего не трогает — тесты этих проверяют не по счётчикам;
   * подменяем ``SETTINGS["logging"]["db"]["flush_interval_sec"]`` через
     mock-объект, передаваемый в ``config.SETTINGS``;
   * проверяем, что после ``ApplicationContext.create`` значение попало
@@ -225,16 +226,17 @@ def minimal_fake_modules(tmp_path):
 
         utils_mod = types.ModuleType("utils")
         utils_db = types.ModuleType("utils.db")
+        # ``utils.db`` в дереве агента остался только для пула lifecycle'а
+        # (``ApplicationContext``) и DSN в ``os.environ``
+        # (``SessionStorageService``). Записи журнала он уже не касается.
         utils_db.configure = MagicMock()
-        # ``DbLoggingService._db_run`` зовёт ``utils.db.run(fn)`` —
-        # мокаем no-op'ом, чтобы worker-цикл не открывал реальный psycopg2.
-        utils_db.run = MagicMock(return_value=None)
-        # Дополнительно: ``_make_sync_services`` и другие точки
-        # могут обращаться к ``fetch`` / ``execute`` — мокаем.
-        utils_db.fetch = MagicMock(return_value=[])
-        utils_db.execute = MagicMock(return_value=None)
+        utils_db.set_pool_config = MagicMock()
         utils_db.shutdown = MagicMock()
         utils_db.start = MagicMock()
+        # Остальные точки сборки могут обращаться к ``fetch`` / ``execute``.
+        utils_db.fetch = MagicMock(return_value=[])
+        utils_db.fetch_with_timeout = MagicMock(return_value=[])
+        utils_db.execute = MagicMock(return_value=None)
         utils_mod.db = utils_db
         sys.modules["utils"] = utils_mod
         sys.modules["utils.db"] = utils_db
@@ -299,39 +301,6 @@ def minimal_fake_modules(tmp_path):
             os.environ["DATABASE_URL"] = _prev_database_url
 
 
-class _FakeCursor:
-    def __init__(self, conn):
-        self.conn = conn
-        self._row = ("1",)
-
-    def execute(self, sql, params=None):
-        # Allow _ensure_schema's existence-check to succeed.
-        if "information_schema.tables" in (sql or ""):
-            return
-        # Suppress other SQL (purge etc.) — no-op.
-
-    def fetchone(self):
-        return self._row
-
-    def fetchall(self):
-        return []
-
-    def close(self):
-        pass
-
-
-class _FakeConn:
-    def cursor(self):
-        return _FakeCursor(self)
-
-    def close(self):
-        pass
-
-    @property
-    def closed(self):
-        return False
-
-
 class TestFlushIntervalSecPropagation:
     """Flush interval из SETTINGS доходит до ``DbLoggingService``."""
 
@@ -345,9 +314,8 @@ class TestFlushIntervalSecPropagation:
 
         SETTINGS["logging"]["db"]["flush_interval_sec"] = 2.0
 
-        # ``utils.db.run`` уже мокнут в фикстуре ``minimal_fake_modules``
-        # (no-op возвращает ``None``), так что worker-цикл DbLoggingService
-        # не откроет реальный psycopg2.
+        # Worker-потоку писатель не нужен: без него он считает события
+        # потерянными и базу не трогает — её у него больше нет.
         from lib.core.application_context import ApplicationContext
 
         script = Path(__file__).resolve().parent.parent
