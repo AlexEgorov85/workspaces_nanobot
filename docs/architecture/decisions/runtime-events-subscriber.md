@@ -89,5 +89,5 @@ Upstream предоставляет два кандидата для интег�
 - `lib/core/application_context.py:399-499` — DI + lifecycle
 - `tests/test_runtime_events_subscriber.py` — 10 unit-тестов
 - `tests/contract/test_runtime_events_api.py` — 8 contract-тестов на upstream API
-- `openspec/changes/nanobot-035-upgrade/design.md` §D7/R7 — исходное обоснование
-- `openspec/changes/runtime-events-subscription/` — формальная спецификация
+- `openspec/changes/archive/2026-09-27-nanobot-035-upgrade/design.md` §D7/R7 — исходное обоснование
+- `openspec/changes/archive/2026-09-27-runtime-events-subscription/` — формальная спецификация

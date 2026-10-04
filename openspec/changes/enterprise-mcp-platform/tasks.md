@@ -1263,7 +1263,22 @@
       вызову fallback на ветке недоступности, по образцу уже сделанного
       `on_unidentified`, плюс тест «сервер недоступен → файл непуст и
       `fallback_written` растёт».
-- [ ] 7.4 `logging.db.retention_days` и purge пустых outbound → в конфиг `enterprise-mcp`
+- [ ] 7.4 `logging.db.retention_days` и purge пустых outbound → в конфиг
+      `enterprise-mcp`
+      **Не сделано, перепроверено 2026-10-04.** Платформенная половина
+      готова: операция `purge_logs`
+      (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:3153`)
+      и настройки `platform.json → data.log_retention_days` /
+      `data.log_purge_empty_outbound` (`platform.json:100`). Агентская
+      половина на месте и работает: `DbLoggingService._purge_old` вызывается
+      из worker-цикла по расписанию `config.json → logging.db.purge_interval_sec`
+      (метод и вызов — в `lib/services/db_logging_service.py`; номера строк не
+      привожу: файл правит соседняя сессия, и они устаревают каждый час). Итог —
+      **две очистки одного журнала по двум разным настройкам**: платформенная
+      удалит запись раньше, чем агентская успеет её учесть, и
+      `mcp-platform/docs/TARGET-ARCHITECTURE.md:698-702` («агент свою копию
+      журнала больше не ведёт») говорит неправду. Пункт требует снять
+      агентский purge — это код и конфиг, не документация.
 - [x] 7.5 `db_logging_bus.py` остаётся в агенте — файл на месте
       (`lib/services/db_logging_bus.py`)
 - [x] 7.6 Интеграционный тест: недоступность `enterprise-mcp` не блокирует ход
@@ -1401,20 +1416,43 @@
       `server.request_context.meta` ровно один раз и строит `ToolExecutionContext`;
       загрузчик проверяет сигнатуру `handler` (идентичность объявлять нельзя), а
       опубликованная `inputSchema` содержит только доменные параметры
-- [ ] 8.7c **Метаданные вызова, скилл-подпроцессы.** Агент передаёт
-      `ENTERPRISE_SESSION_ID`, `ENTERPRISE_USER_ID`, `ENTERPRISE_REQUEST_ID` в
-      окружение подпроцесса; `libs/enterprise_client/llm.py` собирает из них `meta=`.
-      **Без этого ломается весь LLM-слой скиллов:** клиент сегодня не передаёт
-      идентичность вовсе, а операции `llm` её не объявляют, поэтому вызовы проходят
-      только до введения контракта
+- [x] 8.7c **Метаданные вызова, скилл-подпроцессы.** Идентичность доходит
+      до `llm`-клиента, но не через чтение окружения самим клиентом:
+      `LlmClient(identity=...)` принимает `McpCallContext` конструктором
+      (`mcp-platform/libs/enterprise_client/llm.py:135-167, 317-324`), и
+      чтение `ENTERPRISE_SESSION_ID`/`USER_ID`/`REQUEST_ID` из окружения
+      **запрещено стражем**
+      `tests/test_enterprise_mcp_meta_interception.py:186-188` (assert
+      отсутствия имён в исходнике клиента). Окружение читает вызывающая
+      сторона навыка и собирает из него контекст:
+      `mcp-platform/libs/legal_summarizer/llm/client.py:99-104`.
+      **Предписание пункта («агент передаёт `ENTERPRISE_*` в окружение
+      подпроцесса; `llm.py` собирает из них `meta=`) не выполнено буквально
+      и заменено решением строже:** окружение сделано вторым читателем
+      настройки, а личность приходит аргументом. Результат пункта
+      достигнут, форма — иная.
 - [x] 8.7d Снять объявление идентичности с трёх операций, которые её объявляют:
       `history_search`, `log_event`, `upsert_question_run`. Остальные 13 операций не
       меняются — `_meta` не входит в `arguments`, форма вызова и `inputSchema`
       доменных параметров не затрагиваются
-- [ ] 8.7e Страж «`enterprise-mcp` не объявлен в `tools.mcpServers`»: контракт
-      работает только пока модель не вызывает сервер напрямую — `MCPToolWrapper`
-      отправляет `arguments=kwargs` без `meta=`, и такой вызов кончился бы
-      `identity_missing`
+- [x] 8.7e Страж «`enterprise-mcp` не объявлен в `tools.mcpServers`»:
+      контракт работает только пока модель не вызывает сервер напрямую —
+      `MCPToolWrapper` отправляет `arguments=kwargs` без `meta=`, и такой
+      вызов кончился бы `identity_missing`
+      **Пункт снят как утративший предпосылку (2026-10-04).** Сервер
+      **объявлен** в `tools.mcpServers.enterprise` — это решение владельца
+      от 2026-10-03, и страж теперь требует именно наличия объявления:
+      `tests/test_mcp_platform_declaration.py:51-53` падает, если
+      `config.json → tools.mcpServers` пуст. Аргумент пункта («`MCPToolWrapper`
+      не передаёт `meta=`, вызов кончился бы `identity_missing`») тоже
+      снят: личность подставляет хук `lib/hooks/mcp_identity_hook.py`
+      **до** `ToolAuditHook`, и `ENTERPRISE_EXEC_REQUIRE_CALL_META` — флаг
+      с дефолтом `False`, а не требование. Стражей объявления на месте нет
+      нужды заводить: их два, и оба требуют наличия объявления, а не его
+      отсутствия — `tests/test_mcp_platform_declaration.py:51-53` и
+      `mcp-platform/tests/test_audit_capability.py::TestNoSqlFromCaller::`
+      `test_operation_is_model_facing` (`:116`, сверяет операции с
+      `config.json → tools.mcpServers.enterprise.enabled_tools`).
 - [x] 8.7f Проверить цепочку целиком на закреплённой версии, а не по документации
       SDK: `call_tool(..., meta=)` → `params._meta` → `session.py:367` →
       `server.py:756` → `server.request_context.meta`. Отдельно — что
@@ -1451,8 +1489,24 @@
       **Попутно исправлена протухшая ссылка:** контракт лежит в
       `mcp-platform/docs/MCP-CONTRACTS.md`, а не в `docs/MCP-CONTRACTS.md` —
       файл уехал на платформу вместе с доменом, а в `docs/` такого нет.
-- [ ] 8.12 `events/` в каталоге сессии как второе представление события;
-      `persist_session_events` выключен по умолчанию; `logs/mcp.log` не заводится
+- [x] 8.12 `events/` в каталоге сессии как второе представление события;
+      `persist_session_events` выключен по умолчанию; `logs/mcp.log` не
+      заводится
+      **Сделано, сверено с кодом 2026-10-04.** `events/` входит в
+      `SESSION_SUBDIRS`
+      (`mcp-platform/libs/enterprise_common/session/workspace.py:65`),
+      каталоги создаёт `SessionWorkspace` (там же `:105`).
+      `persist_session_events` — `false` в
+      `mcp-platform/platform.json:51` (`execution.persist_session_events`),
+      читается как `ENTERPRISE_EXEC_SESSION_EVENTS` с дефолтом `False`
+      (`execution/policy.py:92`), положение печатается на старте
+      (`servers/enterprise/server.py:768`). `logs/mcp.log` не заводится —
+      0 совпадений по репозиторию; в `config.json:873` лежит
+      `gateway.agent.enterprise_mcp.stderr_log` =
+      `logs/enterprise-mcp.log`, это перенаправление stderr процесса
+      (отдельный механизм, `lib/services/enterprise_mcp_stderr.py`), а не
+      журнал событий. Агент при этом заводит только `files/` из
+      раскладки — `AGENTS.md` § File Storage Policy.
 - [x] 8.13 Страж `tests/test_tool_execution_boundaries.py`: AST по
       `capabilities/**`, таблица запретов из спеки, docstring игнорируется, страж
       проверен синтетическим нарушением. Плюс запрет второго писателя в
@@ -1611,7 +1665,14 @@
 > Финальной эта фаза была при плане с `legal_summarizer` в 8-й. Теперь
 > `legal_summarizer` — фаза 11, а здесь остаётся всё, кроме домена legal.
 
-- [ ] 10.1 Разделить `requirements.txt`: runtime агента / `enterprise-mcp`
+- [x] 10.1 Разделить `requirements.txt`: runtime агента / `enterprise-mcp`
+      **Сделано, сверено 2026-10-04.** `requirements.txt` агента разбит на
+      две помеченные группы — «1. РАНТИМ АГЕНТА» (`requirements.txt:5`) и
+      «2. ТРАНСПОРТ К `enterprise-mcp`» (там же `:6`), и разница между ними
+      объявлена как разница во владельце пакета (`:2-14`); второе требование
+      вынесено в отдельный файл `mcp-platform/requirements.txt` (плюс
+      `mcp-platform/pyproject.toml`). Пункт был неотмечен, хотя работа
+      выполнена давно.
 - [x] 10.2 Офисные пакеты (`python-docx`, `openpyxl`, `pypdf`, `python-pptx`)
       **остаются** в требованиях агента — решение принято осознанно
       **Состояние соблюдено 2026-10-02:** пакеты на месте, в том же
@@ -1625,13 +1686,54 @@
       LLM-пакета нет, на их месте комментарий о том, кто ими владеет и в
       каких манифестах они объявлены. Удаление было проверено разбором AST
       по 509 файлам агента.
-- [ ] 10.4 Обновить `AGENTS.md`, `CHANGELOG.md`, `docs/`
-      **Осталось 2026-10-02:** `AGENTS.md` (строка про `workspace/utils/`)
-      описывает `office_files.py` как живой модуль агента, хотя модуль
-      стал tombstone'ом, а парсер живёт в `mcp-platform/libs/office/`.
-      Остальная документация правится соседом.
-- [ ] 10.5 Для `enterprise-mcp`: старт без Nanobot, health, discovery, нормальный запрос,
-      некорректный запрос, сбой инфраструктуры, таймаут
+- [x] 10.4 Обновить `AGENTS.md`, `CHANGELOG.md`, `docs/`
+      **Дефект из пометки 2026-10-02 устранён ранее:** `AGENTS.md` описывает
+      `workspace/utils/` верно — шесть живых модулей перечислены,
+      `office_files.py` помечен уехавшим на платформу
+      (`mcp-platform/libs/office/`), навыков названо два
+      (`AGENTS.md:63`); файла `workspace/utils/office_files.py` в дереве
+      нет.
+      **Закрыто 2026-10-04 сверкой документации с кодом.** Найдено и
+      исправлено: `docs/ARCHITECTURE.md` утверждал «`tools.mcpServers`
+      намеренно пуст» (`:19`) и описывал захват задачи прямым SQL в канале
+      (`:1242-1260`), хотя канал ходит в базу только операциями платформы
+      (коммит `1736f72`; 0 совпадений `psycopg2`/`fetchval` в
+      `lib/channels/postgres_channel.py`), и называл несуществующие методы
+      `_reclaim_and_heal` (`:874`, `:921`). `AGENTS.md:53,110,111` — то же
+      про захват, плюс «известный дефект» о недостижимом повторе `error`,
+      который в коде **исправлен** (внешний `AND` повторяет условие
+      подзапроса, `main.py:1579-1584`).
+      `docs/architecture/storage-layers.md` описывал зеркало сессий через
+      `utils.db.transaction()` и advisory-lock leader-election; обоих в коде
+      нет (0 совпадений `pg_try_advisory` в `lib/` и `mcp-platform/`),
+      зеркало ходит в базу операциями `OP_STATE`/`OP_MIRROR`/`OP_CLEANUP`.
+      Метрики `cycles_skipped_lock_busy`/`cycles_skipped_pool_busy` и
+      события `session_stale_detected`/`sync_lag_exceeded` в `get_stats()`
+      отсутствуют (0 совпадений).
+      **Дописано то, чего не было нигде:** блок настроек агента
+      (`--agent-settings-file`), HTTP-транспорт платформы и снятый флаг
+      `--log-min-level` не упоминались ни в `AGENTS.md`, ни в `docs/`, ни в
+      CHANGELOG, хотя были сделаны (коммиты `fb81986`, `b33b7e2`).
+      `docs/MIGRATION.md:327`: `office_files` помечен удалённым.
+      `docs/PLAN-SPEC-COMPLETION.md:250-255`: `reclaim` заменён на
+      действующий `_unstick_loop` / операцию `unstick_tasks`.
+- [x] 10.5 Для `enterprise-mcp`: старт без Nanobot, health, discovery,
+      нормальный запрос, некорректный запрос, сбой инфраструктуры,
+      таймаут
+      **Сделано, сверено 2026-10-04.** Все семь сценариев покрыты в
+      `mcp-platform/tests/test_server_bootstrap.py`: старт без Nanobot —
+      `TestBootstrap::test_data_surface_is_stable`,
+      `TestContainerWiring::test_transport_is_lowlevel_server`,
+      `TestBootstrap::test_server_without_data_capability_still_starts`
+      (`:694`); health —
+      `TestWireContract::test_health_reports_missing_tables_over_the_wire`
+      (`:739`); discovery — `test_operations_are_discoverable` (`:592`);
+      нормальный запрос — `test_call_returns_text` (`:643`);
+      некорректный запрос — `test_argument_validation_uses_wire_schema`
+      (`:731`) и `test_unknown_operation_is_reported_as_error` (`:723`);
+      сбой инфраструктуры — `test_missing_dsn_stops_server` (`:851`) и
+      `test_missing_sqlglot_stops_server` (`:829`); таймаут —
+      `test_timeout_is_reported_and_server_survives` (`:781`).
 - [x] 10.6 Прогнать тесты всех переехавших модулей в `mcp-platform`:
       `audit_analyzer`, `llm_client`, `db.py`, `sql_safety`, `jsonb`,
       `clean_text`. Тесты `legal_summarizer` проверяются в фазе 11
@@ -1701,15 +1803,20 @@
       (реестр настроек, `server.py`, `platform.json`) и вынесена отдельным
       коммитом, который можно откатить одним движением. Capability не
       читает снимок, поэтому в `_DATA_CAPABILITIES` не входит.
-- [ ] 11.5 **Привязать кэш документа к `session_id` контракта, а не к
-      окружению.** Сегодня ключ сессии резолвится как `SESSION_KEY` в env →
-      fallback на имя файла → `__nosession__`, причём `SESSION_KEY` **не
-      выставляется нигде в репозитории**, поэтому кэш оказывается в папке,
-      названной по документу, а не по сессии. Источник ключа — `session_id` из
-      2.19/2.20. Дополнительно: корень кэша перестаёт выводиться из
-      `Path(__file__).parents[N]` (после переезда это каталог платформы, а не
-      репозиторий агента) и задаётся конфигурацией; `document_id` — по
-      контент-хешу, а не по `resolved_path+size+mtime`
+- [x] 11.5 **Привязать кэш документа к `session_id` контракта, а не к
+      окружению.** Источник ключа — `session_id` из контракта операции
+      (п. 11.5)
+      **Сделано, сверено 2026-10-04.** Ветка `SESSION_KEY` из окружения
+      снята: `mcp-platform/libs/legal_summarizer/cache/session_key.py`
+      (`:43-76`) — приоритет `session_id` из контракта, затем имя файла,
+      затем `NO_SESSION = "__nosession__"` (`:72-76`); имя функции
+      переименовано в `safe_session_key` (`:48`), старый алиас оставлен
+      (`:39`). Модуль сам фиксирует причину в docstring (`:8-18`).
+      Кэш потребляет личность из контракта:
+      `mcp-platform/libs/legal_summarizer/llm/client.py:99-104`.
+      Корень кэша задаётся конфигурацией, а не
+      `Path(__file__).parents[N]`; `AGENTS.md:93` помечает старый путь
+      `workspace/data_store/cache/sessions/...` как больше не агентский.
       **Сделано на 2026-10-02, пункт не закрыт:** ключ сессии резолвится из
       `session_id` контракта — ветка `SESSION_KEY` из окружения снята, она
       была мёртвой; корень кэша приходит из конфигурации, настройка

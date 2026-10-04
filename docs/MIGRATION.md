@@ -168,6 +168,15 @@
    конкретной реплике (по политике) — установите
    `gateway.session_cold_sync.enabled=false`.
 
+> **Устарело на 2026-10-04, оставлено как историческая процедура deploy.**
+> Ни `pg_try_advisory_xact_lock`, ни leader-election в коде больше нет
+> (0 совпадений в `lib/` и `mcp-platform/`), а класс
+> `SessionColdSyncService` переименован в `SessionMirror`
+> (`lib/gateway/mirror/session_mirror.py`; `CHANGELOG.md` § «Зеркало стало
+> подсистемой шлюза»). Пункты 1 и 2 остаются верными: ключ
+> `gateway.session_cold_sync.*` на месте, имя класса — нет. Действующее
+> описание зеркала — `docs/architecture/storage-layers.md`.
+
 **Rollback**: `git revert <commit-hash>` откатывает все изменения;
 PG-таблицы `agent_session_meta` / `agent_session_messages`
 остаются нетронутыми (sync-сервис только зеркалирует upstream,
@@ -324,7 +333,7 @@ LLM-вызовы в production):
 
 - PATCH-релиз. Полностью обратно совместим.
 - Хуки переехали: фреймворковые — в `lib/hooks/`, плагины — в `workspace/hooks/`.
-- `office_files` skill — чтение docx/xlsx/xls/pdf/pptx/csv/txt.
+- `office_files` skill — чтение docx/xlsx/xls/pdf/pptx/csv/txt. **Удалён:** каталога `workspace/skills/office_files/` в дереве нет; навыков два — `enterprise_mcp` и `audit_analyzer` (см. `docs/skill-tool-inventory.md`).
 
 ## v2.0.0 → v2.3.0
 

@@ -51,7 +51,8 @@
 ## Решение
 
 Все breaking changes **зафиксированы в спеке** через
-`openspec/.../design.md` (D5, D6, D7) и нормативные требования в
+`openspec/changes/archive/2026-09-27-post-0.3.5-patches-cleanup/design.md`
+(D5, D6, D7) и нормативные требования в
 `specs/`. Тесты, которые **не были обновлены**, считаются
 **pre-existing failures** и будут исправлены в **отдельном
 follow-up change'е**.
@@ -85,6 +86,6 @@ follow-up change'е**.
 
 ## См. также
 
-* `openspec/changes/post-0.3.5-patches-cleanup/design.md`
+* `openspec/changes/archive/2026-09-27-post-0.3.5-patches-cleanup/design.md`
 * `docs/architecture/decisions/active-files-hook-removal.md`
 * коммиты c0fe1e4..efe147e на master

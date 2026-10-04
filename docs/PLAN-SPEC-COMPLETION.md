@@ -247,11 +247,14 @@ change'а `enterprise-mcp-platform`.
 протокола канала, а не только перенос данных. `_assemble_outbound` возвращает
 `None` после `message(...)`, и обёртка строит синтетический `OutboundMessage`
 с `_final_turn` — это не событие, и `EventSink` его не заменит, потому что
-подменять тут нечего, надо **не вернуть None**. `postgres_channel.py:1335`
-финализирует оборот **только** по `FINAL_TURN_KEY` или `_turn_end`; без
-маркера задача висит в `processing` до reclaim'а и уходит в `failed`, а
-`postgres_channel.py:1568-1570` прямо опирается на синтетический пустой
-`_final_turn`. Маркер — контракт ещё и `db_logging_bus.py:121-123`, и
+подменять тут нечего, надо **не вернуть None**. Проверка маркера в канале —
+`postgres_channel.py:1417` (`meta.get(FINAL_TURN_KEY) or meta.get("_turn_end")`);
+финализация вызывается **только** по нему, а сам `_finalize_turn` живёт в
+`postgres_channel.py:1485`. Без маркера задача висит в `processing`, пока её
+не вернёт в пул фоновая `_unstick_loop` (`postgres_channel.py:911`, операция
+платформы `unstick_tasks`), а по исчерпании `max_stuck_retries` уходит в
+`failed`; протокола reclaim/lease, который делал это раньше, в коде нет.
+Маркер — контракт ещё и `db_logging_bus.py:121-123`, и
 `outbound_meta.py:73-85`.
 
 Решение было принято раньше и зафиксировано в `runtime_patcher.py:26-29`, в

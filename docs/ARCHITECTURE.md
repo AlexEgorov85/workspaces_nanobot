@@ -16,7 +16,7 @@
 модели), живёт в отдельном процессе `enterprise-mcp` и доступно агенту только
 операциями по протоколу MCP: клиент — `lib/services/enterprise_mcp_client.py`,
 объявление сервера — `config.json` → `gateway.agent.enterprise_mcp`
-(`tools.mcpServers` намеренно пуст).
+объявление сервера — `config.json` → `gateway.agent.enterprise_mcp` (обслуживает фоновые службы агента) **и** `config.json` → `tools.mcpServers.enterprise` — второе объявление читает штатный `MCPProvider` нанобота и отдаёт модели 7 операций как `mcp_enterprise_*`. Поэтому процессов платформы два, и это объявлено, а не вышло случайно; секция не пуста. Транспорт процесса выбирает **блок настроек агента** (`lib/services/agent_settings.py`, единственный аргумент запуска — `--agent-settings-file`): `stdio` по умолчанию либо `streamable-http` на `/mcp` (`mcp-platform/servers/enterprise/http_transport.py`). Адрес и порт приезжают блоком, а не `argv` и не `platform.json`; не-loopback адрес и `::1` отвергаются, фактический адрес сообщается в унаследованный дескриптор, а не в stdout.
 
 > **Об именах таблиц и индексов.** Все имена таблиц/индексов, упомянутые ниже, —
 > **не зашитые константы**, а значения текущей инсталляции, и объявляет их
@@ -871,7 +871,7 @@ UI читает то, что есть, и не обязан понимать к�
 | `message_id` | `str` (UUID) | `PostgresChannel._poll_once` (в `meta` для assistant-placeholder) | — | никогда | ID user-сообщения, на которое это assistant-сообщение — ответ. Пара `message_id ↔ answer_id` (взаимные ссылки в соседних строках). |
 | `answer_id` | `str` (UUID) | `PostgresChannel._poll_once` (в `meta` для user-строки) | — | никогда | ID assistant-placeholder, созданного сразу при клейме. Позволяет каналу находить строку для обновления. |
 | `session_key` | `str` | Передаётся в `raw_meta` (UI/внешний клиент) | — | никогда | Полный ключ сессии nanobot, формат `<channel>:<chat_id>`. Если не передан в raw_meta, канал подставляет `f"postgres:{chat_id}"` (см. `postgres_channel.py:718`). |
-| `retry_count` | `int` | `PostgresChannel._reclaim_and_heal` / `_mark_failed` | инкрементируется при каждом `error`/`stuck` | никогда | Сколько раз задача была в `error`. При `>= max_stuck_retries` → `failed`. |
+| `retry_count` | `int` | Операция платформы `fail_task` (`capabilities/data/service/main.py`) | инкрементируется при каждом `error`/`stuck` | никогда | Сколько раз задача была в `error`. При `>= max_stuck_retries` → `failed`. Инкремент делает платформа: канал получает готовый `retry_count` в ответе операции (`lib/channels/postgres_channel.py:1225`). |
 | `error` | `str` | `PostgresChannel._mark_failed` | — | никогда | Только в строках со статусом `error` или `failed`. Краткое описание причины: `"dispatch_error"`, `"write_error"`. |
 | `reasoning` | `str` | `PostgresChannel._flush_reasoning` (live) + `_finalize_turn` (atomic append) | дописывается через `_reasoning_io_lock` | никогда | Полный текст рассуждений модели (chain-of-thought). Может быть очень длинным. |
 | `context_window` | `dict` | `PostgresChannel._flush_live_context` (live) | перезаписывается каждые `_flush_interval` сек | никогда | Метрика занятости контекстного окна: `{used: int, limit: int, pct: float (0..1, 4 знака), model: str}`. См. подсекцию «Метрика занятости контекстного окна» выше. |
@@ -918,7 +918,7 @@ meta: dict[str, Any] = {
 | `PostgresChannel._flush_reasoning` | `postgres_channel.py:530` | live, каждые `_flush_interval` сек | `reasoning` (дописывается) |
 | `PostgresChannel._finalize_turn` | `postgres_channel.py:1156` | на `_turn_end` | `reasoning` (atomic append остатков) |
 | `PostgresChannel._flush_live_context` | `postgres_channel.py:560-570` | live, каждые `_flush_interval` сек | `context_window` (перезаписывается) |
-| `PostgresChannel._reclaim_and_heal` | `postgres_channel.py:347-348` | lease-loop, истёк lease | `retry_count++` (затем `status='error'` или `'failed'`) |
+| Операция платформы `unstick_tasks` | `capabilities/data/service/main.py` | `_unstick_loop`, истёк `processing_timeout` | `retry_count++` (затем `status='error'` или `'failed'`). Агентский `_reclaim_and_heal` удалён вместе с протоколом lease. |
 | `PostgresChannel._mark_failed` | `postgres_channel.py:835-836` | ошибка диспетчера/записи | `retry_count++`, `error=<reason>` |
 | `RuntimePatcher.patch_assemble_outbound` | `lib/services/runtime_patcher.py:730, 722, 96` | на финальном outbound | `_tool_audit` (если есть), `_final_turn: true` (внутренний протокол), `context_window` (если есть) |
 | `ContextCompactionService._write_history_notice` | `lib/services/context_compaction.py:332` | после успешного сжатия (ручного или авто) | `kind: "context_compact"`, `compact: {…}` |
@@ -1204,7 +1204,9 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 `mode`, `fingerprint_hash`. Журналирование не влияет на детект: сбой
 `DbLoggingService` логируется WARNING'ом и не отключает защитник.
 
-Спека: `openspec/changes/repeat-guard-hook/specs/runtime/anti-loop/spec.md`.
+Спека: `openspec/specs/runtime/anti-loop/spec.md` (в каноне; change
+`repeat-guard-hook` в дереве отсутствует — ни активный, ни архивный, 0
+совпадений по имени каталога).
 
 ---
 
@@ -1239,25 +1241,55 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 
 ### Захват задач и статусы (`agent_conversation_messages`)
 
-Захват задачи (сообщения веб-чата) делает **один** `UPDATE ... RETURNING`
-в `_claim_one` (`lib/channels/postgres_channel.py`):
+Захват задачи (сообщения веб-чата) делает **платформа**: канал вызывает
+операцию `claim_task` через `QueueOps` (`lib/channels/queue_ops.py`), а SQL
+живёт в `mcp-platform/servers/enterprise/capabilities/data/service/main.py`
+(`claim_task`). В `lib/channels/postgres_channel.py` нет ни `psycopg2`, ни
+`fetchval`, ни `execute(` — ноль совпадений по каждому из трёх; контракт
+вызова проверяет `tests/test_postgres_channel_claim_contract.py`.
 
 ```sql
-UPDATE agent_conversation_messages
+-- платформенный SQL, main.py:1554. {table} приходит из profile-оверлея.
+UPDATE {table}
    SET status = 'processing', updated_at = NOW()
- WHERE id = (SELECT id FROM agent_conversation_messages
-              WHERE role = 'user' AND (status = 'pending' OR (status = 'error' AND ...))
-                AND status != 'cancelled'
-                AND NOT EXISTS (SELECT 1 ... m2.status = 'processing' в том же chat_id)
-              ORDER BY created_at ASC LIMIT 1)
-   AND status = 'pending' AND status != 'cancelled'
-RETURNING id, chat_id, user_id, content, media, metadata, created_at
+ WHERE id IN (
+     SELECT picked.id FROM (
+         SELECT DISTINCT ON (chat_id) id, chat_id, created_at
+         FROM {table}
+         WHERE role = 'user'
+           AND (status = 'pending'
+                OR (status = 'error'
+                    AND updated_at + interval '1 second' * %s < NOW()))
+           AND status != 'cancelled'
+           AND NOT EXISTS (
+               SELECT 1 FROM {table} m2
+               WHERE m2.chat_id = {table}.chat_id
+                 AND m2.role = 'user'
+                 AND m2.status = 'processing')
+         ORDER BY chat_id, created_at ASC, id ASC
+     ) picked ORDER BY picked.created_at ASC, picked.id ASC
+     LIMIT %s
+ )
+   -- Внешний AND намеренно повторяет условие подзапроса целиком: без
+   -- этого повтор после error_retry_delay был бы недостижим (исправлено).
+   AND (status = 'pending'
+        OR (status = 'error'
+            AND updated_at + interval '1 second' * %s < NOW()))
+   AND status != 'cancelled'
+ RETURNING id, chat_id, user_id, content, media, metadata, created_at
 ```
 
-**Инвариант:** захват эксклюзивен, потому что внешний `AND status = 'pending'`
-делает повторный UPDATE нерабочим. Если задачу уже взял другой захват, её
-статус не `pending`, UPDATE не срабатывает, вторая обработка невозможна.
-Это MVCC-перепроверка UPDATE, а не UNIQUE-индекс.
+Операция **батчевая**: `claim_tasks(batch=, cursor=) -> ClaimedBatch(tasks,
+next_cursor)`, а `claim_task()` — представление `batch=1` для одиночного
+клейма. `batch` урезается потолком платформы `_max_rows`; `batch < 1` —
+`InvalidRequestError`, а не «ничего не брать»: молчаливая потеря очереди хуже
+ошибки. `cursor` выдаётся только по полному батчу. `DISTINCT ON (chat_id)`
+гарантирует не более одной задачи на чат за захват.
+
+**Инвариант:** захват эксклюзивен, потому что внешний `AND` делает повторный
+UPDATE нерабочим. Если задачу уже взял другой захват, её статус не `pending`,
+UPDATE не срабатывает, вторая обработка невозможна. Это MVCC-перепроверка
+UPDATE, а не UNIQUE-индекс.
 
 Таблицы аренды `public.agent_worker_claims` **нет** — она удалена миграцией
 `sql/migrations/V006__drop_agent_worker_claims.sql`, вместе с настройками
@@ -1272,7 +1304,7 @@ RETURNING id, chat_id, user_id, content, media, metadata, created_at
 `SELECT ... FOR UPDATE` берёт блокировку уровня **таблицы** — такой захват
 заблокировал бы всех читателей и писателей `agent_conversation_messages`.
 Корректности `SKIP LOCKED` здесь и не нужен: он даёт только снижение задержки
-при конкурентных захватах, а эксклюзивность обеспечивает `AND status='pending'`.
+при конкурентных захватах, а эксклюзивность обеспечивает внешний `AND`,
 
 **Статусы задач:**
 
@@ -1306,12 +1338,12 @@ WHERE role = 'assistant' AND status = 'completed' AND content <> ''
 уже существует, но ещё пуста. Наблюдалось при прогонах на реальных данных —
 опросчик успевал увидеть пустой ответ раньше, чем его пропатчил канал.
 
-> **Известный дефект.** Ветка повтора `error` сейчас недостижима: внешний
-> `AND status = 'pending'` отсекает строку, выбранную подзапросом по
-> `status = 'error'`. `_mark_failed` переводит задачу в `error` с обещанием
-> вернуть её в пул, но повторного захвата не происходит — задача остаётся в
-> `error` навсегда. Настройка `error_retry_delay` сохранена как контракт,
-> но механизма за ней сейчас нет. Требует отдельного решения (см. CHANGELOG).
+> **Дефект повтора `error` исправлен.** До 2026-10-04 внешний
+> `AND status = 'pending'` отсекал строку, выбранную подзапросом по
+> `status = 'error'`: задача оставалась в `error` навсегда, а механизм за
+> `error_retry_delay` был недостижим. Теперь внешний `AND` повторяет условие
+> подзапроса целиком, поэтому повтор работает. Проверка —
+> `mcp-platform/tests/test_data_task_queue.py`.
 
 **Возврат зависших задач в пул.** Единственный механизм — фоновая
 `_unstick_loop` с интервалом `unstick_interval` (по умолчанию
@@ -1352,8 +1384,8 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 
 **Поток данных:**
 
-1. `PostgresChannel._poll_once()` → `_claim_one()` — один
-   `UPDATE ... RETURNING` через `fetchone`.
+1. `PostgresChannel._poll_once()` → `_claim_one()` → `QueueOps.claim_task()` —
+   вызов операции платформы, ответ — список строк (`ClaimedBatch.tasks`).
 2. После обработки `_finalize_turn()` → `UPDATE SET status='completed'`,
    снятие слота и `_claimed_ids`.
 3. Раз в `unstick_interval` сек `_unstick_loop` → `_unstick_processing()` —
@@ -1440,8 +1472,8 @@ priority polling доставляет `/stop` в шину, дальше рабо
 подзапрос по соседним задачам). Если пользователь
 помечает сообщение как `cancelled` ДО того, как polling его
 захватил — polling его пропускает (race-free по `UPDATE ... WHERE
-id=(...)`). После claim — повторный `fetchval` re-check; если
-между SELECT подзапроса и UPDATE захвата AW пометил `cancelled`,
+id IN (...)`). После claim — повторная проверка статуса операцией
+`get_message` (`PostgresChannel._status_of`); если между выбором кандидата и
 polling не диспатчит и освобождает claim. В `_finalize_turn` —
 ещё один re-check: если user стал cancelled пока LLM работала,
 финальный ответ не публикуется, освобождаются слот и контекст.
@@ -1454,7 +1486,7 @@ polling не диспатчит и освобождает claim. В `_finalize_t
 | `max_concurrent=2`, A+B работают, A `/stop` | priority polling доставляет `/stop` → отменяется A, B продолжает |
 | A–J работают, F `/stop` | priority polling доставляет `/stop` → отменяется только F, остальные 9 не задеты |
 | row cancelled до claim | polling skip через `AND status != 'cancelled'` |
-| row cancelled после claim (race) | re-check fetchval → drop + cleanup |
+| row cancelled после claim (race) | re-check `get_message` → drop + cleanup |
 | row cancelled во время LLM | `_finalize_turn` drop response, slot released |
 
 Тесты: `tests/test_user_stop_signal.py` (DB safety net + race checks),
@@ -1463,11 +1495,12 @@ polling не диспатчит и освобождает claim. В `_finalize_t
 
 **Модель захвата — одна.** Таблицы аренды `agent_worker_claims` больше нет
 (удалена миграцией `sql/migrations/V006__drop_agent_worker_claims.sql`),
-протокол lease/heartbeat/reclaim снят из канала. Захват задачи — один
-`UPDATE ... RETURNING` в `_claim_one`: состояние захвата хранится в самой строке
-задачи (`status='processing'`). Эксклюзивность обеспечивает внешний
-`AND status = 'pending'` — если задачу уже взял другой захват, повторный UPDATE
-не срабатывает, двойная обработка невозможна.
+протокол lease/heartbeat/reclaim снят из канала. Захват задачи — одна
+операция платформы `claim_task` (внутри — `UPDATE ... RETURNING`, батчем по
+`batch`): состояние захвата хранится в самой строке задачи
+(`status='processing'`). Эксклюзивность обеспечивает внешний `AND`,
+повторяющий условие подзапроса: если задачу уже взял другой захват,
+повторный UPDATE не срабатывает, двойная обработка невозможна.
 
 **Что это значит по мульти-машинности.** Несколько инстансов gateway на общей
 таблице по-прежнему не схлопываются в двойную обработку (это гарантирует

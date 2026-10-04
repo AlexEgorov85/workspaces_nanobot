@@ -25,19 +25,18 @@
         └─────────────────────┬────────────────────────┘
                               │ every 30 sec
                               │ batch (default 50), sorted by session_key
-                              │ last-write-wins по updated_at
+                              │ признак изменения — source_digest
                               ▼
         ┌──────────────────────────────────────────────┐
         │   зеркало сессий                       │
         │   (lib/gateway/mirror/)  │
         │                                                │
         │   • daemon thread (threading.Lock)             │
-        │   • pg_try_advisory_xact_lock (D-Pool.2)       │
         │   • batch with sort by session_key             │
-        │   • leader-election via pg_advisory_lock       │
+        │   • решение о записи — на платформе            │
         └─────────────────────┬────────────────────────┘
-                              │ utils.db.transaction() / utils.db.run()
-                              │ (единый пул, DI — без собственного psycopg2-пула)
+                              │ операции платформы (state / write / cleanup)
+                              │ через enterprise_mcp: SQL и пул — на платформе
                               ▼
         ┌──────────────────────────────────────────────┐
         │   PostgreSQL (cold-storage mirror)             │
@@ -101,68 +100,79 @@ upstream (JSONL); никаких прямых `INSERT/UPDATE` в `agent_session_
 Фоновый сервис в `lib/gateway/mirror/`,
 запускается daemon-потоком через `ApplicationContext.start()`.
 Каждые `sync_interval_sec` (по умолчанию 30 секунд):
-
-1. Захватывает per-transaction advisory lock
-   `pg_try_advisory_xact_lock(hashtext('storage_hybridization_session_cold_sync')::bigint)`.
-   Если lock занят (другая реплика — лидер) — пропускает цикл
-   (`cycles_skipped_lock_busy += 1`).
+1. Собирает аргументы операции зеркала (`MirrorEntry` →
+   `build_write_arguments`: `session_key`, `replica_id`, `source_digest`,
+   `updated_at`, `created_at`, `messages`) и вызывает операцию платформы.
+   Решение о записи, транзакция и пул — на стороне платформы, в процессе
+   `enterprise-mcp`; агент их не повторяет.
+   процессе `enterprise-mcp`; агент их не повторяет.
 2. Читает upstream JSONL-список через `session_manager.list_sessions()`.
-3. Сортирует сессии по `session_key` для детерминированного порядка
-   блокировок (исключает ABBA-deadlock с `DbLoggingService`).
-4. Обрабатывает батчами (`batch_size`, default 50) — для каждой
-   сессии читает `session_manager.read_session_snapshot(key)`,
-   сравнивает `updated_at` с PG (`last-write-wins`), делает
-   UPSERT в `agent_session_meta` + DELETE+INSERT в
-   `agent_session_messages` (явная транзакция).
-5. Cleanup: сравнивает `pg_keys` с `upstream_keys`; удаляет из PG
-   любую сессию, которой нет в upstream (single-writer rule).
-6. Освобождает advisory lock (автоматически на COMMIT).
+3. Сортирует сессии по `session_key` для детерминированного порядка.
+4. Отправляет батчами (`batch_size`, default 50) — для каждой сессии читает
+   `session_manager.read_session_snapshot(key)` и сверяет дайджест;
+   last-write-wins, `stale_tolerance` и `sync_lag_threshold` решаются
+   платформой, а ответ приходит с вердиктом (`unchanged` / `skipped_equal` /
+   `skipped_stale` / записан).
+5. Cleanup: операция сравнивает список на платформе с upstream и удаляет из
+   PG любую сессию, которой нет в upstream (single-writer rule). Пустой
+   список upstream удаление запрещает (`cleanup_guarded_total`).
+6. Advisory lock освобождается на платформе, на COMMIT.
 
 Метрики (`get_stats()`):
 
-- `cycles_total`, `cycles_failed_total`,
-  `cycles_skipped_lock_busy`, `cycles_skipped_pool_busy`;
-- `consecutive_failures`, `last_success_ts`,
-  `last_success_lag_seconds`;
-- `pool_size`, `pool_available`, `pool_wait_seconds` (D-Pool.6);
-- `rows_synced_total`, `messages_synced_total`;
-- `upstream_session_count`, `pg_session_count`.
+- `cycles_total`, `cycles_failed_total`, `last_cycle_seconds`;
+- `consecutive_failures`, `last_success_ts`, `last_success_lag_seconds`;
+- `resource`, `enabled`, `disabled_reason`, `replica_id`;
+- `source_count`, `mirror_count`, `written_total`,
+  `skipped_unchanged_total`, `unreadable_total`, `source_missing_total`;
+- `cleanup_guarded_total`, `deleted_total`;
+- `sync_interval_sec`, `missing_cycles_threshold`;
+- из ресурса `SessionMirror`: `messages_written_total`,
+  `skipped_stale_total`, `stale_tolerance_seconds`,
+  `sync_lag_threshold_seconds`, `upstream_session_count`,
+  `mirror_session_count`, `sessions_written_total`,
+  `snapshot_missing_total`, `cleanup_guarded_total`,
+  `deleted_sessions_total`.
 
 ## Правила использования пула (D-Pool)
 
-`зеркало сессий` использует **единый** пул
-`workspace/utils/db.py`. Никаких собственных psycopg2-пулов.
-Полные правила зафиксированы в архивированном
-`openspec/changes/archive/2026-09-27-storage-hybridization/design.md` § «Connection
-pool» (D-Pool.1 — D-Pool.7). Краткая сводка:
+`зеркало сессий` **не держит соединения с БД**: `psycopg2` в пакете зеркала не
+встречается ни разу, `_db_run`/`fetchval`/`execute` нет. Всё общение с
+PostgreSQL идёт операциями платформы (`OP_STATE` / `OP_MIRROR` /
+`OP_CLEANUP` в `lib/gateway/mirror/session_mirror.py`), а пул, advisory lock и
+транзакция принадлежат процессу `enterprise-mcp`. Полные правила пула
+зафиксированы в архивированном
+`openspec/changes/archive/2026-09-27-storage-hybridization/design.md`
+§ «Connection pool» (D-Pool.1 — D-Pool.7) — для платформенной стороны.
+Краткая сводка:
 
-- **DI через `utils.db.transaction()` / `utils.db.run()`** —
-  никаких `psycopg2.pool.*` / `connect()` / `create_pool()`
-  внутри модуля. Гард —
-  `tests/test_storage_hybridization.py::TestNoNewPoolCreated`.
-- **Per-transaction advisory lock** (`pg_try_advisory_xact_lock`)
-  — нет долгоживущего соединения, lock освобождается
-  автоматически на COMMIT/ROLLBACK.
-- **Threading**: sync-код в daemon-потоке, соединение берётся
-  и возвращается в одном worker-потоке пула (lease живёт в одном
-  job'е).
-- **Батчи с сортировкой** по `session_key` — детерминированный
-  порядок блокировок.
-- **Pool-busy → `cycles_skipped_pool_busy`** без падения.
-- **Shutdown order** (D21): `stop()` ДО закрытия upstream
-  `SessionManager`, чтобы успеть синхронизировать последние
-  dirty-сессии.
+- **Ни одного пула в агенте.** Зеркало получает готовый вердикт, БД не
+  трогает; платформенные гарды —
+  `mcp-platform/tests/test_architecture_boundaries.py`.
+- **Per-transaction advisory lock** (`pg_try_advisory_xact_lock`) — живёт
+  внутри платформенной операции: долгоживущего соединения у агента нет,
+  lock освобождается автоматически на COMMIT/ROLLBACK.
+- **Threading:** цикл в daemon-потоке агента; работа с БД выполняется
+  синхронно внутри вызова операции, соединение платформенного пула берётся и
+  возвращается в одном job'е.
+- **Батчи с сортировкой** по `session_key` — детерминированный порядок
+  блокировок.
+- **Shutdown order** (D21): `stop()` ДО закрытия upstream `SessionManager`,
+  чтобы успеть синхронизировать последние dirty-сессии.
 
 ## Multi-instance deploy
 
-`pg_try_advisory_xact_lock` реализует leader-election без внешней
-координации:
+Механизма выбора лидера в коде нет: `pg_try_advisory` не встречается ни в
+`lib/`, ни в `mcp-platform/`. Несколько реплик на общей таблице не
+разрушаются, потому что запись арбитражна, а не сериализована: платформа
+выполняет чтение зеркала, решение и запись **одной транзакцией**
+(`mirror_session`, `capabilities/data/service/main.py`), а переход строки —
+условным `UPDATE`. Блокировки строки нет сознательно: на Greenplum 6.5
+`SELECT ... FOR UPDATE` взял бы блокировку уровня таблицы.
 
-- каждая реплика пытается захватить lock в начале цикла;
-- только одна реплика получает `True` и выполняет sync;
-- остальные инкрементируют `cycles_skipped_lock_busy`;
-- при краше реплики-держателя lock'а PG автоматически освобождает
-  xact-lock на ROLLBACK.
+Поэтому и D-Pool.2 (`pg_try_advisory_xact_lock`) в этом документе — историческая
+запись, а не действующее правило: его нет ни в коде агента, ни в коде
+платформы.
 
 Escape hatch: `gateway.session_cold_sync.enabled=false` —
 sync-сервис не запускается вообще.
@@ -183,46 +193,41 @@ source of truth; всё, чего нет в `list_sessions()`, удаляетс�
 `зеркало сессий` защищает PG от перезаписи устаревшими
 данными и детектит аномалии sync'а:
 
-**Stale (PG свежее JSONL + tolerance):** если
-`pg_meta.updated_at > jsonl_meta.updated_at + stale_tolerance` —
-sync пропускается для этой сессии (`sync_skipped_stale_total += 1`),
-однократно логируется `event_type="session_stale_detected"` (с TTL
-60s in-memory dedup, чтобы не флудить). Дефолт tolerance — 120 сек
-(`gateway.session_cold_sync.stale_tolerance_seconds`). Защита от
-сценария «PG был обновлён внешним writer'ом (миграция, admin)
-после deploy storage-hybridization; sync не должен перезаписать
-актуальные данные устаревшими из JSONL».
+**Stale (зеркало впереди JSONL + tolerance):** если
+`agent_session_meta.updated_at > jsonl.updated_at + stale_tolerance` —
+sync пропускается для этой сессии (`skipped_stale_total += 1`),
+однократно логируется `agent.degraded` с префиксом `session_stale_detected`
+(TTL 60s in-memory dedup, чтобы не флудить). Дефолт tolerance — 120 сек
+(`gateway.session_cold_sync.stale_tolerance_seconds`). Защита от сценария
+«зеркало обновил внешний writer (миграция, admin) — откаченный файл не
+должен затереть более новое зеркало».
 
-**Reverse-lag (JSONL свежее PG + threshold):** если
-`jsonl_meta.updated_at > pg_meta.updated_at + sync_lag_threshold` —
-логируется `event_type="sync_lag_exceeded"` (для observability).
+**Reverse-lag (JSONL впереди зеркала + threshold):** если
+`jsonl.updated_at > agent_session_meta.updated_at + sync_lag_threshold` —
+логируется `agent.degraded` с префиксом `sync_lag_exceeded` (для
+observability). Событие не блокирующее: sync всё равно выполняется.
 Дефолт threshold — 3600 секунд
 (`gateway.session_cold_sync.sync_lag_threshold_seconds`).
-Срабатывает, если sync-сервис долго не запускался (например,
-после deploy или из-за lock_busy). При срабатывании sync всё равно
-выполняется — это не блокирующий детект.
+Срабатывает, если sync-сервис долго не запускался (например, после deploy).
 
-Оба события пишутся через `DbLoggingService.try_log_event` (без
-прямого `INSERT` в `agent_gateway_logs`). Метрики
-`stale_detected_total`, `sync_skipped_stale_total`,
-`sync_lag_exceeded_total` публикуются в `get_stats()`.
+Оба события пишутся через `DbLoggingService.try_log_event` (без прямого
+`INSERT` в `agent_gateway_logs`). Счётчик в `get_stats()` называется
+`skipped_stale_total`; `stale_detected_total` и `sync_lag_exceeded_total`
+в коде отсутствуют (0 совпадений).
 
 ## Failure modes
 
 | Сценарий | Поведение |
 |---|---|
-| PG недоступен | sync-цикл логирует `event_type="session_cold_sync_failed"`, инкрементирует `consecutive_failures`, backoff |
-| Advisory lock занят (multi-instance) | `cycles_skipped_lock_busy += 1`, цикл пропущен |
-| Пул исчерпан | `cycles_skipped_pool_busy += 1`, цикл пропущен, hot path не затронут |
-| Upstream JSONL пуст | sync пишет 0 строк, `upstream_session_count = 0` |
+| PG недоступен | цикл логирует `agent.degraded` с префиксом `<ресурс> cycle failed:`, инкрементирует `consecutive_failures`, backoff |
+| Upstream JSONL пуст | цикл пишет 0 строк; удаление в PG запрещено (`cleanup_guarded_total`) |
 | Сессия есть в PG, но не в upstream | cleanup удаляет её из PG |
-| Stale-сессия (PG свежее JSONL) | пропуск sync (`sync_skipped_stale_total`), лог `session_stale_detected` |
+| Сессия впереди зеркала (stale) | запись запрещена (`skipped_stale_total`), лог `session_stale_detected` |
 | JSONL значительно опережает PG | лог `sync_lag_exceeded` (sync всё равно выполняется) |
+| Дайджест совпал | вердикт `unchanged`, записи нет |
 
 ## Тесты
 
-- `tests/contract/test_session_manager_api.py` — контракт на
-  upstream `SessionManager` (14 методов, signatures, persistence).
 - `tests/contract/test_session_manager.py` — round-trip через
   JsonlSessionStore.
 - `tests/test_session_cold_sync_service.py` — mock-smoke
