@@ -163,11 +163,11 @@ COLLISIONS: dict[str, tuple[str, ...]] = {
         "lib/channels/postgres_channel.py",
         "lib/channels/postgres_channel.py",
         "lib/channels/postgres_channel.py",
-        "lib/services/session_cold_sync_service.py",
-        "lib/services/session_cold_sync_service.py",
-        "lib/services/session_cold_sync_service.py",
-        "lib/services/session_cold_sync_service.py",
-        "lib/services/session_cold_sync_service.py",
+        "lib/gateway/mirror/mirror_poller.py",
+        "lib/gateway/mirror/mirror_poller.py",
+        "lib/gateway/mirror/mirror_poller.py",
+        "lib/gateway/mirror/session_mirror.py",
+        "lib/gateway/mirror/session_mirror.py",
     ),
     "agent.failed": (
         "lib/hooks/database_logging_hook.py",
@@ -270,6 +270,43 @@ def _agent_source_files() -> list[Path]:
     return files
 
 
+#: Пакет, в котором объявлена обёртка ``_publish`` фоновых подсистем.
+_MIRROR_PACKAGE = "lib.gateway.mirror"
+
+
+def _inherits_publish_wrapper(tree: ast.AST) -> bool:
+    """Обёртка ``_publish`` унаследована, а не объявлена в этом файле.
+
+    Зеркало разнесено на механизм (``mirror_poller.py``) и ресурс
+    (``session_mirror.py``), и ресурс пишет в журнал через унаследованный
+    ``_publish``. Правило «обёртка объявлена в этом же файле» перестаёт видеть
+    места записи ресурса — молча, а эталон продолжает утверждать, что они
+    учтены. Это ровно тот отказ стража, ради которого он и написан: новое место
+    записи появилось и не попало ни под одну проверку.
+
+    Признак узкий: файл импортирует имя из пакета зеркала и объявляет класс,
+    чей базовый класс — одно из этих имён. Форма обёртки проверена отдельно
+    сканированием самого ``mirror_poller.py`` — он в тех же каталогах.
+    """
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and (
+            node.module == _MIRROR_PACKAGE
+            or node.module.startswith(f"{_MIRROR_PACKAGE}.")
+        ):
+            imported.update(alias.name for alias in node.names)
+    if not imported:
+        return False
+    return any(
+        isinstance(node, ast.ClassDef)
+        and any(
+            isinstance(base, ast.Name) and base.id in imported
+            for base in node.bases
+        )
+        for node in ast.walk(tree)
+    )
+
+
 def _written_event_type_literals() -> dict[str, list[str]]:
     """Живые имена, которые агент реально отдаёт журналу, с местом появления.
 
@@ -338,7 +375,7 @@ def _written_event_type_literals() -> dict[str, list[str]]:
                 if arg.arg not in ("self", "cls")
             )
             for node in ast.walk(tree)
-        )
+        ) or _inherits_publish_wrapper(tree)
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):

@@ -134,7 +134,7 @@ through an environment variable, or through re-resolution.
 
 #### Scenario: Тестовая среда запускается под профилем test
 - **КОГДА** активный профиль равен `test` и в БД применена миграция V005
-- **ТОГДА** первые обращения `PostgresChannel` (`agent_conversation_messages_test`), `SessionColdSyncService` (`agent_session_meta_test`, `agent_session_messages_test`), `DbLoggingService` (`agent_gateway_logs_test`, `agent_question_runs_test`) SHALL завершаться без `relation does not exist`
+- **ТОГДА** первые обращения `PostgresChannel` (`agent_conversation_messages_test`), `SessionMirror` (`agent_session_meta_test`, `agent_session_messages_test`), `DbLoggingService` (`agent_gateway_logs_test`, `agent_question_runs_test`) SHALL завершаться без `relation does not exist`
 
 ### Requirement: Профиль доступен для infrastructure use
 

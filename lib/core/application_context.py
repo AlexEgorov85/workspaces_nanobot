@@ -166,7 +166,10 @@ class ApplicationContext:
     print_llm_calls: bool = False
 
     # Storage-hybridization: cold-storage mirror для сессий + LLM usage.
-    session_cold_sync_service: Any | None = None
+    #: Зеркало сессий — подсистема шлюза (``lib/gateway/mirror/``). Собирается
+    #: здесь, живёт под своим жизненным циклом в ``gateway.py``; поле названо
+    #: по назначению, а не по классу, потому что класс — деталь реализации.
+    session_mirror: Any | None = None
     usage_store: Any | None = None
 
     # Клиент к MCP-серверу enterprise-mcp. Создаётся всегда, когда раздел
@@ -338,10 +341,11 @@ class ApplicationContext:
         # не предоставляет класс.
         ctx.usage_store = _make_usage_store(ctx)
 
-        # 4b. SessionColdSyncService (cold-storage mirror).
-        # Создаётся только при PG-конфиге. Sync стартует позже,
-        # в ``start()`` lifecycle.
-        ctx.session_cold_sync_service = _make_session_cold_sync_service(ctx)
+        # 4b. Подсистема зеркала сессий (cold-storage mirror).
+        # Создаётся только при PG-конфиге. Жизненный цикл — в ``gateway.py``:
+        # зеркало работает задачей loop'а, который на момент сборки ещё не
+        # существует.
+        ctx.session_mirror = _make_session_mirror(ctx)
 
         # 5. Реестр ресурсов удалён: писателей не осталось.
         #    Последним читателем был ``CacheLoadService``, ушедший на
@@ -1304,7 +1308,7 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
       * psycopg2 не импортируется (битое окружение).
 
     DSN берётся из ``channels.postgres.dsn`` (тот же, что для
-    ``SessionColdSyncService`` и PostgresChannel). Резервной записи в JSONL-файл
+    зеркала сессий и PostgresChannel). Резервной записи в JSONL-файл
     нет: при недоступности БД события выбрасываются.
     """
     try:
@@ -1471,19 +1475,25 @@ def _make_session_file_resolver(ctx: Any) -> Any:
     return resolver
 
 
-def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
-    """Создать ``SessionColdSyncService`` (холодное зеркало сессий).
+def _make_session_mirror(ctx: ApplicationContext) -> Any | None:
+    """Собрать подсистему зеркала сессий (``lib/gateway/mirror/``).
 
-    Сервис создаётся только если есть ``session_manager`` (upstream JSONL).
+    Зеркало создаётся только если есть ``session_manager`` (upstream JSONL).
 
     Условие прежнее — «нужен PG-деплой» — ушло вместе с прямым доступом к БД:
     зеркалом владеет платформа, и её наличие определяется наличием клиента
-    платформы. Имена таблиц сервис больше не получает: они объявлены в
+    платформы. Имена таблиц подсистема больше не получает: они объявлены в
     ``mcp-platform/platform.json`` и передаются на платформу, второй экземпляр
     объявления в конфигурации агента означал бы ровно тот рассинхрон, из-за
     которого канал и журнал ушли на платформу.
 
     Если условия не выполнены — возвращает ``None``.
+
+    Сборка здесь, владение жизненным циклом — в ``gateway.py``: зеркало
+    работает задачей этого loop'а, и поднимать его раньше бессмысленно (loop
+    ещё не существует), а позже — сессии уже могли бы перестать доходить до
+    холодного хранилища незамеченными. Агент о зеркале не знает: оно не в его
+    инвентаре, и к нему нет ни одного вызова из оборота.
 
     См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
     requirement «Cold-storage mirror в PostgreSQL».
@@ -1509,7 +1519,7 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
     missing_cycles_threshold = int(sync_cfg.get("missing_cycles_threshold", 2))
     replica_id = str(sync_cfg.get("replica_id") or "").strip() or None
 
-    from lib.services.session_cold_sync_service import SessionColdSyncService
+    from lib.gateway.mirror import SessionMirror
 
     logger.info(
         'session_mirror: replica_id=%s, stale_tolerance=%ss, '
@@ -1523,7 +1533,7 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
         enabled,
     )
 
-    return SessionColdSyncService(
+    return SessionMirror(
         session_manager=ctx.session_manager,
         enterprise_mcp=getattr(ctx, "enterprise_mcp", None),
         replica_id=replica_id,

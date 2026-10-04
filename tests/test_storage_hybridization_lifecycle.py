@@ -1,12 +1,12 @@
 """Mock-smoke lifecycle: создание / start / stop ApplicationContext
-с session_cold_sync_service и usage_store.
+с зеркалом сессий и usage_store.
 
 Заменяет реальный gateway / CLI startup (задачи 2.4, 3.4, 7.5, 7.6, 7.7)
 без живого PG. Проверяет, что:
 
 - ``ApplicationContext.create()`` не падает при наличии
-  ``session_cold_sync_service`` в dataclass;
-- ``start()`` запускает cold-sync поток (mock-сессия);
+  ``session_mirror`` в dataclass;
+- ``start()`` запускает подсистему зеркала (mock-сессия);
 - ``stop()`` корректно останавливает поток и закрывает ``usage_store``;
 - LLM observer подключается через ``wrap_provider_snapshot_loader``
   (mock-проверка на уровне ``agent_factory``).
@@ -85,9 +85,9 @@ class TestSessionColdSyncLifecycleMock:
 
     @pytest.mark.asyncio
     async def test_start_and_stop_does_not_crash(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+        from lib.gateway.mirror import SessionMirror
 
-        svc = SessionColdSyncService(
+        svc = SessionMirror(
             session_manager=_FakeSessionManager(),
             enterprise_mcp=_FakeMcp(),
             replica_id="gw-test",
@@ -101,9 +101,9 @@ class TestSessionColdSyncLifecycleMock:
 
     @pytest.mark.asyncio
     async def test_enabled_false_start_is_noop(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+        from lib.gateway.mirror import SessionMirror
 
-        svc = SessionColdSyncService(
+        svc = SessionMirror(
             session_manager=_FakeSessionManager(),
             enterprise_mcp=_FakeMcp(),
             enabled=False,
@@ -113,9 +113,9 @@ class TestSessionColdSyncLifecycleMock:
 
     @pytest.mark.asyncio
     async def test_stop_idempotent(self) -> None:
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+        from lib.gateway.mirror import SessionMirror
 
-        svc = SessionColdSyncService(
+        svc = SessionMirror(
             session_manager=_FakeSessionManager(),
             enterprise_mcp=_FakeMcp(),
         )
@@ -127,9 +127,9 @@ class TestSessionColdSyncLifecycleMock:
         """Отсутствие платформы — не поломка, но и не «работает молча»:
         зеркало обязано быть выключено с названной причиной, иначе оператор
         видит исправный сервис, который ничего не пишет."""
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+        from lib.gateway.mirror import SessionMirror
 
-        svc = SessionColdSyncService(
+        svc = SessionMirror(
             session_manager=_FakeSessionManager(),
             enterprise_mcp=None,
         )

@@ -138,7 +138,8 @@ tool'а-обёртки у агента больше нет: ``workspace/tools/le
   иначе только JSONL) | ``postgres`` (зеркало обязательно, без dsn — ошибка) |
   ``file`` (только JSONL, dsn игнорируется). Менеджер сессий во всех режимах —
   класс библиотеки ``SessionManager`` поверх ``SanitizingSessionStore``;
-  PostgreSQL обслуживает отдельный ``SessionColdSyncService``, а не сам
+  PostgreSQL обслуживает подсистема зеркала сессий
+  (``lib/gateway/mirror/``), а не сам
   менеджер.
 * ``tool_result_limits.*`` — секция УДАЛЕНА вместе с патчами ``exec_limits``
   и ``tool_limits`` (``lib/services/runtime_patcher.py``). Потолки вывода

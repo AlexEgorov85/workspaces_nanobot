@@ -28,8 +28,8 @@
                               │ last-write-wins по updated_at
                               ▼
         ┌──────────────────────────────────────────────┐
-        │   SessionColdSyncService                       │
-        │   (lib/services/session_cold_sync_service.py)  │
+        │   зеркало сессий                       │
+        │   (lib/gateway/mirror/)  │
         │                                                │
         │   • daemon thread (threading.Lock)             │
         │   • pg_try_advisory_xact_lock (D-Pool.2)       │
@@ -89,16 +89,16 @@ upstream (JSONL); никаких прямых `INSERT/UPDATE` в `agent_session_
 Точка выбора режима — `SessionStorageService.create()`
 (`lib/services/session_storage.py`). `storage="postgres"` означает «холодное
 зеркало включено»: имена таблиц проверяются там и уходят в
-`SessionColdSyncService`, а сам `SessionManager` про PostgreSQL не знает.
+`зеркало сессий`, а сам `SessionManager` про PostgreSQL не знает.
 
 **Архитектурный инвариант**: ни один runtime-модуль вне
-`SessionColdSyncService` НЕ пишет в `agent_session_meta` /
+`зеркало сессий` НЕ пишет в `agent_session_meta` /
 `agent_session_messages` напрямую. Проверяется через
 `tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables`.
 
-## Cold-storage mirror: `SessionColdSyncService`
+## Cold-storage mirror: `зеркало сессий`
 
-Фоновый сервис в `lib/services/session_cold_sync_service.py`,
+Фоновый сервис в `lib/gateway/mirror/`,
 запускается daemon-потоком через `ApplicationContext.start()`.
 Каждые `sync_interval_sec` (по умолчанию 30 секунд):
 
@@ -130,7 +130,7 @@ upstream (JSONL); никаких прямых `INSERT/UPDATE` в `agent_session_
 
 ## Правила использования пула (D-Pool)
 
-`SessionColdSyncService` использует **единый** пул
+`зеркало сессий` использует **единый** пул
 `workspace/utils/db.py`. Никаких собственных psycopg2-пулов.
 Полные правила зафиксированы в архивированном
 `openspec/changes/archive/2026-09-27-storage-hybridization/design.md` § «Connection
@@ -180,7 +180,7 @@ source of truth; всё, чего нет в `list_sessions()`, удаляетс�
 
 ## D23: Stale-detection и reverse-lag detection
 
-`SessionColdSyncService` защищает PG от перезаписи устаревшими
+`зеркало сессий` защищает PG от перезаписи устаревшими
 данными и детектит аномалии sync'а:
 
 **Stale (PG свежее JSONL + tolerance):** если
@@ -226,7 +226,7 @@ sync пропускается для этой сессии (`sync_skipped_stale_
 - `tests/contract/test_session_manager.py` — round-trip через
   JsonlSessionStore.
 - `tests/test_session_cold_sync_service.py` — mock-smoke
-  `SessionColdSyncService` (включая архитектурный гард
+  `зеркало сессий` (включая архитектурный гард
   `test_no_new_pool_created`).
 - `tests/test_pg_session_manager.py` — `SanitizingSessionStore` и
   `build_session_manager` (18 тестов: санитизация NUL/control-символов, сборка
@@ -235,13 +235,13 @@ sync пропускается для этой сессии (`sync_skipped_stale_
   (no-direct-SQL, no-new-pool, no-DbLoggingService-llm_usage,
   docstring-инвариант).
 - `tests/test_storage_hybridization_factory.py` — mock-smoke
-  `_make_usage_store` и `_make_session_cold_sync_service`.
+  `_make_usage_store` и `_make_session_mirror`.
 - `tests/test_storage_hybridization_lifecycle.py` — mock-smoke
   lifecycle (start/stop, observer attach, usage store close).
 
 ## Файлы
 
-- `lib/services/session_cold_sync_service.py` — sync-сервис.
+- `lib/gateway/mirror/` — sync-сервис.
 - `lib/session/pg_session_manager.py` — compatibility layer.
 - `lib/core/application_context.py` — регистрация сервиса
   в lifecycle.

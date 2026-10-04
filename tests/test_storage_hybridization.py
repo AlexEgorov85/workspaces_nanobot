@@ -5,7 +5,7 @@
 § Connection pool):
 
 - **no-direct-SQL** в hot-path: ни один runtime-модуль вне
-  ``SessionColdSyncService`` не пишет в ``agent_session_meta`` /
+  ``SessionMirror`` не пишет в ``agent_session_meta`` /
   ``agent_session_messages`` напрямую (запрет ``PGSessionManager``
   hot-path writer);
 - **no-new-pool**: модули storage-hybridization не создают
@@ -74,7 +74,7 @@ def _files_outside_whitelist(files: list[Path], *whitelist: Path) -> list[Path]:
 
 class TestNoDirectSQLToSessionTables:
     """Никаких прямых INSERT/UPDATE/DELETE в ``agent_session_meta`` /
-    ``agent_session_messages`` вне ``SessionColdSyncService``.
+    ``agent_session_messages`` вне зеркала сессий.
 
     Один-единственный writer — фоновый sync-сервис; всё остальное
     (включая ``PGSessionManager``) делегирует в upstream
@@ -83,7 +83,8 @@ class TestNoDirectSQLToSessionTables:
 
     def test_no_direct_sql_in_hot_path(self) -> None:
         whitelist = [
-            _LIB_ROOT / "services" / "session_cold_sync_service.py",
+            _LIB_ROOT / "gateway" / "mirror" / "session_mirror.py",
+            _LIB_ROOT / "gateway" / "mirror" / "mirror_poller.py",
         ]
         offenders: list[tuple[str, int, str]] = []
         for path in _files_outside_whitelist(
@@ -114,7 +115,7 @@ class TestNoDirectSQLToSessionTables:
             details = "\n".join(f"{p}:{ln}: {snippet}" for p, ln, snippet in offenders)
             pytest.fail(
                 "Direct SQL INSERT/UPDATE/DELETE in agent_session_* found "
-                "outside SessionColdSyncService. Only the cold-sync service "
+                "outside the session mirror. Only the mirror subsystem "
                 "may write these tables:\n" + details
             )
 
@@ -128,7 +129,8 @@ class TestNoNewPoolCreated:
 
     def test_no_new_pool_in_storage_hybridization_modules(self) -> None:
         target_files = [
-            _LIB_ROOT / "services" / "session_cold_sync_service.py",
+            _LIB_ROOT / "gateway" / "mirror" / "session_mirror.py",
+            _LIB_ROOT / "gateway" / "mirror" / "mirror_poller.py",
         ]
         for path in target_files:
             if not path.exists():

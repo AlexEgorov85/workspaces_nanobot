@@ -154,7 +154,7 @@ class TestDefaultSchemaIsGeneric:
     #: нельзя: это схема собственных runtime-таблиц агента
     #: (``agent_gateway_logs``, ``agent_session_meta``), а не домен аудита.
     #: Первая версия стража запрещала и его — и падала на
-    #: ``db_logging_service.py`` и ``session_cold_sync_service.py``, где
+    #: ``db_logging_service.py`` и ``lib/gateway/mirror/``, где
     #: ``schema="public"`` корректен. Запрет доменной схемы не должен
     #: запрещать обычную.
     _OARB_DEFAULTS = (

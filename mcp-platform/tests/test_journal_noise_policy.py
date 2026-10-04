@@ -287,7 +287,8 @@ class TestLevelScaleIsSingle:
         # была сознательным решением, а не молчаливым повторением.
         known_debt = {
             "repeat_guard_hook.py",
-            "session_cold_sync_service.py",
+            "session_mirror.py",
+            "mirror_poller.py",
         }
         unexpected = [item for item in offenders if item.split(":")[0] not in known_debt]
         assert not unexpected, (

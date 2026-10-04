@@ -145,7 +145,7 @@
   секцию и применяет через `set_pool_config()`; `ctx.start()/stop()` вызывают
   `utils.db.start()/shutdown()`.
 
-**Кто ходит в БД через пул:** `DbLoggingService`, `SessionColdSyncService`
+**Кто ходит в БД через пул:** `DbLoggingService`, `SessionMirror`
 (зеркало сессий), `PostgresChannel`, `session_storage` и инструменты.
 (`streamlit_app.py` тоже ходил, но удалён в фазе 1.) Ни один сервис-поток не
 держит собственного psycopg2-соединения — соединение выдаёт пул на время

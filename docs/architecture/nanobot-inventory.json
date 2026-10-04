@@ -911,7 +911,7 @@
       "setattr_calls": []
     },
     {
-      "file": "lib/services/session_cold_sync_service.py",
+      "file": "lib/gateway/mirror/session_mirror.py",
       "imports": [
         {
           "line": 52,

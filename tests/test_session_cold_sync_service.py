@@ -36,11 +36,7 @@ from typing import Any
 
 import pytest
 
-from lib.services.session_cold_sync_service import (
-    SessionColdSyncService,
-    default_replica_id,
-    file_digest,
-)
+from lib.gateway.mirror import SessionMirror, default_replica_id, file_digest
 
 UTC = timezone.utc
 NOW = datetime(2026, 10, 3, 12, 0, 0, tzinfo=UTC)
@@ -50,14 +46,22 @@ NOW = datetime(2026, 10, 3, 12, 0, 0, tzinfo=UTC)
 
 
 class _FakeMcp:
-    """Клиент платформы с заранее заданными ответами на операции."""
+    """Клиент платформы с заранее заданными ответами на операции.
+
+    Личность вызова принимается и запоминается: подпись — часть контракта
+    вызова, а фейк, её отбрасывающий, проверял бы только половину пути.
+    """
 
     def __init__(self, responses: dict[str, Any] | None = None) -> None:
         self.responses = dict(responses or {})
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.identities: list[Any] = []
 
-    async def call(self, operation: str, arguments: dict[str, Any]) -> str:
+    async def call(
+        self, operation: str, arguments: dict[str, Any], identity: Any = None
+    ) -> str:
         self.calls.append((operation, arguments))
+        self.identities.append(identity)
         answer = self.responses.get(operation, {})
         if isinstance(answer, Exception):
             raise answer
@@ -109,9 +113,9 @@ def _service(
     sm: _FakeSessionManager,
     mcp: _FakeMcp,
     **kwargs: Any,
-) -> SessionColdSyncService:
+) -> SessionMirror:
     kwargs.setdefault("replica_id", "gw-1")
-    return SessionColdSyncService(session_manager=sm, enterprise_mcp=mcp, **kwargs)
+    return SessionMirror(session_manager=sm, enterprise_mcp=mcp, **kwargs)
 
 
 # --- дайджест ----------------------------------------------------------------
@@ -327,15 +331,22 @@ class TestFailures:
         assert svc._consecutive_failures == 1
 
     async def test_backoff_grows_then_caps(self, tmp_path: Path) -> None:
+        """Отказ должен ОТОДВИГАТЬ следующую попытку, а не приближать её.
+
+        Раньше здесь стоял ``min``, и при отказе цикл стучался каждые 2 с против
+        штатных 30: год отказа базы зеркало выглядело усердной работой, а
+        неработающей подсистемой не выглядело вовсе.
+        """
         sm = _FakeSessionManager({})
-        svc = _service(sm, _FakeMcp(), sync_interval_sec=3600.0)
+        svc = _service(sm, _FakeMcp(), sync_interval_sec=30.0)
 
-        assert svc._compute_delay() == 3600.0
+        assert svc._compute_delay() == 30.0
         svc._consecutive_failures = 1
-        assert svc._compute_delay() == 2.0
+        assert svc._compute_delay() == 30.0, "первый отказ не должен ускорять"
+        svc._consecutive_failures = 6
+        assert svc._compute_delay() == 64.0, "долгий отказ обязан отодвинуть"
         svc._consecutive_failures = 20
-        assert svc._compute_delay() <= 16 * 60.0
-
+        assert svc._compute_delay() == 16 * 60.0, "и упереться в потолок"
     async def test_malformed_answer_is_an_error_not_an_empty_success(
         self, tmp_path: Path,
     ) -> None:
@@ -376,11 +387,13 @@ class TestStatsAndBoundaries:
     def test_service_knows_no_table_names(self, tmp_path: Path) -> None:
         """Имена таблиц зеркала объявлены на платформе. Собственная копия в
         агенте — источник рассинхрона, который уже стоил нам баг с профилем."""
-        source = Path(
-            "lib/services/session_cold_sync_service.py"
-        ).read_text(encoding="utf-8")
-        for forbidden in ("meta_table", "messages_table", "psycopg2", "utils.db"):
-            assert forbidden not in source, forbidden
+        for relative in (
+            "lib/gateway/mirror/mirror_poller.py",
+            "lib/gateway/mirror/session_mirror.py",
+        ):
+            source = Path(relative).read_text(encoding="utf-8")
+            for forbidden in ("meta_table", "messages_table", "psycopg2", "utils.db"):
+                assert forbidden not in source, f"{relative}: {forbidden}"
 
     def test_default_replica_id_is_stable_across_calls(self) -> None:
         assert default_replica_id() == default_replica_id()

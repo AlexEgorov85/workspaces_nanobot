@@ -188,7 +188,7 @@ pytest tests/ --cov=lib --cov-report=term-missing
 
 **MAJOR.** Session hot-path переведён на upstream `SessionManager` (JSONL) —
 единственный source of truth; PostgreSQL остаётся cold-storage mirror
-(`SessionColdSyncService`, per-transaction advisory lock, leader-election).
+(`lib/gateway/mirror/`, per-transaction advisory lock, leader-election).
 `PGSessionManager` в hot path только делегирует `super()`; прямых SQL-операций
 в `agent_session_meta` / `agent_session_messages` нет. Исторические PG-сессии
 требуют разовой миграции в JSONL **до** деплоя (см. `docs/architecture/storage-layers.md`,

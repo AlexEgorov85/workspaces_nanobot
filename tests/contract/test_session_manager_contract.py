@@ -101,8 +101,8 @@ class TestDbLoggingTryLogEventIsSync:
         from lib.services.db_logging_service import try_log_event
 
         assert not inspect.iscoroutinefunction(try_log_event), (
-            "try_log_event MUST be sync — SessionColdSyncService uses "
-            "it from a daemon thread, not asyncio."
+            "try_log_event MUST be sync — the session mirror calls "
+            "it from a background cycle, not from asyncio."
         )
 
     def test_try_log_event_returns_bool(self) -> None:

@@ -3,7 +3,7 @@
 
 Архитектура — «одна очередь + пул соединений» (вместо connect-per-op):
 
-  * все подсистемы (``DbLoggingService``, ``SessionColdSyncService``,
+  * все подсистемы (``DbLoggingService``, зеркало сессий,
     ``ContextCompactionService``, ``SchemaValidationService``, ``session_storage``
     и канал PostgreSQL) шлют задачи в ОДНУ общую job-очередь;
   * пул воркеров (1..N, по умолчанию 1) разбирает очередь; каждый воркер

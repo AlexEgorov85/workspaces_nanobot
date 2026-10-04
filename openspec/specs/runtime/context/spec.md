@@ -126,7 +126,7 @@ nanobot» в `openspec/specs/runtime/context/spec.md`.
 `RuntimePatcher`, входящие в `apply_all`. Существующий
 lifecycle `start()` (template overrides, `_start_db_pool()`,
 `_validate_runtime_schema()`, старт `db_logging_service`,
-`sync_service`, `session_cold_sync_service`,
+`sync_service`, `session_mirror`,
 `RuntimeEventsSubscriber`) сохраняется без изменения —
 эта change **не** рефакторит `start()` (см. Non-Goals в
 `design.md`). Граница фиксируется только в части runtime

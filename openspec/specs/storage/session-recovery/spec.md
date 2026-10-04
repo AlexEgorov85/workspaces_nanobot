@@ -7,8 +7,8 @@ Lets the runtime safely recover sessions whose JSONL source is older than the Po
 
 `agent` — подсистема **частично реализована**: из семи требований закрыто одно.
 
-Реализовано (как инфраструктура `SessionColdSyncService`,
-`lib/services/session_cold_sync_service.py`):
+Реализовано (как инфраструктура `SessionMirror`,
+`lib/gateway/mirror/`):
 - «Reverse sync lag produces a logged event» — порог
   `sync_lag_threshold_seconds` (дефолт 3600), событие
   `sync_lag_exceeded`, счётчик `sync_lag_exceeded_total`;

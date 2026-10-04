@@ -29,7 +29,7 @@ loguru INFO, опциональный Rich-вывод в терминал gatewa
 Заметка в ``agent_conversation_messages`` видна в UI-чате,
 но НЕ попадает в контекст промпта: контекст агента строится из
 upstream JSONL-стора ``SessionManager`` (mirror в PG через
-``SessionColdSyncService``), а таблица обмена —
+``lib/gateway/mirror/``), а таблица обмена —
 транспорт показа сообщений.
 
 Импортируется без nanobot: тяжёлые зависимости резолвятся лениво.
@@ -528,7 +528,7 @@ class ContextCompactionService:
         (например, ``cli:...``)
         — выходим без записи: история диалога CLI живёт в REPL-выводе
         и upstream JSONL-сторе ``SessionManager`` (mirror в PG через
-        ``SessionColdSyncService``).
+        ``lib/gateway/mirror/``).
 
         Запись идёт операцией ``append_history_notice`` платформы, а не
         прямым SQL. Причина не в «чистоте»: имя таблицы задаётся

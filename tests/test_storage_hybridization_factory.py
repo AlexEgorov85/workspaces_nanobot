@@ -1,5 +1,5 @@
 """Mock-smoke для storage-hybridization: создание LLMUsageStore и
-SessionColdSyncService без реального PG.
+зеркала сессий без реального PG.
 
 Проверяет:
 
@@ -7,9 +7,9 @@ SessionColdSyncService без реального PG.
   наличии ``gateway.usage_store.*`` в конфиге;
 - ``_make_usage_store`` возвращает ``None`` при ``enabled=False``
   или отсутствии конфига;
-- ``_make_session_cold_sync_service`` создаёт сервис при наличии
+- ``_make_session_mirror`` создаёт сервис при наличии
   ``channels.postgres.dsn``;
-- ``_make_session_cold_sync_service`` возвращает ``None`` без DSN.
+- ``_make_session_mirror`` возвращает ``None`` без DSN.
 """
 
 from __future__ import annotations
@@ -83,40 +83,40 @@ class TestMakeUsageStore:
         store.close()
 
 
-class TestMakeSessionColdSyncService:
+class TestMakeSessionMirror:
     """Сборка зеркала. Условие создания сменилось с «есть DSN в PG-конфиге»
     на «есть клиент платформы»: прямого доступа к БД у сервиса больше нет,
     и имена таблиц он не получает вовсе."""
 
     def test_returns_none_without_session_manager(self) -> None:
-        from lib.core.application_context import _make_session_cold_sync_service
+        from lib.core.application_context import _make_session_mirror
 
         ctx = _fake_ctx(
             session_manager=None,
             config_service=_FakeConfigService(None),
             db_logging_service=None,
         )
-        assert _make_session_cold_sync_service(ctx) is None
+        assert _make_session_mirror(ctx) is None
 
     def test_service_gets_no_table_names(self) -> None:
         """Имена таблиц зеркала объявлены на платформе. Если агент снова начнёт
         их читать из своей конфигурации, появится вторая копия объявления —
         ровно тот рассинхрон, из-за которого канал и журнал ушли на платформу."""
-        from lib.core.application_context import _make_session_cold_sync_service
+        from lib.core.application_context import _make_session_mirror
 
         ctx = _fake_ctx(
             session_manager=object(),
             config_service=_FakeConfigService(flat={"session_cold_sync": {}}),
             db_logging_service=None,
         )
-        svc = _make_session_cold_sync_service(ctx)
+        svc = _make_session_mirror(ctx)
         assert svc is not None
         assert not hasattr(svc, "_meta_table")
         assert not hasattr(svc, "_messages_table")
         assert not hasattr(svc, "_pg_dsn")
 
     def test_replica_id_comes_from_settings(self) -> None:
-        from lib.core.application_context import _make_session_cold_sync_service
+        from lib.core.application_context import _make_session_mirror
 
         ctx = _fake_ctx(
             session_manager=object(),
@@ -125,7 +125,7 @@ class TestMakeSessionColdSyncService:
             }),
             db_logging_service=None,
         )
-        svc = _make_session_cold_sync_service(ctx)
+        svc = _make_session_mirror(ctx)
         assert svc is not None
         assert svc.replica_id == "gw-2"
 
@@ -133,21 +133,21 @@ class TestMakeSessionColdSyncService:
         """Без явной настройки идентичность реплики должна переживать
         перезапуск: идентификатор с pid'ом оставил бы прежние строки зеркала
         осиротевшими, и они копились бы после каждого рестарта."""
-        from lib.core.application_context import _make_session_cold_sync_service
-        from lib.services.session_cold_sync_service import default_replica_id
+        from lib.core.application_context import _make_session_mirror
+        from lib.gateway.mirror import default_replica_id
 
         ctx = _fake_ctx(
             session_manager=object(),
             config_service=_FakeConfigService(flat={"session_cold_sync": {}}),
             db_logging_service=None,
         )
-        svc = _make_session_cold_sync_service(ctx)
+        svc = _make_session_mirror(ctx)
         assert svc is not None
         assert svc.replica_id == default_replica_id()
         assert default_replica_id() == default_replica_id()
 
     def test_respects_enabled_false(self) -> None:
-        from lib.core.application_context import _make_session_cold_sync_service
+        from lib.core.application_context import _make_session_mirror
 
         ctx = _fake_ctx(
             session_manager=object(),
@@ -156,7 +156,7 @@ class TestMakeSessionColdSyncService:
             }),
             db_logging_service=None,
         )
-        svc = _make_session_cold_sync_service(ctx)
+        svc = _make_session_mirror(ctx)
 
         assert svc is not None
         assert svc.enabled is False
@@ -165,7 +165,7 @@ class TestMakeSessionColdSyncService:
         """Порог подтверждения пропажи — единственная защита от стирания
         зеркала по пустому списку сессий; молчаливое значение по умолчанию
         здесь означало бы, что оператор никогда о нём не узнает."""
-        from lib.core.application_context import _make_session_cold_sync_service
+        from lib.core.application_context import _make_session_mirror
 
         ctx = _fake_ctx(
             session_manager=object(),
@@ -174,15 +174,15 @@ class TestMakeSessionColdSyncService:
             }),
             db_logging_service=None,
         )
-        svc = _make_session_cold_sync_service(ctx)
+        svc = _make_session_mirror(ctx)
         assert svc.get_stats()["missing_cycles_threshold"] == 5
 
 
 class TestApplicationContextHasNewAttrs:
     def test_factory_functions_exist(self) -> None:
         from lib.core.application_context import (
-            _make_session_cold_sync_service,
+            _make_session_mirror,
             _make_usage_store,
         )
-        assert callable(_make_session_cold_sync_service)
+        assert callable(_make_session_mirror)
         assert callable(_make_usage_store)

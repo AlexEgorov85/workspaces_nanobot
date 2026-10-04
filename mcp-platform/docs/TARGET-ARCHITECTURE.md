@@ -635,7 +635,7 @@ chunk_overlap, metric).
 | `lib/services/context_compaction.py` | 597 | Сжатие контекста — внутреннее действие агента |
 | `lib/hooks/*` | 913 | Аудит tool'ов, живой вывод, per-turn логирование |
 | `lib/session/pg_session_manager.py` | 137 | Холодное зеркало сессий поверх upstream |
-| `lib/services/session_cold_sync_service.py` | 669 | JSONL → PG зеркало |
+| `lib/gateway/mirror/` | 669 | JSONL → PG зеркало |
 | `workspace/hooks/session_file_redirect_hook.py` | 417 | Не даёт агенту разбрасывать файлы по проекту |
 | `workspace/hooks/recent_files_hook.py` | 125 | Прикрепляет созданные файлы к ответу пользователю |
 | `workspace/utils/media.py` | 259 | Единый формат вложений для всех каналов |

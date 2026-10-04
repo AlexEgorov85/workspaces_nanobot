@@ -200,8 +200,8 @@ class SessionStorageService:
                 )
             from lib.session.pg_session_manager import build_session_manager
 
-            # Имена таблиц cold-storage уходят в ``SessionColdSyncService``
-            # (его конструктор собирает ``ApplicationContext``), а сам
+            # Имена таблиц cold-storage уходят в зеркало сессий
+            # (``lib/gateway/mirror/``, собирается ``ApplicationContext``), а сам
             # ``SessionManager`` из библиотеки про них не знает. Но
             # отсутствие имён — ошибка конфигурации, и её надо назвать
             # здесь, а не молча уронить на старте синка.

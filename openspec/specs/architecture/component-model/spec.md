@@ -40,7 +40,7 @@
 ```text
 ApplicationContext          → компонент
 ConfigService               → компонент
-SessionColdSyncService      → компонент
+SessionMirror      → компонент
 MessageBus                  → компонент
 PostgresChannel             → компонент
 RedisChannel                → компонент

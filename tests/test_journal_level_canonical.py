@@ -1,7 +1,7 @@
 """Уровень, который агент пишет в журнал, обязан принимать ``CHECK valid_level``.
 
 Дефект, который файл закрывает: четыре события писались с ``level="WARNING"``
-(``repeat_guard_hook`` и три — в ``session_cold_sync_service``). ``CHECK``
+(``repeat_guard_hook`` и три — в ``lib/gateway/mirror/``). ``CHECK``
 ``valid_level`` в ``sql/logs/create_public_agent_gateway_logs.sql:30`` знает
 ровно четыре написания — ``DEBUG/INFO/WARN/ERROR``, — и синонима ``WARNING``
 среди них нет. Такое событие не просто не пишется: отказ касается всего
@@ -657,10 +657,10 @@ class TestPublishedLevelsAreAcceptedByTheCheck:
         читают из него только поля ``payload``, а решение «писать или нет»
         вынесено в саму операцию платформы.
         """
-        from lib.services.session_cold_sync_service import SessionColdSyncService
+        from lib.gateway.mirror import SessionMirror
 
         collector = _Collector()
-        service = SessionColdSyncService(
+        service = SessionMirror(
             session_manager=SimpleNamespace(),
             enterprise_mcp=SimpleNamespace(),
             replica_id="gw-1",

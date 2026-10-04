@@ -154,7 +154,7 @@ def try_log_event(
 ) -> bool:
     """Defensive helper для producer'ов: попробовать записать событие.
 
-    Используется из sync-путей (``SessionColdSyncService``,
+    Используется из sync-путей (зеркало сессий (``lib/gateway/mirror/``),
     ``ContextCompactionService._record_event_log`` после `_notify`-разделения
     concerns, загрузки снимка capability ``data``) и других мест, где прямой
     вызов ``svc.log_event`` мог бы

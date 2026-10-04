@@ -4,7 +4,8 @@
 ``openspec/specs/storage/session-hybridization/spec.md``) сессии НЕ пишутся
 в ``agent_session_meta`` / ``agent_session_messages`` напрямую. Единственный
 writer — upstream ``SessionManager`` (JSONL), а PostgreSQL остаётся
-cold-storage mirror'ом в отдельном фоновом ``SessionColdSyncService``.
+cold-storage mirror'ом в отдельной подсистеме шлюза
+``lib/gateway/mirror/``.
 
 Вся своя семантика агента живёт в одном месте — в слое ``SessionStore``:
 
@@ -32,7 +33,7 @@ cold-storage mirror'ом в отдельном фоновом ``SessionColdSyncS
 
 См. также:
 
-- ``lib/services/session_cold_sync_service.py`` — зеркалирование в PG;
+- ``lib/gateway/mirror/`` — зеркалирование в PG;
 - ``docs/architecture/storage-layers.md`` — общая модель хранения.
 """
 

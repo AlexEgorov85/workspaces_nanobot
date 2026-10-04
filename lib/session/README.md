@@ -24,12 +24,12 @@
 Менеджер сессий — всегда класс библиотеки `SessionManager`. Своё поведение
 агент добавляет не подклассом, а слоем `SessionStore`
 (`SanitizingSessionStore`), а PostgreSQL обслуживает отдельный фоновый
-`SessionColdSyncService` (`lib/services/session_cold_sync_service.py`).
+`SessionMirror` (`lib/gateway/mirror/`).
 
 `storage="postgres"` в конфигурации означает **«холодное зеркало включено»**, а
 не «сессии хранятся в PostgreSQL»: сам `SessionManager` про эти таблицы не
 знает, и в нём их имена не встречаются (`lib/services/session_storage.py:203`).
-Имена таблиц уходят в `SessionColdSyncService`, а их отсутствие — ошибка
+Имена таблиц уходят в `SessionMirror`, а их отсутствие — ошибка
 конфигурации, которую фабрика называет сразу, а не роняет позже на старте
 синка.
 
@@ -184,7 +184,7 @@ referential integrity; каскад и так выполняет писател�
 
 ## Архитектурный инвариант
 
-Ни один runtime-модуль вне `SessionColdSyncService` **не пишет** в
+Ни один runtime-модуль вне `SessionMirror` **не пишет** в
 `agent_session_meta` / `agent_session_messages` напрямую. Проверяется
 `tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables`.
 

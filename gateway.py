@@ -452,12 +452,12 @@ async def _run(ctx) -> None:
     # снимает отметку «транспорт не выбран», установленную в ``start()``.
     ctx.attach_log_transport()
 
-    # Зеркало сессий стартует здесь, а не в ``ctx.start()``: оно работает задачей
-    # этого loop'а и ходит к данным через тот же клиент платформы, чья сессия
-    # только что поднялась рукопожатием. Раньше — раньше бессмысленно (loop ещё
-    # не существует), позже — позже сессии уже могли бы перестать доходить до
-    # холодного хранилища незамеченными.
-    mirror = getattr(ctx, "session_cold_sync_service", None)
+    # Зеркало сессий стартует здесь, а не в ``ctx.start()``: это подсистема
+    # шлюза, она работает задачей этого loop'а и ходит к данным через тот же
+    # клиент платформы, чья сессия только что поднялась рукопожатием. Раньше —
+    # раньше бессмысленно (loop ещё не существует), позже — позже сессии уже
+    # могли бы перестать доходить до холодного хранилища незамеченными.
+    mirror = getattr(ctx, "session_mirror", None)
     if mirror is not None:
         try:
             await mirror.start()
@@ -466,7 +466,7 @@ async def _run(ctx) -> None:
                     f"[yellow]session_mirror: выключено ({mirror.disabled_reason})[/yellow]"
                 )
         except Exception as exc:
-            logger.warning("SessionColdSyncService not started: %s", exc)
+            logger.warning("SessionMirror not started: %s", exc)
 
     try:
         channels_task = asyncio.create_task(channels.start_all())

@@ -216,7 +216,11 @@ class UsageStoreSettings(_StrictOptional):
 
 
 class SessionColdSyncSettings(_StrictOptional):
-    """Параметры ``SessionColdSyncService`` (``gateway.session_cold_sync.*``).
+    """Параметры зеркала сессий (``gateway.session_cold_sync.*``).
+
+    Класс назван по разделу конфигурации, а не по реализации: раздел
+    объявлен настройкой, и переименование класса не должно тащить за собой
+    переименование ключа. Реализация — ``lib/gateway/mirror/``.
 
     Cold-storage mirror upstream JSONL → PG. Все ключи опциональны.
     См. спеку ``openspec/specs/storage/session-hybridization/spec.md``

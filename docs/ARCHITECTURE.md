@@ -101,7 +101,7 @@ flowchart LR
     CTX --> PATCH["RuntimePatcher"]
     CTX --> TOOLS["ProjectToolLoader"]
     CTX --> EMCP["EnterpriseMcpClient"]
-    CTX --> COLD["SessionColdSyncService"]
+    CTX --> COLD["SessionMirror"]
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     class GW,CLI entry
@@ -120,7 +120,7 @@ readiness не входят: снимком и индексами владеет
   `bus`, `agent`, `tool_audit_hook`, `hooks`, `session_manager`,
   `storage_mode`, `db_logging_service`, `config_service`, `runtime_patcher`,
   `runtime_health`, `runtime_readiness`, `session_storage_service`,
-  `hook_factories`, `runtime_events_subscriber`, `session_cold_sync_service`,
+  `hook_factories`, `runtime_events_subscriber`, `lib/gateway/mirror/`,
   `usage_store`, `enterprise_mcp`.
   Полей `cache_loader` / `cache_provider` / `cache_store` / `sync_service` /
   `transcription_service` в dataclass нет: снятый локальный кэш не входит в
@@ -157,7 +157,7 @@ readiness не входят: снимком и индексами владеет
 | Сервис | Мотивация (почему выделен) |
 |--------|---------------------------|
 | `config_service.py` | Дубликат `_load_runtime_config` + `SETTINGS`-аксессора между gateway и cli. Pre-resolve `${PROVIDER_API_KEY}` от .secrets.env (см. ниже). |
-| `session_storage.py` | Выбор режима хранения сессий (auto / postgres / file) с поддержкой `session_manager.json` override. `postgres` означает включённое холодное зеркало `SessionColdSyncService`; менеджер сессий во всех режимах — класс библиотеки `SessionManager` поверх `SanitizingSessionStore`. |
+| `session_storage.py` | Выбор режима хранения сессий (auto / postgres / file) с поддержкой `session_manager.json` override. `postgres` означает включённое холодное зеркало сессий; менеджер сессий во всех режимах — класс библиотеки `SessionManager` поверх `SanitizingSessionStore`. |
 | `runtime_patcher.py` | Все 6 monkey-patch'ей upstream `nanobot.agent.loop.AgentLoop` в одном классе с fallback при изменении API nanobot. Применяется через `apply_all()` из `ApplicationContext.create()`. **НЕ** занимается регистрацией project tools (вынесено в `project_tool_loader.py`). Полный каталог — `docs/architecture/runtime-patcher-inventory.md`. |
 | `project_tool_loader.py` | Stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(...) -> ProjectToolsLoadResult`. Вызывается из `ApplicationContext.create()` сразу после `apply_all()` как независимый stage composition root'а. **НЕ** компонент (нет lifecycle/state/config — критерии `openspec/specs/architecture/component-model/spec.md`). |
 | `channel_factory.py` | `ChannelManager` + Postgres-канал (второй транспорт, Redis, снят — один канал, PostgreSQL). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
@@ -1755,7 +1755,7 @@ nanobot/
 │   │   ├── runtime_health.py             #     RuntimeHealth/RuntimeReadiness (liveness + readiness)
 │   │   ├── runtime_events_subscriber.py  #     подписка на runtime-события → turn-метрики
 │   │   ├── compaction_event_subscriber.py#     событие context_compacted → шина
-│   │   ├── session_cold_sync_service.py  #     daemon: upstream JSONL → PG cold-storage mirror
+│   │   ├── mirror/  #                     подсистема: JSONL → PG cold-storage mirror
 │   │   # сняты 2026-10-02 вместе с уходом общения с моделью в mcp-platform:
 │   │   ├── ~~llm_observer.py~~              #     observer'ы свёрнуты в AgentFactory._wrap_provider_snapshot_loader
 │   │   ├── ~~llm_usage_store_factory.py~~   #     хранилище создаёт библиотека (nanobot.llm_usage)

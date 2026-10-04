@@ -4,7 +4,7 @@
 Определяет нормативный контракт гибридной модели хранения сессий:
 горячее хранилище (upstream JSONL через `nanobot.session.manager.SessionManager`)
 обслуживает hot path операций `get_or_create` / `save` / `list_sessions`,
-холодное хранилище (PostgreSQL через `SessionColdSyncService`-as-mirror)
+холодное хранилище (PostgreSQL через `SessionMirror`-as-mirror)
 обслуживает multi-instance, observability и durability. Цель —
 предотвратить "расползание" session data по сторам и обеспечить
 чёткие границы владения каждым слоем.
@@ -12,7 +12,7 @@
 ## Scope
 
 `agent` — зеркало холодного хранилища сессий — агентское
-Реализация: `lib/session/pg_session_manager.py`, `lib/services/session_cold_sync_service.py`
+Реализация: `lib/session/pg_session_manager.py`, `lib/gateway/mirror/`
 
 ## Requirements
 
@@ -55,12 +55,12 @@ PostgreSQL ДОЛЖЕН использоваться как cold-storage mirror 
 сессий: дублирует JSONL-содержимое в таблицы
 `agent_session_meta` и `agent_session_messages` для multi-instance
 deploy, observability и disaster-recovery. Запись в PG MUST
-идти через отдельный фоновый сервис `SessionColdSyncService`,
+идти через отдельный фоновый сервис `SessionMirror`,
 не из hot path операций upstream `SessionManager`.
 
-#### Scenario: SessionColdSyncService зеркалит в PG
+#### Scenario: SessionMirror зеркалит в PG
 
-- **WHEN** `SessionColdSyncService` запускается по расписанию
+- **WHEN** `SessionMirror` запускается по расписанию
   (например, каждые 30 секунд)
 - **THEN** сервис читает upstream JSONL-стор и записывает
   изменившиеся сессии в PG `agent_session_meta` /
@@ -83,7 +83,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 
 #### Scenario: Зеркалирование agent_session_messages (full re-read)
 
-- **WHEN** `SessionColdSyncService._sync_cycle()` обрабатывает
+- **WHEN** `SessionMirror._sync_cycle()` обрабатывает
   сессию, для которой `agent_session_meta.updated_at`
   в PG < `upstream_session.updated_at`
 - **THEN** сервис загружает полный snapshot через
@@ -130,7 +130,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   pool exhausted, network error)
 - **THEN** upstream `SessionManager` (JSONL-стор) продолжает
   обслуживать `get_or_create` / `save` без ошибок.
-- **AND** `SessionColdSyncService` логирует потерю sync-цикла
+- **AND** зеркало сессий логирует потерю sync-цикла
   через `DbLoggingService.log_sync_event(...)` с
   `event_type="session_cold_sync_failed"` и пропускает
   его до восстановления PG (без блокировки hot path).
@@ -146,7 +146,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   (например, 45 сек при интервале 30 сек из-за большого
   workspace или медленного PG)
 - **THEN** следующий цикл НЕ запускается параллельно:
-  `SessionColdSyncService` использует `asyncio.Lock` вокруг тела
+  `SessionMirror` использует `asyncio.Lock` вокруг тела
   цикла (сервис — задача event loop, а не daemon-поток, потому
   что клиент платформы привязан к своему loop'у).
 - **AND** остановка сервиса ждёт завершения текущего цикла:
@@ -160,9 +160,9 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 
 #### Scenario: Метрики sync-сервиса
 
-- **WHEN** `SessionColdSyncService` работает
+- **WHEN** `SessionMirror` работает
 - **THEN** следующие метрики доступны через
-  `SessionColdSyncService.get_stats() -> dict`:
+  `SessionMirror.get_stats() -> dict`:
   - `cycles_total`: количество выполненных циклов;
   - `cycles_failed_total`: количество упавших циклов;
   - `cycles_skipped_pool_busy`: циклов пропущено из-за исчерпания
@@ -198,7 +198,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 
 При нескольких репликах gateway зеркало разграничивается СОСТАВНЫМИ
 первичными ключами, а не соглашением в коде.
-`SessionColdSyncService` SHALL передавать `replica_id` в каждую операцию
+`SessionMirror` SHALL передавать `replica_id` в каждую операцию
 зеркала; цикл очистки SHALL ограничиваться своей репликой.
 
 Ключи таблиц:
@@ -296,7 +296,7 @@ Leader-election между репликами **не применяется**, �
 
 ### Requirement: Stale-detection и reverse-lag detection
 
-`SessionColdSyncService` SHALL детектировать две аномалии и
+`SessionMirror` SHALL детектировать две аномалии и
 публиковать через `DbLoggingService.try_log_event(...)` события
 для observability:
 
@@ -327,7 +327,7 @@ observability для диагностики сломанного sync.
 
 #### Scenario: Stale сессия — sync пропущен, событие опубликовано
 
-- **WHEN** `SessionColdSyncService._sync_session(key)` обнаруживает
+- **WHEN** `SessionMirror._sync_session(key)` обнаруживает
   `pg.updated_at > jsonl.updated_at + stale_tolerance`
 - **THEN** sync для этого ключа SHALL быть пропущен (никаких
   `INSERT`/`UPDATE` в `agent_session_meta` /
@@ -349,7 +349,7 @@ observability для диагностики сломанного sync.
 
 #### Scenario: Reverse lag — sync выполняется, событие опубликовано
 
-- **WHEN** `SessionColdSyncService._sync_session(key)` обнаруживает
+- **WHEN** `SessionMirror._sync_session(key)` обнаруживает
   `jsonl.updated_at > pg.updated_at + sync_lag_threshold`
 - **THEN** sync для этого ключа SHALL выполниться нормально
   (LWW — mirror обновится).
@@ -366,7 +366,7 @@ observability для диагностики сломанного sync.
   списка stale-сессий — никакого собственного re-implementation
   условия `pg > jsonl + tolerance` в `SessionRecoveryService`.
 - **AND** режим `detect-only` SHALL оставаться no-op до тех пор,
-  пока `SessionColdSyncService` не публикует события
+  пока `SessionMirror` не публикует события
   `session_stale_detected` (см. tasks `session-recovery` —
   «жёсткая зависимость от Части A»).
 
@@ -374,7 +374,7 @@ observability для диагностики сломанного sync.
 
 - **WHEN** в `config.json` на реплике установлено
   `"gateway": {"session_cold_sync": {"enabled": false}}`
-- **THEN** `SessionColdSyncService` НЕ запускает фоновую
+- **THEN** зеркало сессий НЕ запускает фоновую
   задачу на этой реплике.
 - **AND** upstream `SessionManager` (JSONL) продолжает
   обслуживать `get_or_create` / `save` локально — каждая
@@ -388,7 +388,7 @@ observability для диагностики сломанного sync.
   вызывается для изменения метаданных сессии
 - **THEN** upstream JSONL-стор обновляется синхронно.
 - **AND** mirror-операция в PG выполняется асинхронно
-  через `SessionColdSyncService` (не блокирует hot path)
+  через `SessionMirror` (не блокирует hot path)
   и сохраняет обновлённые метаданные в `agent_session_meta.metadata`.
 
 #### Scenario: delete_session ловится diff-циклом
@@ -396,7 +396,7 @@ observability для диагностики сломанного sync.
 - **WHEN** upstream `SessionManager.delete_session(key)` вызывается
   для удаления сессии
 - **THEN** сессия удаляется из upstream JSONL-стора.
-- **AND** `SessionColdSyncService` НЕ подписывается на
+- **AND** `SessionMirror` НЕ подписывается на
   `set_delete_observer(...)`: требование снято, подписка не была
   реализована ни в одной версии, а удаление ловится diff-циклом —
   сессия исчезает из `list_sessions()`, и операция `cleanup_session_mirror`
@@ -409,7 +409,7 @@ observability для диагностики сломанного sync.
 - **WHEN** upstream `SessionManager.save_runtime_checkpoint(key)`
   или `restore_sessions_to_workspace(...)` вызывается
 - **THEN** upstream JSONL-стор обновляется синхронно.
-- **AND** `SessionColdSyncService` подхватывает изменения
+- **AND** `SessionMirror` подхватывает изменения
   в своём sync-цикле через `list_sessions()` /
   `read_session_metadata(...)` и зеркалирует в PG.
 
@@ -418,11 +418,11 @@ observability для диагностики сломанного sync.
 Сессионное состояние (history, checkpoints, provider state)
 MUST иметь ровно один hot-path writer — upstream
 `SessionManager`. Холодное зеркало SHALL писать
-`SessionColdSyncService`,
+`SessionMirror`,
 NOT отдельным primary writer. Никаких "двойных записей"
 hot-path данных в JSONL и PG одновременно — upstream JSONL
 SHALL всегда писаться первым; PG SHALL обновляться
-асинхронно через `SessionColdSyncService`.
+асинхронно через `SessionMirror`.
 
 #### Scenario: Нет двойной записи в hot path
 
@@ -431,7 +431,7 @@ SHALL всегда писаться первым; PG SHALL обновлятьс�
   JSONL, и это единственный обязательный side-effect.
 - **AND** запись в PG `agent_session_messages` ЗАПРЕЩЕНА
   в рамках этого вызова (mirror идёт отдельным
-  `SessionColdSyncService`-циклом).
+  `SessionMirror`-циклом).
 
 #### Scenario: rename_model_preset делегируется в upstream
 
@@ -440,13 +440,13 @@ SHALL всегда писаться первым; PG SHALL обновлятьс�
 - **THEN** операция выполняется через upstream
   `SessionManager.rename_model_preset`.
 - **AND** mirror-операция в PG идёт асинхронно через
-  `SessionColdSyncService` (не блокирует hot path).
+  `SessionMirror` (не блокирует hot path).
 
 #### Scenario: Равные updated_at при разных дайджестах
 
 - **WHEN** `upstream_session.updated_at` ==
   `agent_session_meta.updated_at` в PG, но `source_digest` разошлись
-- **THEN** `SessionColdSyncService` SHALL зеркалировать сессию.
+- **THEN** `SessionMirror` SHALL зеркалировать сессию.
 - **AND** tie-break по `>=`/`==` к меткам времени НЕ применяется: равенство
   меток не означает тождества содержимого. Атомарная перезапись JSONL через
   `os.replace` гарантирует согласованность ФАЙЛА, а не равенство метки
@@ -460,7 +460,7 @@ SHALL всегда писаться первым; PG SHALL обновлятьс�
 - **WHEN** `SessionManager.delete_session(key)` удаляет
   upstream JSONL-сессию
 - **THEN** в следующем sync-цикле
-  `SessionColdSyncService._sync_cycle()` сравнивает
+  `SessionMirror._sync_cycle()` сравнивает
   `upstream_keys = {s["key"] for s in session_manager.list_sessions()}`
   с `pg_keys = {row["session_key"] for row in SELECT session_key FROM agent_session_meta}`.
 - **AND** для каждого `key ∈ pg_keys \ upstream_keys`
@@ -486,7 +486,7 @@ SHALL всегда писаться первым; PG SHALL обновлятьс�
   `<workspace_id>/b.jsonl` (новая сессия).
 - **AND** `list_sessions()` возвращает ОБЕ сессии
   (source и target) — fork не удаляет source.
-- **AND** `SessionColdSyncService` подхватывает обе:
+- **AND** `SessionMirror` подхватывает обе:
   - если target отсутствует в PG → INSERT;
   - если source уже в PG → только проверка `updated_at`.
 
@@ -496,7 +496,7 @@ SHALL всегда писаться первым; PG SHALL обновлятьс�
   выполняется (например, при cold-start из бэкапа)
 - **THEN** upstream JSONL восстанавливает несколько сессий
   одновременно; `list_sessions()` возвращает их все.
-- **AND** `SessionColdSyncService` обрабатывает каждую
+- **AND** `SessionMirror` обрабатывает каждую
   сессию индивидуально по watermark'у. Дубликаты не
   создаются (`ON CONFLICT (session_key) DO UPDATE`).
 - **AND** upstream JSONL — единственный source of truth:
@@ -549,7 +549,7 @@ mirror для session messages — это **разные** persistence-моде�
 - **THEN** `_write_history_notice` пишет в
   `agent_conversation_messages` согласно спеке `logging-db`
   (requirement «Single writer invariant of agent_gateway_logs»).
-- **AND** `SessionColdSyncService` НЕ трогает
+- **AND** `SessionMirror` НЕ трогает
   `agent_conversation_messages` — это не его concern.
 
 #### Scenario: history_search читает из agent_gateway_logs
@@ -569,7 +569,7 @@ mirror для session messages — это **разные** persistence-моде�
 миграцию legacy данных (см. proposal — «миграция legacy →
 JSONL — отдельный будущий change»).
 
-`SessionColdSyncService` работает только с upstream-снимками из
+`SessionMirror` работает только с upstream-снимками из
 `SessionManager.list_sessions()`; всё, чего нет в upstream
 JSONL, считается устаревшим и удаляется cleanup-циклом.
 
@@ -582,7 +582,7 @@ JSONL, считается устаревшим и удаляется cleanup-ц�
   миграции (вне scope этого change), переносящий PG-сессии
   в upstream JSONL через `SessionManager.get_or_create(...)`.
 - **AND** после миграции upstream JSONL становится source of
-  truth; `SessionColdSyncService` зеркалирует его в PG.
+  truth; `SessionMirror` зеркалирует его в PG.
 - **AND** исторические сессии, оставшиеся в PG без upstream
   двойника, удаляются первым же sync-циклом (cleanup-rule:
   upstream JSONL — единственный source of truth).
@@ -602,7 +602,7 @@ JSONL, считается устаревшим и удаляется cleanup-ц�
 
 ### Requirement: Правила использования пула PG-соединений
 
-`SessionColdSyncService` SHALL использовать общий пул `utils.db`.
+`SessionMirror` SHALL использовать общий пул `utils.db`.
 В модуле SHALL NOT быть собственных psycopg2-пулов,
 `connect()` или `create_pool()`.
 
@@ -613,7 +613,7 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 
 #### Scenario: Пул — единый, через DI
 
-- **WHEN** `SessionColdSyncService` обращается к PG
+- **WHEN** `SessionMirror` обращается к PG
 - **THEN** он использует `utils.db.transaction()` /
   `utils.db.run()` для всех операций.
 - **AND** НЕ создаёт собственный `SimpleConnectionPool` /
@@ -621,7 +621,7 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 
 #### Scenario: Разграничение реплик — данными, а не lock'ом
 
-- **WHEN** `SessionColdSyncService` начинает sync-цикл
+- **WHEN** `SessionMirror` начинает sync-цикл
 - **THEN** он SHALL NOT брать advisory-lock: блокировки не
   переживают границу между вызовами платформы, из которых
   состоит цикл
@@ -634,7 +634,7 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 
 - **WHEN** `utils.db.run(...)` бросает `RuntimeError` /
   `TimeoutError` / `PoolError` (пул временно исчерпан)
-- **THEN** `SessionColdSyncService` инкрементирует
+- **THEN** `SessionMirror` инкрементирует
   `cycles_skipped_pool_busy`, логирует
   `event_type="session_cold_sync_failed"` через
   `DbLoggingService.try_log_event` и ждёт следующий цикл
@@ -643,7 +643,7 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 
 #### Scenario: Батчи с сортировкой по session_key
 
-- **WHEN** `SessionColdSyncService._sync_batches()` обрабатывает
+- **WHEN** `SessionMirror._sync_batches()` обрабатывает
   upstream-список сессий
 - **THEN** список сортируется по `session_key` ДО батчинга
   (детерминированный порядок блокировок — исключает ABBA-deadlock
