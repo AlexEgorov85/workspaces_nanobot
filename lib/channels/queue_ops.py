@@ -144,6 +144,11 @@ class QueueOps:
             "claim_task",
             {
                 "error_retry_delay_sec": error_retry_delay_sec,
+                # null — «без фильтра по содержимому», и схема
+                # ``claim_task`` его принимает: поле объявлено как
+                # ``["array", "null"]``. Отправлять здесь ``[]`` нельзя:
+                # платформа добавит ``AND content = ANY(%s)``, и отбор не
+                # найдёт ничего, то есть очередь молча покажется пустой.
                 "priority_contents": list(priority_contents or []) or None,
             },
             identity=self._service_identity(),
@@ -213,9 +218,22 @@ class QueueOps:
 
     async def append_assistant_message(
         self, *, chat_id: str, reply_to: str, content: str = "", media: Any = None,
-        metadata_patch: dict[str, Any] | None = None, user_id: str | None = None,
+        user_id: str | None = None,
     ) -> str:
-        """Создать заглушку ответа. Возвращает её ``id``."""
+        """Создать заглушку ответа. Возвращает её ``id``.
+
+        ``metadata_patch`` здесь больше не отправляется: операция не знает такого
+        параметра ни в объявленной схеме
+        (``servers/enterprise/capabilities/data/tools/append_assistant_message.py``),
+        ни в сигнатуре обработчика, ни в ``DataService.append_assistant_message``.
+        Пока схема строилась из подписи обработчика, лишний ключ не доходил до
+        вызова, и намерение канала просто терялось; как только объявленная схема
+        стала исполняемой, вызов начал отвергаться целиком
+        (``unexpected keyword argument 'metadata_patch'``) — и заодно вскрылся
+        тот самый случай «дефект, скрытый мёртвой подсистемой». Патчить метаданные
+        заглушки нечего: она создаётся пустой, а содержимое и метаданные пишутся
+        позже через ``update_task_status``, где ``metadata_patch`` законен.
+        """
         payload = await self._invoke(
             "append_assistant_message",
             {
@@ -223,7 +241,6 @@ class QueueOps:
                 "reply_to": reply_to,
                 "content": content,
                 "media": media,
-                "metadata_patch": metadata_patch,
             },
             identity=self._turn_identity(f"chat:{chat_id}", user_id or SERVICE_USER),
         )
