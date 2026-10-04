@@ -120,11 +120,16 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
 
 ``skills.audit_analyzer``: навык tool-only (никакого CLI), поэтому
 секции ``cli.*``/``llm.*`` ему не нужны. ``legal_summarizer`` — секция
-удалена 2026-10-02 (фаза 11, п. 11.6): навык уехал в домен платформы
-(``mcp-platform/libs/legal_summarizer``), агент ходит в него операцией
-``query_operation`` через tool
-``workspace/tools/legal_summarizer_query.py``, настройки домена живут в
-``mcp-platform/platform.json`` → ``legal_summarizer``.
+удалена 2026-10-02 (фаза 11, п. 11.6): домен целиком живёт на платформе
+(``mcp-platform/libs/legal_summarizer`` и capability
+``mcp-platform/servers/enterprise/capabilities/legal_summarizer``), агент
+ходит в него операцией ``query_operation``, объявленной в белом списке
+``config.json → tools.mcpServers.enterprise.enabled_tools``. Собственного
+tool'а-обёртки у агента больше нет: ``workspace/tools/legal_summarizer_query.py``
+снят change'ом ``2026-10-03-mcp-native-tools`` (п. D6), поэтому настройки
+``tools.legal_summarizer_query`` в ``config.json`` тоже сняты — читать их
+было некому. Настройки домена живут в ``mcp-platform/platform.json`` →
+``legal_summarizer``.
 
 ``gateway.*``
 -------------

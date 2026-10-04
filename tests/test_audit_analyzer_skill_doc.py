@@ -237,5 +237,6 @@ class TestSkillDocHasNoPhysicalDataNames:
         for pattern in ("python workspace/skills", "python scripts/", "audit_analyze "):
             assert pattern not in text, (
                 f"SKILL.md предлагает вызов {pattern!r} — CLI навыка удалён, "
-                "единственный вход — инструмент audit_analyzer_query"
+                "единственный вход — операции capability audit: "
+                "mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}"
             )

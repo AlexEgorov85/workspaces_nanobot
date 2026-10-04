@@ -3,20 +3,26 @@
 Tool signatures are provided automatically via function calling.
 This file documents non-obvious constraints and usage patterns.
 
-## exec — Safety Limits
+## exec — НЕДОСТУПЕН
 
-- Commands have a configurable timeout (default 60s)
-- Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)
-- Output is truncated at 10,000 characters
-- `restrictToWorkspace` config can limit file access to the workspace
+Шелл в этом рантайме выключен: `config.json → tools.exec.enable = false`,
+и `tools.cliApps.enable = false` вместе с ним (второй путь исполнения кода).
+Инструментов `exec` и `write_stdin` в наборе нет. Звать их нельзя — не
+«нежелательно», а именно нельзя: вызова не существует.
+
+Поэтому любые инструкции ниже, где действие требовало командной строки,
+переписаны на операции платформы. Если задача кажется требующей командной
+строки — ищи операцию (`mcp_enterprise_*`) или скажи пользователю, что
+действие недоступно. Молча подменять shell чем-то другим не нужно.
 
 ## glob — File Discovery
 
-- Use `glob` to find files by pattern before falling back to shell commands
+- Use `glob` to find files by pattern
 - Simple patterns like `*.py` match recursively by filename
 - Use `entry_type="dirs"` when you need matching directories instead of files
 - Use `head_limit` and `offset` to page through large result sets
-- Prefer this over `exec` when you only need file paths
+- Это способ узнать пути: командной строки, которой можно было бы
+  обойтись `find`, здесь нет
 
 ## grep — Content Search
 
@@ -28,19 +34,27 @@ This file documents non-obvious constraints and usage patterns.
 - Use `output_mode="files_with_matches"` to get only matching file paths
 - Use `output_mode="count"` to size a search before reading full matches
 - Use `head_limit` and `offset` to page across results
-- Prefer this over `exec` for code and history searches
+- Для поиска по коду и по журналу — `grep` по журналу не годится, см.
+  `mcp_enterprise_history_search` ниже
 - Binary or oversized files may be skipped to keep results readable
 
 ## cron — Scheduled Reminders
 
 - Please refer to cron skill for usage.
 
-## history_search — поиск по долговечному журналу агента
+## mcp_enterprise_history_search — поиск по долговечному журналу агента
 
-`history_search` — кастомный инструмент (см. `workspace/tools/history_search_tool.py`).
+Операция платформы, а не кастомный tool: прежняя обёртка
+`workspace/tools/history_search_tool.py` снята change'ом
+`2026-10-03-mcp-native-tools` (п. D6), и модель зовёт операцию напрямую.
 Ищет по `agent_gateway_logs` — журналу, который переживает context compaction
 (в отличие от `agent_conversation_messages`). Полезно, когда пользователь
 ссылается на старое сообщение или результат, который выпал из контекста.
+
+Область поиска задаёт платформа: `session_id` и `user_id` берутся из
+контекста вызова, а не из аргументов модели. Поэтому объявлять их не нужно
+и передать чужие нельзя — перебор объявления модели не может расширить
+видимость.
 
 **Параметры:**
 
@@ -97,12 +111,12 @@ This file documents non-obvious constraints and usage patterns.
 **Примеры:**
 
 - «Какие файлы я прикладывал?» →
-  `history_search(event_type="tool_call", tool_name="read_file")`
+  `mcp_enterprise_history_search(event_type="tool_call", tool_name="read_file")`
 - «Когда последний раз сжимался контекст?» →
-  `history_search(event_type="context_compacted", session_scope="current")`
+  `mcp_enterprise_history_search(event_type="context_compacted", session_scope="current")`
 - «Что я писал про договор аренды?» →
-  `history_search(query="договор аренды", event_type="llm_call")`
-- Пагинация: первая страница → `history_search(limit=20)` →
+  `mcp_enterprise_history_search(query="договор аренды", event_type="llm_call")`
+- Пагинация: первая страница → `mcp_enterprise_history_search(limit=20)` →
   если `has_more=true`, продолжить с `offset=next_offset` (НЕ `20`).
 
 **Замечания:**
@@ -111,7 +125,7 @@ This file documents non-obvious constraints and usage patterns.
   и пути), а НЕ выдуманные типы (`file_attached`, `file_created`,
   `document_summarized` — таких нет в журнале).
 - Если результат пустой — отвечай «не найдено в истории», не выдумывай.
-- `history_search` **не выполняет глобальный поиск по всем пользователям**:
+- `mcp_enterprise_history_search` **не выполняет глобальный поиск по всем пользователям**:
   `session_scope="all"` — это все сессии текущего пользователя, а не
   вся БД. Без identity-store запрос возвращает структурированную
   ошибку (`missing_user_identity`) и SQL не выполняется. Это
@@ -264,40 +278,47 @@ JSON-string. Изменение формы данных требует отде�
 сейчас отключено, `idleCompactAfterMinutes: 0`). `raw_dump` — был ли
 полный дамп сообщений в стороннее хранилище.
 
-## legal_summarizer_query — follow-up по уже проанализированному документу
+## mcp_enterprise_query_operation — follow-up по уже проанализированному документу
 
-Кастомный tool (`workspace/tools/legal_summarizer_query.py`). Возвращает
-структурные данные по сохранённой `operation_id` **без перепарсинга PDF** —
-читает manifest/result/chunks навыка `legal_summarizer` из
-`data_store/cache/skills/legal_summarizer/<operation_id>/`.
+Операция capability `legal_summarizer`. Прежний кастомный tool
+`workspace/tools/legal_summarizer_query.py` снят change'ом
+`2026-10-03-mcp-native-tools` (п. D6); тот же контракт живёт теперь на
+платформе —
+`mcp-platform/servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py`.
+
+Возвращает структурные данные по сохранённой `operation_id` **без перепарсинга
+PDF**: читает manifest/result/chunks разбора из состояния операции.
 
 **Зачем:** иначе на follow-up-вопрос («сколько статей?», «какие разделы?»,
-«что в чанке N?») агент вынужден через `exec`+pdfplumber повторно
-извлекать текст документа (200+ сек, часто падает на кириллице в Windows-cp1251).
+«что в чанке N?») документ пришлось бы разбирать заново. В этом рантайме
+сделать это нечем: командной строки нет, а проектный инструмент
+`document_read` отдаёт текст, но не структуру — ни статей, ни чанков, ни
+иерархии разделов.
 
 **Параметры:**
 
-- `operation_id` (обяз.) — поле `result.operation_id` из предыдущего ответа `legal_summarizer`.
+- `operation_id` (обяз.) — `operation_id` из ответа разбора документа. Без
+  него операция бессмысленна.
 - `field` (дефолт `stats`) — `stats | articles | chunks | sections | tree | all`.
 - `max_chunk_summary_chars` (опц., дефолт 1500) — обрезка summary чанка для `field=chunks`.
 
 **Когда звать:**
 
-- Сразу после `--confirm` саммари вернуло `operation_id` → запомни его для follow-up'ов.
+- Сразу после разбора документа вернул `operation_id` → запомни его для follow-up'ов.
 - Любой вопрос про уже проанализированный документ: «сколько статей?», «какие
   разделы?», «что в чанке 5?», «назови все части» и т.п.
 
 **Примеры:**
 
-- «Сколько статей в документе?» → `legal_summarizer_query(operation_id="<op_id>", field="articles")` → `{article_count: N}`
-- «Какие разделы?» → `legal_summarizer_query(operation_id="<op_id>", field="sections")`
-- «О чём чанк 12?» → `legal_summarizer_query(operation_id="<op_id>", field="chunks")` → массив с `chunk_id`, `summary`, `section_path`.
+- «Сколько статей в документе?» → `mcp_enterprise_query_operation(operation_id="<op_id>", field="articles")` → `{article_count: N}`
+- «Какие разделы?» → `mcp_enterprise_query_operation(operation_id="<op_id>", field="sections")`
+- «О чём чанк 12?» → `mcp_enterprise_query_operation(operation_id="<op_id>", field="chunks")` → массив с `chunk_id`, `summary`, `section_path`.
 
 **Не делать:**
 
-- Не вызывай `pdfplumber`/`pdftotext` через `exec` для подсчёта статей —
-  есть `legal_summarizer_query`. Это и быстрее, и кириллица не сломается.
 - Не передавай в `field` значения вне списка — будет отказ с понятной ошибкой.
+- Не разбирай документ заново ради follow-up-вопроса: результат уже
+  посчитан и лежит в состоянии операции.
 
 ## audit_analyzer — операции платформы
 
@@ -315,7 +336,8 @@ JSON-string. Изменение формы данных требует отде�
 | `mcp_enterprise_vector_search` | Семантический поиск по снимку | Похожие формулировки, «найди похожее» |
 | `mcp_enterprise_list_scripts` | Каталог доступных скриптов | Не знаешь, что можно спросить |
 
-**Не делать:** не звать `exec`/`python` ради данных аудита. Операции
-платформы — единственный путь, который даёт изоляцию вызова и запись в
-журнал; обходной путь не увидит ни того, ни другого.
+**Не делать:** не искать обходной путь к данным аудита. Операции платформы
+— единственный доступный: командной строки в этом рантайме нет, а сама
+операция даёт изоляцию вызова и запись в журнал. Обходного пути, который
+увидел бы то же самое, не существует.
 

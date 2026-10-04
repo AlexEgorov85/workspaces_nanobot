@@ -946,10 +946,6 @@
       "enable": false,
       "maxChars": 8000
     },
-    "legal_summarizer_query": {
-      "enable": true,
-      "max_result_chars": 20000
-    },
     "column_descriptions": {
       "enable": true,
       "entries": {

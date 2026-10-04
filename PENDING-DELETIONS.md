@@ -824,3 +824,47 @@ change'а не влияет. Проверено: `workspace/data_store/cache/ski
 следующий такой путь в коде платформы пройдёт молча. Расширять `FORBIDDEN`
 здесь нельзя: `skills` — рабочее имя подкаталога capability, и запрещать его
 целиком значило бы запретить легитимный путь.
+
+
+## Находки 2026-10-04: агентские навыки вне зоны загрузки
+
+### `mcp-platform/libs/legal_summarizer/skill/` — СНЕСТИ ВРУЧНУЮ
+
+Агентский `SKILL.md` лежал в библиотеке платформы. `SkillsLoader` читает
+только `workspace/skills`, `workspace/plugins` и свой встроенный каталог
+(`workspace_skills = workspace / "skills"`), поэтому файл **никогда не
+загружался**: модель его не читала ни разу. Внутри он звал
+`python workspace/skills/legal_summarizer/scripts/cli.py` — пути не
+существует ни одной части, так что даже будь файл загружен, он увёл бы
+модель в никуда.
+
+Домен жив: capability `legal_summarizer` есть и в `platform.json`, и в
+`servers/enterprise/capabilities/legal_summarizer`, операция
+`query_operation` объявлена в
+`config.json → tools.mcpServers.enterprise.enabled_tools`. Снести надо
+только каталог `skill/` — то, что к capability отношения не имеет.
+
+Снос заблокирован: политика рантайма не даёт запустить доверенный
+`mavis-trash`, а обходить её нельзя. Команда для владельца:
+
+```powershell
+rm -- "mcp-platform/libs/legal_summarizer/skill"
+```
+
+После сноса страж `tests/test_agent_facing_docs_contract.py` потребует
+почистить `KNOWN_MISPLACED_SKILLS` — он падает и на новом нарушении, и на
+протухшей записи, специально чтобы список не стал «разрешением на всё».
+
+### `config.json → tools.column_descriptions` — мёртвая секция, решение за владельцем
+
+Ни одного читателя во всём репозитории (проверено `git grep` по `*.py` и
+`*.ps1`). Содержит карту «имя колонки → таблица» на сто с лишним строк
+(`oarb.audits.auditee_entity`, `oarb.violations` и т.д.). Снять можно, но
+это доменные данные, а не мусор: решение о них — за владельцем. Пока
+зафиксированы в `KNOWN_DEAD_TOOL_SECTIONS` стража, с объяснением.
+
+### `config.json → tools.example` — мёртвая секция
+
+`workspace/tools/example.py` удалён в `dcce296`, читателей нет,
+`enable: false`. Остаток удалённого шаблона tool'а; кандидат на снос без
+оговорок, но не тронута — секция может быть заготовкой.
