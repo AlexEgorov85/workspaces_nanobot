@@ -38,14 +38,41 @@ stderr — stderr агента: строки платформы оказываю
 окне; без объявления поведение прежнее. Механизм, зрители для обеих
 платформ и граница со вторым процессом платформы — в
 ``lib/services/enterprise_mcp_stderr.py``.
+
+Про транспорт
+------------
+
+Два транспорта, один переключатель — ``transport`` в
+``config.json → gateway.agent.enterprise_mcp``.
+
+``stdio`` — путь отката и значение по умолчанию: процесс платформы
+stdio-каналом, порт выбирает сам клиент.
+``http`` — тот же дочерний процесс, обслуживаемый по
+``streamable-http``. Процесс остаётся дочерним (второй владелец пула
+PostgreSQL не появится), меняется только конвейер.
+
+На http-ветке агент поднимает процесс сам, и это меняет три вещи.
+Первое: адрес он узнаёт не из ответа клиента, а из строки в канале
+уведомления — выделенном дескрипторе, который агент открывает ребёнку
+сам (``stdin``-слот: на POSIX и на Windows это единственный канал,
+наследуемый как номер дескриптора, доступный ребёнку — см.
+:func:`_open_notify_channel`). Второе: stderr ребёнку открывает агент
+(``errlog`` у ``stdio_client`` тут неприменим), в тот же объявленный
+файл и тем же :func:`~lib.services.enterprise_mcp_stderr.open_redirect`,
+то есть окно зрителя и прежний путь отката не меняются. Третье: stdout
+ребёнка уходит в ``DEVNULL`` — на этой ветке протокола на нём нет, а
+пустота держит страж ``TestServerNeverPrintsToStdout``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 import uuid
 from contextlib import AsyncExitStack
@@ -61,6 +88,7 @@ from lib.services.enterprise_mcp_stderr import (
     open_redirect,
     write_marker,
 )
+from config import ConfigurationError
 from lib.services.session_files import SESSION_FILES_OPERATION
 
 DEFAULT_TOOL_TIMEOUT_SEC = 30.0
@@ -69,6 +97,21 @@ DEFAULT_TOOL_TIMEOUT_SEC = 30.0
 #: вызывается на каждый отказ, и ждать его дольше, чем отвечает живая
 #: платформа, незачем.
 RESET_TIMEOUT_SEC = 5.0
+
+#: Транспорт сессии. ``stdio`` — путь отката и значение по умолчанию,
+#: ``http`` — обслуживание дочернего процесса по streamable-http.
+TRANSPORT_STDIO = "stdio"
+TRANSPORT_HTTP = "http"
+TRANSPORTS: tuple[str, ...] = (TRANSPORT_STDIO, TRANSPORT_HTTP)
+
+#: Предел на чтение строки уведомления. Платформа пишет её сразу после
+#: бинда, поэтому здесь не «время работы», а время подъёма её
+#: зависимостей: импорты, чтение реестра, сборка индексов.
+NOTIFY_READ_TIMEOUT_SEC = 180.0
+
+#: Потолок одной строки уведомления. Адрес — это ``host:port`` и три
+#: числа; всё длиннее — не адрес, и читать дальше незачем.
+NOTIFY_MAX_LINE = 4096
 
 
 def _new_request_id() -> str:
@@ -180,6 +223,398 @@ class EnterpriseMcpUnavailable(RuntimeError):
     """Сервер не поднялся, упал или не ответил вовремя."""
 
 
+class EnterpriseMcpPortBusy(EnterpriseMcpUnavailable):
+    """Закреплённый порт платформы занят — подъём отменён.
+
+    Отдельный тип, а не текст в ``EnterpriseMcpUnavailable``: решение о
+    подъёме не принято по существу (порт занят чужим процессом), и
+    повтор/restart его не исправит. ``holder_pid`` — доказательство, на
+    котором отказ стоит, поэтому оно и в тексте, и отдельным полем.
+    """
+
+    def __init__(self, message: str, *, holder_pid: int | None) -> None:
+        super().__init__(message)
+        self.holder_pid = holder_pid
+
+
+#: Адреса, на которых сервер платформы вправе слушать. Выход за loopback
+#: запрещён до появления потребителя, который не является дочерним процессом
+#: того же агента.
+LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1"})
+
+
+def loopback_bind(bind: str) -> str:
+    """Проверить, что адрес слушания — loopback, и вернуть его.
+
+    ``localhost`` разворачивается в ``127.0.0.1`` здесь, а не в резолвере ОС:
+    результат резолва — это уже чужое решение о нашем адресе. Проверка живёт
+    здесь, а не только в платформе: отказ платформы пришёл бы после подъёма
+    процесса, и оператор увидел бы упавший ребёнок вместо отказа по
+    объявлению.
+    """
+    value = str(bind or "").strip()
+    if value.lower() == "localhost":
+        return "127.0.0.1"
+    if value not in LOOPBACK_BINDS:
+        raise ConfigurationError(
+            f"gateway.agent.enterprise_mcp.transport.bind={bind!r}: сервер "
+            f"платформы слушает только loopback ({', '.join(sorted(LOOPBACK_BINDS))}), "
+            f"а 0.0.0.0 выставил бы порт наружу машины."
+        )
+    return value
+
+
+def find_listener_pid(host: str, port: int) -> int | None:
+    """PID процесса, слушающего ``host:port``; ``None`` — не определён.
+
+    Единственная реализация на обе платформы. Windows смотрит
+    ``netstat -ano -p TCP`` (нативного API в PowerShell нет), Linux
+    разбирает ``/proc``: сокеты в состоянии LISTEN на этом порту дают
+    inode, а inode ищется в ``/proc/<pid>/fd``.
+
+    Почему на Linux procfs, а не ``ss``/``lsof``: ``ss`` есть не везде
+    (в минимальных образах его нет вовсе), его формат вывода меняется
+    между версиями iproute2 и переводится в локализованных сборках, а
+    ``/proc/net/tcp`` — это таблица ядра с фиксированными колонками.
+    Адрес в ней не сверяется: занятость ``host:port`` уже доказана
+    пробой bind, а слушатель этого порта — и есть держатель, даже если
+    он висит на ``0.0.0.0``.
+
+    Ветка Linux написана по коду и на этой машине (Windows) не проверена.
+    """
+
+    if sys.platform.startswith("win"):
+        return _windows_listener_pid(host, port)
+    return _linux_listener_pid(port)
+
+
+def check_platform_port(host: str, port: int) -> None:
+    """Отказать, если закреплённый порт платформы занят.
+
+    Механизм тот же, что у проверки порта канала в
+    ``gateway._check_websocket_port_available``: проба bind тем же
+    сокетом, что и настоящий bind. Проверяется **только** закреплённый
+    порт — при ``0`` адрес назначает ОС в момент бинда, конфликт
+    структурно невозможен, и проверять нечего.
+
+    Raises:
+        EnterpriseMcpPortBusy: порт занят, в тексте названы PID держателя
+            (либо сказано, что он не определён) и POSIX/Windows-средство
+            завершения для этой ОС.
+    """
+    if not port:
+        return
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError as exc:
+            holder = find_listener_pid(host, port)
+            raise EnterpriseMcpPortBusy(
+                port_busy_message(host, port, holder), holder_pid=holder
+            ) from exc
+
+
+def port_busy_message(
+    host: str, port: int, holder_pid: int | None, *, posix: bool | None = None
+) -> str:
+    """Формулировка отказа по занятому порту — под текущий случай.
+
+    Различает живого держателя и «порт занят, а кто — не определилось»,
+    и не утверждает, что «остался висеть предыдущий процесс»: чаще порт
+    держит **живой** второй gateway в соседнем окне, и такое утверждение
+    предлагает оператору погасить работающую систему.
+
+    ``posix`` переопределяет определение ОС — им проверяется POSIX-ветка
+    на машине без Linux.
+    """
+    if posix is None:
+        posix = not sys.platform.startswith("win")
+    where = f"{host}:{port}"
+    if holder_pid is None:
+        holder = "держатель НЕ ОПРЕДЕЛЁН (порт занят, а процесс не найден)"
+        hint = (
+            f"найдите его сами: ss -ltnp 'sport = :{port}' (Linux) "
+            f"или netstat -ano -p TCP (Windows)"
+        )
+    else:
+        holder = f"держит процесс {holder_pid}"
+        hint = (
+            f"kill {holder_pid} (POSIX)"
+            if posix
+            else f"taskkill /PID {holder_pid} /F"
+        )
+    return (
+        f"порт {where} платформы уже занят — {holder}. Подъём отменён, "
+        f"процесс платформы не запускался. Если это живой второй агент, "
+        f"остановите его (Ctrl+C в его окне), иначе завершите держателя: {hint}"
+    )
+
+
+def _windows_listener_pid(host: str, port: int) -> int | None:
+    """Держатель ``host:port`` на Windows: ``netstat -ano -p TCP``."""
+
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout
+    except Exception:
+        return None
+
+    pattern = re.compile(
+        rf"\s+TCP\s+{re.escape(host)}:{port}\s+\S+\s+LISTENING\s+(\d+)\s*"
+    )
+    m = pattern.search(out)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+#: Состояние ``LISTEN`` в ``/proc/net/tcp`` — ``st`` в шестнадцатеричном виде.
+_TCP_LISTEN = "0A"
+
+
+def _linux_listener_pid(port: int) -> int | None:
+    """Держатель порта на Linux по ``/proc``. На Windows не проверялось."""
+
+    inodes = _linux_listen_inodes(port)
+    if not inodes:
+        return None
+    proc = Path("/proc")
+    try:
+        entries = sorted(proc.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            handles = list((entry / "fd").iterdir())
+        except OSError:
+            # чужой процесс: /proc/<pid>/fd читает не владелец
+            continue
+        for handle in handles:
+            try:
+                target = os.readlink(handle)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                return int(entry.name)
+    return None
+
+
+def _linux_listen_inodes(port: int) -> set[str]:
+    """inode'ы слушающих сокетов на ``port`` из ``/proc/net/tcp{,6}``.
+
+    Колонки строки: ``sl local_address rem_address st tx_queue:rx_queue
+    tr:tm->when retrnsmt uid timeout inode``; локальный порт — последняя
+    часть ``local_address`` в верхнем регистре, ``st == 0A`` — LISTEN.
+    """
+
+    wanted = f"{port:04X}"
+    inodes: set[str] = set()
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            lines = Path(name).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines[1:]:  # первая строка — заголовок колонок
+            parts = line.split()
+            if len(parts) < 10 or parts[3] != _TCP_LISTEN:
+                continue
+            if parts[1].rsplit(":", 1)[-1] == wanted:
+                inodes.add(parts[9])
+    return inodes
+
+
+def _parse_notification(line: bytes) -> dict[str, Any]:
+    """Разобрать строку уведомления платформы.
+
+    Единственный формат описан в ``runtime/platform-settings`` (одна строка
+    JSON с ``host``/``port``/``pid``). Всё, что этому не соответствует, —
+    отказ: молча пропущенная строка означала бы подъём по чужому адресу.
+    """
+    try:
+        payload = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EnterpriseMcpUnavailable(
+            f"строка уведомления платформы не разбирается: {line[:120]!r}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise EnterpriseMcpUnavailable(
+            f"строка уведомления платформы — не объект: {line[:120]!r}"
+        )
+    host = payload.get("host")
+    port = payload.get("port")
+    pid = payload.get("pid")
+    # ``bool`` — подкласс ``int``, и ``True`` вместо pid прошло бы как число.
+    broken: list[str] = []
+    if not isinstance(host, str) or not host.strip():
+        broken.append("host")
+    if not isinstance(port, int) or isinstance(port, bool) or port <= 0:
+        broken.append("port")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        broken.append("pid")
+    if broken:
+        raise EnterpriseMcpUnavailable(
+            f"в уведомлении платформы не годятся: {', '.join(broken)} — {line[:120]!r}"
+        )
+    return {"host": host, "port": port, "pid": pid}
+
+
+async def _read_notification(fd: int, *, child_pid: int) -> dict[str, Any]:
+    """Прочитать ровно одно уведомление, с отказом вместо ожидания.
+
+    Наивное ``readline()`` от мёртвого ребёнка повесило бы старт, поэтому
+    читаем под пределом и различаем три исхода: канал закрылся (процесс
+    умер до бинда), время вышло, строка нечитаема. Повтор — тоже отказ:
+    два разных адреса от одного процесса означают, что адрес не тот, за кем
+    его приняли.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = time.monotonic() + NOTIFY_READ_TIMEOUT_SEC
+    buffer = b""
+    while b"\n" not in buffer:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise EnterpriseMcpUnavailable(
+                f"платформа (pid {child_pid}) не сообщила фактический адрес за "
+                f"{int(NOTIFY_READ_TIMEOUT_SEC)} с"
+            )
+        try:
+            chunk = await asyncio.wait_for(
+                loop.run_in_executor(None, os.read, fd, NOTIFY_MAX_LINE), timeout=left
+            )
+        except TimeoutError as exc:
+            raise EnterpriseMcpUnavailable(
+                f"платформа (pid {child_pid}) не сообщила фактический адрес за "
+                f"{int(NOTIFY_READ_TIMEOUT_SEC)} с"
+            ) from exc
+        if not chunk:
+            raise EnterpriseMcpUnavailable(
+                f"платформа (pid {child_pid}) закрыла канал уведомления, не "
+                f"сообщив адрес: процесс умер до бинда, причина — в его stderr"
+            )
+        buffer += chunk
+        if len(buffer) > NOTIFY_MAX_LINE:
+            raise EnterpriseMcpUnavailable(
+                f"строка уведомления длиннее {NOTIFY_MAX_LINE} байт — это не адрес"
+            )
+    line, _, rest = buffer.partition(b"\n")
+    if rest.strip() or _notify_tail_ready(fd):
+        raise EnterpriseMcpUnavailable(
+            "платформа прислала второе уведомление: один процесс объявил два "
+            "адреса, и адрес не тот, за кем его приняли"
+        )
+    return _parse_notification(line)
+
+
+def _notify_tail_ready(fd: int) -> bool:
+    """Есть ли уже пришедший хвост канала. Неблокирующая проверка.
+
+    Ждать второго уведомления нельзя (его может не быть никогда), а
+    пропустить пришедшее нельзя. Неблокирующий режим есть не на всех
+    платформах и версиях Python для анонимного канала — тогда проверка
+    молча выдыхает, и это лучше отказа на живом подъёме.
+    """
+    try:
+        os.set_blocking(fd, False)
+    except OSError:
+        return False
+    try:
+        os.read(fd, NOTIFY_MAX_LINE)
+        return True
+    except BlockingIOError:
+        return False
+    except OSError:
+        return False
+    finally:
+        try:
+            os.set_blocking(fd, True)
+        except OSError:
+            pass
+
+
+def _open_notify_channel() -> tuple[int, int]:
+    """Открыть канал уведомления: ``(читающий, пишущий)`` для ребёнка.
+
+    Пишущий конец отдаётся ребёнку в слот ``stdin`` и объявляется блоком
+    как ``transport.notify_fd = 0``. Причина именно в этом, а не в
+    ``pass_fds``: на Windows ``pass_fds`` не поддерживается, а унаследованный
+    handle не становится номером дескриптора в CRT ребёнка — ``os.write(N)``
+    там даёт ``EBADF`` (проверено на этой машине). Слоты 0/1/2 — единственные,
+    что Windows реально наследует как дескриптор, а на http-ветке stdin
+    ничего не несёт: протокола на нём нет. На POSIX тот же слот работает
+    тем же способом, поэтому механизм один, а не ветка на ветку.
+    """
+    return os.pipe()
+
+
+async def _terminate_child(process: Any) -> None:
+    """Завершить дочерний процесс платформы при закрытии сессии.
+
+    Под пределом: закрытие стека вызывается на каждом отказе, и ждать
+    завершения процесса без предела опасно — иначе зависнет и сброс, и
+    любой вызов, который к нему обратится.
+    """
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=RESET_TIMEOUT_SEC)
+    except (ProcessLookupError, OSError):
+        pass
+    except (TimeoutError, Exception):  # noqa: BLE001 — закрытие не должно ронять вызов
+        try:
+            process.kill()
+        except (ProcessLookupError, OSError):
+            pass
+
+
+def _confirm_process(reported_pid: int, child_pid: int) -> None:
+    """Адрес сообщил именно тот процесс, которого агент запустил.
+
+    Порт мог занять чужой процесс, поднятый до нас, и MCP-рукопожатие на
+    таком сервере прошло бы успешно. Единственное доказательство, что
+    сервер наш, — совпадение pid.
+    """
+    if reported_pid != child_pid:
+        raise EnterpriseMcpUnavailable(
+            f"фактический адрес сообщил процесс {reported_pid}, а агент запустил "
+            f"{child_pid}: по этому адресу отвечает не та платформа, которую он "
+            f"поднимал"
+        )
+
+
+def _confirm_identity(server_info: Any, expected_profile: str | None) -> None:
+    """Сервер назвал свой контур, и он совпал с объявленным.
+
+    Имя приходит в ``serverInfo`` MCP-рукопожатия и несёт контур
+    (``enterprise-mcp`` для базы, ``enterprise-mcp:<контур>`` для
+    профиля). Расхождение — отказ конфигурации, а не доступности: именно
+    оно приводит к тому, что журнал тестового прогона попадает в боевые
+    таблицы, и заметить это можно только по содержимому боевого журнала.
+    """
+    name = str(getattr(server_info, "name", "") or "")
+    reported = name.partition(":")[2] or None
+    if reported == expected_profile:
+        return
+    raise ConfigurationError(
+        f"контур: агент объявил {expected_profile or 'prod (база)'}, а сервер по "
+        f"объявленному адресу назвался {name!r} "
+        f"({reported or 'без имени контура'}). Журнал писался бы не туда, куда "
+        f"объявлено: проверьте --profile у обоих."
+    )
+
+
 class EnterpriseOperationError(RuntimeError):
     """Операция ответила доменной ошибкой.
 
@@ -247,6 +682,10 @@ class EnterpriseMcpClient:
         server_name: str = "enterprise-mcp",
         db_logging_service: Any = None,
         stderr_log: str | os.PathLike[str] | None = None,
+        transport: str = TRANSPORT_STDIO,
+        bind: str = "127.0.0.1",
+        port: int = 0,
+        profile: str = "",
     ) -> None:
         self._command = command
         self._args = list(args or [])
@@ -255,6 +694,20 @@ class EnterpriseMcpClient:
         self._cwd = str(Path(cwd)) if cwd else None
         self._timeout = float(tool_timeout_sec or DEFAULT_TOOL_TIMEOUT_SEC)
         self._server_name = server_name
+        # Транспорт и ЗАПРОС адреса, а не сам адрес: фактический порт
+        # назначает ОС в момент бинда и сообщает его платформа в канале
+        # уведомления. ``port == 0`` — «выдай свободный», и тогда
+        # проверять нечего (проверка занятости — только закреплённый порт).
+        self._transport = transport
+        self._bind = bind
+        self._port = int(port)
+        # Контур, объявленный агентом (``--profile``). Пусто — база (prod).
+        # Нужен для сверки личности сервера на http-ветке.
+        self._profile = profile
+        # Что платформа сказала о себе: pid и фактический адрес. На stdio
+        # их нет — там протокол на stdout, и pid ребёнка клиенту не виден.
+        self._platform_pid: int | None = None
+        self._endpoint: str | None = None
         self._stack: AsyncExitStack | None = None
         self._session: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -328,11 +781,33 @@ class EnterpriseMcpClient:
             "args": self._args,
             "cwd": self._cwd,
             "connected": self.is_connected,
+            "transport": self._transport,
+            # Запрошенный адрес и фактический — разные вещи: запрошенный
+            # виден и до подъёма сессии, фактический приходит от платформы.
+            "requested_port": self._port,
+            "endpoint": self._endpoint,
+            "platform_pid": self._platform_pid,
             # Объявленный путь виден и до подъёма сессии: баннер
             # запуска печатается по ``describe()``, и перенаправление
             # не должно выглядеть включившимся само по себе.
             **describe_redirect(self._stderr, declared=self._stderr_log),
         }
+
+    def presence_line(self, operation_count: int) -> str:
+        """Строка вердикта о платформе: операции, контур, pid, транспорт.
+
+        Один формат на оба входа в систему (gateway и CLI). Вторая копия
+        этой строки разъехалась бы при первой же правке одного из
+        входов, а расхождение печалей в двух терминалах и не найти.
+        """
+        contour = self._profile or "prod (база)"
+        pid = self._platform_pid if self._platform_pid else "неизвестен"
+        return (
+            f"enterprise-mcp: {operation_count} операций, процесс поднят "
+            f"(контур={contour}, pid={pid}, транспорт={self._transport}"
+            + (f", адрес={self._endpoint}" if self._endpoint else "")
+            + ")"
+        )
 
     def stderr_report(self) -> str:
         """Стока для баннера запуска: куда ушёл stderr платформы.
@@ -696,36 +1171,133 @@ class EnterpriseMcpClient:
         async with self._lock:
             if self._session is not None:
                 return self._session
-            self._stack = AsyncExitStack()
-            try:
-                from mcp import ClientSession, StdioServerParameters
-                from mcp.client.stdio import stdio_client
+            if self._transport == TRANSPORT_HTTP:
+                return await self._ensure_http_session()
+            return await self._ensure_stdio_session()
 
-                read, write = await self._stack.enter_async_context(
-                    stdio_client(
-                        StdioServerParameters(
-                            command=self._command,
-                            args=self._args,
-                            cwd=self._cwd,
-                            env=self._child_env(),
-                        ),
-                        # Публичный параметр SDK: stderr процесса в
-                        # stderr агента или в объявленный файл.
-                        errlog=self._errlog(),
-                    )
+    async def _ensure_stdio_session(self) -> Any:
+        """Подъём по stdio — путь отката, поведение прежнее."""
+        self._stack = AsyncExitStack()
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+
+            read, write = await self._stack.enter_async_context(
+                stdio_client(
+                    StdioServerParameters(
+                        command=self._command,
+                        args=self._args,
+                        cwd=self._cwd,
+                        env=self._child_env(),
+                    ),
+                    # Публичный параметр SDK: stderr процесса в
+                    # stderr агента или в объявленный файл.
+                    errlog=self._errlog(),
                 )
-                session = await self._stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-            except BaseException as exc:
-                await self._stack.aclose()
-                self._stack = None
+            )
+            session = await self._stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+        except BaseException as exc:
+            await self._stack.aclose()
+            self._stack = None
+            raise EnterpriseMcpUnavailable(
+                f"сервер {self._server_name!r} не поднялся: {exc}"
+            ) from exc
+        self._session = session
+        self._loop = asyncio.get_running_loop()
+        self._session_established_at = time.time()
+        return session
+
+    def _errlog_fd(self) -> Any:
+        """Номер дескриптора файла-приёмника stderr, если он объявлен.
+
+        На http-ветке ``errlog`` у ``stdio_client`` неприменим: процессом
+        занимается агент, и stderr он открывает ребёнку сам. Приёмник —
+        тот же объявленный файл и тот же ``open_redirect``, поэтому
+        перенаправление дописывается в него же при переподъёме, а окно
+        зрителя открывается как прежде.
+        """
+        redirect = self._errlog()
+        return redirect.fileno() if redirect is not None else None
+
+    async def _ensure_http_session(self) -> Any:
+        """Подъём по streamable-http к дочернему процессу платформы.
+
+        Порядок не переставляется: сначала занятость закреплённого порта
+        (до запуска процесса вообще), потом канал уведомления, потом
+        ровно одно уведомление, потом сверка pid, потом сессия и сверка
+        контура. Каждая сверка обязана случиться **до** того, как
+        подключение начнёт считаться состоявшимся.
+        """
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
+        self._stack = AsyncExitStack()
+        try:
+            # Закреплённый порт занят — не поднимаем процесс вовсе.
+            check_platform_port(self._bind, self._port)
+            read_fd, write_fd = _open_notify_channel()
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    self._command,
+                    *self._args,
+                    cwd=self._cwd,
+                    env=self._child_env(),
+                    stdin=write_fd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=self._errlog_fd(),
+                )
+            finally:
+                os.close(write_fd)
+            self._stack.push_async_callback(_terminate_child, process)
+            try:
+                address = await _read_notification(read_fd, child_pid=process.pid)
+            finally:
+                os.close(read_fd)
+            _confirm_process(address["pid"], process.pid)
+            self._platform_pid = address["pid"]
+            self._endpoint = f"{address['host']}:{address['port']}"
+            if self._port and address["port"] != self._port:
                 raise EnterpriseMcpUnavailable(
-                    f"сервер {self._server_name!r} не поднялся: {exc}"
-                ) from exc
-            self._session = session
-            self._loop = asyncio.get_running_loop()
-            self._session_established_at = time.time()
-            return session
+                    f"платформа заняла порт {address['port']}, а агент просил "
+                    f"{self._port}: адрес не тот, который объявлен"
+                )
+            write_marker(
+                self._stderr,
+                f"transport=http pid={process.pid} адрес={self._endpoint}",
+            )
+            read, write, _ = await self._stack.enter_async_context(
+                streamablehttp_client(f"http://{self._endpoint}/mcp")
+            )
+            session = await self._stack.enter_async_context(ClientSession(read, write))
+            result = await session.initialize()
+            # Внутри try намеренно: сверка обязана закрыть стек, иначе отказ
+            # по чужому контуру оставил бы процесс платформы живым. Тип
+            # сохраняется — ``ConfigurationError`` перечислен ниже.
+            _confirm_identity(getattr(result, "serverInfo", None), self._profile or None)
+        except BaseException as exc:
+            # Закрытие http-клиента само ходит в сеть, и на упавшем
+            # подключении падает второй ошибкой. Подавленная, она затерела
+            # бы настоящую причину: оператор увидел бы ConnectError вместо
+            # «платформа не поднялась».
+            with contextlib.suppress(Exception):
+                await self._stack.aclose()
+            self._stack = None
+            self._platform_pid = None
+            self._endpoint = None
+            # Отказы с названным решением (порт занят, контур чужой)
+            # доходят до вызывающего как есть: переворачивать их в
+            # «сервер не поднялся» значило бы потерять и решение, и его
+            # тип — выходной код входа в систему.
+            if isinstance(exc, (EnterpriseMcpUnavailable, ConfigurationError)):
+                raise
+            raise EnterpriseMcpUnavailable(
+                f"сервер {self._server_name!r} не поднялся: {exc}"
+            ) from exc
+        self._session = session
+        self._loop = asyncio.get_running_loop()
+        self._session_established_at = time.time()
+        return session
 
     async def _reset(self) -> None:
         """Сбросить сессию: оборванный процесс недоступен навсегда.
@@ -737,6 +1309,10 @@ class EnterpriseMcpClient:
         обратится.
         """
         stack, self._stack, self._session = self._stack, None, None
+        # Адрес и pid прошлого подъёма недействительны: переподъём
+        # обязан заново прочитать уведомление (см. ``_ensure_http_session``).
+        self._platform_pid = None
+        self._endpoint = None
         if stack is not None:
             try:
                 await asyncio.wait_for(stack.aclose(), timeout=RESET_TIMEOUT_SEC)
@@ -902,12 +1478,42 @@ def client_from_settings(
     # который агент и поднимает), а не объявление платформы. Поэтому
     # его чтение не ломает контракт «агент не объявляет ничего для
     # платформы», и страж границы остаётся зелёным.
+    # Транспорт и запрошенный адрес — из того же раздела, что и команда.
+    # Ключи вложенные (``enterprise_mcp.transport.*``): раздел закрыт
+    # ``AGENT_SECTIONS``, и объявлять их в корне config.json нельзя —
+    # схема nanobot отвергает неизвестный ключ верхнего уровня.
+    transport_section = section.get("transport")
+    if not isinstance(transport_section, dict):
+        transport_section = {}
+    transport = str(transport_section.get("mode") or "").strip() or TRANSPORT_STDIO
+    if transport not in TRANSPORTS:
+        raise ConfigurationError(
+            f"gateway.agent.enterprise_mcp.transport.mode={transport!r} не "
+            f"объявлен. Допустимы: {', '.join(TRANSPORTS)}."
+        )
+    bind = loopback_bind(
+        str(transport_section.get("bind") or "").strip() or "127.0.0.1"
+    )
+    port = transport_section.get("port")
+    try:
+        port = int(port) if port not in (None, "") else 0
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"gateway.agent.enterprise_mcp.transport.port={port!r} — не целое. "
+            f"0 значит «выдай свободный»."
+        ) from exc
     stderr_log = str(section.get("stderr_log") or "").strip() or None
     return EnterpriseMcpClient(
         command=str(command),
         args=args,
         cwd=section.get("cwd"),
         stderr_log=stderr_log,
+        transport=transport,
+        bind=bind,
+        port=port,
+        # Контур уезжает в блок личности, а не в argv: имя сервера в
+        # рукопожатии обязано совпасть с тем, что агент объявил.
+        profile=profile if profile and profile != "prod" else "",
         tool_timeout_sec=float(
             section.get("tool_timeout_sec") or DEFAULT_TOOL_TIMEOUT_SEC
         ),

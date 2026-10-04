@@ -316,6 +316,46 @@ _CHILD = textwrap.dedent(
 )
 
 
+class TestServerIdentity:
+    """Сервер называет свой контур — иначе агент не отличит свой процесс
+    от чужого, занявшего тот же порт.
+
+    Имя приходит в ``serverInfo`` рукопожатия, и сверяет его агент. Подставленное
+    по шаблону имя проверило бы шаблон, поэтому контур берётся ровно из флага
+    ``--profile`` и ниоткуда больше.
+    """
+
+    @staticmethod
+    def _name(profile: str | None) -> str:
+        from servers.enterprise import server as enterprise_server
+
+        return enterprise_server._server_identity_name(profile)
+
+    def test_base_carries_no_profile(self) -> None:
+        assert self._name(None) == "enterprise-mcp"
+
+    def test_profile_travels_in_the_name(self) -> None:
+        assert self._name("test") == "enterprise-mcp:test"
+
+    def test_name_follows_the_profile_flag_only(self) -> None:
+        from servers.enterprise import server as enterprise_server
+
+        # Ровно тот разбор, которым имя наполняется на живом подъёме.
+        assert self._name(
+            enterprise_server._profile_from_argv(["--profile", "test"])
+        ) == "enterprise-mcp:test"
+        assert self._name(enterprise_server._profile_from_argv([])) == "enterprise-mcp"
+
+    def test_explicit_prod_is_not_the_same_as_base(self) -> None:
+        """Явно запрошенный ``prod`` отличается от молчаливого.
+
+        Иначе «контур назван» и «контур не назван» стали бы одним состоянием,
+        и сверка перестала бы что-то значить.
+        """
+        assert self._name("prod") == "enterprise-mcp:prod"
+        assert self._name("prod") != self._name(None)
+
+
 class TestServerActuallyServesOverHttp:
     """Подъём целиком: uvicorn, менеджер сессий, заголовок ``Host``, JSON-RPC.
 

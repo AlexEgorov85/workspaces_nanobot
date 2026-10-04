@@ -651,7 +651,11 @@ def build(
         registry.register(_session_files(execution.workspace))
     transport = build_server(
         registry,
-        name="enterprise-mcp",
+        # Имя несёт контур: по адресу может отвечать чужой процесс, и
+        # доказать, что сервер наш, можно только его собственным
+        # ``serverInfo`` из рукопожатия. На stdio это не проверяется, там
+        # протокол на stdout и поднятый процесс известен по построению.
+        name=_server_identity_name(profile),
         pipeline=execution.pipeline,
         instructions=(
             "Enterprise-слой проекта. Операции данных, векторов, аудита и LLM. "
@@ -913,6 +917,21 @@ def _prepare_capabilities(container: Any) -> None:
             state,
             time.monotonic() - started,
         )
+
+
+def _server_identity_name(profile: str | None) -> str:
+    """Имя сервера в MCP-рукопожатии — вместе с контуром.
+
+    ``enterprise-mcp`` для базы (prod) и ``enterprise-mcp:<контур>`` для
+    профиля. Контур приходит флагом ``--profile`` от агента: он знает, в
+    каком контуре запущен, и без этого ответа платформа писала бы в боевые
+    таблицы под тестовым профилем.
+
+    Имя — единственное место, где сервер называет себя, и агент сверяет
+    его со своим объявлением. Поэтому здесь не проходит ни одна настройка
+    из блока: подставленное по шаблону имя проверило бы шаблон.
+    """
+    return f"enterprise-mcp:{profile}" if profile else "enterprise-mcp"
 
 
 def main(argv: list[str] | None = None) -> None:

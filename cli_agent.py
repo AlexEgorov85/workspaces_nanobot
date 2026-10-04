@@ -327,12 +327,14 @@ async def _connect_enterprise_mcp(ctx) -> None:
         )
         return
 
+    # Импорт рядом с ``_verify_platform_tables``, который берёт оттуда же
+    # ``CallIdentity``: клиент платформы нашим входом не поднимается, и
+    # его импорт на уровне модуля стал бы платой за каждый запуск.
+    from lib.services.enterprise_mcp_client import EnterpriseMcpPortBusy
+
     try:
         operations = await client.list_operations()
-        console.print(
-            f"[green]✓[/green] enterprise-mcp: {len(operations)} операций, "
-            "процесс поднят"
-        )
+        console.print(f"[green]✓[/green] {client.presence_line(len(operations))}")
         await _verify_platform_tables(ctx, client)
     except ConfigurationError as exc:
         # Расхождение профиля — это ошибка конфигурации, а не «сервер не
@@ -341,6 +343,19 @@ async def _connect_enterprise_mcp(ctx) -> None:
         console.print(f"[red]✗ enterprise-mcp: КОНФИГУРАЦИЯ[/red] — {exc}")
         logger.error("enterprise-mcp: ошибка конфигурации: %s", exc)
         raise
+    except EnterpriseMcpPortBusy as exc:
+        # Порт платформы занят — решение о подъёме не принято, и ни
+        # повтор, ни рестарт его не исправят. Отдельная ветка, потому
+        # что подсказка здесь другая: устранять надо держателя порта,
+        # а не «platform.json и .secrets.env».
+        console.print(f"[red]✗ enterprise-mcp: ПОРТ ЗАНЯТ[/red] — {exc}")
+        if exc.holder_pid:
+            console.print(
+                f"[red]  держатель: pid {exc.holder_pid}. "
+                f"Остановите его (Ctrl+C в его окне) и запустите снова.[/red]"
+            )
+        logger.error("enterprise-mcp: занятый порт: %s", exc)
+        raise CliStartupError(f"enterprise-mcp: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 — причина важнее типа
         # Одна строка причины + подсказка, без стек-трейса: CLI интерактивен,
         # и пользователю нужен вердикт «не поднялась платформа», а не дамп.

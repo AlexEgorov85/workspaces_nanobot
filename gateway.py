@@ -240,7 +240,7 @@ async def _connect_enterprise_mcp(ctx) -> None:
 
     try:
         operations = await client.list_operations()
-        _verdict(f"enterprise-mcp: {len(operations)} операций, процесс поднят")
+        _verdict(client.presence_line(len(operations)))
         # Куда ушёл stderr платформы. Без этой строки режим наблюдения
         # молчал бы, и «окно не открылось» читалось бы как «смотреть
         # не на что» — тем более что по умолчанию stderr уходит в
@@ -716,26 +716,43 @@ def _check_websocket_port_available(ctx) -> None:
         try:
             s.bind((host, port))
         except OSError as e:
-            owner_pid = _find_listener_pid(host, port) or "?"
-            _console.print(
-                f"[red]✗[/red] Порт {host}:{port} уже занят (PID {owner_pid}). "
-                f"Вероятно, остался висеть предыдущий процесс gateway."
+            owner_pid = _find_listener_pid(host, port)
+            holder = (
+                f"его держит процесс {owner_pid}"
+                if owner_pid
+                else "его держит НЕИЗВЕСТНЫЙ процесс"
             )
+            _console.print(f"[red]✗[/red] Порт {host}:{port} уже занят — {holder}.")
+            if owner_pid and not sys.platform.startswith("win"):
+                _console.print(f"    kill {owner_pid}")
+            elif owner_pid:
+                _console.print(f"    taskkill /PID {owner_pid} /F")
+            else:
+                _console.print("    найдите держателя: netstat -ano -p TCP")
             _console.print(
-                "  Завершите его одним из способов и запустите снова:"
+                "  Чаще всего это живой второй gateway в соседнем окне — "
+                "остановите его через Ctrl+C в его окне."
             )
-            _console.print(f"    taskkill /PID {owner_pid} /F")
-            _console.print("    (или закройте окно gateway через Ctrl+C в PowerShell)")
             raise SystemExit(1) from e
 
 
 def _find_listener_pid(host: str, port: int) -> int | None:
-    """Найти PID процесса, слушающего ``host:port`` (Windows).
+    """Найти PID процесса, слушающего ``host:port``.
 
-    Использует ``netstat -ano`` через subprocess (PowerShell не имеет
-    нативного API для этого). При ошибке парсинга или отсутствии
-    процесса — возвращает ``None``.
+    Реализация одна и у владельца её (``client.find_listener_pid``):
+    ею пользуется и проверка порта канала здесь, и проверка закреплённого
+    порта платформы в клиенте. Второе определение разошлось бы с первым
+    при первой же правке одной из двух веток ОС — а расхождение двух
+    копий и было причиной, по которой порт канала на Linux показывал
+    ``PID ?``.
+
+    Ветка Linux у владельца на этой машине (Windows) не проверена.
     """
+    from lib.services.enterprise_mcp_client import find_listener_pid
+
+    return find_listener_pid(host, port)
+
+
     import re
     import subprocess
 

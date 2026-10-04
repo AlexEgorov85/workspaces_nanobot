@@ -87,6 +87,19 @@ class _FakeClient:
         """
         return "stderr платформы: stderr агента (тест)"
 
+    def presence_line(self, operation_count: int) -> str:
+        """Строка вердикта о платформе.
+
+        Тот же контракт, что у ``stderr_report``: формат один на оба входа
+        в систему, и формат задаёт клиент. Двойник отвечает тем же текстом,
+        который печатает рукопожатие, — иначе проверки ниже смотрели бы на
+        одну строку в gateway и на другую в CLI.
+        """
+        return (
+            f"enterprise-mcp: {operation_count} операций, процесс поднят "
+            "(контур=test, pid=4242, транспорт=stdio)"
+        )
+
 
 def _ctx(client: object, **kw) -> types.SimpleNamespace:
     """Контекст для рукопожатия.
