@@ -40,7 +40,15 @@ def _monitor(client: _Client, events: list[tuple[str, str, str]] | None = None):
         if events is not None:
             events.append((event_type, name, level))
 
-    return McpHealthMonitor(client, interval_sec=1.0, publish=publish)
+    # ``reconnect_interval_sec`` задаётся явно и равен интервалу: пока платформа
+    # не отвечает, петля ждёт именно его, иначе тесты на восстановление ждали
+    # бы production-минуту вместо своих двух десятых секунды.
+    return McpHealthMonitor(
+        client,
+        interval_sec=1.0,
+        reconnect_interval_sec=1.0,
+        publish=publish,
+    )
 
 
 @pytest.mark.asyncio

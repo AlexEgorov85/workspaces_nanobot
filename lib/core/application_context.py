@@ -1704,20 +1704,29 @@ def _make_mcp_health_monitor(ctx: ApplicationContext) -> Any | None:
     if client is None:
         return None
 
-    interval = 30.0
-    try:
-        section = ctx.config_service.settings_section("gateway")
-        mcp_cfg = section.get("agent", {}).get("enterprise_mcp", {})
-        if isinstance(mcp_cfg, dict) and mcp_cfg.get("health_interval_sec"):
-            interval = float(mcp_cfg["health_interval_sec"])
-    except Exception:  # noqa: BLE001 - дефолт наблюдателя лучше, чем его отсутствие
-        interval = 30.0
-
     from lib.gateway.mcp_health import (
+        DEFAULT_INTERVAL_SEC,
+        RECONNECT_MIN_INTERVAL_SEC,
         SERVICE_SESSION_ID,
         SERVICE_USER,
         McpHealthMonitor,
     )
+
+    # Дефолты берутся у самого механизма, а не пишутся здесь вторым числом:
+    # два места с разными значениями — это интервал, который когда-нибудь
+    # поменяют в одном и забудут про другое.
+    interval = DEFAULT_INTERVAL_SEC
+    reconnect_interval = RECONNECT_MIN_INTERVAL_SEC
+    try:
+        section = ctx.config_service.settings_section("gateway")
+        mcp_cfg = section.get("agent", {}).get("enterprise_mcp", {})
+        if isinstance(mcp_cfg, dict):
+            if mcp_cfg.get("health_interval_sec"):
+                interval = float(mcp_cfg["health_interval_sec"])
+            if mcp_cfg.get("reconnect_interval_sec"):
+                reconnect_interval = float(mcp_cfg["reconnect_interval_sec"])
+    except Exception:  # noqa: BLE001 - дефолт наблюдателя лучше, чем его отсутствие
+        pass
 
     async def _publish(
         event_type: str,
@@ -1758,9 +1767,17 @@ def _make_mcp_health_monitor(ctx: ApplicationContext) -> Any | None:
             event_type=event_type,
         )
 
-    monitor = McpHealthMonitor(client, interval_sec=interval, publish=_publish)
+    monitor = McpHealthMonitor(
+        client,
+        interval_sec=interval,
+        reconnect_interval_sec=reconnect_interval,
+        publish=_publish,
+    )
     logger.info(
-        "enterprise-mcp: наблюдение за живостью включено, интервал %ss", interval
+        "enterprise-mcp: наблюдение за живостью включено, интервал %ss, "
+        "переподключение не чаще %ss",
+        interval,
+        reconnect_interval,
     )
     return monitor
 

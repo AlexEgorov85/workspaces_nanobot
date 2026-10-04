@@ -168,6 +168,36 @@ class TestProbeIsHonest:
 
         ``is_connected`` переживает смерть процесса до первого неудачного
         вызова — именно поэтому «шлюз не замечает остановленную платформу».
+        Проба разбита на ``probe()`` (логика отказа и таймаут) и ``_probe_once()``
+        (сам разговор), поэтому ищется связка: проба обязана звать разговор, а
+        разговор — бить по протоколу.
+        """
+        tree = _tree(CLIENT_SRC)
+        probe = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "probe"
+        )
+        conversation = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_probe_once"
+        )
+        probe_body = _unparse_code(probe)
+        talk = _unparse_code(conversation)
+
+        assert "_probe_once" in probe_body, "проба не доходит до разговора"
+        assert "send_ping" in talk, "разговор не общается с процессом по протоколу"
+        assert "is_connected" not in probe_body + talk, (
+            "проба выносит вердикт из наличия объекта сессии — это не "
+            "наблюдение, а догадка"
+        )
+
+    def test_probe_has_a_timeout_around_the_whole_conversation(self) -> None:
+        """Таймаут на ``ping`` без таймаута на подъём — это ловушка.
+
+        Платформа, которая стартует и не отвечает, оставляла наблюдение
+        подвешенным навсегда: молчание неотличимо от нормы.
         """
         tree = _tree(CLIENT_SRC)
         probe = next(
@@ -176,10 +206,9 @@ class TestProbeIsHonest:
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "probe"
         )
         body = _unparse_code(probe)
-        assert "send_ping" in body, "проба не общается с процессом по протоколу"
-        assert "is_connected" not in body, (
-            "проба выносит вердикт из наличия объекта сессии — это не "
-            "наблюдение, а догадка"
+        assert "wait_for" in body, "у пробы нет предела"
+        assert "_probe_once" in body, (
+            "таймаут накладывается не на ту функцию — разговор остаётся без предела"
         )
 
     def test_probe_records_failure_and_resets_the_session(self) -> None:

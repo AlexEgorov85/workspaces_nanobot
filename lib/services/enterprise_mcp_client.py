@@ -65,6 +65,11 @@ from lib.services.session_files import SESSION_FILES_OPERATION
 
 DEFAULT_TOOL_TIMEOUT_SEC = 30.0
 
+#: Предел на закрытие оборванного процесса. Короче таймаута операции: сброс
+#: вызывается на каждый отказ, и ждать его дольше, чем отвечает живая
+#: платформа, незачем.
+RESET_TIMEOUT_SEC = 5.0
+
 
 def _new_request_id() -> str:
     """``request_id`` для вызова, у которого нет оборота.
@@ -177,6 +182,19 @@ class EnterpriseOperationError(RuntimeError):
         super().__init__(f"[{code}] {message}")
         self.code = code
         self.message = message
+
+
+def _reason(exc: BaseException) -> str:
+    """Причина отказа, пригодная для строки лога.
+
+    Отдельная функция потому, что у половины транспортных отказов ``str(exc)``
+    ПУСТОЙ: оборванная труба и закрытый поток из anyio приходят с именем класса
+    и без текста. В лог уезжало «ping не удался: » — то есть оператор видел
+    сам факт и не видел причины, а это худший вид сообщения: выглядит как
+    недописанная строка. Имя класса в таком случае и есть причина.
+    """
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def _first_text(result: Any) -> str:
@@ -383,26 +401,45 @@ class EnterpriseMcpClient:
         self._probes += 1
         self._last_probe_at = time.time()
         try:
-            session = await self._ensure_session()
-            await asyncio.wait_for(session.send_ping(), timeout=self._timeout)
+            # Таймаут на ВСЮ пробу, а не только на ping. Подъём сессии тоже
+            # ждёт ответа процесса — ``initialize()`` не имел своего предела,
+            # и платформа, которая стартует, но не отвечает, навсегда
+            # оставляла наблюдение в подвешенном состоянии: цикл не доходил
+            # до записи DOWN и переставал замечать что-либо вообще. Смерть
+            # процесса выглядит как «тишина», а не как отказ, — ровно то, что
+            # наблюдение обязано ловить.
+            await asyncio.wait_for(
+                self._probe_once(), timeout=self._timeout
+            )
         except EnterpriseMcpUnavailable:
             self._record_probe_failure("сервер недоступен")
             raise
         except TimeoutError as exc:
             await self._reset()
             self._record_probe_failure(
-                f"ping не ответил за {self._timeout:g}с"
+                f"проба не уложилась в {self._timeout:g}с"
             )
             raise EnterpriseMcpUnavailable(
-                f"ping не ответил за {self._timeout:g}с"
+                f"проба не уложилась в {self._timeout:g}с"
             ) from exc
         except Exception as exc:  # noqa: BLE001 - транспорт любой формы
             await self._reset()
-            self._record_probe_failure(f"{type(exc).__name__}: {exc}")
-            raise EnterpriseMcpUnavailable(f"ping не удался: {exc}") from exc
+            reason = _reason(exc)
+            self._record_probe_failure(reason)
+            raise EnterpriseMcpUnavailable(f"ping не удался: {reason}") from exc
         self._probe_failures = 0
         self._last_probe_ok_at = self._last_probe_at
         self._last_probe_error = None
+
+    async def _probe_once(self) -> None:
+        """Подъём сессии и ping. Оборачивается таймаутом в ``probe()``.
+
+        Отдельно от ``probe()`` — чтобы ``asyncio.wait_for`` отменял именно
+        работу с процессом, а логика отказа и запись в снимок оставались в
+        одном месте.
+        """
+        session = await self._ensure_session()
+        await session.send_ping()
 
     def _record_probe_failure(self, reason: str) -> None:
         self._probe_failures += 1
@@ -652,12 +689,19 @@ class EnterpriseMcpClient:
             return session
 
     async def _reset(self) -> None:
-        """Сбросить сессию: оборванный процесс недоступен навсегда."""
+        """Сбросить сессию: оборванный процесс недоступен навсегда.
+
+        Закрытие стека тоже под таймаутом. Сброс вызывается на каждый отказ, и
+        ждать его завершения без предела опасно: если оборван был процесс,
+        который не дошёл до конца рукопожатия, его закрытие может не вернуться,
+        а тогда зависнет не только проба, но и любой вызов, который к ней
+        обратится.
+        """
         stack, self._stack, self._session = self._stack, None, None
         if stack is not None:
             try:
-                await stack.aclose()
-            except Exception:  # noqa: BLE001 - закрытие не должно ронять вызов
+                await asyncio.wait_for(stack.aclose(), timeout=RESET_TIMEOUT_SEC)
+            except (TimeoutError, Exception):  # noqa: BLE001 - закрытие не должно ронять вызов
                 pass
 
     async def aclose(self) -> None:

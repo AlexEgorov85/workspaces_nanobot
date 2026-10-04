@@ -47,10 +47,21 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
-#: Интервал между пробами, если он не объявлен. Достаточно редко, чтобы фоновая
-#: подсистема не мешала работе, и достаточно часто, чтобы обрыв не оставался
-#: незамеченным дольше нескольких минут.
-DEFAULT_INTERVAL_SEC = 30.0
+#: Интервал между пробами, если он не объявлен. Обоснование не в «цифре красиво»:
+#: проба — протокольный ping без побочных эффектов, она не ходит в PostgreSQL и
+#: не занимает рабочий пул, поэтому платить за частый опрос нечем. А платить
+#: приходится за противоположное: пока платформа не отвечает, в логе нет
+#: ничего, и с интервалом 30 с остановка процесса выглядит как полминуты
+#: нормальной работы. Десять секунд — это предел, за которым «всё хорошо» уже
+#: нельзя принять за исправность.
+DEFAULT_INTERVAL_SEC = 10.0
+
+#: Нижний предел между попытками ПОДНЯТЬ платформу, когда она не отвечает.
+#: Отделен от интервала намеренно: часто спрашивать — дёшево, часто поднимать
+#: процесс — нет (подъём с рукопожатием занимает секунды). Без этого предела
+#: шесть неудачных подъёмов в минуту на сломанной платформе выглядели бы как
+#: шум, а не как попытка починить.
+RECONNECT_MIN_INTERVAL_SEC = 60.0
 
 #: Событие деградации и восстановления. Имена — из общего словаря типов
 #: событий платформы, а не придуманы здесь: неизвестный тип отвергается всей
@@ -133,10 +144,12 @@ class McpHealthMonitor:
         client: Any,
         *,
         interval_sec: float = DEFAULT_INTERVAL_SEC,
+        reconnect_interval_sec: float = RECONNECT_MIN_INTERVAL_SEC,
         publish: PublishFn | None = None,
     ) -> None:
         self._client = client
         self._interval = max(1.0, float(interval_sec))
+        self._reconnect_interval = max(self._interval, float(reconnect_interval_sec))
         self._publish = publish
         self._status = McpHealthStatus(
             up=False, checked_at=None, ever_checked=False
@@ -194,10 +207,20 @@ class McpHealthMonitor:
             pass
 
     async def run(self) -> None:
-        """Петля: проба сразу, затем по интервалу. Отказ не завершает цикл."""
+        """Петля: проба сразу, затем по интервалу. Отказ не завершает цикл.
+
+        Пока платформа не отвечает, петля ждёт не интервал, а
+        ``RECONNECT_MIN_INTERVAL_SEC``: подъём процесса дорог, и повторять его
+        на каждой пробе — значит греть процесс зря.
+        """
         while True:
             await self.check_once()
-            await asyncio.sleep(self._interval)
+            if self._status.up:
+                await asyncio.sleep(self._interval)
+            else:
+                await asyncio.sleep(
+                    max(self._interval, self._reconnect_interval)
+                )
 
     async def check_once(self) -> McpHealthStatus:
         """Одна проба с записью снимка и событием на смену состояния.
