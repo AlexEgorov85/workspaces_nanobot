@@ -114,9 +114,10 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
 операция при старте процесса.
 
 ``skills.<name>.vector_indexes[*]``: ``name`` — логическое имя индекса
-(как его видит tool ``vector_search``). Source-таблица хранится в
-``public.agent_vector_index_config`` (runtime-БД, инфраструктурная
-декларация), backend и путь хранения — ``gateway.vector.index.*``.
+(как его видит tool ``vector_search``). Source-таблица берётся из объявления
+индекса (``config.json → gateway.vector.index.indexes``); прежний PG-реестр
+``public.agent_vector_index_config`` кодом больше не читается (см. ниже про
+``vector.*``), backend и путь хранения — ``gateway.vector.index.*``.
 
 ``skills.audit_analyzer``: навык tool-only (никакого CLI), поэтому
 секции ``cli.*``/``llm.*`` ему не нужны. ``legal_summarizer`` — секция
