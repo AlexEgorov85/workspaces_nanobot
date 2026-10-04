@@ -409,6 +409,41 @@ class TestLocalFallback:
         assert len(lines) == 2
         assert json.loads(lines[0])["event_type"] == "agent.started"
 
+    def test_creates_the_directory_it_writes_into(self, tmp_path: Path) -> None:
+        """Каталог создаётся сам: на свежей машине его не бывает.
+
+        Живой прогон 2026-10-04: `data_store/logs` не существовал, и каждый
+        батч уходил в fallback с `No such file or directory` — то есть
+        последний след события не появлялся ровно тогда, когда он был нужен.
+        Путь собирается из `data_store/logs/...`, а `open(..., "a")` каталоги
+        не создаёт, поэтому это молчало до первого отказа платформы.
+        """
+        target = tmp_path / "data_store" / "logs" / "gateway-events-fallback.jsonl"
+        assert not target.parent.exists()
+
+        sink = LocalFallbackSink(str(target))
+        sink.write([_event(event_type="agent.started")])
+
+        assert target.exists(), "каталог не создан, след события потерян"
+        assert len(target.read_text(encoding="utf-8").splitlines()) == 1
+
+    def test_directory_is_not_created_before_the_first_write(self, tmp_path: Path) -> None:
+        """Пустой каталог без событий — это шум, а не след.
+
+        Каталог появляется лениво, при первой записи: иначе наличие каталога
+        означало бы «писали», хотя могли и не писать никогда.
+        """
+        target = tmp_path / "data_store" / "logs" / "gateway-events-fallback.jsonl"
+        LocalFallbackSink(str(target))
+        assert not target.parent.exists()
+
+    def test_writes_into_a_deep_missing_path(self, tmp_path: Path) -> None:
+        """Отсутствие каталога не должно ронять запись событий."""
+        target = tmp_path / "a" / "b" / "c" / "fallback.jsonl"
+        sink = LocalFallbackSink(str(target))
+        sink.write([_event(event_type="agent.started")])
+        assert target.exists()
+
     def test_identity_is_kept_in_the_fallback_record(self) -> None:
         """Событие без личности должно остаться опознаваемым при разборе."""
         sink_path = Path(str(Path.cwd() / "_fb_test.jsonl"))
@@ -434,8 +469,16 @@ class TestLocalFallback:
         assert target.read_text(encoding="utf-8") == "x" * 100, "файл не растёт"
 
     def test_unwritable_path_counts_drops_instead_of_raising(self, tmp_path: Path) -> None:
-        """Отказ локального следа не должен ронять flush."""
-        sink = LocalFallbackSink(str(tmp_path / "нет" / "нет" / "fallback.jsonl"))
+        """Отказ локального следа не должен ронять flush.
+
+        Непригодный путь строится как файл на месте каталога, а не как
+        отсутствующий каталог: с момента, когда fallback создаёт каталог сам,
+        отсутствующего каталога больше не означает отказ, и такой «недоступный»
+        путь на самом деле успешно пишет.
+        """
+        blocker = tmp_path / "это-файл"
+        blocker.write_text("не каталог", encoding="utf-8")
+        sink = LocalFallbackSink(str(blocker / "fallback.jsonl"))
         sink.write([_event()])
         assert sink.stats()["dropped"] == 1
 

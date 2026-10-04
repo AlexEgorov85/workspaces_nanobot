@@ -430,6 +430,22 @@ class LocalFallbackSink:
     def path(self) -> str:
         return self._path
 
+    def _ensure_parent(self) -> None:
+        """Создать каталог файла, если его нет.
+
+        Без этого последний след события не появлялся никогда: ``open(..., "a")``
+        не создаёт каталоги, а ``data_store/logs`` на свежей машине не
+        существует. Живой прогон 2026-10-04 показывал ровно это — по
+        ``No such file or directory`` на каждый батч, то есть обещание «петля не
+        замыкается, след остаётся» не выполнялось ровно тогда, когда след был
+        нужен. Каталог создаётся лениво, при первой записи, а не в
+        конструкторе: создание файла на старте сделало бы след заметным даже
+        тогда, когда писать нечего.
+        """
+        parent = os.path.dirname(self._path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
     def write(self, events: Sequence[Any]) -> None:
         """Дописать события одной строкой JSON на событие."""
         if not events:
@@ -440,6 +456,7 @@ class LocalFallbackSink:
                 if self._exceeded():
                     dropped = len(events)
                 else:
+                    self._ensure_parent()
                     with open(self._path, "a", encoding="utf-8") as handle:
                         for event in events:
                             handle.write(
