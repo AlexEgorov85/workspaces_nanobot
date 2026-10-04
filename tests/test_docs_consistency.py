@@ -327,7 +327,6 @@ _REMOVED_MARKERS = (
 
 #: Подкаталоги и файлы документации, которые историю хранят по назначению.
 _DOC_HISTORY_DIRS = (
-    "docs/audit",
     "docs/architecture/decisions",
     "docs/architecture/decisions/",
 )
