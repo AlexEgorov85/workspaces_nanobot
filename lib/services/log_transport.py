@@ -53,6 +53,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from lib.services.enterprise_mcp_client import (
@@ -419,7 +420,12 @@ class LocalFallbackSink:
     """
 
     def __init__(self, path: str, *, max_bytes: int = 32 * 1024 * 1024) -> None:
-        self._path = str(path)
+        # Путь приводится к абсолютному ЗДЕСЬ, а не у вызывающего: след читают
+        # люди и инструменты расследования, и относительный путь означал бы
+        # «где-то относительно того каталога, откуда запустили», а не «файл
+        # вот тут». Смена текущего каталога посреди работы не должна менять
+        # смысл уже написанного.
+        self._path = str(Path(path).resolve())
         self._max_bytes = int(max_bytes)
         self._lock = threading.Lock()
         self._written = 0

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from loguru import logger
 from nanobot.agent import AgentHook
 
 # Ключ-«bucket» для оборотов без session_key (например, прямые SDK-вызовы).
@@ -31,9 +32,15 @@ class ToolAuditHook(AgentHook):
     накапливаемое состояние изолируется по ``session_key``: вызовы одного
     вопроса никогда не попадают в аудит другого. Дренаж идёт той же
     ключевой функцией — ``drain(session_key)``.
+
+    Служба журнала передаётся конструктором, а не берётся из контекста: отказ
+    инструмента виден этому хуку всегда (он есть в ``ctx.hooks`` безусловно), и
+    хук — единственный, кто может записать отказ, возникший ДО входа в
+    конвейер платформы. Служба необязательна: без неё хук остаётся
+    накопителем аудита, как был до появления журнала.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db_logging_service: Any = None) -> None:
         """Инициализирует внутренние структуры хранения.
 
         Создаёт словари (ключ — ``session_key``, ``""`` для оборотов без
@@ -45,6 +52,7 @@ class ToolAuditHook(AgentHook):
         self._entries: dict[str, list[dict[str, Any]]] = {}
         self._calls: dict[str, list[dict]] = {}
         self._pending_start: dict[str, int] = {}
+        self._service = db_logging_service
 
     @staticmethod
     def _bucket_key(ctx: Any) -> str:
@@ -100,6 +108,7 @@ class ToolAuditHook(AgentHook):
         if start is None:
             return
         bucket = self._entries.get(key) or []
+        failed: list[dict[str, Any]] = []
         for i, ev in enumerate(ctx.tool_events):
             idx = start + i
             if idx >= len(bucket):
@@ -109,8 +118,51 @@ class ToolAuditHook(AgentHook):
             detail = ev.get("detail", "")
             if status == "error":
                 bucket[idx]["error"] = detail
+                failed.append(bucket[idx])
             elif status == "ok" and detail:
                 bucket[idx]["result_preview"] = detail[:200]
+        if failed:
+            self._log_failures(key, failed, ctx)
+
+    def _log_failures(
+        self, key: str, failed: list[dict[str, Any]], ctx: Any
+    ) -> None:
+        """Записать отказ инструмента в журнал.
+
+        Отказ, возникший на проводе до входа в конвейер платформы, не оставляет
+        в журнале ни одной строки: конвейер не начат, поэтому не было ни
+        ``tool.started``, ни ``tool.failed``. Молчание неотличимо от того, что
+        вызова не было, и в журнале выглядит как «сервис здоров».
+
+        Писать отказ обязан тот, кто отказ видит, — агент. Имя каноническое
+        (``tool.failed``), а писателя различает ``metadata.source``:
+        ``enterprise_mcp`` у платформы, ``nanobot`` у агента. Отдельного имени
+        заводить нельзя: при строгой политике неизвестных имён такое событие не
+        пишется вовсе.
+        """
+        if self._service is None:
+            return
+        request_id = None
+        getter = getattr(self._service, "get_request_id", None)
+        if callable(getter):
+            try:
+                request_id = getter(key)
+            except Exception:  # noqa: BLE001 - журнал не должен ронять оборот
+                request_id = None
+        for entry in failed:
+            message = str(entry.get("error") or "отказ инструмента без сообщения")
+            try:
+                self._service.log_tool_result(
+                    session_id=key,
+                    tool_name=str(entry.get("name") or "?"),
+                    result=message,
+                    latency_ms=0.0,
+                    status="error",
+                    error=message,
+                    request_id=request_id,
+                )
+            except Exception:  # noqa: BLE001 - потеря журнала не роняет оборот
+                logger.debug("ToolAuditHook: отказ не записан в журнал", exc_info=True)
 
     def drain(self, session_key: str | None = None) -> list[dict[str, Any]]:
         """Возвращает записи вызовов для одной сессии и очищает их bucket.

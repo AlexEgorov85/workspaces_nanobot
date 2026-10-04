@@ -117,18 +117,22 @@ ETALON: dict[str, LiveName] = {
     "agent.compacted": LiveName("lib/services/context_compaction.py:365"),
     "agent.degraded": LiveName("lib/channels/postgres_channel.py:564"),
     # --- вход и доставка --------------------------------------------------
-    "agent.received": LiveName("lib/services/db_logging_service.py:871"),
+    "agent.received": LiveName("lib/services/db_logging_service.py:1188"),
     "agent.delivered": LiveName(
-        "lib/services/db_logging_service.py:920",
+        "lib/services/db_logging_service.py:1239",
         purged_as_empty_outbound=True,
     ),
     # --- обращения к модели ------------------------------------------------
     "llm.requested": LiveName("lib/hooks/database_logging_hook.py:52"),
     "llm.completed": LiveName("lib/hooks/database_logging_hook.py:53"),
-    "llm.exchanged": LiveName("lib/services/db_logging_service.py:1008"),
+    "llm.exchanged": LiveName("lib/services/db_logging_service.py:1352"),
     # --- вызовы -----------------------------------------------------------
-    "tool.started": LiveName("lib/services/db_logging_service.py:944"),
-    "tool.completed": LiveName("lib/services/db_logging_service.py:976"),
+    "tool.started": LiveName("lib/services/db_logging_service.py:1265"),
+    "tool.completed": LiveName("lib/services/db_logging_service.py:1304"),
+    # Имя то же, что у платформенного отказа, и различает их ``metadata.source``.
+    # Отдельного имени не заведено намеренно: при строгой политике неизвестных
+    # имён ``tool.rejected`` не был бы записан вовсе.
+    "tool.failed": LiveName("lib/services/db_logging_service.py:1304"),
     "tool.suppressed": LiveName("lib/hooks/repeat_guard_hook.py:384"),
 }
 

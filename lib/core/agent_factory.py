@@ -144,8 +144,13 @@ class AgentFactory:
 
         hooks: list[Any] = []
         # ToolAuditHook — обязателен: каналы и CLI рендерят его записи
-        # в UI ("✓ read(x.txt) → content" / "✗ exec: timeout").
-        tool_audit_hook = self._import_tool_audit_hook()()
+        # в UI ("✓ read(x.txt) → content" / "✗ exec: timeout"). Ему же
+        # передаётся служба журнала: отказ, возникший на проводе ДО входа в
+        # конвейер платформы, не оставляет в журнале ни одной строки, и
+        # записать его может только сторона, которая этот отказ видит, — агент.
+        tool_audit_hook = self._import_tool_audit_hook()(
+            db_logging_service=db_logging_service
+        )
         hooks.append(tool_audit_hook)
 
         # TerminalToolPrintHook — опционален: живой вывод результатов
