@@ -29,6 +29,9 @@ SETTING_NAMES: tuple[str, ...] = (
     "ENTERPRISE_EXEC_LOGGING",
     "ENTERPRISE_EXEC_SESSION_ROOT",
     "ENTERPRISE_EXEC_LOG_ARG_FIELDS",
+    "ENTERPRISE_EXEC_LOG_ARG_EXCERPT_BYTES",
+    "ENTERPRISE_EXEC_LOG_RESULT_EXCERPT_BYTES",
+    "ENTERPRISE_EXEC_LOG_REDACT_KEYS",
     "ENTERPRISE_EXEC_SESSION_EVENTS",
     "ENTERPRISE_EXEC_REQUIRE_CALL_META",
 )
@@ -46,6 +49,17 @@ class ExecutionPolicy:
     logging_enabled: bool
     session_root: str
     log_argument_fields: tuple[str, ...]
+    #: Потолок выдержки аргументов в ``payload`` вызова, байт. Применяется к
+    #: выдержке **целиком**, а не к одному полю: потолок на поле означал бы,
+    #: что суммарный объём растёт числом полей и перестаёт быть ограниченным.
+    log_argument_excerpt_bytes: int
+    #: Потолок выдержки результата, байт. Меньше ``preview_bytes`` намеренно:
+    #: превью вызывающий и так получил в ответе, и журнал не должен держать
+    #: больше тела, чем дошло до него по проводу.
+    log_result_excerpt_bytes: int
+    #: Имена полей, значения которых заменяются маркером. Поверх работает
+    #: распознавание по форме (DSN, ``Bearer``, ``sk-``, PEM, JWT).
+    log_redact_keys: tuple[str, ...]
     persist_session_events: bool
     require_call_meta: bool
 
@@ -68,6 +82,13 @@ class ExecutionPolicy:
             log_argument_fields=_parse_field_list(
                 settings.get("ENTERPRISE_EXEC_LOG_ARG_FIELDS")
             ),
+            log_argument_excerpt_bytes=int(
+                settings.get("ENTERPRISE_EXEC_LOG_ARG_EXCERPT_BYTES") or 0
+            ),
+            log_result_excerpt_bytes=int(
+                settings.get("ENTERPRISE_EXEC_LOG_RESULT_EXCERPT_BYTES") or 0
+            ),
+            log_redact_keys=_parse_field_list(settings.get("ENTERPRISE_EXEC_LOG_REDACT_KEYS")),
             persist_session_events=bool(settings.get("ENTERPRISE_EXEC_SESSION_EVENTS", False)),
             require_call_meta=bool(settings.get("ENTERPRISE_EXEC_REQUIRE_CALL_META", False)),
         )

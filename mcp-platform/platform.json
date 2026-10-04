@@ -45,6 +45,9 @@
     "logging_enabled": true,
     "session_root": "${NANOBOT_WORKSPACE}/data_store/sessions",
     "log_argument_fields": "tool_name,event_type,session_scope",
+    "log_argument_excerpt_bytes": 512,
+    "log_result_excerpt_bytes": 1024,
+    "log_redact_keys": "password,passwd,secret,token,api_key,apikey,authorization,dsn,private_key,credential,credentials",
     "persist_session_events": false,
     "require_call_meta": false
   },

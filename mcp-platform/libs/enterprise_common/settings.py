@@ -714,6 +714,20 @@ _s("ENTERPRISE_SESSION_META_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "белый список полей аргументов, попадающих в журнал как метаданные; "
        "всё остальное логируется размером и хешем",
        file_key="execution.log_argument_fields"),
+    _s("ENTERPRISE_EXEC_LOG_ARG_EXCERPT_BYTES", "int", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/logger.py",
+       "потолок выдержки аргументов в payload вызова, байт; потолок "
+       "применяется к выдержке целиком, а не к одному полю",
+       file_key="execution.log_argument_excerpt_bytes"),
+    _s("ENTERPRISE_EXEC_LOG_RESULT_EXCERPT_BYTES", "int", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/logger.py",
+       "потолок выдержки результата в payload вызова, байт",
+       file_key="execution.log_result_excerpt_bytes"),
+    _s("ENTERPRISE_EXEC_LOG_REDACT_KEYS", "str", FROM_FILE, OWNER_PLATFORM,
+       "libs/enterprise_common/execution/logger.py",
+       "имена полей, значения которых заменяются маркером; поверх — "
+       "распознавание по форме (DSN, Bearer, sk-, PEM, JWT)",
+       file_key="execution.log_redact_keys"),
     _s("ENTERPRISE_EXEC_SESSION_EVENTS", "bool", FROM_FILE, OWNER_PLATFORM,
        "libs/enterprise_common/eventing/writer.py",
        "писать события оборота файлом в каталог сессии; по умолчанию "
@@ -996,6 +1010,9 @@ SHARED_SETTINGS: tuple[str, ...] = (
     "ENTERPRISE_EXEC_LOGGING",
     "ENTERPRISE_EXEC_SESSION_ROOT",
     "ENTERPRISE_EXEC_LOG_ARG_FIELDS",
+    "ENTERPRISE_EXEC_LOG_ARG_EXCERPT_BYTES",
+    "ENTERPRISE_EXEC_LOG_RESULT_EXCERPT_BYTES",
+    "ENTERPRISE_EXEC_LOG_REDACT_KEYS",
     "ENTERPRISE_EXEC_SESSION_EVENTS",
     "ENTERPRISE_EXEC_REQUIRE_CALL_META",
 )

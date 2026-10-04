@@ -37,7 +37,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..errors import InfrastructureError
-from ..eventing.models import AgentEvent
+from ..eventing.models import (
+    COMPONENT_TOOL_EXECUTION,
+    SOURCE_ENTERPRISE_MCP,
+    AgentEvent,
+)
 from ..eventing.types import TOOL_FAILED
 from ..session.artifact_store import Artifact, ArtifactStore
 from ..session.workspace import SessionWorkspace
@@ -446,7 +450,17 @@ class ToolExecutionPipeline:
                     "identity_missing": True,
                     "identity_source": None,
                 },
-                metadata={"logged_without_identity": True},
+                # Признак писателя обязателен и на этом пути: отказ на границе
+                # идентичности тоже пишет сторона, которая его видит, а без
+                # `source` строку нечем отличить от отказа, записанного агентом
+                # (тот пишет `nanobot`). Различие по `metadata.source` — вместо
+                # нового имени события, которое при `strict` пришлось бы ещё и
+                # объявлять в словаре платформы.
+                metadata={
+                    "source": SOURCE_ENTERPRISE_MCP,
+                    "component": COMPONENT_TOOL_EXECUTION,
+                    "logged_without_identity": True,
+                },
             )
         )
 
