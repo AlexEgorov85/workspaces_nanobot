@@ -412,6 +412,22 @@ class TestBootstrap:
             # completed. Отдельная операция, потому что append_assistant_message
             # создаёт плейсхолдер, который обязан закрыть finalize_turn.
             "append_history_notice",
+            # Холодное зеркало сессий. До 2026-10-04 эти три операции были
+            # описаны в `DataService` и покрыты тестами, но регистрирующих их
+            # файлов операций не существовало: загрузчик собирает реестр из
+            # каталога `tools/`, и сервер отвечал на каждый вызов зеркала
+            # `[tool_load_error] операция не зарегистрирована` — год, пока
+            # зеркало молча ничего не писало. Методы существовали, а поверхности
+            # не было; тест на стабильность поверхности `data` и был тем
+            # стражем, который это должен был поймать.
+            #
+            # Все три — `runtime-only`, с permission `data:*_mirror*`: их
+            # зовёт фоновая подсистема шлюза, модель их не видит, поэтому
+            # белый список `config.json → tools.mcpServers.enterprise` не
+            # меняется.
+            "session_mirror_state",
+            "mirror_session",
+            "cleanup_session_mirror",
         }
 
     def test_every_capability_has_a_registered_service(self) -> None:
