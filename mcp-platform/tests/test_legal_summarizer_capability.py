@@ -162,7 +162,10 @@ class TestOperationContract:
         assert definition.name == "query_operation"
         assert definition.category == "legal_summarizer"
         assert definition.description.strip()
-        assert "runtime-only" in definition.tags
+        # Не «runtime-only»: операция объявлена модели в config.json, и метка
+        # внутренней операции на ней врала. Согласованность объявления и метки
+        # проверяет страж агента tests/test_mcp_operation_audience.py.
+        assert "runtime-only" not in definition.tags
         assert definition.permissions == ("legal_summarizer:query_operation",)
 
     def test_schema_is_built_from_handler_signature(self, tmp_path: Path) -> None:
@@ -294,16 +297,21 @@ class TestErrorCodeTable:
     """Таблица перевода обязана совпадать с доменом, а не «почти совпадать»."""
 
     def test_table_keys_are_exactly_the_domain_error_types(self) -> None:
-        """Ключи ``_ERROR_CODES`` = значения ``_MANIFEST_ERROR_TYPES``.
+        """Ключи ``_ERROR_CODES`` = все ``error_type``, которые присылает домен.
 
         Сверка идёт с обоими источниками: лишний ключ означал бы код, который
         домен никогда не пришлёт, а недостающий - молчаливый откат на
         ``internal`` (именно этим был баг с ``unsupported_manifest_version``).
         Проверка без диска и без моков: чистое следствие двух объявлений.
-        """
-        from libs.legal_summarizer.cli_query import _MANIFEST_ERROR_TYPES
 
-        assert set(_ERROR_CODES) == set(_MANIFEST_ERROR_TYPES.values())
+        Сверяется с ``DOMAIN_ERROR_TYPES``, а не с ``_MANIFEST_ERROR_TYPES``:
+        манифестная половина - не весь домен. Отказ по аргументу
+        (``invalid_field``) тоже обязан иметь код, иначе модель получала бы
+        «виновата платформа» вместо «повтори с одним из шести».
+        """
+        from libs.legal_summarizer.cli_query import DOMAIN_ERROR_TYPES
+
+        assert set(_ERROR_CODES) == set(DOMAIN_ERROR_TYPES)
 
 
 class TestWire:
@@ -343,6 +351,40 @@ class TestWire:
         assert result.isError is True
         assert json.loads(result.content[0].text)["error"]["code"] == "not_found"
         assert "Traceback" not in result.content[0].text
+
+    def test_wire_unknown_field_is_refused_and_manifest_is_not_dumped(
+        self, tmp_path: Path
+    ) -> None:
+        """Поле не из перечня — отказ, даже когда манифест читается.
+
+        Манифест здесь заведомо валиден. Это и есть условие, при котором
+        поломка была незаметна: на несуществующем ``operation_id`` домен и так
+        отказывал, и отказ по полю не отличить от отказа по состоянию. С
+        живым манифестом старое поведение отдавало ``status = "ok"`` и
+        ``manifest`` целиком, то есть опечатка в имени поля стоила модели
+        целого документа и не давала ни отказа, ни намёка на ошибку.
+        """
+        from conftest import make_layer
+        from libs.enterprise_common.loader import build_server
+
+        _write_manifest(tmp_path, "op1")
+        transport = build_server(
+            _registry(_service(tmp_path)),
+            name="enterprise-mcp",
+            pipeline=make_layer(tmp_path).pipeline,
+        )
+        result = _wire(
+            transport, "query_operation", {"operation_id": "op1", "field": "section"}
+        )
+        assert result.isError is True
+        text = result.content[0].text
+        assert json.loads(text)["error"]["code"] == "invalid_params"
+        # Перечень обязателен: иначе модель не знает, что повторить.
+        for field in ("stats", "articles", "chunks", "sections", "tree", "all"):
+            assert field in text, f"в отказе не назван допустимый перечень: {field}"
+        # Главное: содержимое манифеста утекать не должно.
+        assert "chunk_states" not in text, "отказ по полю выдал manifest целиком"
+        assert "Traceback" not in text
 
     def test_call_without_meta_is_refused_before_domain(self, tmp_path: Path) -> None:
         """Без ``params._meta`` вызов не доходит до домена.

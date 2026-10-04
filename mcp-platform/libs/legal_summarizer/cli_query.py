@@ -106,6 +106,22 @@ _MANIFEST_ERROR_TYPES = {
     "unsupported_version": "manifest_unsupported_version",
 }
 
+#: Поля, которые операция умеет отдать. Объявлены здесь, а не перечислены в
+#: ветвях ``if``: перечисление разъезжалось с ветвями, и поле, не совпавшее ни
+#: с одной, молча уходило в ветку ``all``.
+_FIELDS = frozenset(
+    {"stats", "articles", "chunks", "sections", "tree", "all"}
+)
+
+#: Все ``error_type``, которые домен кладёт в конверт: и зависящие от
+#: состояния манифеста, и зависящие от аргументов вызова. Объявлено одной
+#: точкой, потому что таблица кодов конверта обязана сверяться с ДОМЕНОМ, а
+#: сверка только с манифестной половиной пропускала бы отказ по аргументу —
+#: именно так он и появился: домен отказывал, а таблица о нём не знала.
+DOMAIN_ERROR_TYPES: frozenset[str] = frozenset(
+    _MANIFEST_ERROR_TYPES.values()
+) | {"invalid_field"}
+
 
 class LegalQueryError(Exception):
     """Ошибка follow-up запроса с готовым конвертом.
@@ -334,6 +350,23 @@ def query_operation(
         if workspace_root is not None
         else _resolve_workspace_root(None)
     )
+
+    # Проверка аргумента - до чтения с диска и до нормализации. Отказ по
+    # аргументу не зависит от того, существует ли операция: иначе на
+    # несуществующем operation_id модель получила бы «manifest не найден» и
+    # решила бы, что ошиблась в имени, а не в поле.
+    if field not in _FIELDS:
+        raise LegalQueryError({
+            "status": "error",
+            "error_type": "invalid_field",
+            "operation_id": operation_id,
+            "workspace_root": str(root),
+            "field": field,
+            "message": (
+                f"неизвестное поле {field!r}; доступны: "
+                + ", ".join(sorted(_FIELDS))
+            ),
+        })
 
     envelope = _manifest_error_envelope(operation_id, root)
     if envelope is not None:

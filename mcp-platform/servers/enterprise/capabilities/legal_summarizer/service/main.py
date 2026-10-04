@@ -44,6 +44,10 @@ _ERROR_CODES: dict[str, str] = {
     "manifest_not_found": "not_found",
     "manifest_corrupted": "internal",
     "manifest_unsupported_version": "upstream_unavailable",
+    # Отказ по аргументу, а не по состоянию: поле не из перечня. Без этой
+    # строки доменное имя ушло бы в ``internal`` (дефолт вызова), и модель
+    # получила бы «виновата платформа» вместо «повтори с одним из шести».
+    "invalid_field": "invalid_params",
 }
 
 
