@@ -397,6 +397,10 @@ class EnterpriseMcpSettings(_StrictOptional):
     args: list[str] | None = None
     cwd: str | None = None
     tool_timeout_sec: float | None = Field(default=None, gt=0)
+    #: Как часто шлюз спрашивает у процесса «ты жив?» (``lib/gateway/mcp_health.py``).
+    #: Отдельный ключ рядом с ``stderr_log``, потому что это протокол наблюдения,
+    #: а не транспорт вывода. Без него — 30 секунд.
+    health_interval_sec: float | None = Field(default=None, gt=0)
 
 
 # ---------------------------------------------------------------------------

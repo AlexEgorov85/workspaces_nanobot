@@ -1236,7 +1236,7 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 - `lib/utils/outbound_meta.py` — единый фильтр служебных outbound
   (`system`, `audit`, `tool_audit`, `_assemble_outbound`-артефакты).
 - `SessionFileStore` (`workspace/utils/session_file_store.py`) — общий стор
-  вложений под `data_store/cache/sessions/<key>/attachments/`.
+  вложений под `data_store/sessions/<key>/attachments/`.
 
 При добавлении нового канала: наследовать `nanobot.channels.base.BaseChannel`
 и делегировать `start/stop/send/send_delta/poll_once` в `MessageExchange`.
@@ -1673,7 +1673,7 @@ Postgres/Redis. Теперь — один, через `MessageExchange`.
 
 Утилита для существующих развёртываний: читает `agent_conversation_messages`,
 конвертирует старые `{filename, data}` в `{filename, file_id, mime_type,
-file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
+file_size}` (payload → `data_store/sessions/_shared/attachments/`,
 в БД — только `file_id`). Идемпотентна: записи с уже проставленным
 `file_id` пропускаются, HTTP/HTTPS-ссылки не трогает. CLI:
 `python scripts/backfill_media_aw.py [--dry-run]`.
@@ -1692,7 +1692,7 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
   `check()` прогоняет все check'и в `try/except` и сводит в `ReadinessReport`.
 - **Статусы:** `READY` (required + optional UP), `DEGRADED` (required OK, optional
   DOWN), `NOT_READY` (required DOWN). Сводное правило — `compute_overall_status`.
-- **Компоненты:** сейчас зарегистрирован только `postgres`. Проверки
+- **Компоненты:** `postgres` и `enterprise_mcp`. Проверки
   `duckdb_cache` и `vector_search` сняты в фазе 5 (п. 5.8) вместе со снимком
   в агенте; Redis-канал удалён. Здоровье снимка и векторных индексов отвечает
   платформа (capability `data` / `vectors`).
@@ -1703,6 +1703,20 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
   не годится, потому что `build_session_manager` возвращает библиотечный
   `SessionManager` (не подкласс), и гейт по имени `PG`/`Postgres` не срабатывал
   никогда.
+- **Компонент `enterprise_mcp`** проверяется по результату последней пробы
+  наблюдателя `lib/gateway/mcp_health.py`, а не по наличию сессии клиента.
+  Проверка синхронна и должна быть быстрой, поэтому ходить в процесс ей нельзя;
+  свежесть наблюдения видна в `detail` (возраст последней пробы). Required-ness
+  тот же, что у `postgres`: через платформу идут **все** выходы к данным —
+  журнал (`log_events`), очередь (`claim_task`), зеркало, — поэтому её
+  недоступность останавливает работу, а не ухудшает её.
+- **Наблюдение, а не разовая проверка.** Рукопожатие `_connect_enterprise_mcp`
+  подтверждает подъём процесса на старте и ничего не говорит о его дальнейшей
+  жизни: объект сессии переживает смерть процесса, поэтому без отдельной петли
+  остановка замечалась только первым неудачным вызовом. Петля шлёт протокольный
+  `ping`, поднимает сессию заново, если её нет, и публикует `agent.degraded`
+  (при недоступности) / `quality.check` (при восстановлении) — только на смену
+  состояния.
 - **Объекты** `ctx.runtime_health` / `ctx.runtime_readiness` создаются
   в `ApplicationContext.create()`.
 
@@ -1786,7 +1800,7 @@ nanobot/
 │
 ├── workspace/                            # runtime-данные и плагины-хуки
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
-│   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/cache/sessions/
+│   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/sessions/
 │   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
 │   │   └── debug_stream_diag.py          #     диагностика стриминга
 │   ├── tools/                            # кастомные tool'ы (auto-discover через project_tool_loader.register_project_tools)

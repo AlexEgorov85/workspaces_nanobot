@@ -518,6 +518,14 @@ async def _run(ctx) -> None:
         except Exception as exc:
             logger.warning("SessionMirror not started: %s", exc)
 
+    # Наблюдение за живостью платформы стартует сразу после рукопожатия и до
+    # каналов: очередь, журнал и зеркало уходят в тот же процесс, и остановить
+    # его можно в любой момент. Без наблюдения обрыв замечает только тот, кто
+    # обратится первым, — а до обращения платформа может лежать сутки.
+    mcp_health = getattr(ctx, "mcp_health_monitor", None)
+    if mcp_health is not None:
+        await mcp_health.start()
+
     try:
         channels_task = asyncio.create_task(channels.start_all())
         await ctx.agent.run()
@@ -549,6 +557,12 @@ async def _run(ctx) -> None:
         if mirror is not None:
             with contextlib.suppress(Exception):
                 await mirror.stop()
+
+        # Наблюдение останавливается до закрытия сессии платформы: иначе проба
+        # успела бы разбудить процесс, который сейчас закрывают.
+        if mcp_health is not None:
+            with contextlib.suppress(Exception):
+                await mcp_health.stop()
 
         # Сессия enterprise-mcp закрывается здесь, пока жив loop: после
         # выхода из asyncio.run() закрыть её уже нечем, и сервер завершился

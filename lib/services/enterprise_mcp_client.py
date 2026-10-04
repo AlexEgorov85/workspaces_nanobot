@@ -46,6 +46,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -244,12 +245,47 @@ class EnterpriseMcpClient:
         self._stderr_log = stderr_log
         self._stderr: StderrRedirect | None = None
         self._stderr_opened = False
+        # Наблюдение за живостью процесса. Отдельные счётчики, а не флаг:
+        # оператор должен видеть не только «упало», но и сколько раз подряд и
+        # с какого момента. Пишет их только ``probe()`` — состояние сессии само
+        # по себе не говорит, отвечает ли процесс.
+        self._probes = 0
+        self._probe_failures = 0
+        self._session_established_at: float | None = None
+        self._last_probe_at: float | None = None
+        self._last_probe_ok_at: float | None = None
+        self._last_probe_error: str | None = None
 
     # -- состояние ---------------------------------------------------------
 
     @property
     def is_connected(self) -> bool:
         return self._session is not None
+
+    def health(self) -> dict[str, Any]:
+        """Наблюдаемое здоровье клиента: снимок последнего ``probe()``.
+
+        Не догадка по наличию сессии: объект сессии переживает смерть процесса
+        до первого неудачного вызова, поэтому ``is_connected`` после остановки
+        платформы ещё какое-то время показывает ``True``. Наблюдение — это
+        последняя проба и её исход; ``probes``/``probe_failures`` позволяют
+        отличить «никогда не проверяли» от «проверяли и падает».
+
+        Проба не выполняется здесь намеренно: она асинхронная и поднимает
+        сессию, а этот метод зовут синхронные проверки готовности, которым
+        нужен быстрый ответ, а не поход в процесс.
+        """
+        return {
+            "server": self._server_name,
+            "connected": self.is_connected,
+            "probes": self._probes,
+            "probe_failures": self._probe_failures,
+            "consecutive_failures": self._probe_failures,
+            "session_established_at": self._session_established_at,
+            "last_probe_at": self._last_probe_at,
+            "last_ok_at": self._last_probe_ok_at,
+            "last_error": self._last_probe_error,
+        }
 
     def describe(self) -> dict[str, Any]:
         """Сведения для баннера запуска и диагностики."""
@@ -322,6 +358,55 @@ class EnterpriseMcpClient:
             raise EnterpriseMcpUnavailable(f"discovery не удался: {exc}") from exc
         tools = sorted(getattr(result, "tools", None) or [], key=lambda t: t.name)
         return [str(t.name) for t in tools]
+
+    async def probe(self) -> None:
+        """Одно наблюдение за живостью: ping протокола на живой сессии.
+
+        Единственный честный признак «процесс отвечает» — обмен по протоколу
+        MCP. Проверять ``is_connected`` недостаточно: объект сессии переживает
+        смерть процесса и остаётся не-``None`` до первого неудачного вызова,
+        то есть система о «платформа остановлена» узнавала бы только тогда,
+        когда кто-то уже попытался что-то сделать.
+
+        Проба лечит, а не только измеряет: сессия поднимается, если её нет, и
+        обрывается, если не отвечает. Поэтому вызывающая сторона получает
+        восстановление без отдельного механизма — просто следующая проба.
+
+        ``ping`` выбран намеренно: он не трогает бизнес-операцию, не ходит в
+        PostgreSQL и не имеет побочных эффектов, то есть в отличие опроса
+        зеркала или ``list_operations`` ничего не меняет.
+
+        Raises:
+            EnterpriseMcpUnavailable: сервер не поднялся, не ответил на ping
+                или оборвался.
+        """
+        self._probes += 1
+        self._last_probe_at = time.time()
+        try:
+            session = await self._ensure_session()
+            await asyncio.wait_for(session.send_ping(), timeout=self._timeout)
+        except EnterpriseMcpUnavailable:
+            self._record_probe_failure("сервер недоступен")
+            raise
+        except TimeoutError as exc:
+            await self._reset()
+            self._record_probe_failure(
+                f"ping не ответил за {self._timeout:g}с"
+            )
+            raise EnterpriseMcpUnavailable(
+                f"ping не ответил за {self._timeout:g}с"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - транспорт любой формы
+            await self._reset()
+            self._record_probe_failure(f"{type(exc).__name__}: {exc}")
+            raise EnterpriseMcpUnavailable(f"ping не удался: {exc}") from exc
+        self._probe_failures = 0
+        self._last_probe_ok_at = self._last_probe_at
+        self._last_probe_error = None
+
+    def _record_probe_failure(self, reason: str) -> None:
+        self._probe_failures += 1
+        self._last_probe_error = reason
 
     def _identity_from_turn(self) -> CallIdentity | None:
         """Собрать личность вызова из доверенного контекста оборота.
@@ -563,6 +648,7 @@ class EnterpriseMcpClient:
                 ) from exc
             self._session = session
             self._loop = asyncio.get_running_loop()
+            self._session_established_at = time.time()
             return session
 
     async def _reset(self) -> None:

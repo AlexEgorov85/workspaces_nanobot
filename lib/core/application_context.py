@@ -199,6 +199,12 @@ class ApplicationContext:
     # пока не понадобился, и не мешает старту агента, если платформа не собрана.
     enterprise_mcp: Any | None = None
 
+    # Наблюдатель за живостью платформы (``lib/gateway/mcp_health.py``).
+    #: Подсистема шлюза: без неё остановленный процесс платформы замечает
+    #: только тот, кто обратится к нему первым, а readiness остаётся READY.
+    #: Поле названо по назначению, как и ``session_mirror`` выше.
+    mcp_health_monitor: Any | None = None
+
     # Единственное место на стороне агента, где вычисляется каталог сессии.
     # Создаётся после клиента платформы, потому что при объявленной платформе
     # корень спрашивается у неё операцией ``session_files``, а при выключенной —
@@ -362,12 +368,10 @@ class ApplicationContext:
         # не предоставляет класс.
         ctx.usage_store = _make_usage_store(ctx)
 
-        # 4b. Подсистема зеркала сессий (cold-storage mirror).
-        # Создаётся только при PG-конфиге. Жизненный цикл — в ``gateway.py``:
-        # зеркало работает задачей loop'а, который на момент сборки ещё не
-        # существует.
-        ctx.session_mirror = _make_session_mirror(ctx)
-
+        # 4b. Зеркало сессий собирается на шаге 7a-0 — после клиента платформы,
+        # от которого оно зависит. Раньше здесь стоял вызов, и зеркало получало
+        # ``enterprise_mcp=None`` и выключалось навсегда.
+        #
         # 5. Реестр ресурсов удалён: писателей не осталось.
         #    Последним читателем был ``CacheLoadService``, ушедший на
         #    платформу 2026-10-01 вместе с кластером снимка. Состав снимка
@@ -515,6 +519,16 @@ class ApplicationContext:
                 "enterprise-mcp: клиент создан (%s), соединение ленивое",
                 ctx.enterprise_mcp.describe(),
             )
+
+        # 7a-0. Подсистемы шлюза, которым нужен клиент платформы.
+        #
+        # Собираются ЗДЕСЬ, а не на своём прежнем месте (4b, до каналов): клиент
+        # платформы создаётся на шаге 7a, и зеркало, собранное раньше, видело бы
+        # ``enterprise_mcp=None`` — то есть выключалось бы навсегда с текстом
+        # «платформа недоступна», при живой и поднятой платформе. Наблюдатель за
+        # живостью без клиента не имеет смысла по той же причине.
+        ctx.session_mirror = _make_session_mirror(ctx)
+        ctx.mcp_health_monitor = _make_mcp_health_monitor(ctx)
 
         # 7a-1. Резолвер каталога сессии.
         #
@@ -1329,6 +1343,64 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
         "postgres", check_postgres, required=_pg_required
     )
 
+    # -- enterprise_mcp ----------------------------------------------------
+    #
+    # Платформа объявлена как один процесс, а через неё идут ВСЕ выходы к данным:
+    # журнал (``log_events``), очередь (``claim_task``), зеркало. Поэтому её
+    # недоступность — не «минус удобство», а остановка работы, и required-ness
+    # выводится из конфигурации ровно так же, как у БД: канал включён ИЛИ
+    # storage работает в режиме postgres. Иначе была бы ложь в обе стороны —
+    # NOT_READY при выключенном канале, DEGRADED при включённом.
+    _mcp_cfg = (
+        (getattr(ctx, "settings", None) or {})
+        .get("gateway", {})
+        .get("agent", {})
+        .get("enterprise_mcp", {})
+    )
+    _mcp_declared = bool(isinstance(_mcp_cfg, dict) and _mcp_cfg.get("command"))
+    if not _mcp_declared or getattr(ctx, "enterprise_mcp", None) is None:
+        return
+
+    _mcp_required = _pg_required
+
+    def check_enterprise_mcp() -> ComponentStatus | None:
+        monitor = getattr(ctx, "mcp_health_monitor", None)
+        client = ctx.enterprise_mcp
+        if monitor is None:
+            # Наблюдателя нет — судить не по чему, кроме состояния сессии. Она
+            # переживает смерть процесса, поэтому это нижняя граница точности,
+            # и сказать об этом нужно прямо в detail, а не выдать за пробу.
+            connected = bool(getattr(client, "is_connected", False))
+            return ComponentStatus(
+                name="enterprise_mcp", required=_mcp_required,
+                status="UP" if connected else "DOWN",
+                detail=_detail(
+                    "наблюдатель не собран; суждение по состоянию сессии "
+                    f"(connected={connected})"
+                ),
+            )
+        status = monitor.status()
+        if not status.ever_checked:
+            # Проверка идёт до первой пробы: на старте это норма, а не поломка.
+            # Доказательство — состояние сессии после рукопожатия.
+            connected = bool(getattr(client, "is_connected", False))
+            return ComponentStatus(
+                name="enterprise_mcp", required=_mcp_required,
+                status="UP" if connected else "DOWN",
+                detail=_detail("проба ещё не выполнялась, суждение по сессии"),
+            )
+        return ComponentStatus(
+            name="enterprise_mcp", required=_mcp_required,
+            status="UP" if status.up else "DOWN",
+            detail=_detail(
+                f"{status.summary()}, ошибка={status.error or '-'}"
+            ),
+        )
+
+    ctx.runtime_readiness.register(
+        "enterprise_mcp", check_enterprise_mcp, required=_mcp_required
+    )
+
 
 def _make_config_service(
     script_dir: Path,
@@ -1613,6 +1685,83 @@ def _make_session_mirror(ctx: ApplicationContext) -> Any | None:
         sync_lag_threshold_seconds=sync_lag_threshold_seconds,
         missing_cycles_threshold=missing_cycles_threshold,
     )
+
+
+def _make_mcp_health_monitor(ctx: ApplicationContext) -> Any | None:
+    """Собрать наблюдателя за живостью платформы.
+
+    Наблюдатель существует только вместе с клиентом: нечего наблюдать, если
+    платформа не объявлена. Интервал берётся из того же раздела
+    ``gateway.agent.enterprise_mcp``, который объявляет процесс, — отдельная
+    настройка рядом с ним означала бы два места, где можно забыть про живое
+    наблюдение.
+
+    Публикация событий подключается лениво: ``bus`` к этому моменту уже
+    собран, но проверка приводит его к ``Any``, и лучше не тащить типы шины в
+    фабрику подсистемы.
+    """
+    client = getattr(ctx, "enterprise_mcp", None)
+    if client is None:
+        return None
+
+    interval = 30.0
+    try:
+        section = ctx.config_service.settings_section("gateway")
+        mcp_cfg = section.get("agent", {}).get("enterprise_mcp", {})
+        if isinstance(mcp_cfg, dict) and mcp_cfg.get("health_interval_sec"):
+            interval = float(mcp_cfg["health_interval_sec"])
+    except Exception:  # noqa: BLE001 - дефолт наблюдателя лучше, чем его отсутствие
+        interval = 30.0
+
+    from lib.gateway.mcp_health import (
+        SERVICE_SESSION_ID,
+        SERVICE_USER,
+        McpHealthMonitor,
+    )
+
+    async def _publish(
+        event_type: str,
+        name: str,
+        payload: dict,
+        level: str = "WARN",
+    ) -> None:
+        """Записать событие наблюдателя в журнал.
+
+        Путь тот же, что у канала и зеркала: ``try_log_event`` с
+        ``DbLoggingService``. Прямая публикация в шину была бы неверной — на
+        шине нет подписчика на служебные события фоновой подсистемы, и такая
+        строка просто потерялась бы молча.
+
+        Оговорка, которая здесь и зафиксирована: когда платформа не отвечает,
+        журнал ходит через неё, и при транспорте через ``log_events`` событие
+        может не доехать до базы — на этот случай у журнала есть локальный
+        fallback. Поэтому основной сигнал о недоступности — строка лога
+        наблюдателя, а не запись в журнале.
+        """
+        svc = getattr(ctx, "db_logging_service", None)
+        if svc is None:
+            return
+        from lib.services.db_logging_service import LogEvent, try_log_event
+
+        try_log_event(
+            svc,
+            LogEvent(
+                event_type=event_type,
+                level=level,
+                summary=f"{name}: {payload.get('error') or 'ok'}",
+                session_id=SERVICE_SESSION_ID,
+                user_id=SERVICE_USER,
+                payload={"name": name, **payload},
+            ),
+            producer="McpHealthMonitor",
+            event_type=event_type,
+        )
+
+    monitor = McpHealthMonitor(client, interval_sec=interval, publish=_publish)
+    logger.info(
+        "enterprise-mcp: наблюдение за живостью включено, интервал %ss", interval
+    )
+    return monitor
 
 
 def _make_compaction_service(ctx: ApplicationContext) -> Any | None:
