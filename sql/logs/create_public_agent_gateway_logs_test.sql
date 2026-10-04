@@ -40,13 +40,15 @@ CREATE TABLE IF NOT EXISTS public.agent_gateway_logs_test (
     payload      JSONB,
     metadata     JSONB,
 
+    PRIMARY KEY (id),
+
     CONSTRAINT valid_level CHECK (level IN ('DEBUG', 'INFO', 'WARN', 'ERROR'))
 );
 
--- Ключ распределения — id, как в боевом файле: уникальный UUID даёт
--- равномерную запись по сегментам, а хеш по времени упирал бы запись
--- журнала в один сегмент. PK у таблицы нет, поэтому ограничение «ключ
--- распределения — подмножество ключа» здесь не действует. Клауза объявлена
+-- Ключ распределения — id, как в боевом файле: он же и есть первичный
+-- ключ, поэтому ограничение «ключ распределения — подмножество ключа»
+-- выполнено, а хеш по времени упирал бы запись журнала в один сегмент.
+-- Клауза объявлена
 -- ограждённым шагом, а не в теле CREATE TABLE, потому что файлы из sql/
 -- применяются и к PostgreSQL 13.22, где её нет в синтаксисе.
 DO $distribution$
@@ -63,6 +65,50 @@ BEGIN
     END IF;
 END
 $distribution$;
+
+-- ---------------------------------------------------------------------------
+-- Момент события и ключ порядка: тестовый клон повторяет prod-миграцию
+-- V008__agent_gateway_logs_event_time_columns.sql.
+--
+-- Колонки ЗДЕСЬ ОСТАЮТСЯ NULLABLE намеренно. Ограничение NOT NULL в prod
+-- убирает представимость дефекта, но не отменяет читательскую обязанность:
+-- контракт двухчастного чтения оборота и счётчик unattributed обязаны
+-- проверяться негативными тестами там, где NULL представим, — то есть здесь.
+-- Наложить NOT NULL в тестовом профиле значит delete-тестами, которыми
+-- держится требование «Отсутствие ключа порядка определено и не молчит».
+--
+-- Порядок шагов в prod (nullable → backfill → очистка → ограничение
+-- непустоты) здесь не воспроизводится целиком: очистка УДАЛЯЕТ строки, а
+-- тестовый профиль для этого не предназначен, и объём удаления задаёт
+-- замер, а не файл DDL. Порядок проверяется отдельным тестом на самом файле
+-- миграции.
+--
+-- ADD COLUMN IF NOT EXISTS (9.6) на 9.4 недоступен, поэтому каждая колонка
+-- добавляется через проверку information_schema.columns. Проверка нужна и
+-- ради идемпотентности: файл применяют повторно, и без неё второй прогос
+-- упал бы на «column already exists».
+-- ---------------------------------------------------------------------------
+DO $columns$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'agent_gateway_logs_test'
+          AND column_name  = 'seq'
+    ) THEN
+        ALTER TABLE public.agent_gateway_logs_test ADD COLUMN seq BIGINT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'agent_gateway_logs_test'
+          AND column_name  = 'occurred_at'
+    ) THEN
+        ALTER TABLE public.agent_gateway_logs_test ADD COLUMN occurred_at TIMESTAMPTZ;
+    END IF;
+END
+$columns$;
 
 DO $indexes$
 BEGIN
@@ -124,50 +170,6 @@ COMMENT ON INDEX  public.agent_gateway_logs_test_user_id_timestamp_idx IS 'Об�
 -- TABLE IF NOT EXISTS на уже существующей таблице default не выставит).
 ALTER TABLE public.agent_gateway_logs_test
     ALTER COLUMN id SET DEFAULT gen_random_uuid();
-
--- ---------------------------------------------------------------------------
--- Момент события и ключ порядка: тестовый клон повторяет prod-миграцию
--- V008__agent_gateway_logs_event_time_columns.sql.
---
--- Колонки ЗДЕСЬ ОСТАЮТСЯ NULLABLE намеренно. Ограничение NOT NULL в prod
--- убирает представимость дефекта, но не отменяет читательскую обязанность:
--- контракт двухчастного чтения оборота и счётчик unattributed обязаны
--- проверяться негативными тестами там, где NULL представим, — то есть здесь.
--- Наложить NOT NULL в тестовом профиле значит delete-тестами, которыми
--- держится требование «Отсутствие ключа порядка определено и не молчит».
---
--- Порядок шагов в prod (nullable → backfill → очистка → ограничение
--- непустоты) здесь не воспроизводится целиком: очистка УДАЛЯЕТ строки, а
--- тестовый профиль для этого не предназначен, и объём удаления задаёт
--- замер, а не файл DDL. Порядок проверяется отдельным тестом на самом файле
--- миграции.
---
--- ADD COLUMN IF NOT EXISTS (9.6) на 9.4 недоступен, поэтому каждая колонка
--- добавляется через проверку information_schema.columns. Проверка нужна и
--- ради идемпотентности: файл применяют повторно, и без неё второй прогос
--- упал бы на «column already exists».
--- ---------------------------------------------------------------------------
-DO $columns$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name   = 'agent_gateway_logs_test'
-          AND column_name  = 'seq'
-    ) THEN
-        ALTER TABLE public.agent_gateway_logs_test ADD COLUMN seq BIGINT;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name   = 'agent_gateway_logs_test'
-          AND column_name  = 'occurred_at'
-    ) THEN
-        ALTER TABLE public.agent_gateway_logs_test ADD COLUMN occurred_at TIMESTAMPTZ;
-    END IF;
-END
-$columns$;
 
 COMMENT ON COLUMN public.agent_gateway_logs_test.seq IS
     'Test-профиль: ключ порядка строки журнала (момент события в наносекундах). Nullable намеренно — см. комментарий выше: контракт чтения без ключа проверяется здесь. Канонический порядок — ORDER BY seq, id.';
