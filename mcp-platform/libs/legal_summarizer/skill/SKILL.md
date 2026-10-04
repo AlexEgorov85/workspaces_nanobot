@@ -38,8 +38,8 @@ description: >-
 есть оболочка.
 
 > ⚠️ **ПРАВИЛО #1 (нарушать нельзя):** саммари делает ТОЛЬКО
-> `python <каталог навыка>/scripts/cli.py --file <path>`. Никаких
-> прямых вызовов `workspace.utils.office_files.extract_metadata()`,
+> `python -m libs.legal_summarizer.cli --file <path>`. Никаких
+> прямых вызовов `office_files.extract_metadata()`,
 > `extract_text()` или `from utils.office_files import …`.
 >
 > `office_files.extract_metadata()` (раньше `summarize()`) — это **НЕ
@@ -78,8 +78,9 @@ description: >-
 ## Запуск
 
 > ℹ️ PYTHONPATH выставлять **не нужно** — `cli.py` сам подкладывает
-> корень репо и `scripts/` в `sys.path`. Просто запускай `python` с
-> абсолютным путём к `cli.py` (см. команды ниже).
+> корень платформы в `sys.path`. Запускай его как модуль из корня
+> платформы: `python -m libs.legal_summarizer.cli …` (абсолютный путь к файлу
+> тоже работает — оба способа равнозначны).
 
 > ⚠️ **ПРАВИЛО #4 (никакого retry-цикла):** если `cli.py` упал с
 > `ImportError`/`timeout`/просто не печатает sentinel
@@ -235,45 +236,42 @@ pipeline (новый map-reduce с полным LLM-анализом выбра�
 `legal_summarizer_query`:
 
 ```python
-legal_summarizer_query(operation_id="<op_id>", field="stats")    # метрики + article_count
-legal_summarizer_query(operation_id="<op_id>", field="chunks")   # список chunks + summaries
-legal_summarizer_query(operation_id="<op_id>", field="sections")  # список sections
-legal_summarizer_query(operation_id="<op_id>", field="tree")      # иерархия sections
-legal_summarizer_query(operation_id="<op_id>", field="all")      # весь manifest.json
+mcp_enterprise_query_operation(operation_id="<op_id>", field="stats")    # метрики + article_count
+mcp_enterprise_query_operation(operation_id="<op_id>", field="chunks")   # список chunks + summaries
+mcp_enterprise_query_operation(operation_id="<op_id>", field="sections")  # список sections
+mcp_enterprise_query_operation(operation_id="<op_id>", field="tree")      # иерархия sections
+mcp_enterprise_query_operation(operation_id="<op_id>", field="all")      # весь manifest.json
 ```
 
-Подробности — `workspace/TOOLS.md` раздел «legal_summarizer_query».
+Подробности — `workspace/TOOLS.md` раздел `mcp_enterprise_query_operation`.
 
-### IPC contract for follow-up queries (tool `legal_summarizer_query` ↔ `cli_query.py`)
+### Контракт отказа по операции `query_operation`
 
-`cli_query.py` пишет в stdout **JSON-объект** с фиксированной семантикой
-по комбинации exit code и `status`-поля. Tool `legal_summarizer_query`
-читает stdout как есть и пробрасывает доменные ошибки агенту.
+Вызов идёт по протоколу MCP **в том же процессе**, где живёт capability.
+Подпроцесса нет, его stdout не разбирается, а кодов возврата у вызова нет —
+есть признак `isError` и конверт. Всё, что ниже раньше описывало wrapper и
+exit code, снято вместе с агентской обёрткой (change
+`2026-10-03-mcp-native-tools`, п. D6): `cli_failed`, `cli_not_found`,
+`subprocess_error`, `empty_response` и `invalid_json` не существуют ни в коде,
+ни в контракте, и искать их в отказе бессмысленно.
 
-| exit code | stdout `status` | тип результата | `error_type` (если `status="error"`) |
-| --- | --- | --- | --- |
-| 0 | `"ok"` | success | — |
-| ≠ 0 | `"error"` (JSON-объект) | domain error | `manifest_not_found` / `manifest_corrupted` / `manifest_unsupported_version` |
-| ≠ 0 | другое (пустой stdout / невалидный JSON / JSON без `status` / JSON-массив / `status != "error"`) | process failure | `cli_failed` |
-| 0 | пустой stdout | empty response | `empty_response` |
-| 0 | stdout не JSON | process failure (на стороне wrapper) | `invalid_json` |
-
-Wrapper-уровневые `error_type`, не зависящие от CLI:
-`timeout` (subprocess перешёл через `tools.legal_summarizer_query.timeout_sec`),
-`cli_not_found` (cli_query.py отсутствует на ожидаемом пути),
-`subprocess_error` (`subprocess.run` бросил `OSError` до старта).
+| ситуация | `error_type` домена | код конверта |
+| --- | --- | --- |
+| манифеста нет | `manifest_not_found` | `not_found` |
+| манифест не парсится | `manifest_corrupted` | `internal` |
+| версия манифеста не 2 | `manifest_unsupported_version` | `upstream_unavailable` |
+| `field` не из перечня | `invalid_field` | `invalid_params` |
 
 **Правила:**
 
-- `status == "ok"` И exit code == 0 — единственный «успешный» путь.
-  Tool возвращает payload as is (JSON-строка, UTF-8).
-- `status == "error"` И exit code ≠ 0 — **доменная ошибка**. Tool
-  пробрасывает JSON as is, **все поля сохранены** (`operation_id`,
-  `path`, `version_observed`, `message`, и любые будущие). Никакой
-  собственный envelope поверх не ставится.
-- Всё остальное при non-zero exit — реальная поломка CLI-процесса;
-  tool возвращает собственный envelope с `error_type = "cli_failed"`
-  и первыми 1000 символами stderr.
+- Успех — единственный путь без отказа: тело ответа с `status = "ok"`.
+- Отказ приходит конвертом с кодом из таблицы. Читать надо код, а не текст:
+  текст меняется, а код объявлен один раз и сверяется стражем с перечнем
+  домена — рассогласоваться они не могут молча.
+- `field` вне перечня **отказывает**, а не отдаёт `manifest` целиком. Раньше
+  значение не из шести уходило в ветку `all`, и модель получала
+  `status = "ok"` с целым документом вместо отказа: опечатка в имени поля
+  стоила ответа на вопрос и не давала ни отказа, ни намёка на ошибку.
 
 #### Семантика `chunks_total` vs `field=chunks`
 
@@ -295,12 +293,21 @@ Wrapper-уровневые `error_type`, не зависящие от CLI:
 
 Capability состоит из:
 
-* `cli.py` — CLI entry point.
-* `cli_query.py` — follow-up по `operation_id`.
-* девять runtime-слоёв рядом с ними:
+* `servers/enterprise/capabilities/legal_summarizer/service/main.py` —
+  единственное место, где домен встречается с остальной платформой; отдаёт
+  операцию `query_operation`.
+* `servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py` —
+  сама операция: схема строится из сигнатуры обработчика, домен вызывается
+  в том же процессе.
+* `../cli.py` — CLI-оболочка суммаризации, для ручного запуска.
+* `../cli_query.py` — оболочка над доменной `query_operation` для ручного
+  запуска; в пути вызова модели не стоит.
+* девять runtime-слоёв рядом с доменом:
   `application/`, `cache/`, `chunking/`, `document/`, `execution/`,
   `llm/`, `output/`, `planning/`, `retrieval/`.
-* `prompts/` — LLM-инструкции (summarize / section_reduce / reduce).
+* `prompts/` — LLM-инструкции (summarize / section_reduce / reduce). Читает их
+  `llm/prompts_runtime.py`; каталог лежит здесь, рядом с этим файлом, а не в
+  корне домена.
 * `references/` — подробные документы: `architecture.md`, `contracts.md`,
   `testing.md`.
 
