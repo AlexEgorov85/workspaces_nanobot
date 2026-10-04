@@ -1,11 +1,12 @@
 """Порог оператора доезжает до обоих писателей журнала процесса.
 
 Агент объявляет порог журнала в одном месте — ``config.json →
-gateway.agent.logging.db.min_level`` — и передаёт его платформе флагом запуска
-``--log-min-level``. Значение доезжало до **одного** писателя: до буфера журнала
-capability ``data``. Второй писатель — ``EventWriter`` слоя исполнения,
-создававшийся в ``build_execution_layer`` без порога, — резал внутренние события
-платформы по своему значению по умолчанию ``INFO``.
+gateway.agent.logging.db.min_level`` — и передаёт его платформе блоком
+настроек (``--agent-settings-file``, ``specs/runtime/platform-settings``).
+Значение доезжало до **одного** писателя: до буфера журнала capability
+``data``. Второй писатель — ``EventWriter`` слоя исполнения, создававшийся в
+``build_execution_layer`` без порога, — резал внутренние события платформы по
+своему значению по умолчанию ``INFO``.
 
 Итог был ровно тот, который требование запрещает: при ``DEBUG`` в боевом
 конфиге события агента писались, а ``tool.*`` и ``quality.check`` выпадали. Одна
@@ -96,11 +97,23 @@ def _service(**kwargs: Any) -> DataService:
     )
 
 
-def _writer(session_root: Path, **kwargs: Any) -> tuple[Any, Sink]:
-    """Слой исполнения с порогом оператора и приёмником, который его видит."""
+def _writer(session_root: Path, min_level: str | None = None) -> tuple[Any, Sink]:
+    """Слой исполнения с порогом оператора и приёмником, который его видит.
+
+    Порог кладётся в **слой разрешённых настроек**, а не в параметр
+    сборки: так его теперь доставляет блок агента, и второй путь —
+    параметр, который кто-то передаст литералом, — не появляется.
+    """
     sink = Sink()
+    # Ключ кладется всегда: настоящий ``Settings`` для отсутствующего значения
+    # блока отдаёт пустую строку, и «не задан» — это пустая строка, а не
+    # отсутствие ключа. Отсутствие ключа в словаре значений означает
+    # офлайн-сборку, которой блока нет вовсе, и там дефолт писателя.
+    settings = {
+        "ENTERPRISE_LOG_MIN_LEVEL": "" if min_level is None else min_level,
+    }
     layer = build_execution_layer(
-        {}, sink=sink, session_root=session_root, **kwargs
+        settings, sink=sink, session_root=session_root
     )
     return layer, sink
 
@@ -155,7 +168,7 @@ class TestThresholdReachesTheEventWriter:
     def test_no_threshold_means_write_everything(self, tmp_path: Path) -> None:
         """``None`` — «порог не задан», а не «дефолт ``INFO``».
 
-        Так же трактует флаг писатель capability ``data``: без ``--log-min-level``
+        Так же трактует пустое значение писатель capability ``data``: без блока
         платформа пишет всё. Подстановка ``INFO`` здесь означала бы, что сервер,
         поднятый без агента, режет то, что буфер журнала пропускает, — то есть
         два порога в одном процессе, причём в обратную сторону.
@@ -241,26 +254,58 @@ class TestWiringIsNotOptional:
             "настройки оператора."
         )
 
-    def test_every_execution_layer_is_built_with_a_threshold(self) -> None:
+    def test_every_execution_layer_takes_the_threshold_from_the_settings_layer(
+        self,
+    ) -> None:
+        """Ни один вызов не приносит порог литералом.
+
+        Слой исполнения — писатель внутренних событий платформы, и порог у
+        него теперь один: из слоя разрешённых настроек (его наполняет блок
+        агента). Литерал в вызове — это второй источник того же значения, и он
+        разошёлся бы с блоком молча.
+        """
         sites = _call_sites("build_execution_layer")
         assert sites, "скан не нашёл ни одного build_execution_layer(...)"
-        missing = [
+        literals = [
             where
             for where, node in sites
-            if not any(keyword.arg == "min_level" for keyword in node.keywords)
+            for keyword in node.keywords
+            if keyword.arg == "min_level"
+            and isinstance(keyword.value, ast.Constant)
         ]
-        assert not missing, (
-            f"слой исполнения собран без порога журнала: {missing}. Слой — это "
-            "и есть писатель внутренних событий платформы, и без явного значения "
-            "он вернётся к своему дефолту."
+        assert not literals, (
+            f"слой исполнения собран с порогом литералом: {literals}. Порог "
+            "приходит блоком агента и разбирается в писателе журнала, где шкала "
+            "объявлена один раз."
         )
 
-    def test_server_hands_the_parsed_flag_to_the_writer(self) -> None:
-        """Наверх идёт именно то, что разобрано из ``--log-min-level``.
+    def test_the_default_threshold_is_the_settings_layer(self) -> None:
+        """Дефолт сборки — «спросить слой», а не литерал.
 
-        Литерал, константа или второй разбор флага означали бы, что у журнала
-        снова два ответа на вопрос «каким уровнем он пишется», причём
-        разъедущихся молча: флаг разбирается, а применяется другое значение.
+        Если дефолтом станет ``None`` или ``INFO``, сервер, собранный без
+        блока, отрежет внутренние события по значению, о котором никто не
+        объявлял, — и разъезд будет молчаливым.
+        """
+        import inspect
+
+        from libs.enterprise_common.execution.factory import FROM_SETTINGS
+
+        default = inspect.signature(build_execution_layer).parameters[
+            "min_level"
+        ].default
+        assert default is FROM_SETTINGS, (
+            f"дефолт min_level = {default!r}, а должен быть маркером "
+            "«взять из слоя разрешённых настроек»"
+        )
+
+    def test_server_hands_the_block_to_the_settings_layer(self) -> None:
+        """Сервер отдаёт писателю слой настроек, а не значение порога.
+
+        Единственный путь доставки — блок агента
+        (``--agent-settings-file`` → ``Settings(agent_settings_path=…)`` →
+        ``settings.get``). Второй путь — литерал, константа или разбор флага
+        в ``server.py`` — означал бы, что у журнала снова два ответа на
+        вопрос «каким уровнем он пишется», и разъедутся они молча.
         """
         tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"), filename=str(SERVER_SRC))
         calls = [
@@ -271,15 +316,25 @@ class TestWiringIsNotOptional:
             and node.func.id == "build_execution_layer"
         ]
         assert calls, "в server.py нет вызова build_execution_layer(...)"
-        passed = [
-            ast.unparse(keyword.value)
-            for call in calls
-            for keyword in call.keywords
+        assert not [
+            keyword.arg for call in calls for keyword in call.keywords
             if keyword.arg == "min_level"
+        ], "сервер передаёт порог параметром — это второй путь доставки"
+        settings_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Settings"
         ]
-        assert passed == ["log_min_level"], (
-            f"вызов build_execution_layer передаёт min_level={passed}, а не значение, "
-            "разобранное из флага"
+        assert settings_calls, "в server.py нет вызова Settings(...)"
+        assert any(
+            keyword.arg == "agent_settings_path"
+            for call in settings_calls
+            for keyword in call.keywords
+        ), (
+            "Settings собирается без пути к блоку: флаг разбирается и не "
+            "применяется"
         )
 
     def test_server_does_not_fall_back_to_the_default_threshold(self) -> None:

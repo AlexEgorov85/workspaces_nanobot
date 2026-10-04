@@ -1,21 +1,27 @@
-"""Порог журнала доезжает до платформы флагом запуска, а не в каждом вызове.
+"""Порог журнала доезжает до платформы блоком настроек, а не в каждом вызове.
 
 Требование заказчика: «уровень логирования регулируется в одном месте, без
 переписывания кода» и «MCP будет всегда знать как логировать у себя».
 Объявление одно — ``config.json → gateway.agent.logging.db.min_level`` — и его
-уже читают две половины агента: писатель журнала
-(``ApplicationContext._make_db_logging``) и клиент MCP
-(``client_from_settings``), который отдаёт то же значение платформе флагом
-``--log-min-level``.
+читают две половины агента: писатель журнала
+(``ApplicationContext._make_db_logging``) и сборка блока для платформы
+(``lib/services/agent_settings.py``), которая пишет файл и передаёт платформе
+его путь флагом ``--agent-settings-file``.
+
+Раньше здесь был страж флага ``--log-min-level``. Смена доставки — не смена
+смысла: значение по-прежнему одно и едет один раз при старте, только вместо
+командной строки его несёт файл. Причина замены — командная строка процесса
+видна всем, кто может прочитать список процессов, а блок сделан с расчётом на
+то, что в нём однажды окажется секрет (``specs/runtime/platform-settings``).
 
 Проверка «одного места» — в ``tests/test_journal_threshold_single_source.py``:
 там перечень читателей, отсутствие молчаливых дефолтов, отсутствие чтения из
-окружения и сверка значений писателя и MCP на одном наборе настроек. Здесь —
-поведение самой проводки в клиенте: что флаг уходит, что уходит ровно один
-раз и что значение едет как есть.
+окружения и сверка значений писателя и блока на одном наборе настроек. Здесь —
+поведение самой проводки: что блок пишется, что в ``argv`` уезжает только путь
+и что значение едет как есть.
 
-Почему флагом запуска, а не в ``params._meta`` каждого вызова
-------------------------------------------------------------
+Почему блоком, а не в ``params._meta`` каждого вызова
+------------------------------------------------------
 
 1. Значение, перечитываемое на каждый вызов, способно разъехаться между
    вызовами одного оборота. Это ровно тот класс дефекта, который в репозитории
@@ -30,13 +36,15 @@
 Стражи
 ------
 
-* ``test_threshold_is_forwarded_as_a_startup_flag`` — значение из
-  конфигурации реально уходит в argv;
-* ``test_absent_threshold_adds_no_flag`` — без ключа флага нет: подстановка
-  дефолта здесь была бы вторым местом, объявления которого нет;
+* ``test_threshold_reaches_the_platform_in_the_block`` — значение из
+  конфигурации реально лежит в файле блока;
+* ``test_absent_threshold_publishes_no_key`` — без ключа в блоке нет записи:
+  подстановка дефолта здесь была бы вторым местом, объявления которого нет;
 * ``test_value_is_forwarded_verbatim`` — агент не приводит уровень сам: разбор
   живёт на платформе, где шкала объявлена один раз, и незнакомый уровень там
   роняет старт, а не тихо становится ``INFO``;
+* ``test_argv_carries_the_path_and_no_value`` — в командной строке путь и
+  ни одного значения;
 * ``test_flag_is_declared_in_exactly_one_place`` — единственное обращение к
   имени флага: переехать в метаданные вызова он не может.
 """
@@ -44,37 +52,77 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
-from lib.services.enterprise_mcp_client import (
-    LOG_MIN_LEVEL_FLAG,
-    client_from_settings,
+import pytest
+
+from lib.services.agent_settings import (
+    AGENT_SETTINGS_DECLARATION,
+    AGENT_SETTINGS_FILE_FLAG,
+    block_values,
 )
+from lib.services.enterprise_mcp_client import client_from_settings
 
-CLIENT_SRC = (
-    Path(__file__).resolve().parent.parent / "lib" / "services" / "enterprise_mcp_client.py"
-)
+ROOT = Path(__file__).resolve().parent.parent
+AGENT_SETTINGS_SRC = ROOT / "lib" / "services" / "agent_settings.py"
 
 
-def _section() -> dict:
-    """Раздел ``enterprise_mcp``, минимальный и рабочий."""
+def _section(cwd: Path | None = None) -> dict:
+    """Конфигурация агента, минимальная и рабочая."""
+    enterprise: dict = {
+        "enabled": True,
+        "command": "python",
+        "args": ["-m", "servers.enterprise.server"],
+    }
+    if cwd is not None:
+        enterprise["cwd"] = str(cwd)
     return {
-        "enterprise_mcp": {
-            "enabled": True,
-            "command": "python",
-            "args": ["-m", "servers.enterprise.server"],
-        }
+        "enterprise_mcp": enterprise,
+        "logging": {"db": {"min_level": "WARN"}},
     }
 
 
-def _flag_value(settings: dict) -> str | None:
-    """Значение после ``--log-min-level`` в argv, либо ``None``."""
+def _platform_json(tmp_path: Path) -> Path:
+    """Временный ``platform.json`` с объявлением пути к блоку."""
+    path = tmp_path / "platform.json"
+    path.write_text(
+        json.dumps(
+            {AGENT_SETTINGS_DECLARATION: "${NANOBOT_WORKSPACE}/block.json"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _workspace_in_tmp(monkeypatch, tmp_path: Path) -> None:
+    """Подстановка ``${NANOBOT_WORKSPACE}`` указывает в ``tmp_path``.
+
+    Объявление пути разворачивается из окружения процесса, а это окружение
+    у тестов — настоящее: без подмены блок писался бы в рабочий каталог
+    агента, то есть тест оставлял бы файл там, где его никто не ждёт.
+    """
+    monkeypatch.setenv("NANOBOT_WORKSPACE", str(tmp_path / "workspace"))
+
+
+def _argv(tmp_path: Path, **logging: object) -> list[str]:
+    """``argv`` собранного клиента для конфигурации из аргументов."""
+    _platform_json(tmp_path)
+    settings = _section(tmp_path)
+    settings["logging"]["db"] = logging
     client = client_from_settings(settings)
     assert client is not None
-    args = list(client.describe()["args"])
-    if LOG_MIN_LEVEL_FLAG not in args:
-        return None
-    return args[args.index(LOG_MIN_LEVEL_FLAG) + 1]
+    return list(client.describe()["args"])
+
+
+def _published_block(tmp_path: Path, **logging: object) -> dict:
+    """Содержимое файла блока, до которого дошёл клиент."""
+    args = _argv(tmp_path, **logging)
+    assert AGENT_SETTINGS_FILE_FLAG in args
+    index = args.index(AGENT_SETTINGS_FILE_FLAG)
+    return json.loads(Path(args[index + 1]).read_text(encoding="utf-8"))
 
 
 def _code_nodes(source: str) -> list[ast.AST]:
@@ -108,36 +156,54 @@ def _code_nodes(source: str) -> list[ast.AST]:
 class TestClientForwardsTheThreshold:
     """Значение из ``config.json`` доезжает до платформы при старте."""
 
-    def test_threshold_is_forwarded_as_a_startup_flag(self) -> None:
-        settings = _section()
-        settings["logging"] = {"db": {"min_level": "WARN"}}
-        assert _flag_value(settings) == "WARN"
+    def test_threshold_reaches_the_platform_in_the_block(self, tmp_path: Path) -> None:
+        assert _published_block(tmp_path, min_level="WARN") == {
+            "logging.db.min_level": "WARN"
+        }
 
-    def test_absent_threshold_adds_no_flag(self) -> None:
-        """Нет ключа — нет флага: платформа пишет всё, как сейчас.
+    def test_absent_threshold_publishes_no_key(self, tmp_path: Path) -> None:
+        """Нет ключа — нет записи в блоке: платформа пишет всё, как сейчас.
 
         Отсутствие ключа не ошибка и не «дефолт INFO»: дефолт, подставленный
         здесь, был бы вторым местом, объявления которого нет.
-        """
-        assert _flag_value(_section()) is None
-        settings = _section()
-        settings["logging"] = {"db": {}}
-        assert _flag_value(settings) is None
 
-    def test_value_is_forwarded_verbatim(self) -> None:
-        """Синоним ``WARNING`` уезжает как ``WARNING``, а не как ``WARN``.
+        Файл при этом **пишется**: «файла нет» и «значений нет» — разные
+        состояния в стартовом логе, и без файла второе выглядело бы как первое.
+        """
+        assert _published_block(tmp_path) == {}
+        args = _argv(tmp_path)
+        index = args.index(AGENT_SETTINGS_FILE_FLAG)
+        assert Path(args[index + 1]).exists()
+        settings = _section()
+        assert block_values(settings) == {"logging.db.min_level": "WARN"}
+        settings["logging"] = {"db": {}}
+        assert block_values(settings) == {}
+
+    def test_value_is_forwarded_verbatim(self, tmp_path: Path) -> None:
+        """Синоним ``WARNING`` уезжает как ``warning``, а не как ``WARN``.
 
         Разбор уровня — на платформе, где шкала объявлена один раз. Если бы
         агент приводил значение здесь, то на одной стороне шкала была бы
         объявлена дважды, а неизвестный уровень молча превратился бы в
         ``INFO`` вместо отказа на старте.
         """
-        settings = _section()
-        settings["logging"] = {"db": {"min_level": "warning"}}
-        assert _flag_value(settings) == "warning"
+        assert _published_block(tmp_path, min_level="warning") == {
+            "logging.db.min_level": "warning"
+        }
+
+    def test_argv_carries_the_path_and_no_value(self, tmp_path: Path) -> None:
+        """В ``argv`` — путь и ни одного значения.
+
+        Значение в командной строке читается из списка процессов; блок сделан
+        с расчётом на секрет, и секрет в ``argv`` — это утечка по построению.
+        """
+        args = _argv(tmp_path, min_level="WARN")
+        index = args.index(AGENT_SETTINGS_FILE_FLAG)
+        assert Path(args[index + 1]).name == "block.json"
+        assert "WARN" not in args
 
     def test_flag_is_declared_in_exactly_one_place(self) -> None:
-        """Флаг дописывается в argv и nowhere else.
+        """Флаг собирается в одном месте — ``argv`` при старте.
 
         Одно использование имени константы означает, что флаг не может
         оказаться в метаданных вызова: переезд «в ``params._meta``, чтобы
@@ -148,12 +214,12 @@ class TestClientForwardsTheThreshold:
         """
         uses = [
             node
-            for node in _code_nodes(CLIENT_SRC.read_text(encoding="utf-8"))
+            for node in _code_nodes(AGENT_SETTINGS_SRC.read_text(encoding="utf-8"))
             if isinstance(node, ast.Name)
-            and node.id == "LOG_MIN_LEVEL_FLAG"
+            and node.id == "AGENT_SETTINGS_FILE_FLAG"
             and isinstance(node.ctx, ast.Load)
         ]
         assert len(uses) == 1, (
-            f"константа {LOG_MIN_LEVEL_FLAG} используется {len(uses)} раз(ы). "
+            f"константа {AGENT_SETTINGS_FILE_FLAG} используется {len(uses)} раз(ы). "
             "Флаг объявляется в одном месте — argv при старте."
         )

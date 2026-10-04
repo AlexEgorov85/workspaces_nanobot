@@ -136,19 +136,25 @@ class TestServerDeclaration:
         assert "DATABASE_URL" not in env
         assert not [k for k in env if "API_KEY" in k or "PASSWORD" in k]
 
-    def test_profile_and_journal_level_arrive_as_values(self):
-        """Имя контура и порог журнала едут значениями, а не флагами агента.
+    def test_profile_and_block_path_arrive_as_values(self):
+        """Имя контура и путь к блоку едут значениями, а не флагами агента.
 
         ``args`` — список, и ``${VAR}`` подставляет только значение. Пустое
-        значение платформа читает как «флага нет» и берёт базовый контур.
+        значение платформа читает как «флага нет» и берёт базовый контур;
+        для блока пустое значение означает «настроек агента нет».
+
+        Порога журнала в ``args`` нет и быть не должно: значение едет в
+        файле блока, а командная строка процесса видна всем, кто может её
+        прочитать.
         """
         args = _server()["args"]
         assert "--profile" in args
         assert args[args.index("--profile") + 1] == "${NANOBOT_ENTERPRISE_MCP_PROFILE}"
-        assert "--log-min-level" in args
-        assert args[args.index("--log-min-level") + 1] == (
-            "${NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL}"
+        assert "--agent-settings-file" in args
+        assert args[args.index("--agent-settings-file") + 1] == (
+            "${NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS}"
         )
+        assert "--log-min-level" not in args
 
 
 class TestPlatformGate:
@@ -211,13 +217,33 @@ class TestProfileExport:
         agent_config._export_platform_process_env({}, "test")
         assert os.environ["NANOBOT_ENTERPRISE_MCP_PROFILE"] == "test"
 
-    def test_journal_level_reads_lifted_path(self, env):
-        """Ключ поднят в корень из ``gateway.agent`` — читать надо корень."""
+    def test_block_path_reads_lifted_section(self, env, tmp_path):
+        """Корень платформы берётся из поднятой секции, а не из вложенной.
+
+        ``_lift_agent_sections`` убирает ``gateway.agent`` из конфигурации,
+        поэтому читать вложенный путь значит держать вторую копию одного
+        объявления. Путь к блоку, в свою очередь, **не вычисляется**: он
+        приходит из ``platform.json → agent_settings``, и страж проверяет
+        именно это.
+        """
         import config as agent_config
 
-        cfg = {"logging": {"db": {"min_level": "WARNING"}}}
-        agent_config._export_platform_process_env(cfg, "prod")
-        assert os.environ["NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL"] == "WARNING"
+        platform = tmp_path / "platform.json"
+        platform.write_text(
+            json.dumps(
+                {"agent_settings": "${NANOBOT_WORKSPACE}/block.json"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        agent_config._export_platform_process_env(
+            {"enterprise_mcp": {"cwd": str(tmp_path)}}, "prod"
+        )
+        monkey = os.environ.get("NANOBOT_WORKSPACE") or ""
+        assert os.environ["NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS"] == str(
+            Path(monkey) / "block.json"
+        )
+        assert "NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL" not in os.environ
 
     def test_declared_path_matches_the_client(self):
         """Путь к порогу объявлен в двух модулях — и обязан совпадать.

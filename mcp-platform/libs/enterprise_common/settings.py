@@ -78,7 +78,36 @@ DSN — через ``resolve_dsn()``. Перечислить настройки,
 ``owner="platform"`` — у платформы есть мнение, и оно живёт в
 ``platform.json``. ``owner="agent"`` — решение агента (модель, ключ,
 адрес, путь снимка, пока снимок грузит агент), значение приходит через
-окружение и в файл не попадает никогда.
+блок настроек агента (``merge_agent_settings``), и в ``platform.json`` оно не
+попадает никогда: один источник на значение.
+
+Блок настроек агента
+--------------------
+
+Настройки с ``owner="agent"`` доезжают до платформы **блоком**: агент пишет
+файл и передаёт ровно один аргумент запуска, ``--agent-settings-file``
+(:data:`AGENT_SETTINGS_FILE_FLAG`). Словарь принимаемых ключей объявлен здесь,
+в реестре, и он же — единственный: агент не вычисляет его и своего не имеет.
+
+Значение блока — единственный его источник. Окружение процесса для агентских
+настроек не используется: окружение приоритетнее файла, и такой «экспорт»
+молча затирал бы объявление — ровно тот класс дефекта, который уже случался
+в проекте.
+
+Три отказа, и все три на старте, а не в рантайме:
+
+* неизвестный ключ (опечатка либо ключ, о котором вызывающая сторона думает,
+  что он поддержан) — с называнием ключа и принятого словаря;
+* ключ платформенной настройки — с называнием ключа и его настоящего
+  владельца: это и есть запрет перенаправления доступа к данным (DSN, имена
+  таблиц, путь снимка, состав таблиц аудита, пул, реквизиты доступа);
+* ключ агентской настройки, объявленный в ``platform.json`` — с называнием
+  ключа и обоих источников.
+
+Правило **владение, а не приоритет**: у значения один владелец, и расхождение
+диагностируется отказом. Приоритет дал бы два ответа на вопрос «что
+применяется на самом деле», и худший из них — тот, где файл выглядит
+настроенным, но не применяется.
 
 Настройки вне capability
 -----------------------
@@ -836,6 +865,23 @@ _s("ENTERPRISE_SESSION_META_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_apply_pool_settings",
        "разрешена ли рантайм-работа в явной транзакции (аренда воркера)",
        file_key="job_classes.runtime.leases"),
+    # -- блок настроек агента -----------------------------------------------
+    #
+    # Первая настройка, которая доезжает до платформы блоком: порог журнала —
+    # решение агента, потому что журнал пишет он. До этого он ехал флагом
+    # запуска ``--log-min-level``, который не был объявлен ни в одном файле:
+    # единственным следом применённого значения была строка в stderr
+    # платформы, которая исчезала вместе с процессом.
+    #
+    # ``OPTIONAL``, а не ``FROM_FILE``: capability может быть не настроена
+    # (контур без блока), и это законное состояние — писать всё. Пустой блок
+    # и отсутствующий файл дают одно и то же, и оба означают «порог не
+    # задан», а не «забыли настроить».
+    _s("ENTERPRISE_LOG_MIN_LEVEL", "str", OPTIONAL, OWNER_AGENT,
+       "libs/enterprise_common/execution/factory.py:build_execution_layer",
+       "порог долговечного журнала, ниже которого события не пишутся; "
+       "приходит блоком агента, окружение не читается",
+       file_key="logging.db.min_level"),
 )
 
 #: Имя -> настройка. Построен один раз; единственный источник правды.
@@ -1015,6 +1061,11 @@ SHARED_SETTINGS: tuple[str, ...] = (
     "ENTERPRISE_EXEC_LOG_REDACT_KEYS",
     "ENTERPRISE_EXEC_SESSION_EVENTS",
     "ENTERPRISE_EXEC_REQUIRE_CALL_META",
+    # Порог журнала — слой исполнения, а не одна capability: писатель буфера
+    # и слой исполнения читают его и там, и там. Владелец — агент, значение
+    # приходит блоком, и в platform.json его быть не должно (см.
+    # ``read_platform_file``).
+    "ENTERPRISE_LOG_MIN_LEVEL",
 )
 
 #: Секции ``platform.json``, которых нет в ``servers/enterprise/capabilities``:
@@ -1030,8 +1081,13 @@ SHARED_SETTINGS: tuple[str, ...] = (
 #: ``job_classes`` — по той же причине, что и ``pool``, но с записью на каждую
 #: аудиторию работы: секция вложена (``job_classes.model.wait_sec``), и без её
 #: объявления ключи класса выглядели бы опечатками в файле.
+#:
+#: ``agent_settings`` — объявление **пути** к файлу блока настроек агента, а не
+#: значение настройки: верхнеуровневый ключ рядом с ``execution``. Поэтому он и
+#: в :data:`RESERVED_SECTIONS` (снимается до проверки «ключ известен») и здесь
+#: (секция файла принадлежит общему коду, а не capability).
 SHARED_SECTIONS: tuple[str, ...] = (
-    "db", "pool", "job_classes", "execution", "profiles",
+    "db", "pool", "job_classes", "execution", "profiles", "agent_settings",
 )
 
 #: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуется
@@ -1246,8 +1302,12 @@ PROFILE_OWNED_KEYS = frozenset({
 
 #: Секции верхнего уровня ``platform.json``, которые НЕ являются настройками и
 #: потому не проходят проверку «ключ известен». Из них берётся только ``profiles``
-#: — оверлей имён таблиц (см. ``read_profile_overlay``).
-RESERVED_SECTIONS = frozenset({"profiles"})
+#: — оверлей имён таблиц (см. ``read_profile_overlay``) и ``agent_settings`` —
+#: объявление пути к файлу блока настроек агента (см.
+#: ``read_agent_settings_file``). Первое платформа читает сама, второе читает
+#: агент: значение настройки лежит в файле блока, а здесь объявлено только
+#: местонахождение этого файла.
+RESERVED_SECTIONS = frozenset({"profiles", "agent_settings"})
 
 
 def read_profile_overlay(profile: str, path: Path | None = None) -> dict[str, str]:
@@ -1334,13 +1394,17 @@ def read_platform_file(path: Path | None = None) -> dict[str, Any]:
     for reserved in RESERVED_SECTIONS:
         raw.pop(reserved, None)
 
+    # Блок агента — не настройка платформы и не оверлей профиля: это файл,
+    # который приходит отдельным аргументом запуска (см.
+    # ``merge_agent_settings``), а значение читает реестр. В platform.json его
+    # быть не должно так же, как и в окружении: у настройки один источник.
     allowed = {s.key for s in settings_owned_by(OWNER_PLATFORM)}
     flat: dict[str, Any] = {}
     for key, value in _flatten(raw).items():
         if key not in allowed:
             raise InfrastructureError(
                 f"{target.name}: {key!r} — не настройка платформы "
-                f"(владелец — агент, значение приходит через окружение)"
+                f"(владелец — агент, значение приходит блоком настроек агента)"
             )
         if isinstance(value, bool):
             flat[key] = "1" if value else "0"
@@ -1359,6 +1423,127 @@ def read_platform_file(path: Path | None = None) -> dict[str, Any]:
     return {BY_FILE_KEY[k].name: v for k, v in flat.items()}
 
 
+#: Единственный аргумент запуска, принимающий настройки агента. Значения в
+#: argv не едут: командная строка процесса видна всем, кто может её прочитать,
+#: а блок сделан с расчётом на то, что в нём однажды окажется секрет.
+AGENT_SETTINGS_FILE_FLAG = "--agent-settings-file"
+
+
+def agent_settings_dictionary() -> Mapping[str, Setting]:
+    """Ключи блока, которые платформа принимает, и объявляющие их настройки.
+
+    Единственное место, где словарь написан: и проверка «ключ известен», и
+    страж на перенаправление доступа к данным смотрят в него. Своего
+    словаря у агента нет — иначе у вопроса «что примет платформа» было бы
+    два ответа, и разошлись бы они молча.
+    """
+    return MappingProxyType(
+        {s.key: s for s in settings_owned_by(OWNER_AGENT) if s.key}
+    )
+
+
+def read_agent_settings_file(path: Path | None) -> dict[str, Any]:
+    """Прочитать файл блока в вид ``ключ -> значение``.
+
+    Отсутствующий файл — не ошибка, а пустой блок: контур, в котором блок не
+    заведён, существует (платформа поднимается и без агента, в тестах), и
+    пустой блок означает «порог не задан», а не «опечатка».
+
+    Нечитаемый или неразбираемый файл — уже другое, и это отказ. Молчаливый
+    откат к пустому блоку выглядел бы как «настроек нет», а опечатка в
+    значении уводила бы контур на боевые значения, не сказав ни слова.
+
+    Raises:
+        InfrastructureError: файл есть, но не читается, не разбирается или не
+            объект.
+    """
+    if path is None or not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InfrastructureError(f"{path.name}: не читается ({exc})") from exc
+    if not isinstance(raw, dict):
+        raise InfrastructureError(f"{path.name}: ожидался объект")
+    return {str(key): value for key, value in raw.items()}
+
+
+def merge_agent_settings(
+    block: Mapping[str, Any], path: Path | None = None
+) -> dict[str, Any]:
+    """Проверить блок и вернуть его в виде ``имя настройки -> значение``.
+
+    Сначала проверяются **все** ключи, и только потом применяются принятые:
+    частичное применение оставило бы процесс в состоянии, которого никто не
+    объявлял, — половина по замыслу, половина по умолчанию.
+
+    Args:
+        block: плоский словарь из :func:`read_agent_settings_file`.
+        path: файл-источник, только для называния в отказе.
+
+    Raises:
+        InfrastructureError: ключ не объявлен, объявлен за платформой или не
+            приводится к своему типу. Отказ называет ключ, источник и счёт
+            «принято N из M» — решение принимает тот, кто читает стартовый
+            лог, а не тот, кто потом разбирает журнал.
+    """
+    dictionary = agent_settings_dictionary()
+    platform_keys = {s.key: s for s in settings_owned_by(OWNER_PLATFORM) if s.key}
+    source = f"блок агента {path.name}" if path is not None else "блок агента"
+    accepted: dict[str, Any] = {}
+    rejected: list[str] = []
+    for key, raw in block.items():
+        setting = dictionary.get(key)
+        if setting is None:
+            if key in platform_keys:
+                rejected.append(
+                    f"{key!r} — настройка платформы, её значение живёт в "
+                    "platform.json; блок не перенаправляет доступ к данным"
+                )
+            else:
+                rejected.append(
+                    f"{key!r} — ключ не объявлен, приняты: "
+                    f"{', '.join(sorted(dictionary)) or '—'}"
+                )
+            continue
+        if setting.kind in ("str", "secret") and isinstance(raw, (dict, list, tuple)):
+            # ``coerce`` приводит структуру к строке через ``str()``, и
+            # ``{'уровень': 'WARN'}`` уехал бы дальше как текст, который
+            # отверг уже писатель журнала — с сообщением про уровень вместо
+            # сообщения про файл. Отказ называет ключ здесь.
+            rejected.append(
+                f"{key!r} — ожидалась строка, получено {type(raw).__name__}"
+            )
+            continue
+        try:
+            accepted[setting.name] = setting.coerce(raw)
+        except InfrastructureError as exc:
+            rejected.append(f"{key!r} — {exc}")
+    if rejected:
+        raise InfrastructureError(
+            f"{source}: принято {len(accepted)} из {len(block)} ключей, "
+            f"отклонено {len(rejected)}: " + "; ".join(rejected)
+        )
+    return accepted
+
+
+def agent_settings_summary(settings: Settings) -> str:
+    """Строка баннера: откуда пришёл блок и какие значения применены.
+
+    Пустой блок — не пустая строка. «Порог не задан» и «файла нет» — разные
+    состояния, и читатель стартового лога должен видеть, какое из них.
+    """
+    report = settings.agent_settings_report()
+    if not report["declared"]:
+        return "блок настроек агента не передан"
+    if not report["applied"]:
+        return f"блок настроек агента {report['source']}: ключей нет"
+    applied = ", ".join(
+        f"{key}={value!r}" for key, value in sorted(report["applied"].items())
+    )
+    return f"блок настроек агента {report['source']}: {applied}"
+
+
 class Settings:
     """Разрешённые значения настроек: окружение > файл > дефолт."""
 
@@ -1369,6 +1554,7 @@ class Settings:
         secrets_path: Path | None = None,
         secrets: Mapping[str, str] | None = None,
         profile: str | None = None,
+        agent_settings_path: Path | None = None,
     ) -> None:
         """
         Args:
@@ -1387,6 +1573,11 @@ class Settings:
                 база, то есть prod. Имя приходит от агента, но **значения не
                 приходят**: агент сообщает, какой контур, а что в нём писать —
                 объявление платформы.
+            agent_settings_path: файл блока настроек агента, путь приходит
+                аргументом запуска (:data:`AGENT_SETTINGS_FILE_FLAG`). Читается
+                один раз, в конструкторе: блок — это состояние на старте, и
+                файл, переписанный в разгар работы, не имеет права менять
+                значения на ходу. ``None`` — блок не передан.
         """
         self._env: Mapping[str, str] = os.environ if env is None else env
         self._secrets: dict[str, str] = (
@@ -1412,6 +1603,24 @@ class Settings:
                 self._file[BY_FILE_KEY[key].name] = value
         self._values: dict[str, Any] = {}
         self._sources: dict[str, str] = {}
+        # Блок читается и проверяется здесь, до резолюции: отказ на неизвестный
+        # ключ должен остановить подъём до того, как сервисы схватят
+        # настройки, — иначе процесс половину работы сделал бы на значениях,
+        # которых никто не объявлял.
+        self._agent_settings_path = (
+            Path(agent_settings_path) if agent_settings_path is not None else None
+        )
+        self._block: dict[str, Any] = (
+            merge_agent_settings(
+                read_agent_settings_file(self._agent_settings_path),
+                self._agent_settings_path,
+            )
+        )
+        self._block_source = (
+            f"block:{self._agent_settings_path.name}"
+            if self._agent_settings_path is not None
+            else ""
+        )
         for setting in SETTINGS:
             self._resolve(setting)
 
@@ -1424,6 +1633,23 @@ class Settings:
         ``${`` (вполне обычная последовательность), был бы съеден.
         """
         from_file: tuple[Any, str] | None = None
+        if setting.owner == OWNER_AGENT:
+            # Блок — единственный источник агентской настройки. Окружение для
+            # неё не читается намеренно: окружение приоритетнее файла, и
+            # «экспорт» из агента молча затирал бы объявление блока, оставляя
+            # файл выглядящим настроенным, который ничего не настраивает.
+            raw = self._block.get(setting.name)
+            if raw is None:
+                self._values[setting.name] = (
+                    _OPTIONAL_EMPTY[setting.kind]
+                    if setting.default is OPTIONAL
+                    else setting.default
+                )
+                self._sources[setting.name] = "default"
+                return
+            self._values[setting.name] = raw
+            self._sources[setting.name] = self._block_source or "block:agent"
+            return
         if setting.file_first:
             from_file = self._from_file(setting)
         if from_file is None:
@@ -1594,6 +1820,25 @@ class Settings:
             for name, source in self._sources.items()
             if source == "file:platform.json"
         )
+
+    def agent_settings_report(self) -> dict[str, Any]:
+        """Что пришло из блока агента: передан ли он, и какие ключи применены.
+
+        Ключи блока, а не имена переменных: читатель лога должен видеть ровно
+        то, что он видит в файле блока. Отклонённых ключей здесь нет — отказ
+        бросается в конструкторе, и называет их он сам («принято N из M», с
+        перечислением отклонённых).
+        """
+        return {
+            "declared": self._agent_settings_path is not None,
+            "source": self._block_source,
+            "received": len(self._block),
+            "applied": {
+                setting.key: self._values[setting.name]
+                for setting in settings_owned_by(OWNER_AGENT)
+                if setting.name in self._block
+            },
+        }
 
     def as_env(self) -> dict[str, str]:
         """Разрешённые значения в виде ``имя переменной -> значение``.

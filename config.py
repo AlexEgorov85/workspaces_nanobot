@@ -216,9 +216,11 @@ tool'а-обёртки у агента больше нет: ``workspace/tools/le
 ``${NANOBOT_PYTHON}`` и ``${NANOBOT_PROJECT_ROOT}`` подставляются из
 ``os.environ`` (``_export_runtime_env``): в конфиге нет ни одного пути
 конкретной машины, и сервер поднимается тем же Python, в котором
-установлены его зависимости. Имя контура и порог журнала едут в дочерний
-процесс значениями ``NANOBOT_ENTERPRISE_MCP_PROFILE`` и
-``NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL`` (``_export_platform_process_env``).
+установлены его зависимости. Имя контура и путь к файлу блока настроек агента
+едут в дочерний процесс значениями ``NANOBOT_ENTERPRISE_MCP_PROFILE`` и
+``NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS``
+(``_export_platform_process_env``). Значения настроек при этом **не** едут:
+только путь, а сами значения лежат в файле блока, который читает платформа.
 
 ``DATABASE_URL`` серверу НЕ нужен из окружения агента: capability ``data``
 собирает DSN сам из ``mcp-platform/.secrets.env``. Именно поэтому объявление
@@ -280,14 +282,13 @@ AGENT_SECTIONS_PATH: tuple[str, ...] = ("gateway", "agent")
 _SUPPORTED_PROFILES = frozenset({"prod", "test"})
 
 #: Путь к порогу журнала в дереве настроек. Объявлен здесь, а не у потребителя,
-#: потому что читателей стало трое: писатель журнала агента
-#: (``lib/core/application_context.py``), клиент MCP фоновых служб
-#: (``lib/services/enterprise_mcp_client.py``) и экспорт для второго процесса
-#: платформы, который поднимает нанобот (``_export_platform_process_env``).
+#: потому что читателей стало двое: писатель журнала агента
+#: (``lib/core/application_context.py``) и сборка блока для платформы
+#: (``lib/services/agent_settings.py``).
 #: Ключ поднят в корень из ``gateway.agent`` функцией ``_lift_agent_sections`` —
 #: читать надо корень ``logging``, а не ``gateway.agent.logging``: второго пути
 #: к тому же значению быть не должно.
-#: Страж единого источника — ``tests/test_journal_threshold_single_source.py``.
+#: Равенство объявлений проверяет ``tests/test_mcp_platform_declaration.py``.
 JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
 
 
@@ -659,9 +660,17 @@ def _export_platform_process_env(cfg: dict, profile: str) -> None:
 
     Нужны объявлению ``config.json → tools.mcpServers.enterprise``: его ``args``
     — это список, а не строка, и подстановкой ``${VAR}`` внутрь списка можно
-    передать только ЗНАЧЕНИЕ. Поэтому имя контура и порог журнала едут в
-    процесс платформы значениями, а не флагами, которые агент дописывает
-    руками.
+    передать только ЗНАЧЕНИЕ. Поэтому имя контура и путь к файлу блока
+    настроек едут в процесс платформы значениями, а не флагами, которые
+    агент дописывает руками.
+
+    Настройки агента едут **блоком** (``--agent-settings-file``), а не
+    значением: командная строка процесса видна всем, а блок сделан с
+    расчётом на то, что в нём однажды окажется секрет. Здесь экспортируется
+    только путь, и путь этот **объявлен платформой**
+    (``mcp-platform/platform.json → agent_settings``) — он читается из
+    объявления, а не вычисляется, иначе у вопроса «где блок» было бы два
+    ответа.
 
     **Это не второй источник профиля.** Значения выводятся из уже
     разрешённых ``profile`` и ``cfg`` и присваиваются БЕЗ ``setdefault``:
@@ -673,19 +682,44 @@ def _export_platform_process_env(cfg: dict, profile: str) -> None:
     Пустое значение — не мусор, а «флага нет»: платформа разбирает
     ``--profile <пусто>`` как отсутствие флага и берёт базовый контур
     (``mcp-platform/servers/enterprise/server.py::_profile_from_argv``
-    возвращает ``None``). То же и с порогом журнала.
+    возвращает ``None``).
     """
-    node: object = cfg
-    for key in JOURNAL_MIN_LEVEL_PATH:
-        node = node.get(key) if isinstance(node, dict) else None
-        if node is None:
-            break
-    min_level = str(node).strip() if isinstance(node, str) else ""
     if profile and profile != "prod":
         os.environ["NANOBOT_ENTERPRISE_MCP_PROFILE"] = profile
     else:
         os.environ["NANOBOT_ENTERPRISE_MCP_PROFILE"] = ""
-    os.environ["NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL"] = min_level
+    os.environ["NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS"] = _agent_settings_path(cfg)
+
+
+def _agent_settings_path(cfg: dict) -> str:
+    """Путь к файлу блока настроек агента — из объявления платформы.
+
+    Источник — ``mcp-platform/platform.json → agent_settings``, а корень
+    платформы берётся из ``config.json → gateway.agent.enterprise_mcp.cwd``:
+    это тот же каталог, из которого агент поднимает сам процесс, и второй
+    ответ на вопрос «где конфигурация платформы» заводить нельзя.
+
+    Читается поднятая секция (``cfg["enterprise_mcp"]``), а не
+    ``cfg["gateway"]["agent"]["enterprise_mcp"]``: к этому моменту
+    ``_lift_agent_sections`` её уже поднял в корень, и читать вложенный путь
+    значило бы держать вторую копию одного и того же объявления.
+
+    Пустая строка — блок не передан. Это состояние контура, а не сбой:
+    платформа поднимется и без него, а настройки агента не применятся.
+
+    Не-строка в ``cwd`` — тоже «блок не передан», и вот почему: к этому
+    моменту конфигурация прошла проверку схемы, где ``cwd`` объявлен строкой,
+    и не-строка здесь означает не конфигурацию (двойник в тесте), а объект,
+    путь из которого взять нельзя. Отказ был бы отказом не по тому поводу.
+    """
+    from lib.services.agent_settings import declared_block_path
+
+    section = cfg.get("enterprise_mcp")
+    cwd = section.get("cwd") if isinstance(section, dict) else None
+    if not isinstance(cwd, str) or not cwd.strip():
+        return ""
+    path = declared_block_path(Path(_resolve_env_refs(cwd.strip())) / "platform.json")
+    return str(path) if path is not None else ""
 
 
 def _merge_profile_overlay(cfg: dict, mode: str) -> None:

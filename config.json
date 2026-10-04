@@ -975,8 +975,8 @@
           "servers.enterprise.server",
           "--profile",
           "${NANOBOT_ENTERPRISE_MCP_PROFILE}",
-          "--log-min-level",
-          "${NANOBOT_ENTERPRISE_MCP_LOG_MIN_LEVEL}"
+          "--agent-settings-file",
+          "${NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS}"
         ],
         "cwd": "${NANOBOT_PROJECT_ROOT}/mcp-platform",
         "env": {

@@ -42,13 +42,18 @@ from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.errors import InfrastructureError
-from libs.enterprise_common.execution.factory import build_execution_layer
+from libs.enterprise_common.execution.factory import (
+    build_execution_layer,
+    resolved_journal_min_level,
+)
 from libs.enterprise_common.loader import build_server, load_registry
 from libs.enterprise_common.registry import ToolRegistry
 from libs.enterprise_common.settings import (
+    AGENT_SETTINGS_FILE_FLAG,
     POOL_SETTING_KEYS,
     SCRIPTS_REGISTRY_LABEL,
     Settings,
+    agent_settings_summary,
     job_class_config,
     job_class_setting_names,
     pool_config,
@@ -298,17 +303,12 @@ def _declared_tables(settings: Settings) -> tuple[str, ...]:
 def _build_container(
     settings: Settings,
     capabilities: frozenset[str] | None = None,
-    *,
-    log_min_level: str | None = None,
 ) -> ToolContainer:
     """Собрать контейнер: сервисы capability и конфигурация из настроек.
 
     Args:
         capabilities: какие capability поднимать. ``None`` — все.
-        log_min_level: порог журнала из ``--log-min-level``, как есть
-            (``None`` — флага не было). Разбор уровня и отказ на негодном
-            значении — в писателе журнала; здесь значение только доезжает до
-            него и не подменяется.
+        settings: разобранные настройки, включая принятый блок агента.
 
     Сборка не тяжелеет сама себя: сервисы и настройки читаются только для
     отобранных capability. Это не оптимизация, а условие корректности —
@@ -379,7 +379,7 @@ def _build_container(
         # является: объявлять его ещё и в ``platform.json`` значило бы
         # завести второе место, и вопрос «каким уровнем пишется журнал» получил
         # бы два ответа, разъехавшихся молча.
-        min_level=log_min_level,
+        min_level=resolved_journal_min_level(settings),
         snapshot=_snapshot(settings),
     )
     services["data"] = data
@@ -563,7 +563,7 @@ def _log_table(settings: Settings) -> tuple[str, str]:
 def build(
     capabilities: frozenset[str] | None = None,
     profile: str | None = None,
-    log_min_level: str | None = None,
+    agent_settings_path: Path | None = None,
 ) -> tuple[Any, ToolRegistry, ToolContainer]:
     """Собрать сервер: настройки, пул, сервисы, реестр, транспорт.
 
@@ -573,12 +573,9 @@ def build(
             то есть prod). Имя присылает агент: он знает, в каком контуре
             запущен. Значения имён таблиц при этом не приходят — перекрывает
             объявление платформы (:func:`read_profile_overlay`).
-        log_min_level: порог журнала, присланный агентом из его
-            ``config.json → gateway.agent.logging.db.min_level`` (``None`` —
-            флага не было, платформа пишет всё). Применяют его оба писателя
-            журнала процесса — capability ``data`` и писатель слоя исполнения;
-            здесь значение только передаётся вниз, и разбор уровня живёт там,
-            где шкала объявлена один раз.
+        agent_settings_path: файл блока настроек агента, путь приходит
+            аргументом запуска (:data:`AGENT_SETTINGS_FILE_FLAG`). ``None`` —
+            блок не передан, и настройки агента не применяются.
 
     Возвращает ``(server, registry, container)`` — чтобы тест мог проверить
     реестр, не поднимая транспорт.
@@ -590,12 +587,15 @@ def build(
     ``llm`` и ничего больше — см. :func:`_needs_data`.
     """
     wanted = _selected(capabilities)
-    settings = Settings(profile=profile)
+    # Блок читается и проверяется здесь, один раз, до сборки сервисов: отказ
+    # на неизвестном ключе должен остановить подъём до того, как что-либо
+    # схватит настройки.
+    settings = Settings(profile=profile, agent_settings_path=agent_settings_path)
     if _needs_data(wanted):
         _check_dependencies(settings)
         _configure_dsn(settings)
         _apply_pool_settings(settings)
-    container = _build_container(settings, wanted, log_min_level=log_min_level)
+    container = _build_container(settings, wanted)
     registry = load_registry(
         CAPABILITIES_DIR, container, root=PLATFORM_ROOT, capabilities=wanted
     )
@@ -603,16 +603,14 @@ def build(
     # сервис ``data``: второй писатель событий означал бы, что журнал читают
     # двое, а порядок записей определяет тот, кто быстрее.
     #
-    # ``min_level`` — тот же порог, что и у ``DataService`` выше, из того же
-    # флага. Раньше он сюда не доезжал, и ``EventWriter`` резал внутренние
-    # события платформы по своему дефолту ``INFO``: при ``DEBUG`` в
-    # ``config.json`` внутренние события выпадали, а агентские проходили, то
-    # есть журнал писался по двум разным правилам.
+    # Порог журнала — тот же, что и у ``DataService`` выше, и берётся из того
+    # же слоя разрешённых настроек: два писателя процесса режут по одному
+    # правилу, а не по двум. Значение приходит блоком агента
+    # (``--agent-settings-file``), и ни одна из половин не имеет своего.
     execution = build_execution_layer(
         settings,
         sink=_event_sink(container),
         session_root=PLATFORM_ROOT / _session_root(settings),
-        min_level=log_min_level,
     )
     # Платформенная операция чтения сохранённого результата. Здесь, а не через
     # загрузчик каталогов: файлами сессии владеет платформа, и страж
@@ -665,6 +663,10 @@ def build(
             settings.get("ENTERPRISE_TASK_TABLE"),
         )
     _log_journal_min_level(container)
+    # Что пришло из блока агента и какие ключи применены. Отдельная строка от
+    # «порог журнала» ниже: та показывает значение, применяемое писателем,
+    # эта — источник и состав блока, включая блок, которого не было.
+    logger.info("настройки агента: %s", agent_settings_summary(settings))
     if wanted != _ALL_CAPABILITIES:
         logger.info("подняты только capability: %s", ", ".join(sorted(wanted)))
     _log_llm_settings(container.get("llm"))
@@ -921,7 +923,7 @@ def main(argv: list[str] | None = None) -> None:
     transport, _, container = build(
         _capabilities_from_argv(argv),
         profile=_profile_from_argv(argv),
-        log_min_level=_log_min_level_from_argv(argv),
+        agent_settings_path=_agent_settings_path_from_argv(argv),
     )
     # ``services``, а не ``get``: у процесса без ``data`` такого сервиса
     # нет, и строгий ``get`` уронил бы старт с «сервис не зарегистрирован»
@@ -985,32 +987,40 @@ def _profile_from_argv(argv: list[str] | None) -> str | None:
     return None
 
 
-def _log_min_level_from_argv(argv: list[str] | None) -> str | None:
-    """Разобрать ``--log-min-level <уровень>``; без флага — писать всё.
+def _agent_settings_path_from_argv(argv: list[str] | None) -> Path | None:
+    """Разобрать ``--agent-settings-file <путь>``; без флага — блока нет.
 
     Ручной разбор по той же причине и в том же виде, что у ``--profile`` и
     ``--capabilities``: входная точка одна и живёт в потоке, где ``sys.argv``
     принадлежит не серверу, а лишняя зависимость ради трёх строк разбора не
     окупается.
 
-    Значение присылает агент — из ``config.json →
-    gateway.agent.logging.db.min_level``, того же ключа, что и у его
-    писателя журнала. Объявление порога потому и одно: платформа узнаёт о нём
-    один раз при старте и применяет у себя, а не получает в каждом вызове.
+    Флаг объявляет **путь**, а не значение: значение лежит в файле, и
+    командная строка видна всем, кто может прочитать список процессов.
 
-    Возвращается строка **как есть**, включая негодную. Проверку уровня делает
-    писатель журнала (:class:`~servers.enterprise.capabilities.data.service.main.DataService`),
-    где шкала объявлена один раз, и незнакомое значение обязано уронить старт
-    с названным уровнем: откат к значению по умолчанию молча переключил бы
-    платформу на другую политику записи — ровно тот случай, из-за которого
-    неизвестный профиль тоже не откатывается к боевому.
+    Returns:
+        Путь к файлу блока либо ``None`` — флага не было.
+
+    Raises:
+        InfrastructureError: флаг объявлен, а значения при нём нет. Пустой
+            путь развернулся бы в текущий каталог, и платформа прочитала бы
+            чужой файл вместо блока.
     """
     args = list(sys.argv[1:] if argv is None else argv)
     for index, arg in enumerate(args):
-        if arg == "--log-min-level" and index + 1 < len(args):
-            return args[index + 1].strip() or None
-        if arg.startswith("--log-min-level="):
-            return arg.split("=", 1)[1].strip() or None
+        if arg == AGENT_SETTINGS_FILE_FLAG and index + 1 < len(args):
+            value = args[index + 1].strip()
+        elif arg.startswith(f"{AGENT_SETTINGS_FILE_FLAG}="):
+            value = arg.split("=", 1)[1].strip()
+        else:
+            continue
+        if not value:
+            raise InfrastructureError(
+                f"{AGENT_SETTINGS_FILE_FLAG}: не задано значение. Флаг "
+                "объявляет путь к файлу блока настроек агента; пустой путь "
+                "развернулся бы в текущий каталог."
+            )
+        return Path(value)
     return None
 
 

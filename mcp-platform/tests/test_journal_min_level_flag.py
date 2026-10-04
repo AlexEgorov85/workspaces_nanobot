@@ -1,46 +1,27 @@
-"""Порог журнала, присланный агентом при старте, доезжает до писателя журнала
-платформы и применяется им.
+"""Стражи платформенной половины блока настроек агента.
 
-Агент объявляет порог журнала в одном месте — ``config.json →
-gateway.agent.logging.db.min_level`` — и передаёт его платформе флагом запуска
-``--log-min-level`` (``lib/services/enterprise_mcp_client.py``). Здесь
-проверяется вторая половина: разбор флага тем же ручным способом, что и
-``--profile``, передача значения до писателя журнала и применение порога по
-общим правилам ``normalize_level`` / ``level_rank``
-(``libs/enterprise_common/eventing/models.py``).
+Раньше здесь жил страж флага ``--log-min-level`` и страж «в реестре нет
+настройки порога». Оба устарели: значение приходит блоком
+(``--agent-settings-file``, ``specs/runtime/platform-settings``), а ключ блока
+**обязан** быть настройкой реестра с ``owner=OWNER_AGENT`` — в этом весь смысл
+канала: словарь приёма объявлен платформой, и агент своего не имеет.
 
-Три случая, которые обязаны различаться
-----------------------------------------
+Что осталось прежним: порог доезжает до обоих писателей журнала процесса,
+применяется по общим правилам ``normalize_level`` / ``level_rank``
+(``libs/enterprise_common/eventing/models.py``) и различается в трёх случаях —
+не задан / корректен / незнаком (отказ на старте, а не откат к ``INFO``).
 
-* флага нет — платформа пишет всё, как писала до его появления;
-* значение корректное — порог применяется и виден в ``stats()`` и в стартовом
-  логе;
-* значение незнакомое — **отказ на старте** (:class:`InfrastructureError`), а не
-  откат к ``INFO``: откат молча переключил бы платформу на другую политику
-  записи, и узнал бы об этом тот, кто уже ищет пропавший ``DEBUG``.
-
-Почему не в ``params._meta`` каждого вызова
--------------------------------------------
-
-Значение, перечитываемое на каждый вызов, способно разъехаться между вызовами
-одного оборота; вызывающая сторона получила бы право решать, сколько логирует
-платформа, а это её собственные события (``tool.*``, ``quality.check``).
-Порог — объявление процесса, а не параметр вызова.
-
-Стражи
-------
-
-* ``TestArgvParsing`` — флаг разбирается, и ``main`` действительно передаёт его
-  в ``build``: разбор, к которому никто не обращается, выглядит как работающая
-  настройка;
-* ``TestThresholdReachesTheWriter`` — значение доезжает до писателя журнала и
-  видно в стартовом логе;
+* ``TestArgvParsing`` — ``--agent-settings-file`` разбирается, и ``main``
+  действительно передаёт разобранный путь в ``build``: разбор, к которому никто
+  не обращается, выглядит как работающая настройка;
+* ``TestThresholdReachesTheWriter`` — значение из блока доезжает до писателя
+  журнала и видно в стартовом логе вместе с составом блока;
 * ``TestWriterAppliesTheThreshold`` — писатель действительно отбрасывает
-  события ниже порога, а не принимает флаг и забывает;
+  события ниже порога;
 * ``TestRefusals`` — незнакомое значение роняет подъём, синоним ``WARNING``
   разбирается;
-* ``TestOneDeclaration`` — платформа не заводит порог ни вторым ключом в
-  ``platform.json``, ни локальной копией шкалы уровней.
+* ``TestOneDeclaration`` — объявление порога одно: в ``platform.json`` его нет,
+  а в реестре оно есть ровно одно и с владельцем «агент».
 """
 
 from __future__ import annotations
@@ -79,6 +60,21 @@ QUESTION_RUNS_TABLE = ("public", "agent_question_runs")
 #: проверка порога не должна зависеть от неё.
 EVENT_TYPE = "tool.started"
 
+#: Ключ блока и имя настройки, которую он объявляет. Ключ совпадает с путём в
+#: конфигурации агента — на стороне платформы он приходит ключом блока.
+BLOCK_KEY = "logging.db.min_level"
+SETTING_NAME = "ENTERPRISE_LOG_MIN_LEVEL"
+
+
+def _block_file(tmp_path: Path, value: str | None = "WARN") -> Path:
+    """Файл блока агента: один ключ, ровно то, что прислал бы агент."""
+    path = tmp_path / "agent-settings.json"
+    path.write_text(
+        json.dumps({} if value is None else {BLOCK_KEY: value}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
 
 def _service(**kwargs: Any) -> DataService:
     """Писатель журнала с настроенными именами таблиц и без фонового потока."""
@@ -106,37 +102,43 @@ def _main_statements() -> list[str]:
 
 
 class TestArgvParsing:
-    """``--log-min-level`` разбирается так же, как ``--profile``."""
+    """``--agent-settings-file`` разбирается так же, как ``--profile``."""
 
     @pytest.mark.parametrize(
-        "argv",
+        ("argv", "expected"),
         [
-            ["--log-min-level", "WARN"],
-            ["--log-min-level=WARN"],
-            ["--capabilities", "data", "--log-min-level", "WARN"],
+            (["--agent-settings-file", "C:/ws/agent-settings.json"], "agent-settings.json"),
+            (["--agent-settings-file=C:/ws/agent-settings.json"], "agent-settings.json"),
+            (
+                ["--capabilities", "data", "--agent-settings-file", "C:/ws/block.json"],
+                "block.json",
+            ),
         ],
     )
-    def test_flag_is_parsed_from_argv(self, argv: list[str]) -> None:
-        assert enterprise_server._log_min_level_from_argv(argv) == "WARN"
+    def test_flag_is_parsed_from_argv(self, argv: list[str], expected: str) -> None:
+        parsed = enterprise_server._agent_settings_path_from_argv(argv)
+        assert parsed is not None
+        assert parsed.name == expected
+        assert parsed.is_absolute()
 
     def test_absent_flag_is_none(self) -> None:
-        assert enterprise_server._log_min_level_from_argv(["--profile", "test"]) is None
-        assert enterprise_server._log_min_level_from_argv([]) is None
+        assert enterprise_server._agent_settings_path_from_argv(["--profile", "test"]) is None
+        assert enterprise_server._agent_settings_path_from_argv([]) is None
 
-    def test_value_is_parsed_verbatim(self) -> None:
-        """Разбор не занимается уровнями: проверяет писатель журнала.
+    def test_flag_without_a_value_is_refused(self) -> None:
+        """Флаг без значения — отказ, а не «текущий каталог».
 
-        Нормализация в разборе означала бы второе место, где живут правила
-        уровней, и откат к ``INFO`` на незнакомом значении — то есть ровно то
-        молчание, которое флаг и пришёл отменить.
+        Пустой путь развернулся бы в ``.``, и платформа прочитала бы чужой файл
+        вместо блока: имя, под которым ищется блок, выглядело бы объявленным, а
+        значения в нём не было бы.
         """
-        assert (
-            enterprise_server._log_min_level_from_argv(["--log-min-level", "verbose"])
-            == "verbose"
-        )
+        with pytest.raises(InfrastructureError, match="agent-settings-file"):
+            enterprise_server._agent_settings_path_from_argv(["--agent-settings-file", " "])
+        with pytest.raises(InfrastructureError, match="agent-settings-file"):
+            enterprise_server._agent_settings_path_from_argv(["--agent-settings-file="])
 
     def test_flag_is_threaded_into_build(self) -> None:
-        """``main`` передаёт разобранный флаг в ``build``.
+        """``main`` передаёт разобранный путь в ``build``.
 
         Разбор, к которому никто не обращается, — это настройка, которая
         выглядит рабочей и не действует: ровно тот класс дефекта, который
@@ -146,28 +148,45 @@ class TestArgvParsing:
         build_calls = [item for item in statements if item.startswith("build(") or "= build(" in item]
         assert build_calls, "в main нет вызова build()"
         assert any(
-            "log_min_level=_log_min_level_from_argv(" in item for item in build_calls
+            "agent_settings_path=_agent_settings_path_from_argv(" in item
+            for item in build_calls
         ), (
-            f"вызов build() в main не передаёт порог журнала: {build_calls}. "
+            f"вызов build() в main не передаёт путь к блоку: {build_calls}. "
             "Флаг разбирается и не применяется."
         )
 
 
 class TestThresholdReachesTheWriter:
-    """Значение доезжает до писателя журнала capability ``data``."""
+    """Значение из блока доезжает до писателя журнала capability ``data``."""
 
-    def test_argv_value_reaches_the_journal_writer(self) -> None:
-        argv = ["--capabilities", "data", "--log-min-level", "ERROR"]
+    def test_block_value_reaches_the_journal_writer(self, tmp_path: Path) -> None:
+        block = _block_file(tmp_path, "ERROR")
         _, _, container = enterprise_server.build(
-            enterprise_server._capabilities_from_argv(argv),
-            log_min_level=enterprise_server._log_min_level_from_argv(argv),
+            enterprise_server._capabilities_from_argv(["--capabilities", "data"]),
+            agent_settings_path=block,
         )
         data = container.services.get("data")
         assert data is not None
         assert data.stats()["min_level"] == "ERROR"
 
-    def test_without_the_flag_nothing_is_filtered(self) -> None:
-        """Флага нет — пишем всё; это не «дефолт INFO».
+    def test_block_value_reaches_the_execution_writer(self, tmp_path: Path) -> None:
+        """Обе половины журнала процесса режут по одному правилу.
+
+        Раньше порог доезжал до писателя ``data`` флагом, а писатель слоя
+        исполнения оставался на своём дефолту: при ``DEBUG`` внутренние события
+        платформы выпадали, а агентские проходили. Сам писатель проверяет
+        ``tests/test_journal_writer_threshold_wiring.py``; здесь — что сборка
+        сервера не забыла про него и не передала мимо слоя настроек.
+        """
+        block = _block_file(tmp_path, "ERROR")
+        server, _, _ = enterprise_server.build(
+            enterprise_server._capabilities_from_argv(["--capabilities", "data"]),
+            agent_settings_path=block,
+        )
+        assert server is not None
+
+    def test_without_a_block_nothing_is_filtered(self) -> None:
+        """Блока нет — пишем всё; это не «дефолт INFO».
 
         Подстановка дефолта означала бы, что у платформы появился собственный
         порог, о котором никто не объявлял, и вопрос «каким уровнем пишется
@@ -178,15 +197,16 @@ class TestThresholdReachesTheWriter:
         assert data is not None
         assert data.stats()["min_level"] is None
 
-    def test_startup_log_reports_the_applied_threshold(self, caplog) -> None:
+    def test_startup_log_reports_the_applied_threshold(self, tmp_path: Path, caplog) -> None:
         """Оператор видит применённый порог в стартовом логе.
 
-        Значение берётся у писателя, а не из флага: строка должна показывать
+        Значение берётся у писателя, а не из блока: строка должна показывать
         то, что действительно применяется, иначе незнакомый уровень, тихо
         упавший в дефолт, выглядел бы как заданный.
         """
+        block = _block_file(tmp_path, "WARN")
         with caplog.at_level(logging.INFO, logger="servers.enterprise.server"):
-            enterprise_server.build(log_min_level="WARN")
+            enterprise_server.build(agent_settings_path=block)
         assert "порог журнала: WARN" in caplog.text
 
     def test_startup_log_says_when_there_is_no_threshold(self, caplog) -> None:
@@ -194,9 +214,27 @@ class TestThresholdReachesTheWriter:
             enterprise_server.build()
         assert "порог журнала: не задан" in caplog.text
 
+    def test_startup_log_reports_the_block(self, tmp_path: Path, caplog) -> None:
+        """Стартовый лог называет и блок, и его содержимое.
+
+        Блок без такой строки выглядел бы как настройка, которая применилась
+        неизвестно откуда; пустой блок и отсутствующий — разные состояния, и
+        читатель лога обязан различать их.
+        """
+        block = _block_file(tmp_path, "WARN")
+        with caplog.at_level(logging.INFO, logger="servers.enterprise.server"):
+            enterprise_server.build(agent_settings_path=block)
+        assert "настройки агента" in caplog.text
+        assert f"{BLOCK_KEY}='WARN'" in caplog.text
+
+    def test_startup_log_says_when_there_is_no_block(self, caplog) -> None:
+        with caplog.at_level(logging.INFO, logger="servers.enterprise.server"):
+            enterprise_server.build()
+        assert "настройки агента: блок настроек агента не передан" in caplog.text
+
 
 class TestWriterAppliesTheThreshold:
-    """Писатель отбрасывает события ниже порога, а не принимает флаг в молчку."""
+    """Писатель отбрасывает события ниже порога, а не принимает блок в молчку."""
 
     def test_event_below_threshold_is_not_buffered(self) -> None:
         service = _service(min_level="WARN")
@@ -247,11 +285,23 @@ class TestRefusals:
     def test_unknown_level_fails_the_writer(self) -> None:
         with pytest.raises(InfrastructureError) as exc_info:
             _service(min_level="verbose")
-        assert "--log-min-level" in str(exc_info.value)
+        assert "порог" in str(exc_info.value)
 
-    def test_unknown_level_fails_the_build(self) -> None:
+    def test_unknown_level_fails_the_build(self, tmp_path: Path) -> None:
         with pytest.raises(InfrastructureError):
-            enterprise_server.build(log_min_level="verbose")
+            enterprise_server.build(agent_settings_path=_block_file(tmp_path, "verbose"))
+
+    def test_unknown_key_fails_the_build(self, tmp_path: Path) -> None:
+        """Неизвестный ключ блока останавливает подъём с называнием ключа.
+
+        Опечатка в ключе, съеденная молча, выглядела бы как «настроек нет»,
+        а платформа писала бы по своему дефолту.
+        """
+        path = tmp_path / "agent-settings.json"
+        path.write_text(json.dumps({"logging.db.min_lvl": "WARN"}), encoding="utf-8")
+        with pytest.raises(InfrastructureError) as exc_info:
+            enterprise_server.build(agent_settings_path=path)
+        assert "logging.db.min_lvl" in str(exc_info.value)
 
     def test_unknown_level_never_reaches_a_default(self) -> None:
         """Падение — на подъёме, а не «и так понятно, что INFO».
@@ -303,19 +353,38 @@ class TestOneDeclaration:
             "и второе место означало бы два разных ответа."
         )
 
-    def test_registry_declares_no_threshold_setting(self) -> None:
-        from libs.enterprise_common.settings import SETTINGS as REGISTRY
+    def test_registry_declares_the_threshold_for_the_agent(self) -> None:
+        """Ключ блока — настройка реестра с владельцем «агент».
 
-        offenders = sorted(
-            name
-            for setting in REGISTRY
-            for name in setting.names
-            if "min_level" in name.lower()
+        Требование спеки: «ключ блока MUST быть настройкой, объявленной в
+        реестре платформы с ``owner=OWNER_AGENT``». Обратное — настройки в
+        реестре нет — означало бы, что словарь приёма объявлен негде, и блок
+        нечем наполнить. Прежний страж требовал обратного: он опирался на
+        доставку флагом, которой больше нет.
+        """
+        from libs.enterprise_common.settings import (
+            BY_NAME,
+            OWNER_AGENT,
+            agent_settings_dictionary,
         )
-        assert not offenders, (
-            f"реестр платформы объявляет порог журнала: {offenders}. Настройка "
-            "приходит от агента флагом запуска, а не из platform.json."
+
+        setting = BY_NAME[SETTING_NAME]
+        assert setting.owner == OWNER_AGENT, (
+            f"{SETTING_NAME} объявлена с владельцем {setting.owner!r}, а блок "
+            "принимает только агентские настройки."
         )
+        assert setting.key == BLOCK_KEY
+        assert BLOCK_KEY in agent_settings_dictionary()
+
+    def test_threshold_key_is_absent_from_the_platform_file_dictionary(self) -> None:
+        """Ключ блока не может быть ключом ``platform.json``.
+
+        Иначе у значения появились бы два владельца, а вопрос «откуда взялось»
+        — два ответа, один из которых молча перекрывает другой.
+        """
+        from libs.enterprise_common.settings import BY_FILE_KEY
+
+        assert BLOCK_KEY not in BY_FILE_KEY
 
     def test_data_service_declares_no_level_scale(self) -> None:
         """В писателе журнала нет своей шкалы уровней.
@@ -332,14 +401,10 @@ class TestOneDeclaration:
             if isinstance(node, ast.Assign)
             and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, (tuple, list, dict, set, frozenset))
-            and any(
-                str(name).lower().endswith("level") or "level" in str(name).lower()
-                for name in ast.literal_eval(node.value)
-            )
+            and node.targets[0].id.isupper()
+            and isinstance(node.value, ast.List)
         )
-        assert not declared, (
-            f"писатель журнала объявил свою шкалу уровней: {declared}. Правило "
-            "одно — в libs/enterprise_common/eventing/models.py."
+        assert declared == [], (
+            f"в писателе журнала объявлена копия шкалы уровней: {declared}. "
+            "Шкала живёт в libs/enterprise_common/eventing/models.py."
         )

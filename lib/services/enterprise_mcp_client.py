@@ -808,48 +808,42 @@ class EnterpriseMcpClient:
         return env
 
 
-#: Путь к порогу журнала в конфигурации агента. Объявлен один раз и на
-#: чтение, и на сверку: писатель журнала агента
-#: (``lib/core/application_context.py``) читает **этот же** ключ, и страж
-#: ``tests/test_journal_threshold_reaches_mcp.py`` падает, если чтения
-#: разъедутся. Ключ поднят в корень ``SETTINGS`` из ``gateway.agent`` функцией
-#: ``config._lift_agent_sections`` — читать надо ``SETTINGS["logging"]``, а не
-#: ``SETTINGS["gateway"]["agent"]["logging"]``: второго пути к тому же значению
-#: быть не должно.
-#:
-#: Второй читатель того же ключа — ``config._export_platform_process_env``,
-#: он объявляет путь у себя в ``config.py``. Объявить его здесь и импортировать
-#: отсюда нельзя: ``config`` — базовый модуль, и потянуть в него сервисный
-#: слой нельзя. Равенство двух объявлений проверяет
-#: ``tests/test_mcp_platform_declaration.py``.
-JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
-
-#: Имя флага запуска, которым порог доезжает до платформы. Литерал с обеих
-#: сторон процесса, как ``--profile``: общего модуля у агента и платформы нет,
-#: а объявлять флаг в третьем месте — значит завести ещё одно объявление.
-LOG_MIN_LEVEL_FLAG = "--log-min-level"
+#: Путь к порогу журнала в конфигурации агента живёт в
+#: ``lib/services/agent_settings.py`` — там же, где он наполняет блок
+#: настроек. Здесь он переэкспортирован, потому что им пользуются тесты
+#: (``tests/test_mcp_platform_declaration.py`` сверяет его с
+#: ``config.JOURNAL_MIN_LEVEL_PATH``) и потому что это объявление значения,
+#: которое едет платформе.
+from lib.services.agent_settings import (  # noqa: E402  (после доктрины)
+    JOURNAL_MIN_LEVEL_PATH,
+    publish_agent_settings,
+)
 
 
-def _journal_min_level(settings: Any) -> str:
-    """Порог журнала из ``config.json → gateway.agent.logging.db.min_level``.
+def _agent_settings_argv(settings: Any, section: Any) -> list[str]:
+    """Аргументы запуска с блоком настроек агента — или ничего.
 
-    Значение уходит строкой **как есть**: разбором уровня занимается
-    платформа, где шкала объявлена один раз
-    (``libs/enterprise_common/eventing/models.py``), и незнакомый уровень там
-    роняет старт с названным значением. Тихая замена на ``INFO`` здесь
-    переключила бы платформу на другую политику молча — ровно то, чем
-    кончается любой откат «на всякий случай».
+    Корневой каталог платформы уже объявлен в
+    ``config.json → gateway.agent.enterprise_mcp.cwd``; объявление пути к
+    блоку лежит рядом, в ``platform.json``. Без ``cwd`` блок некуда положить
+    и некуда положить его объявление, поэтому аргументов не будет — с записью
+    в журнал, а не молча.
 
-    Пустая строка — «флага нет»: платформа пишет всё, как сейчас.
+    ``cwd`` проверяется на строку: конфигурация прошла схему, где он объявлен
+    строкой, и не-строка здесь означает двойник в тесте, а не конфигурацию.
+    Приводить такой объект к строке нельзя — получился бы путь в никуда и
+    отказ с требованием починить чужой тест.
     """
-    if settings is None:
-        return ""
-    node: Any = settings
-    for key in JOURNAL_MIN_LEVEL_PATH:
-        node = node.get(key) if hasattr(node, "get") else None
-        if node is None:
-            return ""
-    return str(node).strip()
+    cwd = section.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        logger.warning(
+            "enterprise-mcp: не объявлен cwd — блок настроек агента не передан"
+        )
+        return []
+    block = publish_agent_settings(
+        settings, platform_json=Path(cwd) / "platform.json"
+    )
+    return block.argv() if block is not None else []
 
 
 def client_from_settings(
@@ -871,11 +865,15 @@ def client_from_settings(
     процесса. Пустое значение или отсутствие ключа означают прежнее
     поведение — stderr уходит в stderr агента.
 
-    Из настроек агента платформа получает ровно два значения: имя контура
-    (``--profile``) и порог журнала (``--log-min-level``). Оба — при старте,
-    оба читаются из ключей, которые платформа не объявляет, и оба приходят
-    **как есть**: разбор и отказ на незнакомом значении — на стороне, где
-    шкала объявлена.
+    Значения агента уезжают **блоком** (``--agent-settings-file``, см.
+    ``lib/services/agent_settings.py``), а не флагом на каждое значение: в
+    ``argv`` видны все, а блок сделан с расчётом на секрет. Блок собирается
+    из ``config.json`` агента и ОДИН раз при старте. В ``params._meta`` каждого
+    вызова он не едет: значение, перечитываемое на каждый вызов, способно
+    разъехаться между вызовами одного оборота, а вызывающая сторона получила
+    бы право решать, сколько логировать платформа, — а это её собственные
+    события (``tool.*``, ``quality.check``), и подменять им политику
+    вызывающего нельзя.
     """
     section = settings.get("enterprise_mcp") if settings is not None else None
     if not section:
@@ -895,15 +893,10 @@ def client_from_settings(
     profile = str((settings.get("profile") or "") if settings is not None else "").strip()
     if profile and profile != "prod":
         args += ["--profile", profile]
-    # Порог журнала — тот же ключ, что у писателя агента, и тоже ОДИН раз при
-    # старте. В ``params._meta`` каждого вызова он не едет: значение,
-    # перечитываемое на каждый вызов, способно разъехаться между вызовами
-    # одного оборота, а вызывающая сторона получила бы право решать, сколько
-    # логировать платформа, — а это её собственные события (``tool.*``,
-    # ``quality.check``), и подменять им политику вызывающего нельзя.
-    min_level = _journal_min_level(settings)
-    if min_level:
-        args += [LOG_MIN_LEVEL_FLAG, min_level]
+    # Настройки агента — блоком, одним аргументом. Флаг на каждое значение
+    # означал бы, что добавление настройки — правка кода запуска, и держал бы
+    # второй путь к значению, который уже снят с этого места.
+    args += _agent_settings_argv(settings, section)
     # stderr_log — НЕ настройка платформы и в argv не едет: это
     # вопрос транспорта на стороне агента (куда девать stderr процесса,
     # который агент и поднимает), а не объявление платформы. Поэтому

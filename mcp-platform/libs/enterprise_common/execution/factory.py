@@ -64,13 +64,67 @@ def policy_values(settings: Any) -> dict[str, Any]:
     return {name: getter(name) for name in SETTING_NAMES}
 
 
+class _FromSettings:
+    """Дефолт, который означает «возьми из слоя разрешённых настроек».
+
+    Отдельный объект, а не ``None``: ``None`` — законное значение («порога
+    нет, пишется всё»), и подменить его дефолтом значило бы стереть
+    различие между «оператор порог не задавал» и «кто-то настройку не
+    передал». Второе — дефект, первое — решение.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - только для отладки
+        return "<из слоя разрешённых настроек>"
+
+
+#: Дефолт для ``min_level``: значение приходит из реестра, а не из кода.
+FROM_SETTINGS = _FromSettings()
+
+
+def resolved_journal_min_level(settings: Any) -> str | None:
+    """Порог журнала из слоя разрешённых настроек.
+
+    Пустое значение — «порог не задан», то есть писать без фильтра, а не
+    ``INFO``: фильтр по умолчанию резал бы события, которые оператор просил
+    писать. Словарь значений без блока (офлайн-сборка, тест) получает дефолт
+    писателя — там блока нет вовсе, и «не задан» ничего не объясняло бы.
+    """
+    raw = (
+        settings.get("ENTERPRISE_LOG_MIN_LEVEL")
+        if hasattr(settings, "get")
+        else None
+    )
+    if raw is None:
+        # Офлайн-сборка (словарь значений без блока): дефолт писателя.
+        return DEFAULT_MIN_LEVEL
+    return str(raw).strip() or None
+
+
+def journal_min_level(settings: Any, min_level: Any) -> str | None:
+    """Порог журнала для писателя: явный аргумент либо слой настроек.
+
+    Args:
+        settings: ``Settings`` реестра либо словарь значений.
+        min_level: :data:`FROM_SETTINGS` — взять из ``settings``; ``None`` —
+            порога нет; строка — порог.
+
+    Returns:
+        Уровень либо ``None`` — писать без фильтра.
+    """
+    if min_level is not FROM_SETTINGS:
+        return min_level
+    return resolved_journal_min_level(settings)
+
+
 def build_execution_layer(
     settings: Any,
     *,
     sink: EventSink | None = None,
     executor: ThreadPoolExecutor | None = None,
     session_root: str | Path | None = None,
-    min_level: str | None = DEFAULT_MIN_LEVEL,
+    min_level: str | None | _FromSettings = FROM_SETTINGS,
 ) -> ExecutionLayer:
     """Собрать слой исполнения.
 
@@ -83,17 +137,14 @@ def build_execution_layer(
             а не соединения.
         session_root: переопределение корня файлов сессий. Нужно тестам, чтобы
             не писать в каталог рядом с ``platform.json``.
-        min_level: порог журнала, **как его прислал оператор**, из того же
-            ключа ``config.json``, что и у агента. ``None`` — порога нет,
-            пишется всё; это тот же смысл, что у писателя capability ``data``.
+        min_level: порог журнала. По умолчанию — из слоя разрешённых
+            настроек (``ENTERPRISE_LOG_MIN_LEVEL``, владелец — агент, значение
+            приходит блоком настроек агента). ``None`` — порога нет, пишется
+            всё; это тот же смысл, что у писателя capability ``data``.
 
-            Значение по умолчанию — офлайн-дефолт (сборка без агента, тест),
-            а не рантайм-значение. Рантайм обязан передать то, что разобрано из
-            ``--log-min-level``: забытый здесь порог означал бы второй фильтр на
-            пути события, и внутренние события платформы резались бы по
-            ``INFO`` независимо от настройки оператора. Что значение действительно
-            доезжает, проверяет
-            ``tests/test_journal_writer_threshold_wiring.py``.
+            Явное значение остаётся только тестом: у платформы значения в
+            коде быть не должно, иначе у вопроса «что применяется» снова
+            два ответа.
     """
     values = policy_values(settings)
     policy = ExecutionPolicy.from_settings(values)
@@ -108,7 +159,7 @@ def build_execution_layer(
         sink,
         workspace=workspace,
         persist_session_events=policy.persist_session_events,
-        min_level=min_level,
+        min_level=journal_min_level(settings, min_level),
     )
     pipeline = ToolExecutionPipeline(
         base_policy=policy,

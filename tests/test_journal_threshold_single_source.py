@@ -10,9 +10,10 @@
 две половины агента, иначе платформа половину времени пишет по чужой политике:
 
 * ``ApplicationContext._make_db_logging`` — порог писателя журнала агента;
-* ``client_from_settings`` — тот же порог, отданный платформе флагом запуска
-  ``--log-min-level`` (платформа применяет его у себя; см.
-  ``mcp-platform/servers/enterprise/capabilities/data/service/main.py``).
+* ``ApplicationContext._make_db_logging`` — порог писателя журнала агента;
+* ``lib/services/agent_settings.block_values`` — тот же порог, положенный в
+  блок настроек агента (``--agent-settings-file``; платформа применяет его у
+  себя, см. ``mcp-platform/servers/enterprise/settings.py``).
 
 Поэтому этот страж запрещает не «второе чтение», а **второй источник**:
 чтение не из того ключа, молчаливый дефолт вместо значения из конфигурации,
@@ -55,6 +56,7 @@ from typing import Any
 
 import pytest
 from config import runtime_table
+from lib.services.agent_settings import AGENT_BLOCK_PATHS
 
 AGENT_ROOT = Path(__file__).resolve().parent.parent
 APPLICATION_CONTEXT = AGENT_ROOT / "lib" / "core" / "application_context.py"
@@ -80,17 +82,22 @@ AGENT_SOURCE_FILES: tuple[Path, ...] = (
 #: ``config._lift_agent_sections``, что и в ``resolve_application_config``.
 CONFIG_KEY_PATH: tuple[str, ...] = ("logging", "db", "min_level")
 
-#: Ровно три чтения порога в дереве агента, и все — из ``CONFIG_KEY_PATH``.
-#: Одно место, которое правит человек, — ``config.json``; читателей три,
-#: потому что журнал пишут ТРИ процесса: писатель агента, клиент MCP фоновых
-#: служб и второй процесс платформы, который поднимает нанобот ради операций
-#: для модели. Без третьего читателя платформа писала бы в журнал по своей
-#: политике — тихо и всегда.
+#: Чтения порога, которые видны сканеру: ``.get("logging") → db → min_level``
+#: либо чтение по константе-пути. Одно место, которое правит человек, —
+#: ``config.json``.
 DECLARED_READERS: tuple[tuple[str, str], ...] = (
     # (файл, функция, которая читает порог)
     ("lib/core/application_context.py", "_make_db_logging"),
-    ("lib/services/enterprise_mcp_client.py", "_journal_min_level"),
-    ("config.py", "_export_platform_process_env"),
+)
+
+#: Читатели, которых сканер не видит: там нет ``.get("logging")``, путь приходит
+#: аргументом из объявления. Сборка блока для платформы — единственный такой.
+#: Объявлены отдельно и проверяются **тождеством** пути, а не сканом: если
+#: путь скопировать, а не взять константой, он разъедется с первым читателем
+#: тихо, и ровно это страж обязан ловить.
+PATH_DECLARED_READERS: tuple[tuple[str, str], ...] = (
+    # (файл, имя константы-пути, которой этот файл пользуется)
+    ("lib/services/agent_settings.py", "JOURNAL_MIN_LEVEL_PATH"),
 )
 
 #: Имя переменной окружения, которой не должно быть. Ловит самый естественный
@@ -146,6 +153,26 @@ def _configured_threshold() -> Any:
 
 def _relative(path: Path) -> str:
     return path.relative_to(AGENT_ROOT).as_posix()
+
+
+def _module(path: Path) -> Any:
+    """Модуль агента по файлу: проверяется тождество, а не совпадение строк.
+
+    Модуль регистрируется в ``sys.modules`` **до** исполнения: dataclass внутри
+    него ищет свой модуль именно там, и без регистрации падает на ``None``.
+    """
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(f"_guard_{path.stem}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
 
 
 def _function(tree: ast.AST, name: str) -> ast.FunctionDef:
@@ -409,8 +436,8 @@ class TestConfigValueIsResolvedOnceAndLoudly:
             _build(min_level="verbose")
 
 
-class TestOneSourceWithThreeReaders:
-    """Один источник — ``config.json``; читателей ровно три, и все его."""
+class TestOneSourceWithTwoReaders:
+    """Один источник — ``config.json``; читателей ровно два, и оба его."""
 
     def test_only_the_declared_readers_read_the_threshold(self) -> None:
         """Порог читают ровно объявленные места, и все — оттуда.
@@ -420,16 +447,22 @@ class TestOneSourceWithThreeReaders:
         Сканер ловит и прямое чтение по литералу, и чтение по
         константе-пути: второе не хуже первого, а при прежней версии этого
         стража оно было не видно вовсе.
+
+        Читатель по константе-пути сканер не видит (путь приходит аргументом),
+        поэтому он объявлен в :data:`PATH_DECLARED_READERS` и проверяется
+        отдельно — тождеством пути, а не количеством чтений.
         """
         reads = _threshold_reads()
         files = sorted({file for file, _, _ in reads})
         assert files == sorted(file for file, _ in DECLARED_READERS), (
             "порог журнала читают не те файлы: "
             f"{[(file, line) for file, line, _ in reads]}. Объявлены читатели "
-            f"{[file for file, _ in DECLARED_READERS]} — писатель журнала, "
-            "клиент MCP и экспорт для второго процесса платформы, и все "
-            "читают ключ logging.db.min_level."
+            f"{[file for file, _ in DECLARED_READERS]} и "
+            f"{[file for file, _ in PATH_DECLARED_READERS]} — писатель журнала "
+            "и сборка блока, и оба читают ключ logging.db.min_level."
         )
+        for file, constant in PATH_DECLARED_READERS:
+            assert (AGENT_ROOT / file).exists(), f"{file} не найден"
 
     def test_each_reader_reads_it_once(self) -> None:
         """Внутри читателя ключ читается один раз.
@@ -451,9 +484,12 @@ class TestOneSourceWithThreeReaders:
 
         Это и есть «одно место» по смыслу: неважно, сколько раз ключ прочитан,
         важно, что он один. Писатель читает его по подсекции
-        ``settings_section("logging") → db``, клиент MCP — по константе-пути,
-        и сверяются они тут, а не на словах в докстрингах.
+        ``settings_section("logging") → db``, а сборка блока берёт
+        ``JOURNAL_MIN_LEVEL_PATH`` — ту же константу, которой пользуется
+        ``config.py``. Сверяются они тут, а не на словах в докстрингах.
         """
+        from config import JOURNAL_MIN_LEVEL_PATH
+
         for file, function in DECLARED_READERS:
             source = (AGENT_ROOT / file).read_text(encoding="utf-8")
             tree = ast.parse(source, filename=file)
@@ -482,55 +518,60 @@ class TestOneSourceWithThreeReaders:
                     f"(ключи до него: {before})"
                 )
 
-    def test_writer_and_mcp_client_resolve_the_same_value(self) -> None:
+        for file, constant in PATH_DECLARED_READERS:
+            module = _module(AGENT_ROOT / file)
+            declared = getattr(module, constant)
+            assert declared == CONFIG_KEY_PATH == JOURNAL_MIN_LEVEL_PATH, (
+                f"{file}::{constant} = {declared}, а путь в конфигурации — "
+                f"{CONFIG_KEY_PATH}. Это разные пути к одному значению."
+            )
+            assert list(AGENT_BLOCK_PATHS.values()) == [declared], (
+                f"{file}: блок наполняется не тем путём — "
+                f"{list(AGENT_BLOCK_PATHS.values())}"
+            )
+
+    def test_writer_and_the_block_resolve_the_same_value(self) -> None:
         """Оба читателя на ОДНИХ настройках дают одно значение.
 
-        Самая ценная проверка файла: писатель и флаг запуска MCP собираются из
-        одного и того же словаря настроек, и значение, ушедшее в MCP, должно
-        означать для платформы ровно то, чем фильтрует писатель. Сравниваются
-        приведённые значения: писатель нормализует при сборке, а клиент
-        отдаёт строку как есть, и приводит её уже платформа (её правило разбора
-        — то же, что у писателя).
+        Самая ценная проверка файла: писатель и блок для платформы собираются
+        из одного и того же словаря настроек, и значение, ушедшее в блок,
+        должно означать для платформы ровно то, чем фильтрует писатель.
+        Сравниваются приведённые значения: писатель нормализует при сборке, а
+        блок отдаёт строку как есть, и приводит её уже платформа (её правило
+        разбора — то же, что у писателя).
         """
+        from lib.services.agent_settings import block_values
         from lib.services.db_logging_service import normalize_journal_level
-        from lib.services.enterprise_mcp_client import (
-            LOG_MIN_LEVEL_FLAG,
-            client_from_settings,
-        )
 
         for configured in ("DEBUG", "INFO", "WARN", "ERROR", "warning"):
             settings = _settings(min_level=configured)
             writer = _writer(settings)
-            args = client_from_settings(settings).describe()["args"]
-            assert LOG_MIN_LEVEL_FLAG in args, (
-                f"при min_level={configured!r} флаг {LOG_MIN_LEVEL_FLAG} не ушёл "
-                f"в MCP: {args}. Платформа осталась бы со своей политикой."
+            block = block_values(settings)
+            assert "logging.db.min_level" in block, (
+                f"при min_level={configured!r} в блок не попал порог: {block}. "
+                "Платформа осталась бы со своей политикой."
             )
-            forwarded = args[args.index(LOG_MIN_LEVEL_FLAG) + 1]
+            forwarded = block["logging.db.min_level"]
             assert normalize_journal_level(forwarded) == writer._min_level, (
-                f"писатель фильтрует по {writer._min_level!r}, а в MCP ушло "
+                f"писатель фильтрует по {writer._min_level!r}, а в блок ушло "
                 f"{forwarded!r} — половины журнала пишутся по разному."
             )
 
-    def test_absent_key_gives_no_flag_and_no_policy_change(self) -> None:
-        """Ключа нет — писателю дефолт, платформе флаг не уходит.
+    def test_absent_key_publishes_nothing_and_changes_no_policy(self) -> None:
+        """Ключа нет — писателю дефолт, в блок ничего не попадает.
 
         Отсутствие ключа законно и разбирается по-разному: у писателя оно
         законченное состояние (``DEFAULT_MIN_LEVEL``), у платформы — «пишем всё,
-        как писали до флага». Подстановка дефолта в флаг сделала бы второе
+        как писали до блока». Подстановка дефолта в блок сделала бы второе
         место, объявления которого нет.
         """
+        from lib.services.agent_settings import block_values
         from lib.services.db_logging_service import DEFAULT_MIN_LEVEL
-        from lib.services.enterprise_mcp_client import (
-            LOG_MIN_LEVEL_FLAG,
-            client_from_settings,
-        )
 
         settings = _settings(min_level=None, present=False)
         assert _writer(settings)._min_level == DEFAULT_MIN_LEVEL
-        args = client_from_settings(settings).describe()["args"]
-        assert LOG_MIN_LEVEL_FLAG not in args, (
-            f"без ключа в конфигурации платформе отдан порог {args} — "
+        assert block_values(settings) == {}, (
+            f"без ключа в конфигурации в блок ушёл порог {block_values(settings)} — "
             "значение, которого в конфигурации нет."
         )
 
