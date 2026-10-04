@@ -143,8 +143,8 @@ MUST NOT вызывать `ContextCompactionService.compact(...)` локальн
 У CLI после перехода в клиентскую модель нет ни `ApplicationContext`, ни
 сервиса сжатия, ни доступа к `agent_conversation_messages`. Локальное
 исполнение означало бы сжатие сессии вторым процессом — ровно тот класс
-гонок, который устранён в `cache-architecture-alignment` и
-`fix-cache-process-boundary`.
+гонок, который устранён в архивных `2026-10-02-drop-local-cache-read-from-pg`
+и `2026-10-02-fix-cache-process-boundary`.
 
 Gateway MUST обработать команду в своём command router
 (`nanobot/agent/loop.py:1342` — команды обрабатываются для любого канала, кроме
@@ -217,9 +217,19 @@ in-memory `MessageBus`: `bus.publish_inbound(InboundMessage(...))` для
 
 - **WHEN** пользователь вводит сообщение в CLI REPL
 - **THEN** CLI отправляет его в Gateway по wire-протоколу, а Gateway вызывает `bus.publish_inbound(InboundMessage(channel="websocket", chat_id=..., content=...))` — AgentLoop обрабатывает через bus
-- **WHEN** сообщение приходит в Gateway через `PostgresChannel`
-- **THEN** `PostgresChannel` вызывает `bus.publish_inbound(InboundMessage(channel="postgres", chat_id=..., content=...))` — тот же AgentLoop обрабатывает через bus
+- **WHEN** сообщение приходит в Gateway через канал, который читает очередь задач
+- **THEN** этот канал вызывает `bus.publish_inbound(InboundMessage(channel="postgres", chat_id=..., content=...))` — тот же AgentLoop обрабатывает через bus
 - **AND** AgentLoop MUST вести себя идентично в обоих случаях
+
+> Маркер «после `2026-10-02-task-queue-into-mcp`». Пример назван не
+> `PostgresChannel` с собственным пулом PostgreSQL и 33 SQL-глаголами: change
+> `2026-10-02-task-queue-into-mcp` переводит работу с задачами в операции
+> capability `data`, и канал становится потребителем этих операций, а не
+> владельцем собственного пула. **Инвариант сценария переживает эту правку
+> целиком:** важен не конкретный канал, а то, что любой источник приходит в
+> `AgentLoop` через `bus.publish_inbound` и что `AgentLoop` не различает их.
+> Ждать завершения `2026-10-02-task-queue-into-mcp` не нужно — тот же приём
+> «после X», что уже применён в D13.
 
 #### Scenario: проект не расширяет список исключений
 
@@ -264,8 +274,10 @@ cron работал в CLI.
 
 `cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать
 профиль из env. CLI MUST использовать фиксированный профиль `test` при вызове
-`config._initialize_settings(profile="test")`. Gateway MAY принимать
-`--profile`.
+`config._initialize_settings(profile="test")`. Отклоняются `--profile`,
+`-profile` и `-p`, каждая передача — `ConfigurationError`. Gateway MUST
+принимать `--profile` из whitelist'а `("prod", "test")`
+(`gateway.py::_SUPPORTED_PROFILES`) и MUST отклонять иной профиль.
 
 Профиль `test` у CLI определяет **только локальное разрешение конфигурации
 клиента** (адрес Gateway, флаги подключения, отображение настроек). Он НЕ
@@ -302,6 +314,11 @@ Gateway и доступны CLI через wire-протокол.
 - **THEN** gateway MUST принять `--profile`
 - **AND** `SETTINGS["profile"]` MUST соответствовать переданному значению
 
+#### Scenario: Профиль вне whitelist'а отклоняется
+
+- **WHEN** пользователь запускает `python gateway.py --profile=staging`
+- **THEN** gateway MUST поднять `ConfigurationError` и завершиться с кодом 2 (`gateway.py::_parse_args`)
+
 #### Scenario: профиль CLI не создаёт локальный runtime
 
 - **WHEN** CLI разрешил конфигурацию с профилем `test`
@@ -334,10 +351,13 @@ CLI после перехода в клиентскую модель вообщ�
 
 ### Requirement: Deprecated kwargs с явной compatibility boundary
 
-Deprecated kwargs являются временной compatibility boundary. Они MUST
-приниматься только через `**kwargs` до выполнения отдельного change
-`remove-deprecated-enable-kwargs`. До этого change production code MUST NOT
-использовать эти kwargs. После применения `remove-deprecated-enable-kwargs`:
+Deprecated kwargs являются временной compatibility boundary. Change
+`remove-deprecated-enable-kwargs`, который их снимал, **не существует** ни в
+`changes/`, ни в `archive/`, и замена кандидата **не выполнена** на 2026-04.
+Исполнитель не назначен, и этот change его за собой не заменяет: снятие
+deprecated kwargs — отдельный предмет. До того как отдельный change будет
+создан и выполнен, kwargs MUST приниматься через `**kwargs`, а production
+code MUST NOT их использовать. После такого change:
 
 - `enable_db_logging`
 - `enable_audit`
@@ -345,6 +365,13 @@ Deprecated kwargs являются временной compatibility boundary. О
 
 MUST NOT приниматься `ApplicationContext.create()`; их передача MUST
 приводить к `TypeError`.
+
+`DEPRECATED_ENABLE_KWARGS`
+(`lib/core/application_context.py::DEPRECATED_ENABLE_KWARGS`) MUST оставаться
+allowlist'ом, а не «мягкой» обработкой: любой ключ вне перечня MUST
+отвергаться `TypeError`, называющим принятые имена
+(`lib/core/application_context.py::_resolve_enable_kwargs`). Это делает
+опечатку (`enable_aduit=`) явной ошибкой, а не молчаливым игнорированием.
 
 `enable_cron` УДАЛЁН из перечня: cron перестаёт быть параметром composition
 (см. требование «Cron = gateway-only»), поэтому принимать его через `**kwargs`
@@ -362,9 +389,21 @@ MUST NOT приниматься `ApplicationContext.create()`; их переда
 
 #### Scenario: После remove-deprecated-enable-kwargs — TypeError на deprecated kwargs
 
-- **WHEN** change `remove-deprecated-enable-kwargs` реализован
+- **WHEN** отдельный change, снимающий deprecated kwargs, реализован
 - **AND** код вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
 - **THEN** MUST быть поднят `TypeError`
+
+> Заголовок сценария сохранён как канонический, но сам change
+> `remove-deprecated-enable-kwargs` в репозитории **отсутствует** (нет ни в
+> `changes/`, ни в `archive/`), замена кандидата не выполнена, исполнитель не
+> назначен. Сценарий описывает цель отдельного будущего change, а не
+> достигнутое состояние.
+
+#### Scenario: Ключ вне allowlist'а — TypeError, а не молчание
+
+- **WHEN** код вызывает `ApplicationContext.create(..., enable_aduit=False)`
+- **THEN** MUST быть поднят `TypeError`, называющий принятые имена
+  (`lib/core/application_context.py::_resolve_enable_kwargs`)
 
 #### Scenario: profile не входит в перечень deprecated kwargs
 
@@ -401,11 +440,19 @@ change устраняет, и служило источником побочны
 ### Requirement: role определяет composition инфраструктуры, не AgentLoop
 
 **Reason**: Таблица «сервис × `role`» кодировала композицию как функцию от
-параметра способа запуска и была частично неверна: `PostgresChannel`
-создаётся `ChannelFactory._add_postgres`
+параметра способа запуска и была частично неверна: канал, читающий очередь
+задач, создаётся `ChannelFactory._add_postgres`
 (`lib/services/channel_factory.py:129-191`) из `gateway.py:249-258`, то есть
 вне `ApplicationContext`. Кроме того, таблица утверждала, что cron — сервис,
 определяемый `role` и `enable_cron`, что и породило связь cron → storage.
+
+> Маркер «после `2026-10-02-task-queue-into-mcp`». Канал назван не
+> «`PostgresChannel` со своим пулом PostgreSQL и 33 SQL-глаголами»: change
+> `2026-10-02-task-queue-into-mcp` переводит работу с задачами в операции
+> capability `data`. Причина снятия требования от этого не меняется — она в
+> том, что канал создаёт `ChannelFactory`, а не `ApplicationContext`, и
+> таблица кодировала композицию как функцию от `role`. Ждать завершения
+> `2026-10-02-task-queue-into-mcp` не нужно.
 
 **Migration**: Контракт переносится в требование «composition принадлежит
 Gateway»: перечень создаваемых компонентов фиксирован и разделён по
@@ -420,11 +467,34 @@ Gateway»: перечень создаваемых компонентов фик
 адресом подключения клиента, и требование в этой формулировке запрещало бы
 указать клиенту на порт, который Gateway проверяет как свой.
 
+**Снимает три D13-обязательства.** Это требование доставляется
+`2026-10-04-enterprise-mcp-http-transport` в усиленном виде, и на трёх местах
+оно держится на предпосылке «CLI поднимает собственный процесс платформы»
+(`2026-10-04-enterprise-mcp-http-transport/design.md:354-361`). Снятие
+предпосылки снимает и все три, точно:
+
+1. **сужение «server-only» до порта канала** — уточнение границы объекта:
+   «server-only» относится к порту канала WebSocket, а проверка занятости
+   порта **платформы** — другой объект и другое требование, потому что её CLI
+   выполняет;
+2. **проверка закреплённого порта платформы в обоих входах** — требование
+   «Закреплённый порт проверяется до запуска, занятый — отказ запуска»:
+   проверка MUST выполняться в gateway и в CLI, «платформу поднимает и CLI»;
+3. **сценарий «Проверки портов не смешиваются»** — CLI проверяет порт
+   платформы и MUST NOT выполнять `_check_websocket_port_available()`.
+
+Все три помечены в `http-transport` как «до `unify-runtime-channels`», и все
+три MUST быть сняты именно здесь, а не остаться требованиями к коду, которого
+после этого change не существует. Ничего из перечисленного не переносится в
+`ADDED`: после перехода CLI не поднимает платформу, поэтому проверять её порт
+некому.
+
 **Migration**: Контракт переносится в требование «WebSocket port check
 принадлежит Gateway, а тот же порт — адрес клиента»: проверка остаётся
 server-side в `gateway.py`, а источник адреса клиента и источник проверки —
 один и тот же (`channels.websocket.host`/`port`). Второй порт для клиента не
-вводится.
+вводится. Снятие трёх D13-обязательств выше — не следствие этого переноса, а
+отдельное обязательство фазы 5 (`tasks.md` п. 5.9).
 
 ### Requirement: CLI-специфичные runtime-параметры
 

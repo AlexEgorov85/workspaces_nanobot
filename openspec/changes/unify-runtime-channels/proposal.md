@@ -1,15 +1,14 @@
-> ## ⚠️ СТАТУС: NEEDS-REWORK — не начат (3/48), требует перепроверки перед реализацией
+> ## Статус: контракт пересобран 2026-10-04 — ожидает `enterprise-mcp-http-transport` (D13)
 >
-> Помечено 2026-10-02. **Удалять нельзя: направление не устарело, а стало
-> дороже.** Ниже — что именно проверено, чтобы следующий исполнитель не
-> переделывал эту проверку заново и не принял «факты протухли» за повод
-> выбросить проект.
+> Пометка NEEDS-REWORK снята 2026-10-04. Ниже сохранено только то, что после
+> пересборки ещё верно и что следующему исполнителю не следует выяснять
+> заново. **Удалять нельзя: направление не устарело, а стало дороже.**
 >
 > ### Что проверено на живом коде 2026-10-02 и держится
 >
 > | Факт change'а | Состояние |
 > |---|---|
-> | Ф1 `create(role=...)`, `ctx.role` — двойное назначение | держится: 9 упоминаний `role` в `application_context.py` |
+> | Ф1 `create(role=...)`, `ctx.role` — двойное назначение | держится: `ctx.role` присваивается (`application_context.py:296`) и читается в cron-гейте (`:406`) |
 > | Ф2 каналы создаются мимо composition root | держится: `gateway.py` дергает `create_all` сам |
 > | Ф3 `AgentLoop` не transport-agnostic | держится: 3 сравнения `msg.channel` в `nanobot/agent/loop.py` |
 > | Ф4 CLI завершает turn локально, не по `turn_end` | держится: `_consume_outbound` + `turn_done.set()`, слова `turn_end` в `console_loop.py` нет |
@@ -17,14 +16,20 @@
 > | Ф6 `WebSocketChannel` есть в `nanobot`, но в `config.json` не включён | держится: `default_enabled=True` в манифесте, в нашем конфиге секции нет |
 > | Ф7 Gateway блокируется на stdin | держится |
 >
-> Привязки `file:line` разъехались на единицы строк (`create` 193→194,
-> `ctx.role` 385→378, `return_file_manager` 315→316,
-> `turn_wait_timeout` 233→235). Это следствие сноса кластера кэша, а не
-> смены архитектуры. **Одна ссылка протухла по-настоящему:** п. 5.5 указывал
-> на `application_context.py:1727`, а файл теперь 1502 строки, и
-> `_make_cron_service` живёт на 379. Правки внесены.
+> Привязки `file:line` разъехались на единицы строк (`return_file_manager`
+> 315→316, `turn_wait_timeout` 233→235). Это следствие сноса кластера кэша, а
+> не смены архитектуры.
 >
-> ### Что изменилось и почему change от этого важнее, а не старше
+> **Правка привязки от 2026-10-02 была неверной и откатывается.** П. 5.5
+> указывал на `application_context.py:1727`, и это было верно. Правка
+> 2026-10-02 объявила `:1727` протухшим и подставила `:379`, но `:379` — это
+> комментарий про `mcp-platform/platform.json`, а не `_make_cron_service`.
+> Функция живёт на `:1584`, её docstring — на `:1585`, и docstring **до сих
+> пор** утверждает «нужен для CLI-режима», то есть расхождение с гейтом
+> `if ctx.enable_cron and ctx.role == "gateway"` осталось неразобранным.
+> Привязка восстановлена в `tasks.md` п. 5.5.
+>
+> ### Основание остаётся, изменилась его цена (решение Р5)
 >
 > Change написан до миграции `enterprise-mcp`. С тех пор агент получил
 > stdio-клиента платформы, и `ApplicationContext.create()` **безусловно**
@@ -35,40 +40,71 @@
 > ```
 >
 > Гейта по `role` там нет. Значит `cli_agent.py`, поднимая свой
-> `ApplicationContext`, поднимает **второй процесс `enterprise-mcp`** —
-> второе рукопожатие, второй держатель пула PostgreSQL, вторая сессия
-> capability. Это ровно та конструкция, которую запрещает
-> `AGENTS.md` при обосновании `EnterpriseMcpClient`
-> («вторая копия процесса означала бы второго владельца пула PostgreSQL»).
+> `ApplicationContext`, поднимает **второй процесс `enterprise-mcp`**:
+> второе рукопожатие и вторая сессия capability.
 >
-> Иными словами: до миграции дубль runtime'а стоил второго `AgentLoop` и
-> второго `SessionManager`. После миграции он стоит ещё и второго
-> владельца **базы данных**. Направление change'а («CLI — тонкий
-> WebSocket-клиент, `ApplicationContext` в CLI не поднимается») убирает и
-> новую проблему, поэтому **переделывать надо, а не удалять**.
+> Прежняя формулировка обоснования упиралась в «второго владельца пула
+> PostgreSQL» (запрет `AGENTS.md` при обосновании `EnterpriseMcpClient`).
+> 2026-10-04 этот аргумент **ослаб**: change
+> `2026-10-02-task-queue-into-mcp` снимает второй пул в агенте, перенося
+> работу с задачами в операции capability `data`. Изменилась цена, а не
+> основание: двойной `AgentLoop`, двойной `SessionManager`, двойные хуки и
+> патчи и **двойной процесс `enterprise-mcp`** остаются. Направление
+> change'а («CLI — тонкий WebSocket-клиент, `ApplicationContext` в CLI не
+> поднимается») по-прежнему убирает и новую проблему, поэтому переделывать
+> надо, а не удалять.
 >
-> ### Что обязательно пере-decide перед реализацией
+> ### Решения, принятые при пересборке 2026-10-04
 >
-> 1. **Кто владеет сессией `enterprise-mcp`.** Change написан в логике «CLI
->    сам — runtime». Теперь это не так: если CLI становится клиентом
->    Gateway, `ApplicationContext` в CLI не поднимается вообще, и сессия
->    остаётся одна. Это надо записать в design как решение, а не оставить
->    следствием.
-> 2. **Транспорт.** `WebSocketChannel` в `nanobot` есть, но включается
->    дефолтом в `ChannelManager` и в `config.json` агента не объявлен. Нужно
->    решить, включаем ли его секцией конфига или отдельной точкой сборки.
-> 3. **Разделение 8 «Договорённости».** `turn_end` — единственный сигнал
->    завершения оборота на wire, и модель его потребления должна совпасть с
->    тем, что реально кодит `encode_turn_end` в 0.3.5.
-> 4. **Пересобрать каталог задач.** Разделы 2–6 указывают строки, которые
->    надо перепроверить по месту; п. 5.5 уже поправлен, остальные — при
->    первом же касании.
+> 1. **Сессия `enterprise-mcp` — одна по контракту, а не по стечению
+>    обстоятельств.** Дельта фиксирует это нормативно (сценарий «только
+>    Gateway вызывает composition root»), а не оставляет следствием того, что
+>    CLI перестал звать `create()`.
+> 2. **Р1 — добавлена дельта `runtime/context`.** `role` нормативен не только
+>    в `runtime/entrypoints`: `openspec/specs/runtime/context/spec.md:61,83`
+>    закрепляет «различие только в обязательном kwarg `role`». Дельта только
+>    `runtime/entrypoints` оставила бы висящее требование к
+>    несуществующему параметру, поэтому `runtime/context` тоже несёт
+>    `MODIFIED`.
+> 3. **Р2 — долг `data/cache-provider` сюда не втягивается.** Канонизация
+>    cache-контракта **не состоялась**: change `cache-architecture-alignment`
+>    не существует ни в `changes/`, ни в `archive/`, а его реальные потомки
+>    (`2026-10-02-drop-local-cache-read-from-pg`,
+>    `2026-10-02-fix-cache-process-boundary`, оба архивированы) не имеют
+>    каталога `specs/` вообще. Утверждение прежней версии change'а — «A → B
+>    → C решает обе проблемы: B снимает дубли, C удаляет `role`» —
+>    **не подтверждается**. Дубликаты cache-контракта в `runtime/entrypoints`
+>    остаются; лечатся они отдельным change, потому что здесь уже несутся
+>    `runtime/entrypoints` и `runtime/cli-client`. Долг зафиксирован в
+>    `## Out of Scope` и в `design.md` (Decision 9).
+> 4. **Р3 — три D13-обязательства снимаются фазой 5 этого change**, а не
+>    молча. См. `tasks.md` п. 5.9 и `REMOVED`-блок в
+>    `specs/runtime/entrypoints/spec.md`.
+> 5. **Р4 — примеры канала не ждут `task-queue-into-mcp`, а помечены
+>    «после `2026-10-02-task-queue-into-mcp`»** — тем же приёмом «после X»,
+>    что уже применён в D13.
+> 6. **Р5 — мотивация переписана в ключе «цена изменилась, основание
+>    нет»**, обоснование не выброшено.
 >
-> ### Порядок
+> ### Порядок (D13)
 >
-> Не брать, пока `enterprise-mcp-platform` (фаза 8) не дойдёт до устойчивого
-> состояния: слой исполнения операций меняет и `ApplicationContext`, и
-> границу «агент ↔ платформа», вокруг которой определён этот change.
+> Этот change идёт **после** `2026-10-04-enterprise-mcp-http-transport`:
+> тот **добавляет** в `runtime/entrypoints` три требования, держащихся на
+> предпосылке «CLI поднимает собственный процесс платформы», и сам помечает
+> их «до `unify-runtime-channels`»
+> (`2026-10-04-enterprise-mcp-http-transport/design.md:341-361`). Фаза 5
+> этого change снимает все три.
+>
+> Прежний арбитр («не брать, пока `enterprise-mcp-platform` фазы 8 не дойдёт
+> до устойчивого состояния») протух: фаза 8 давно позади, а решение принято и
+> записано — D13.
+>
+> ### Известный долг, не входящий в этот change
+>
+> `runtime/entrypoints` по-прежнему содержит четыре требования про cache
+> (ownership, fencing, layered API, `CacheSyncService`), которые дублируют
+> `data/cache-provider` и `data/cache-runtime-lifecycle` и расходятся с ними
+> по заголовкам. **Требуется отдельный change** — здесь не лечится (Р2).
 
 ## Why
 
@@ -88,8 +124,8 @@
 (`lib/core/application_context.py:193`) вызывается из `gateway.py:121`
 (`role='gateway'`) и `cli_agent.py:125,151,175` (`role='cli'`). Реальные
 чтения `ctx.role` в runtime: `application_context.py:250` (присваивание),
-`:385` (гейт CronService), `:1538` (identity claim'а cache — уже устранён
-change `cache-architecture-alignment`).
+`:406` (гейт CronService), identity claim'а cache снят архивным change
+`2026-10-02-drop-local-cache-read-from-pg`.
 
 **Факт 2 — таблица composition-сервисов в канонической спеке неверна.**
 `openspec/specs/runtime/entrypoints/spec.md:164` утверждает, что
@@ -98,6 +134,14 @@ change `cache-architecture-alignment`).
 (`lib/services/channel_factory.py:129-191`), который вызывается из
 `gateway.py:249-258` — то есть **вне** `ApplicationContext`. Спека
 приписывает composition тому, кто её не выполняет.
+
+Примеры «канал = `PostgresChannel`, свой пул PostgreSQL, 33 SQL-глагола»,
+которые фигурируют в этом change'е, устаревают прямо сейчас: change
+`2026-10-02-task-queue-into-mcp` переводит канал на операции capability
+`data`. По решению Р4 ждать его не нужно: в дельтах такие примеры помечены
+«после `2026-10-02-task-queue-into-mcp»». Само утверждение («канал создаёт
+`ChannelFactory`, а не `ApplicationContext`») переживает эту правку — меняется
+не то, кто создаёт канал, а то, чем он является.
 
 **Факт 3 — `AgentLoop` не transport-agnostic в строгом смысле.**
 `openspec/specs/runtime/entrypoints/spec.md:189-199` требует, чтобы
@@ -170,9 +214,11 @@ health-probe (`:99-129`).
 `application_context.py:159,253,315`: `return_file_manager=not ctx.enable_cron`
 (`SessionStorageService.create`, `lib/services/session_storage.py:42-51`).
 Cron-гейт — `if ctx.enable_cron and ctx.role == "gateway"`
-(`application_context.py:385`), при этом docstring `_make_cron_service`
-(`:1727`) утверждает обратное («нужен для CLI-режима») — расхождение
-документации с кодом.
+(`application_context.py:406`), при этом docstring `_make_cron_service`
+(`:1585`, сама функция на `:1584`) утверждает обратное («нужен для
+CLI-режима») — расхождение документации с кодом. Правка привязки от
+2026-10-02 (`:1727` → `:379`) была ошибочной: `:379` — комментарий про
+`mcp-platform/platform.json`.
 
 **Факт 11 — `/health` в этом проекте не поднимается.**
 Upstream health-сервер живёт в `nanobot/cli/gateway_runtime.py:761-816` и
@@ -192,10 +238,15 @@ Upstream health-сервер живёт в `nanobot/cli/gateway_runtime.py:761-8
    рантайма.
 2. **Параметр `role` MUST быть удалён** из `ApplicationContext.create()` и из
    поля `ctx.role` (`application_context.py:156,193,250`). Это BREAKING и
-   делается здесь, а не «после того, как понадобится».
+   делается здесь, а не «после того, как понадобится». `role` нормативен не
+   только в `runtime/entrypoints`: его закрепляет и `runtime/context`
+   (`openspec/specs/runtime/context/spec.md:61,83`), поэтому дельта
+   `runtime/context` входит в этот change (решение Р1) — иначе снос
+   параметра оставил бы висящее требование.
 3. **Cron MUST стать свойством Gateway, а не entrypoint-флага.**
-   `enable_cron` перестаёт быть переключателем composition (`application_context.py:159,253,315,385`);
-   `_make_cron_service` docstring (`:1727`) приводится в соответствие с кодом.
+   `enable_cron` перестаёт быть переключателем composition (`application_context.py:159,253,315,406`);
+   `_make_cron_service` docstring (`:1585`; сама функция `:1584`) приводится в
+   соответствие с кодом.
 4. **`return_file_manager` MUST NOT зависеть от cron-флага** (`application_context.py:315`).
    Это сессионное решение, а не cron-решение; `session_storage.py:13-17`
    (docstring с перепутанным порядком возврата) правится заодно.
@@ -220,9 +271,11 @@ Upstream health-сервер живёт в `nanobot/cli/gateway_runtime.py:761-8
    ApplicationContext.create с role`, `role определяет composition
    инфраструктуры, не AgentLoop`, `WebSocket port check остаётся server-only`,
    `CLI-специфичные runtime-параметры`, `Slash-команда /compact в CLI
-   остаётся локальной`. Дубликаты cache-контракта из `runtime/entrypoints`
-   удаляются не здесь, а в `cache-architecture-alignment` — это его
-   канонизация.
+   остаётся локальной`. Дубликаты
+   cache-контракта из `runtime/entrypoints` **не трогаются здесь**: канонизация
+   не состоялась (Р2 в шапке), предшественник `cache-architecture-alignment`
+   не существует ни в `changes/`, ни в `archive/`, а его потомки не имеют
+   каталога `specs/`. Это известный долг, он требует отдельного change.
 9. **CLI-флаги MUST соответствовать роли клиента:** `--session` сохраняется
    (идентификатор чата/сессии на Gateway), `--storage` и `--patched`
    удаляются (выбор локального хранилища и vanilla/patched-режим перестают
@@ -246,6 +299,10 @@ Upstream health-сервер живёт в `nanobot/cli/gateway_runtime.py:761-8
 
 ### Modified Capabilities
 
+- `runtime/context` — дельта из 1 требования (решение Р1):
+  `Единый корень общей инфраструктуры` перестаёт требовать `role` и
+  `storage_override` от CLI; все четыре канонических заголовка сценариев
+  сохранены, тела скорректированы.
 - `runtime/entrypoints` — дельта из 15 требований:
 
   **REMOVED** (заголовок содержал утверждение, ставшее ложным; нормативный
@@ -277,29 +334,44 @@ Upstream health-сервер живёт в `nanobot/cli/gateway_runtime.py:761-8
 
 ## Dependencies Between Changes
 
-Порядок реализации: `fix-cache-process-boundary` →
-`cache-architecture-alignment` → `unify-runtime-channels`.
+**Порядок (D13).** Этот change идёт **после**
+`2026-10-04-enterprise-mcp-http-transport` — того, который **добавляет** три
+требования `runtime/entrypoints` на предпосылке «CLI поднимает собственную
+платформу» и сам помечает их «до `unify-runtime-channels`»
+(`2026-10-04-enterprise-mcp-http-transport/design.md:341-361`). Фаза 5
+этого change снимает все три явно (п. 5.9 в `tasks.md`).
 
-- **Зависит от `cache-architecture-alignment`:** удаление `role` возможно
-  только после того, как `role` перестал участвовать в выборе cache owner
-  (`worker_id` без `role`). Иначе удаление параметра сломает идентичность
-  claim'а.
-- **Зависит от `fix-cache-process-boundary`:** CLI перестаёт быть вторым
-  владельцем cache-файла в этом же изменении — иначе в момент удаления
-  `role` останется путь, где CLI открывает файл, который Gateway держит.
-- **Независим от `remove-streamlit-runtime`:** `streamlit_app.py` вызывает
-  только `config._initialize_settings` (`:95`) и НЕ вызывает
-  `ApplicationContext.create()` — удаление `role` его не затрагивает.
-  Сопряжение по конфигурации (`--profile`) сохраняется: CLI-клиент наследует
-  тот же lifecycle-gate.
+Оба archive-предшественника по кэшу уже выполнены и стоят **перед** этим
+change. Прежние имена `cache-architecture-alignment` и
+`fix-cache-process-boundary` в репозитории **не существуют**; ниже — их
+реальные преемники:
+
+- **Закрыт (архив) `2026-10-02-drop-local-cache-read-from-pg`** — преемник
+  `cache-architecture-alignment` в части identity: локальное чтение кэша из
+  PostgreSQL снято, и удаление `role` больше не ломает идентичность claim'а
+  (`worker_id` без `role`). Канонизации cache-контракта он **не** выполнил:
+  каталога `specs/` у него нет вовсе, поэтому обещания «B снимает дубли» этот
+  change не выполняет.
+- **Закрыт (архив) `2026-10-02-fix-cache-process-boundary`** — CLI больше не
+  второй владелец cache-файла, так что в момент удаления `role` не остаётся
+  пути, где CLI открывает файл, который Gateway держит.
+- **Уже удалён 2026-10-02 `streamlit_app.py`** (change
+  `remove-streamlit-runtime`, которого в репозитории нет). Правок он не
+  требовал и не требует: `create()` он не вызывал, только
+  `config._initialize_settings` (`:95`). Сопряжение по конфигурации
+  (`--profile`) сохраняется: CLI-клиент наследует тот же lifecycle-gate.
+- **Не существует: `remove-deprecated-enable-kwargs`.** Замена кандидата не
+  выполнена, исполнитель не назначен. Снятие deprecated kwargs — отдельный
+  предмет; этот change фиксирует текущее состояние границы, а не заменяет
+  отсутствующий change.
 
 ## Impact
 
 **Runtime-код:**
 
 - `lib/core/application_context.py` — удалить `role` (`:156,193,250`) и его
-  чтение (`:385`); убрать `enable_cron` из composition (`:159,253,315`);
-  исправить docstring `_make_cron_service` (`:1727`).
+  чтение (`:406`); убрать `enable_cron` из composition (`:159,253,315`);
+  исправить docstring `_make_cron_service` (`:1585`; сама функция `:1584`).
 - `cli_agent.py` — удалить `_run_vanilla`/`_run_patched`/`_run_patched_repl`
   и вызовы `ApplicationContext.create` (`:125,151,175`); удалить
   `_migrate_cron_store` (`:232-243`) и `_get_cron` (`:212-215`); убрать флаги
@@ -337,10 +409,19 @@ Layout» и «Configuration», исправление устаревшего «`
 
 ## Out of Scope
 
-- Cache lifecycle, ownership, heartbeat, fencing, shutdown ordering —
-  change `cache-architecture-alignment`.
-- Процессная граница skill ↔ cache — change `fix-cache-process-boundary`.
-- Удаление `streamlit_app.py` — change `remove-streamlit-runtime`.
+- Cache lifecycle, ownership, heartbeat, fencing, shutdown ordering — снято
+  архивным `2026-10-02-drop-local-cache-read-from-pg`.
+- Процессная граница skill ↔ cache — архивный
+  `2026-10-02-fix-cache-process-boundary`.
+- **Канонизация дубликатов cache-контракта в `runtime/entrypoints` под
+  `data/cache-provider` / `data/cache-runtime-lifecycle`** — требует
+  отдельного change (решение Р2). Это известный долг: `cache-architecture-alignment`
+  не существует ни в `changes/`, ни в `archive/`, а его архивные потомки не
+  имеют каталога `specs/`.
+- Снятие deprecated kwargs (`remove-deprecated-enable-kwargs`) — отдельный
+  change; замена кандидата не выполнена, исполнитель не назначен.
+- Удаление `streamlit_app.py` — **выполнено 2026-10-02**, отдельного change
+  не требует.
 - Новый HTTP/OpenAPI-эндпойнт для CLI: WebSocket-транспорт уже поднят и
   документирован; второй транспорт означал бы два протокола для одной
   задачи.
