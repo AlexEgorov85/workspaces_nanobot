@@ -27,6 +27,16 @@ from typing import Any
 
 MANIFEST_VERSION_V2 = 2
 
+#: Каталог operation-level состояния под корнем кэша домена. Раньше
+#: здесь склеивался путь эпохи агента
+#: (``workspace/data_store/cache/skills/legal_summarizer``), хотя
+#: докстринг модуля выше уже описывал раскладку как ``operations/``.
+#: Двойная склейка давала ``<корень кэша>/workspace/data_store/...``:
+#: объявленный владельцем корень кэша и корень репозитория склеивались
+#: в один путь, которого не объявлял никто. Теперь под ``workspace_root``
+#: лежит ровно корень кэша домена - тот же, что у ``DocumentCache``.
+OPERATIONS_DIRNAME = "operations"
+
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,13 +227,20 @@ def skill_repo_root() -> Path:
 def manifest_root(workspace_root: Path | str | None) -> Path:
     """Корень для manifest'ов/chunks/result skill'а (operation-level).
 
-    ``workspace_root`` — корень РЕПО (не workspace dir!). Если не передан
-    — выводится через :func:`skill_repo_root` (стабильный абсолютный путь).
-    Возвращает ``<repo>/workspace/data_store/cache/skills/legal_summarizer``.
+    ``workspace_root`` — корень кэша домена, тот же, что принимает
+    ``cache.document_cache.DocumentCache``. Если не передан — берётся
+    объявление владельца через :func:`skill_repo_root`.
+    Возвращает ``<корень кэша>/operations``.
+
+    Значение параметра обязано совпадать у писателя и читателя: иначе
+    прогон пишет manifest в одно место, а follow-up ищет в другом, и
+    цепочка «суммаризовали → спросили» не работает никогда. Сторож
+    ``tests/legal_summarizer/architecture/test_state_root_agreement.py``
+    сравнивает оба корня.
     """
     if workspace_root is None:
         workspace_root = skill_repo_root()
-    return Path(workspace_root) / "workspace" / "data_store" / "cache" / "skills" / "legal_summarizer"
+    return Path(workspace_root) / OPERATIONS_DIRNAME
 
 
 def manifest_path(operation_id: str, workspace_root: Path | str | None = None) -> Path:

@@ -37,17 +37,14 @@ from libs.legal_summarizer.cache.manifest import (  # noqa: E402
 
 
 def _workspace_root(tmp_path: Path) -> Path:
-    """tmp-каталог в форме корня репо (где лежит ``workspace/``).
+    """tmp-каталог в форме корня кэша домена.
 
     Функция :func:`manifest_path` строит путь относительно ``workspace_root``
-    как ``<root>/workspace/data_store/cache/skills/legal_summarizer/<op>/``.
-    Чтобы тест не зависел от боевого кеша, делаем фейковый workspace_root
-    и кладём manifest туда напрямую.
+    как ``<root>/operations/<op>/``. Чтобы тест не зависел от боевого кеша,
+    делаем фейковый корень и кладём manifest туда напрямую.
     """
     ws = tmp_path / "ws"
-    (ws / "workspace" / "data_store" / "cache" / "skills" / "legal_summarizer").mkdir(
-        parents=True, exist_ok=True,
-    )
+    (ws / "operations").mkdir(parents=True, exist_ok=True)
     return ws
 
 

@@ -260,6 +260,7 @@ def main() -> None:
         parser = _build_parser()
         args = parser.parse_args()
 
+        from libs.legal_summarizer.cache import manifest
         from libs.legal_summarizer.application.context_builder import build_execution_context
         from libs.legal_summarizer.application.estimation import estimate_for_run
         from libs.legal_summarizer.application.service import (
@@ -350,17 +351,13 @@ def main() -> None:
             "question": args.question,
             "operation_id": args.operation_id,
             "document_path": str(args.file),
-            # Корень РЕПО (не workspace dir) — стабильный абсолютный путь,
-            # выведенный из __file__. Раньше передавали None → скилл брал
-            # относительный путь и при cwd=<workspace> создавал дубль
-            # workspace/workspace/data_store/... (см. инцидент 2026-08-28).
-            # workspace_root — корень платформы. Раньше здесь стоял
-            # ``Path(__file__).resolve().parents[4]``, то есть корень
-            # репозитория агента: после переезда такой путь указывал бы
-            # мимо платформы. Корень кэша станет настройкой в п. 11.5
-            # (сейчас он выводится из места файла — как и раньше, только
-            # теперь отсчёт идёт от платформы).
-            "workspace_root": _PLATFORM_ROOT,
+            # Корень кэша домена, а не корень репозитория: ровно тот же,
+            # что читает follow-up (см. manifest.manifest_root). Раньше здесь
+            # стоял ``_PLATFORM_ROOT``, из-за чего писатель клал manifest в
+            # ``<корень платформы>/operations/``, а capability искала его в
+            # ``<объявленный корень кэша>/operations/`` — два разных места,
+            # то есть follow-up не мог найти состояние собственного прогона.
+            "workspace_root": manifest.skill_repo_root(),
             # session_key: явный идентификатор сессии контракта приходит
             # параметром операции; CLI-обёртка его не знает, поэтому
             # разрешает автоматически (см. cache/session_key.py).

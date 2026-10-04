@@ -4,7 +4,7 @@
 ("сколько статей?", "какие разделы?", "что в чанке 12?") **без
 перепарсинга PDF** через ``exec``+pdfplumber. Читает manifest/result/chunks
 навыка ``legal_summarizer``, уже лежащие в
-``data_store/cache/skills/legal_summarizer/<operation_id>/``, и возвращает
+``<корень кэша>/operations/<operation_id>/``, и возвращает
 JSON с нужным полем.
 
 Чисто stdlib (``json``, ``pathlib``, ``argparse``) — кросс-платформенный
@@ -195,13 +195,14 @@ def _load_manifest_with_diagnosis(
 
 def _manifest_error_message(reason: str, operation_id: str, diag: dict[str, Any]) -> str:
     """Сформировать человекочитаемое сообщение для manifest-ошибки."""
-    base_path = (
-        f"workspace/data_store/cache/skills/legal_summarizer/{operation_id}"
-    )
+    # Путь берём у диагностики, а не собираем строкой: собранный вручную
+    # путь расходился с реальным и уводил читателя искать несуществующий
+    # каталог вместо того, чтобы сверить operation_id.
+    actual = diag.get("path") or "<неизвестно>"
     if reason == "not_found":
         return (
             f"manifest.json для operation_id={operation_id!r} не найден "
-            f"(ожидался по пути <repo>/{base_path}/manifest.json). "
+            f"(ожидался по пути {actual}). "
             "Возможно, прогон был удалён или operation_id указан неверно."
         )
     if reason == "corrupted":

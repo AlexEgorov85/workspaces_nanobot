@@ -1,7 +1,7 @@
 """Capability ``legal_summarizer``: операция ``query_operation`` и её границы.
 
 Capability читает состояние ранее выполненной суммаризации **с диска**: манифест
-лежит в ``<cache_root>/workspace/data_store/cache/skills/legal_summarizer/<op>/``.
+лежит в ``<cache_root>/operations/<op>/``.
 Поэтому успешный путь проверяется по-настоящему — настоящим манифестом в
 ``tmp_path``, без БД, без модели и без файла снимка. Всё, что нужно домену для
 follow-up'а, это один валидный JSON на диске.
@@ -57,7 +57,7 @@ TOOL_FILE = CAPABILITY_DIR / "tools" / "query_operation.py"
 #: ``libs.legal_summarizer.cache.manifest.manifest_root``; путь собран вручную,
 #: чтобы тест не зависел от внутреннего устройства домена и падал с понятным
 #: сообщением, если раскладка изменится.
-MANIFEST_SUBPATH = Path("workspace") / "data_store" / "cache" / "skills" / "legal_summarizer"
+MANIFEST_SUBPATH = Path("operations")
 
 
 @pytest.fixture(autouse=True)
