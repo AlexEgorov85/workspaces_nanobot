@@ -54,6 +54,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import IO, Any
 
@@ -150,7 +151,27 @@ def open_redirect(raw_path: str | os.PathLike[str] | None) -> StderrRedirect | N
             exc,
         )
         return None
+    # Заголовок — ДО зрителя: в момент его подъёма платформа ещё ничего не
+    # напечатала, и пустое окно неотличимо от «смотреть не на что».
+    try:
+        handle.write(_run_header(path) + "\n")
+        handle.flush()
+    except (OSError, ValueError):  # noqa: BLE001 - заголовок не повод отказать в журнале
+        pass
     return StderrRedirect(path=path, handle=handle, viewer=spawn_viewer(path))
+
+
+def _run_header(path: Path) -> str:
+    """Первая строка журнала: что это за файл и какой это прогон.
+
+    Время запуска здесь не украшение: по нему видно, чей это вывод, когда
+    в файле лежат прогоны разных запусков, а окно открыто на весь сеанс.
+    """
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        f"{stamp} — stderr процесса enterprise-mcp (платформа), начало прогона; "
+        f"файл: {path}"
+    )
 
 
 def spawn_viewer(path: Path) -> str:
@@ -218,6 +239,13 @@ def _spawn_windows_viewer(path: Path) -> str:
     зритель нельзя было бы закрыть вместе с родителем и нельзя было бы
     увидеть его ошибку. И обратное тоже важно: своя консоль означает, что
     ``Ctrl+C`` в консоли gateway до зрителя не доходит.
+
+    **Стандартные потоки зрителя НЕ перенаправляются** — ни в
+    ``DEVNULL``, ни куда-либо ещё. Зритель пишет в **stdout**, а stdout
+    здесь принадлежит его собственной консоли: перенаправление уводило
+    весь вывод в NUL, и окно открывалось с правильным заголовком и
+    оставалось пустым. Отдельная консоль и есть смысл зрителя, поэтому
+    перенаправлять её некуда.
     """
     flag = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
     for shell in ("powershell.exe", "pwsh"):
@@ -229,9 +257,6 @@ def _spawn_windows_viewer(path: Path) -> str:
             process = subprocess.Popen(  # noqa: S603 - argv собран выше, путь экранирован
                 argv,
                 creationflags=flag,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
         except OSError as exc:
@@ -247,6 +272,10 @@ def _spawn_linux_viewer(path: Path) -> str:
     Без ``DISPLAY``/``WAYLAND_DISPLAY`` окно открыть некуда — это не
     ошибка (шлюз нередко поднимают на машине без графики), поэтому
     возвращается отчёт, а окно не ищется впустую.
+
+    Потоки зрителя не перенаправляются по той же причине, что и на
+    Windows: ``tail`` пишет в stdout, и уводить его stdout в
+    ``DEVNULL`` — значит открыть окно и не показать в нём ничего.
     """
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return f"headless (нет DISPLAY) — окно не открыто, файл: {path}"
@@ -258,9 +287,6 @@ def _spawn_linux_viewer(path: Path) -> str:
         try:
             process = subprocess.Popen(  # noqa: S603 - argv собран выше
                 argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
             )

@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -56,21 +57,34 @@ REAL_SPAWN_VIEWER = stderr_mod.spawn_viewer
 
 
 @pytest.fixture(autouse=True)
-def _no_window_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Зрителей в тестах нет — ни окон, ни процессов.
+def _window_probe(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]:
+    """Зрителей в тестах нет — ни окон, ни процессов. Проба вместо них.
 
     Ограничений два, и каждое закрывает свой обход. ``spawn_viewer``
     подменён заглушкой: иначе на машине с графикой каждый вызов
     ``open_redirect`` открывал бы настоящее окно. ``subprocess.Popen``
     запрещён: иначе достаточно одного нового прямого вызова в обход шва,
     чтобы окна снова пошли, и никто бы этого не заметил.
+
+    Заглушка снимает содержимое файла **в момент подъёма зрителя** — так
+    проверяется порядок «заголовок написан, потом открыто окно».
     """
+    probes: list[tuple[Path, str]] = []
 
     def _forbidden(*args: Any, **kwargs: Any) -> None:
         pytest.fail(f"тест попытался запустить процесс: {args[:1]}")
 
-    monkeypatch.setattr(stderr_mod, "spawn_viewer", lambda path: STUB_VIEWER)
+    def _stub(path: Path) -> str:
+        try:
+            seen = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            seen = ""
+        probes.append((Path(path), seen))
+        return STUB_VIEWER
+
+    monkeypatch.setattr(stderr_mod, "spawn_viewer", _stub)
     monkeypatch.setattr(stderr_mod.subprocess, "Popen", _forbidden)
+    return probes
 
 
 def _section(**extra: Any) -> dict:
@@ -112,7 +126,24 @@ class TestRedirectFile:
         redirect = open_redirect(target)
 
         assert redirect is not None
-        assert target.read_text(encoding="utf-8") == ""
+        assert "прошлый прогон" not in target.read_text(encoding="utf-8")
+
+    def test_window_is_never_empty(self, tmp_path: Path, _window_probe) -> None:
+        """Окно не может открыться пустым — и это проверяется по порядку.
+
+        Платформа печатает первое сообщение через несколько секунд (импорт,
+        прогрев, индексы), а окно открывается раньше. Без заголовка в
+        начале журнала окно какое-то время пусто, и пустое окно неотличимо
+        от «смотреть не на что».
+        """
+        open_redirect(tmp_path / "enterprise-mcp.log")
+
+        assert _window_probe, "зритель вообще не поднимался"
+        path, content = _window_probe[-1]
+        assert path.name == "enterprise-mcp.log"
+        assert "stderr процесса enterprise-mcp" in content, (
+            "зритель поднялся раньше, чем в файле появился заголовок"
+        )
 
     def test_unopenable_file_is_not_fatal(self, tmp_path: Path) -> None:
         """Каталог вместо файла — не повод ронять старт агента.
@@ -316,6 +347,67 @@ class TestLinuxViewer:
         """Пустой список зрителей прошёл бы проверки выше вхолостую."""
         assert stderr_mod.TERMINAL_CANDIDATES
         assert all(candidate.name for candidate in stderr_mod.TERMINAL_CANDIDATES)
+
+
+class TestViewerWritesToItsOwnConsole:
+    """Регрессия: окно открывалось и оставалось пустым.
+
+    ``Get-Content`` и ``tail`` пишут в **stdout**, а stdout зрителя был
+    перенаправлен в ``DEVNULL`` — то есть в NUL. Заголовок окна при этом
+    ставился (его задаёт сама PowerShell, а не вывод), поэтому окно
+    выглядело живым: правильное имя, ноль строк. Нашлось это только глазами
+    на экране, и потому проверка обязана быть отдельной: остальные тесты
+    зрителей работают через заглушку и потоков не видят вовсе.
+    """
+
+    @staticmethod
+    def _capture(
+        monkeypatch: pytest.MonkeyPatch, terminal: str
+    ) -> dict[str, Any]:
+        """Подмена ``Popen`` и ``which``: запуск настоящий не нужен."""
+        captured: dict[str, Any] = {}
+
+        def _capture_popen(argv: list[str], **kwargs: Any) -> Any:
+            captured["argv"] = list(argv)
+            captured.update(kwargs)
+            return SimpleNamespace(pid=4242)
+
+        monkeypatch.setattr(stderr_mod.subprocess, "Popen", _capture_popen)
+        monkeypatch.setattr(
+            stderr_mod.shutil, "which", lambda name: f"/opt/fake/bin/{name}"
+        )
+        monkeypatch.setattr(
+            stderr_mod, "TERMINAL_CANDIDATES", (TerminalCandidate(terminal),)
+        )
+        return captured
+
+    @pytest.mark.parametrize("stream", ["stdin", "stdout", "stderr"])
+    def test_windows_viewer_keeps_the_new_console(self, stream, tmp_path, monkeypatch) -> None:
+        captured = self._capture(monkeypatch, "powershell.exe")
+
+        report = stderr_mod._spawn_windows_viewer(tmp_path / "enterprise-mcp.log")
+
+        assert captured, "зритель не был запущен — проверка вхолостую"
+        assert captured.get(stream) is None, (
+            f"{stream} зрителя перенаправлен в {captured.get(stream)!r}: "
+            "вывод уйдёт мимо его окна, и окно будет пустым"
+        )
+        assert "creationflags" in captured
+        assert "4242" in report
+
+    @pytest.mark.parametrize("stream", ["stdin", "stdout", "stderr"])
+    def test_linux_viewer_keeps_the_window(self, stream, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("DISPLAY", ":0")
+        captured = self._capture(monkeypatch, "gnome-terminal")
+
+        report = stderr_mod._spawn_linux_viewer(tmp_path / "enterprise-mcp.log")
+
+        assert captured, "зритель не был запущен — проверка вхолостую"
+        assert captured.get(stream) is None, (
+            f"{stream} зрителя перенаправлен в {captured.get(stream)!r}: "
+            "tail уйдёт в никуда, и окно будет пустым"
+        )
+        assert "4242" in report
 
 
 class TestPlatformDispatch:
