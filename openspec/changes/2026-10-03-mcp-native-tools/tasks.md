@@ -69,7 +69,7 @@ Push-Location mcp-platform; python -m pytest -q 2>&1 | Select-Object -Last 5; Po
       `legal_summarizer_query.py`, `history_search_tool.py`
       (`tools/remove_legacy_query_tools.py --apply` — удаление агенту
       заблокировано политикой).
-- [ ] 6.2 Удалить тесты снесённых инструментов
+- [x] 6.2 Удалить тесты снесённых инструментов
       (`tools/remove_legacy_query_tests.py --apply`): четыре файла тестов и две
       фикстуры бенчмарка. Покрытие не теряется — оно ушло на платформу
       вместе с кодом: аудит (`test_audit_capability.py` + 12 `test_audit_lib_*`),
@@ -79,6 +79,22 @@ Push-Location mcp-platform; python -m pytest -q 2>&1 | Select-Object -Last 5; Po
       **Бенчмарк сносится не как дубль:** он измерял ILIKE и ORDER BY в
       агентском tool'е. Такого SQL в агенте нет; перенос замера на запрос
       платформы — задача её стороны.
+
+      **Фактически снос уже состоялся** — коммитом `1f22aab` (D6, 2026-10-03),
+      тем же, что снёс сами три обёртки: из индекса и с диска ушли все шесть
+      целей (`test_audit_analyzer_query_tool.py`, `test_legal_summarizer_query_tool.py`,
+      `test_history_search_tool.py`, `test_history_search_benchmark.py` и обе
+      фикстуры `tests/fixtures/history_search/`, каталог тоже пуст). Поэтому
+      `tools/remove_legacy_query_tests.py --apply` теперь отказывает на первой
+      цели («не обычный файл») и ничего не меняет — снос повторно не нужен.
+
+      **Счётчики покрытия в тексте пункта не сходятся с деревом:** на платформе
+      шесть `test_audit_lib_*`, а не 12, и восемь `test_vectors_*`, а не семь.
+      Само покрытие на месте и собирается: `test_audit_capability.py` + 259 тестов
+      `test_audit_lib_*`, а также `test_data_service.py::TestHistorySearchIsolation`
+      и `::TestHistorySearchFilters` (8 тестов). Висячих ссылок не осталось —
+      ни одного импорта снесённых модулей; упоминания в `tests/` остались
+      текстовыми (докстринги, фикстуры логов, отрицательные стражи).
 - [x] 6.3 Починить гард-тесты, ссылающиеся на удалённые tool'ы.
       Что оказалось правдой на деле: из 28 файлов, где встречаются имена,
       ломаются девять. Остальные упоминания — фикстуры в тексте или ссылки
