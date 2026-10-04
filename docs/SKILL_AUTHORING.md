@@ -580,7 +580,7 @@ agent-facing критерии (§1); образец — `workspace/tools/documen
 
 Из `workspace/AGENTS.md`:
 
-- Новые файлы — под `data_store/cache/sessions/<session_key>/`. **НЕ**
+- Новые файлы — под `data_store/sessions/<session_key>/`. **НЕ**
   пишите в корень проекта.
 - Используйте **относительные пути** в `write_file`/`write`/`edit` —
   `SessionFileRedirectHook` (`workspace/hooks/session_file_redirect_hook.py`)
@@ -598,13 +598,13 @@ agent-facing критерии (§1); образец — `workspace/tools/documen
 
 Допустимые пути для `--file <path>`:
 
-- ✅ **Абсолютный** путь: `<project_root>/data_store/cache/sessions/<session_key>/<file>.pdf`
-- ✅ **Относительный от корня репо** (cwd = корень проекта): `data_store/cache/sessions/<session_key>/<file>.pdf`
+- ✅ **Абсолютный** путь: `<project_root>/data_store/sessions/<session_key>/<file>.pdf`
+- ✅ **Относительный от корня репо** (cwd = корень проекта): `data_store/sessions/<session_key>/<file>.pdf`
 - ❌ Только basename файла (`<file>.pdf` без префикса) — обработчик вернёт
   «Файл не найден», потому что в cwd такого файла нет.
 
 Если агент не знает session_key и видит только basename из media-attach —
-он должен найти файл через `glob` по `data_store/cache/sessions/*/<file>`
+он должен найти файл через `glob` по `data_store/sessions/*/<file>`
 или передать абсолютный путь, который знает из контекста канала.
 
 Скрипт навыка со своей стороны **не делает redirect-логику** — это контрактная

@@ -13,7 +13,7 @@
   3. Модель приложила нереальный абсолютный путь типа
      ``/home/<user>/<project>/workspace/test/test.md`` — этот путь мы
      берём ПОСЛЕ ``SessionFileRedirectHook``, т.е. уже перенаправленный
-     в ``data_store/cache/sessions/<session_key>/...``.
+     в ``data_store/sessions/<session_key>/...``.
 
 Архитектура:
 
@@ -34,7 +34,7 @@ from typing import Any, ClassVar
 from nanobot.agent import AgentHook
 
 # Полный список файловых инструментов, которые могут оставлять файлы
-# в ``data_store/cache/sessions/<key>/``*. Любой из них после нашего
+# в ``data_store/sessions/<key>/``*. Любой из них после нашего
 # хука должен пройти через ``SessionFileRedirectHook`` (см.
 # ``workspace/hooks/session_file_redirect_hook.py``), поэтому мы берём
 # финальный путь из ``params["path"]``.

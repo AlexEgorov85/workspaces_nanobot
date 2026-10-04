@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 _SESSION_PATH_RE = re.compile(
-    r"(?:^|[/\\])data_store[/\\]cache[/\\]sessions[/\\]([^/\\]+)"
+    r"(?:^|[/\\])data_store[/\\]sessions[/\\]([^/\\]+)"
 )
 
 #: Метка сессии, у которой нет пригодного имени каталога. Каталогом сессии она
@@ -205,7 +205,7 @@ def resolve_session_key_for_subprocess(
 
 
 def extract_session_key_from_path(file_path: str) -> str | None:
-    """Извлечь raw session_key из пути ``data_store/cache/sessions/<key>/...``.
+    """Извлечь raw session_key из пути ``data_store/sessions/<key>/...``.
 
     Поддерживает POSIX и Windows пути. ``None`` если session_key в пути
     не найден.

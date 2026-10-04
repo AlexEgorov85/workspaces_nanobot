@@ -252,7 +252,7 @@ def test_patcher_skips_recent_files_that_dont_exist(tmp_path):
 def test_patcher_replaces_stale_redirected_path(tmp_path):
     """Сценарий 4: модель приложила путь ДО SessionFileRedirectHook.
 
-    write_file перенаправил файл в ``data_store/cache/sessions/<key>/``,
+    write_file перенаправил файл в ``data_store/sessions/<key>/``,
     а ``message(media=[исходный путь])`` ссылается на старый путь,
     которого на диске нет. basename совпадает — auto-attach должен
     ЗАМЕНИТЬ устаревший путь реальным (перенаправленным), а не

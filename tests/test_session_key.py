@@ -169,38 +169,38 @@ def test_resolve_session_key_labels_unusable_key_for_the_log_only():
 
 
 def test_extract_session_key_from_relative_path():
-    path = "data_store/cache/sessions/cli_1/doc.pdf"
+    path = "data_store/sessions/cli_1/doc.pdf"
     assert extract_session_key_from_path(path) == "cli_1"
 
 
 def test_extract_session_key_from_absolute_path():
-    path = "C:/Users/Alex/.nanobot/data_store/cache/sessions/telegram_8281248569/doc.pdf"
+    path = "C:/Users/Alex/.nanobot/data_store/sessions/telegram_8281248569/doc.pdf"
     assert extract_session_key_from_path(path) == "telegram_8281248569"
 
 
 def test_extract_session_key_from_path_with_underscore_prefix():
     """raw safe_session_key может начинаться с underscore (после sanitize)."""
-    path = "data_store/cache/sessions/_cli_1/doc.pdf"
+    path = "data_store/sessions/_cli_1/doc.pdf"
     assert extract_session_key_from_path(path) == "_cli_1"
 
 
 def test_extract_session_key_returns_none_for_other_paths():
     assert extract_session_key_from_path("/tmp/doc.pdf") is None
     assert extract_session_key_from_path("C:/Users/Alex/doc.pdf") is None
-    assert extract_session_key_from_path("data_store/cache/other/x.pdf") is None
-    assert extract_session_key_from_path("data_store/cache/sessions") is None
+    assert extract_session_key_from_path("data_store/other/x.pdf") is None
+    assert extract_session_key_from_path("data_store/sessions") is None
     assert extract_session_key_from_path("") is None
     assert extract_session_key_from_path(None) is None
 
 
 def test_extract_session_key_handles_backslashes():
-    path = "C:\\Users\\Alex\\.nanobot\\data_store\\cache\\sessions\\cli_5\\doc.pdf"
+    path = "C:\\Users\\Alex\\.nanobot\\data_store\\sessions\\cli_5\\doc.pdf"
     assert extract_session_key_from_path(path) == "cli_5"
 
 
 def test_extract_session_key_does_not_match_nested_sessions():
     """Вложенный ``sessions/sessions/...`` — не должно ломаться."""
-    path = "data_store/cache/sessions/outer/inner/doc.pdf"
+    path = "data_store/sessions/outer/inner/doc.pdf"
     assert extract_session_key_from_path(path) == "outer"
 
 
@@ -214,6 +214,6 @@ def test_roundtrip_real_session_keys():
     raw_keys = ["cli:1", "telegram:8281248569", "postgres:abc-def-123", "redis:user42"]
     for raw in raw_keys:
         safe = safe_session_key(raw)
-        path = f"data_store/cache/sessions/{safe}/document.pdf"
+        path = f"data_store/sessions/{safe}/document.pdf"
         extracted = extract_session_key_from_path(path)
         assert extracted == safe, f"roundtrip failed for {raw!r}: {safe!r} != {extracted!r}"

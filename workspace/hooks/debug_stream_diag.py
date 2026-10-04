@@ -1,7 +1,8 @@
 """DEBUG-HOOK: StreamDiagnosisHook — временный диагностический хук.
 
 Регистрируется через ``workspace/hooks/`` auto-scan и подробно логирует
-каждый стрим-чанк в файл ``data_store/cache/debug_stream.log``.
+каждый стрим-чанк в файл ``data_store/cache/debug_stream.log`` (директория
+cache/ сохраняется для служебного лога диагностики — это не путь сессии).
 
 УДАЛИТЬ после диагностики.
 """

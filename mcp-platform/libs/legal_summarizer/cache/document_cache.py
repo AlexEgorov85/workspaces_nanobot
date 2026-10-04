@@ -122,7 +122,7 @@ def _cache_root(workspace_root: Path | str | None, session_key: str) -> Path:
     владельцем корень кэша домена (``ENTERPRISE_LEGAL_CACHE_ROOT``), а имя
     каталога сессии считает платформа, функцией ``session_dir_name``.
 
-    Раньше здесь был ``<root>/workspace/data_store/cache/sessions/<key>/documents``:
+    Раньше здесь был ``<root>/workspace/data_store/sessions/<key>/documents``:
     кэш домена писался в ``data_store`` репозитория агента, то есть в чужое
     дерево сессий, и правило имени сессии тут было ещё раз написано своим
     regex'ом. Оба расхождения сняты: корень объявляет владелец, имя - общая

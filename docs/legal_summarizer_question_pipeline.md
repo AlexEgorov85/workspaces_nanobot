@@ -24,7 +24,7 @@
 `application.service._inspection_mod.inspect(...)` минуя `run_canonical_pipeline`.
 Подробный и question режимы проходят через `run_canonical_pipeline`, который
 снапшотит `physical` + `analysis` (структура + chunks + validation) в
-`data_store/cache/sessions/<session_key>/documents/<document_id>/`.
+`data_store/sessions/<session_key>/documents/<document_id>/`.
 
 ### 1.2. Как считается `operation_id`
 
@@ -513,7 +513,7 @@ full detailed pipeline? Или пользователь должен сам эт
    document-level cache, не зависящий от режима.
 
 2. **session_key в document-level cache:** сейчас snapshot живёт под
-   `data_store/cache/sessions/<session_key>/documents/<document_id>/`. То есть
+   `data_store/sessions/<session_key>/documents/<document_id>/`. То есть
    у каждой сессии свой кэш для одного и того же файла. Это правильно?
    Аргумент «за»: изоляция сессий, нет утечки данных между чатами.
    Аргумент «против»: если файл загружали в 5 чатах — будет 5 копий snapshot.
