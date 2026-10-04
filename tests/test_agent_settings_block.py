@@ -148,6 +148,32 @@ class TestPublishing:
     def test_values_come_from_config(self) -> None:
         assert block_values(agent_config("WARN")) == {"logging.db.min_level": "WARN"}
 
+    def test_transport_comes_from_enterprise_mcp_section(self) -> None:
+        # Секция enterprise_mcp поднимается в корень SETTINGS из gateway.agent,
+        # поэтому блок читает enterprise_mcp.transport.*. Прежний путь
+        # ("transport", ...) вёл в корень, где такого ключа нет: четыре ключа
+        # молча давали пустую строку и режим транспорта было нельзя включить.
+        cfg = agent_config("WARN")
+        cfg["enterprise_mcp"]["transport"] = {
+            "mode": "streamable-http",
+            "bind": "127.0.0.1",
+            "port": 18765,
+        }
+        block = block_values(cfg)
+        assert block["transport.mode"] == "streamable-http"
+        assert block["transport.bind"] == "127.0.0.1"
+        assert block["transport.port"] == "18765"
+        assert "transport.notify_fd" not in block
+
+    def test_root_level_transport_is_not_a_declaration_site(self) -> None:
+        # Страховка от возврата пути в корень. Если кто-то вернёт ("transport", ...),
+        # тест выше снова станет зелёным на пустом месте, а настройка перестанет
+        # действовать в тишине — худший вид дефекта.
+        cfg = agent_config("WARN")
+        cfg["transport"] = {"mode": "streamable-http", "port": 18765}
+        assert "transport.mode" not in block_values(cfg)
+        assert "transport.port" not in block_values(cfg)
+
     def test_empty_value_is_not_published(self) -> None:
         # «Оператор не задал» и «оператор задал пустое» — одно состояние; два
         # его представления разъезжаются при первом же чтении.
@@ -263,11 +289,24 @@ class TestArgv:
 class TestOnePlaceToAddASetting:
     """Добавление настройки — одна строка, и платформа её принимает."""
 
-    def test_block_key_equals_the_agent_config_path(self) -> None:
+    def test_every_config_path_roots_where_settings_actually_exist(self) -> None:
+        # Ключ блока — плоский ключ словаря платформы (file_key), а путь в
+        # AGENT_BLOCK_PATHS — точка в config.json агента. Обязаны совпадать они
+        # не могут: при transport.* совпадение требовало ключа "transport" в
+        # корне, которого нет ни в config.json, ни в профиле, и четыре настройки
+        # молча не доезжали до платформы. Сражём настоящее условие: корень пути
+        # обязан быть местом, которое в конфигурации есть.
+        from config import AGENT_SECTIONS
+
+        raw = json.loads(
+            (Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8")
+        )
+        places = set(AGENT_SECTIONS) | set(raw)
         for key, path in AGENT_BLOCK_PATHS.items():
-            assert key == ".".join(path), (
-                f"{key!r} не совпадает с путём в конфигурации агента {path}. "
-                "Совпадение и делает запись одной строкой."
+            assert path[0] in places, (
+                f"{key!r} читается по пути {path}, а корня {path[0]!r} нет ни среди "
+                f"поднимаемых секций {sorted(AGENT_SECTIONS)}, ни среди ключей "
+                f"корня config.json {sorted(raw)}. Настройка объявлена, но не действует."
             )
 
     def test_every_block_key_is_accepted_by_the_platform(self) -> None:

@@ -86,10 +86,23 @@ JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
 #: должен знать, на каком порту поднимется второй процесс, иначе ему не на
 #: что опереться при проверке занятости. Объявляет эти пути платформа
 #: (``settings.py``, ``file_key`` каждой настройки) — здесь только адресация.
-TRANSPORT_MODE_PATH: tuple[str, ...] = ("transport", "mode")
-TRANSPORT_BIND_PATH: tuple[str, ...] = ("transport", "bind")
-TRANSPORT_PORT_PATH: tuple[str, ...] = ("transport", "port")
-TRANSPORT_NOTIFY_FD_PATH: tuple[str, ...] = ("transport", "notify_fd")
+#:
+#: Читать надо ``enterprise_mcp.transport.*``, а не ``transport.*`` в корне.
+#: В ``SETTINGS`` секция ``enterprise_mcp`` поднята в корень из
+#: ``gateway.agent`` (``config.AGENT_SECTIONS`` + ``_lift_agent_sections``), а
+#: ключа ``transport`` в корне нет ни в ``config.json``, ни в профиле. Путь
+#: через него давал пустую строку, и четыре ключа молча не доезжали до
+#: платформы: режим транспорта нельзя было включить в принципе, и это ничем
+#: не проявлялось. Объявленная настройка, которая не действует, — тот же
+#: класс дефекта, что и у ``mcpServers.enterprise`` в ``tools``.
+TRANSPORT_MODE_PATH: tuple[str, ...] = ("enterprise_mcp", "transport", "mode")
+TRANSPORT_BIND_PATH: tuple[str, ...] = ("enterprise_mcp", "transport", "bind")
+TRANSPORT_PORT_PATH: tuple[str, ...] = ("enterprise_mcp", "transport", "port")
+TRANSPORT_NOTIFY_FD_PATH: tuple[str, ...] = (
+    "enterprise_mcp",
+    "transport",
+    "notify_fd",
+)
 
 #: Ключи блока, которые агент наполняет из своего ``config.json``.
 #:
