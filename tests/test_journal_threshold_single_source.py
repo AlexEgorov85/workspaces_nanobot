@@ -100,7 +100,7 @@ DECLARED_READERS: tuple[tuple[str, str], ...] = (
 #: настраивается своим ключом в своей подсистеме.
 ENV_NAME_RE = re.compile(r"min_?level", re.IGNORECASE)
 
-#: Рабочие данные, а не код. В ``workspace/data_store/cache/sessions`` лежат
+#: Рабочие данные, а не код. В ``workspace/data_store/sessions`` лежат
 #: копии сессий, а среди них — целые снимки проекта; скан по ним искал бы
 #: «второй регулятор» в чужом бэкапе и падал бы без причины.
 RUNTIME_DIRS = frozenset(
