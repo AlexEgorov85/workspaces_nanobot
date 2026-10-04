@@ -11,9 +11,6 @@ from __future__ import annotations
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 
-AUDIENCE_RUNTIME = "runtime"
-
-
 def create_tool(container: ToolContainer) -> ToolDefinition:
     # Сервис принадлежит capability и живёт в контейнере. Свой экземпляр на
     # каждую операцию означал бы три копии конфигурации.
@@ -35,7 +32,7 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         description=description,
         handler=generate_sql,
         category="audit",
-        tags=("infrastructure", "runtime-only"),
+        tags=("infrastructure",),
         permissions=("audit:generate_sql",),
         input_schema=build_input_schema(generate_sql),
     )

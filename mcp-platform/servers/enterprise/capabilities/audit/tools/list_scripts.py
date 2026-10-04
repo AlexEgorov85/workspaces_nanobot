@@ -10,11 +10,12 @@ from __future__ import annotations
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 
-#: Операция — инфраструктурная: ею пользуется конвейер и сам агент, а не
-#: модель в свободном диалоге. Профиль вызова зашит в обработчик, аргументов
-#: от вызывающей стороны не принимается.
-AUDIENCE_RUNTIME = "runtime"
-
+#: Метка ``runtime-only`` снята: модель зовёт каталог первой, и объявление в
+#: ``config.json → tools.mcpServers.enterprise.enabled_tools`` это подтверждает.
+#: Прежняя пометка «а не модель в свободном диалоге» противоречила объявлению
+#: через несколько строк в этом же файле. Оставившаяся часть комментария верна
+#: и отражает контракт: профиль вызова зашит в обработчик, аргументов от
+#: вызывающей стороны операция не принимает.
 
 def create_tool(container: ToolContainer) -> ToolDefinition:
     # Сервис принадлежит capability и живёт в контейнере. Свой экземпляр на
@@ -38,7 +39,7 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         description=description,
         handler=list_scripts,
         category="audit",
-        tags=("infrastructure", "runtime-only"),
+        tags=("infrastructure",),
         permissions=("audit:list_scripts",),
         input_schema=build_input_schema(list_scripts),
     )

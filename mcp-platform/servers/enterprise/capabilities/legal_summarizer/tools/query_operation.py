@@ -11,10 +11,12 @@ from __future__ import annotations
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 
-#: Операция инфраструктурная: ею пользуется конвейер и сам агент на
-#: follow-up, а не модель в свободном диалоге.
-AUDIENCE_RUNTIME = "runtime"
-
+#: Метка ``runtime-only`` снята. Операция объявлена модели в
+#: ``config.json → tools.mcpServers.enterprise.enabled_tools`` и зовётся ею,
+#: поэтому обещание «не для модели» было ложным: ни код, ни ``tags`` его не
+#: проверяли, а объявление говорило обратное. Ложная метка опаснее отсутствующей
+#: — по ней решили бы, что операция скрыта, и однажды отфильтровали бы по ней
+#: публикацию в MCP, убрав рабочий инструмент с поверхности модели.
 
 def create_tool(container: ToolContainer) -> ToolDefinition:
     # Сервис принадлежит capability и живёт в контейнере. Свой экземпляр на
@@ -48,7 +50,7 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         description=description,
         handler=query_operation,
         category="legal_summarizer",
-        tags=("infrastructure", "runtime-only"),
+        tags=("infrastructure",),
         permissions=("legal_summarizer:query_operation",),
         input_schema=build_input_schema(query_operation),
     )

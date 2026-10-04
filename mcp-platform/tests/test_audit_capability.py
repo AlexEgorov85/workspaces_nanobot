@@ -113,15 +113,25 @@ class TestNoSqlFromCaller:
         assert "sql" not in properties, f"в схеме {name} есть sql: {sorted(properties)}"
 
     @pytest.mark.parametrize("name", ["list_scripts", "run_script", "generate_sql"])
-    def test_operation_is_not_model_facing(self, name: str) -> None:
-        """Профиль вызова зашит в обработчик: у модели этих операций нет.
+    def test_operation_is_model_facing(self, name: str) -> None:
+        """Эти операции зовёт модель — метки «не для модели» у них быть не должно.
 
-        Иначе модель получила бы вход, которого быть не должно, и путь
-        «спросить пользователя и подставить SQL» стал бы доступен без
-        всякой проверки.
+        Раньше тест утверждал обратное и закреплял ложь: все три операции
+        объявлены модели в ``config.json → tools.mcpServers.enterprise.enabled_tools``,
+        а навык ``audit_analyzer`` ведёт модель именно к ним. Метка
+        ``runtime-only`` не управляет публикацией (её ничто не читает), но
+        ``docs/MCP-CONTRACTS.md`` описывает фильтрацию по ней как
+        намечаемую. Сними её с модельной операции — и однажды фильтрация
+        уберёт рабочий инструмент с поверхности, считая его внутренним.
+
+        Право объявлять остаётся проверяемым: ``permissions`` у операции
+        обязательны, иначе её нечем разрешить.
         """
         tool = _tool(name, _container(_snapshot()))
-        assert "runtime-only" in tool.tags, f"операция {name} не помечена runtime-only"
+        assert "runtime-only" not in tool.tags, (
+            f"операция {name} помечена runtime-only, хотя объявлена модели: "
+            "метка и объявление противоречат друг другу"
+        )
         assert tool.permissions, f"операция {name} не объявляет permission"
 
 

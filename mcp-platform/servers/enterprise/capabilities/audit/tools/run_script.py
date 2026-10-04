@@ -13,9 +13,6 @@ from typing import Any
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 
-AUDIENCE_RUNTIME = "runtime"
-
-
 def create_tool(container: ToolContainer) -> ToolDefinition:
     # Сервис принадлежит capability и живёт в контейнере. Свой экземпляр на
     # каждую операцию означал бы три копии конфигурации.
@@ -38,7 +35,7 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
         description=description,
         handler=run_script,
         category="audit",
-        tags=("infrastructure", "runtime-only"),
+        tags=("infrastructure",),
         permissions=("audit:run_script",),
         input_schema=build_input_schema(run_script),
         quality_policy="sql_result",

@@ -16,9 +16,6 @@ import json
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition, build_input_schema
 
-AUDIENCE_RUNTIME = "runtime"
-
-
 def create_tool(container: ToolContainer) -> ToolDefinition:
     def purge_logs(
         retention_days: int | None = None,
