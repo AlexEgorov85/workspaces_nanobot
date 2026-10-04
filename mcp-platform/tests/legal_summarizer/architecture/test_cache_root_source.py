@@ -34,6 +34,7 @@ ROOT_RESOLVERS = (
     "cache/document_cache.py",
     "cache/manifest.py",
     "cli_query.py",
+    "llm/client.py",
 )
 
 
