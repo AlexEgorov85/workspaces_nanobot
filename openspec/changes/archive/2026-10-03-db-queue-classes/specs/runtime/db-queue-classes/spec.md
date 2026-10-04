@@ -365,7 +365,6 @@
   `DBManager` или `_submit`
 - **ТОГДА** страж SHALL упасть с указанием модуля и имени
 
-## MODIFIED Requirements
 
 ### Requirement: Значения пула приходят из platform.json
 

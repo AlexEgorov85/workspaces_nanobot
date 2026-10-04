@@ -28,6 +28,14 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | `data/vector-indexes/spec.md` | capability `vectors` | `mcp-platform/libs/vectors/`, объявления в `platform.json → vectors.indexes` |
 | `skills/legal-summarizer-query/spec.md` | capability `legal_summarizer` | `mcp-platform/libs/legal_summarizer/`; в агенте не осталось ничего — обёртка `workspace/tools/legal_summarizer_query.py` снята (change `2026-10-03-mcp-native-tools`, п. D6), модель зовёт операцию `mcp_enterprise_query_operation` |
 
+Спеки ниже не переезжали, а родились в платформе: предмета в агенте у них
+не было и не стало.
+
+| Спека | Где смотреть |
+|---|---|
+| `data/operation-schema/spec.md` | `mcp-platform/libs/enterprise_common/registry.py` (`build_input_schema`, `_json_type`), `libs/enterprise_common/loader.py` (выбор публикуемой схемы), `INPUT_SCHEMA` в `capabilities/*/tools/*.py` |
+| `runtime/db-queue-classes/spec.md` | `mcp-platform/libs/enterprise_data/db.py` (`_Worker`, `submit`, `submit_transaction`), `platform.json` (`pool`, `job_classes`) |
+
 ## `shared` — контракт между агентом и платформой
 
 Здесь нормативные требования адресованы обеим сторонам: одна решает, другая
@@ -54,6 +62,7 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | `runtime/context/spec.md` | `lib/core/application_context.py` |
 | `runtime/entrypoints/spec.md` | `gateway.py`, `cli_agent.py`, `lib/lifecycle/` |
 | `runtime/error-fallback/spec.md` | `lib/services/turn_delivery_factory.py` |
+| `runtime/operator-console/spec.md` | `lib/utils/logging_utils.py`, `lib/hooks/terminal_tool_print_hook.py`, `lib/channels/postgres_channel.py`, `gateway.py` (`gateway.console_level`) |
 | `runtime/runtime-events-subscription/spec.md` | `lib/services/runtime_events_subscriber.py` |
 | `runtime/runtime-patcher/spec.md` | `lib/services/runtime_patcher.py` |
 | `runtime/startup-schema-validation/spec.md` | `lib/services/schema_validation.py` |

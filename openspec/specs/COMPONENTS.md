@@ -20,10 +20,10 @@
 | architecture | 2 | 0 | 2 | 0 | 0 |
 | runtime | 3 | 0 | 3 | 0 | 0 |
 | configuration | 1 | 0 | 1 | 0 | 0 |
-| data | 2 | 0 | 2 | 0 | 0 |
+| data | 4 | 1 | 3 | 0 | 0 |
 | documentation | 1 | 0 | 0 | 1 | 0 |
 | validation | 1 | 0 | 0 | 1 | 0 |
-| **Итого** | **10** | **0** | **8** | **2** | **0** |
+| **Итого** | **12** | **1** | **9** | **2** | **0** |
 
 ## Компоненты
 
@@ -50,8 +50,9 @@
 
 ### Data
 
-> Оба компонента принадлежат платформе (`mcp-platform`), не агенту: capability
-> `data` владеет снимком, capability `vectors` — индексами. Агентских
+> Все компоненты этого раздела принадлежат платформе (`mcp-platform`), не агенту:
+> capability `data` владеет снимком, capability `vectors` — индексами, схема
+> публикуемых операций — общий контракт платформы. Агентских
 > `lib/services/cache_provider.py` и `lib/services/vector_index_service.py`
 > в дереве нет (удалены 2026-10-01 вместе с кластером локального снимка).
 
@@ -60,6 +61,7 @@
 | CacheProvider | `mcp-platform/libs/enterprise_data/snapshot/contracts.py:CacheProvider` | [`data/cache-provider`](data/cache-provider/spec.md) | partial |
 | VectorIndexBuilder | `mcp-platform/libs/vectors/builder.py:VectorBuilder` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
 | VectorIndexOwner | `mcp-platform/libs/vectors/owner.py:VectorIndexOwner` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
+| OperationSchema | `mcp-platform/libs/enterprise_common/registry.py:build_input_schema` | [`data/operation-schema`](data/operation-schema/spec.md) | complete |
 
 ### Documentation
 
