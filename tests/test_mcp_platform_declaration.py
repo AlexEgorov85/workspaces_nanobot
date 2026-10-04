@@ -56,6 +56,16 @@ def _server() -> dict:
     return servers["enterprise"]
 
 
+def _client_settings() -> dict:
+    """Секция ``gateway.agent.enterprise_mcp`` — то, чем агент ждёт вызов."""
+    return _load_json(REPO / "config.json")["gateway"]["agent"]["enterprise_mcp"]
+
+
+def _platform_settings() -> dict:
+    """``platform.json`` платформы — объявления её собственных порогов."""
+    return _load_json(REPO / "mcp-platform" / "platform.json")
+
+
 def _legacy_identity_keys() -> tuple[str, ...]:
     """``LEGACY_IDENTITY_KEYS`` из исходника конвейера платформы."""
     tree = ast.parse(PIPELINE.read_text(encoding="utf-8"))
@@ -81,6 +91,34 @@ class TestServerDeclaration:
 
     def test_declares_exactly_the_agent_facing_operations(self):
         assert set(_server()["enabled_tools"]) == EXPECTED_TOOLS
+
+    def test_call_timeout_does_not_expire_before_the_platform_stops(self):
+        """Клиент обязан ждать дольше, чем платформа готова работать.
+
+        Бюджета времени два, и они живут в разных файлах: ``execution_timeout_sec``
+        в ``platform.json`` — сколько сервер готов выполнять вызов,
+        ``tool_timeout_sec`` в ``config.json`` — сколько агент готов его ждать.
+        Зазор нужен в обе стороны.
+
+        Случай «клиент короче» вреден по-тихому: клиент срывает вызов, рапортует
+        модели об отказе, а сервер продолжает работу — жжёт слот пула и время LLM
+        ради результата, который никто не прочитает, и повтор по советам модели
+        запускает всё заново. Именно так вел себя ``generate_sql``: холодный
+        вызов занимал 11.4 с при потолке 30 с, и запас кончался раньше, чем
+        заканчивалась плата за уже начатую работу.
+
+        Случай «клиент длиннее» — просто ожидание: модель смотрит в потолок
+        вызова, а отказ приходит оттуда, кто действительно решил сдаться.
+        """
+        platform_budget = float(
+            _platform_settings()["execution"]["execution_timeout_sec"]
+        )
+        client_budget = float(_client_settings()["tool_timeout_sec"])
+        assert client_budget >= platform_budget, (
+            f"клиент сдаётся через {client_budget} с, а платформа работает до "
+            f"{platform_budget} с: вызов будет сорван на работающей стороне, и "
+            "её работа пропадёт вместе с отказом"
+        )
 
     def test_env_is_minimal_and_declares_workspace(self):
         """Окружение дочернего процесса собирает MCP SDK, а не агент.

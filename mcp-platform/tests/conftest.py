@@ -79,6 +79,9 @@ def execution_settings(session_root: Path) -> dict[str, Any]:
         "ENTERPRISE_EXEC_LOGGING": True,
         "ENTERPRISE_EXEC_SESSION_ROOT": str(session_root),
         "ENTERPRISE_EXEC_LOG_ARG_FIELDS": "event_type,tool_name",
+        "ENTERPRISE_EXEC_LOG_ARG_EXCERPT_BYTES": 512,
+        "ENTERPRISE_EXEC_LOG_RESULT_EXCERPT_BYTES": 1024,
+        "ENTERPRISE_EXEC_LOG_REDACT_KEYS": "password,secret,token,api_key,dsn",
         "ENTERPRISE_EXEC_SESSION_EVENTS": False,
         "ENTERPRISE_EXEC_REQUIRE_CALL_META": True,
     }

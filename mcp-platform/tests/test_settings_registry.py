@@ -373,12 +373,39 @@ class TestPlatformFile:
         DSN — другой случай и он разрешён: в нём может быть пароль, но
         записывается он подстановкой ``${ПЕРЕМЕННАЯ}`` (отдельная проверка
         ниже). Ключ LLM-провайдера подстановкой не пишется, и незачем.
+
+        Проверяется **материал ключа**, а не слово. ``execution.log_redact_keys``
+        объявляет имена полей, которые платформа маскирует, и ``api_key`` в этом
+        списке — имя поля, а не значение; запрет на подстроку бьёт по названию и
+        запрещал бы маскировать самый вероятный носитель секрета. Форма проверки
+        та же, что у ``test_file_dsn_carries_no_literal_credentials`` ниже: по
+        виду значения. Два условия рядом и не избыточны: первое ловит материал
+        ключа под любым именем, второе — что-то, что названо ключом как
+        настройку, то есть место, где значение приедет в файл по ошибке.
         """
         import json
+        import re as _re
 
-        raw = json.dumps(json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8")))
-        for forbidden in ("sk-", "api_key", "apikey"):
-            assert forbidden not in raw, f"platform.json содержит {forbidden!r}"
+        document = json.loads(PLATFORM_CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = json.dumps(document, ensure_ascii=False)
+        assert not _re.search(r"sk-[A-Za-z0-9_-]{8,}", raw), "platform.json содержит ключ провайдера"
+
+        def keys_of(node: object) -> list[str]:
+            if isinstance(node, dict):
+                found = [str(key).lower() for key in node]
+                for value in node.values():
+                    found.extend(keys_of(value))
+                return found
+            if isinstance(node, list):
+                return [name for item in node for name in keys_of(item)]
+            return []
+
+        declared = set(keys_of(document))
+        for forbidden in ("api_key", "apikey"):
+            assert forbidden not in declared, (
+                f"platform.json объявляет настройку {forbidden!r}: значение "
+                "секрета в коммитируемом файле"
+            )
 
     def test_file_dsn_carries_no_literal_credentials(self) -> None:
         """Логин и пароль в файле — только подстановками.

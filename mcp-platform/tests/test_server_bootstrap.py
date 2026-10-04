@@ -605,6 +605,12 @@ class TestWireContract:
         С ``FastMCP`` их было две: реестровая и выведенная обёрткой. Расхождение
         проявлялось как ``kwargs`` в схеме и падение валидации на нормальном
         вызове.
+
+        ``required`` сравнивается с допуском на отсутствие: схема, объявленная
+        автором, уходит на провод поле в поле, и объявление без ``required``
+        (у ``claim_task`` обязательных параметров нет) не должно превращаться
+        в ошибку сравнения. Отсутствие ключа означает «ничего не обязательно» —
+        ровно то, что объявил автор.
         """
         import anyio
 
@@ -613,7 +619,9 @@ class TestWireContract:
         for definition in registry:
             wire = tools[definition.name].inputSchema
             assert wire.get("properties") == dict(definition.input_schema["properties"])
-            assert sorted(wire.get("required", [])) == sorted(definition.input_schema["required"])
+            assert sorted(wire.get("required", [])) == sorted(
+                definition.input_schema.get("required", [])
+            )
             assert "kwargs" not in wire.get("properties", {})
             assert "args" not in wire.get("properties", {})
 
