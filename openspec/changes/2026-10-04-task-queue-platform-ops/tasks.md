@@ -1,0 +1,101 @@
+# Tasks — операции очереди задач в capability `data`
+
+**Baseline (зафиксирован ДО первой правки этого change'а).**
+
+```powershell
+Push-Location mcp-platform; python -m pytest -q --collect-only -q 2>&1 | Out-File "$env:TEMP\base_collect.txt"; Pop-Location
+# сумма счётчиков по файлам: 5716
+```
+
+> **Правило присвоения:** после каждой доступной правки запускать
+> `python -m pytest -q` в `mcp-platform`. Зелёный прогон на этом шаге
+> обязателен: он означает, что ни один шаг не сломал соседний. Соседние
+> change'ы в дереве меняют то же дерево, и общий прогон — единственный
+> способ это заметить, а не узнать на шаге 2.
+
+## 1. Операции очереди
+
+- [x] 1.1 `claim_task` — атомарный захват, фильтр по priority-командам,
+      исключение чатов с незавершённым оборотом (**было до этого change'а**,
+      commit `c439ef3`)
+- [x] 1.2 `update_task_status` — смена статуса, включая
+      `processing → error/failed/pending` (**было**)
+- [x] 1.3 `append_assistant_message` — assistant-плейсхолдер
+      (`role='assistant'`, `status='processing'`) (**было**)
+- [x] 1.4 `delete_assistant_message` — удаление плейсхолдера при откате
+      (**было**)
+- [x] 1.5 `patch_message_metadata` — read-modify-write `metadata`
+      (**было**)
+- [x] 1.6 `unstick_tasks` — возврат зависших `processing` в `pending`, с
+      ретраями и пометкой сирот (**было**)
+
+## 2. Объявление имени таблицы
+
+- [x] 2.1 `platform.json::data.task_table` (**было**, commit `c439ef3`)
+- [x] 2.2 Запись реестра настроек `ENTERPRISE_TASK_TABLE` с
+      `file_key="data.task_table"`, владелец `platform`
+      (**было**; ключ в `PROFILE_OWNED_KEYS`)
+- [x] 2.3 Имена колонок, которых не хватало, объявлены там же, где
+      `log_table` и `question_runs_table` — образец соблюдён: платформа
+      объявляет имя таблицы, а список колонок живёт в сервисе
+      (`_TASK_RETURNING`). Отдельных объявлений колонок не вводилось:
+      журнал и прогоны вопросов их тоже не имеют, а объявление «на
+      всякий случай» было бы вторым местом, которое обязано совпадать с
+      первым.
+
+## 3. Схемы операций
+
+- [x] 3.1 Настоящая `inputSchema` у каждой из шести операций (**было**)
+- [x] 3.2 `batch` и `cursor` в `INPUT_SCHEMA` `claim_task`; `cursor`
+      объявлен как `["string", "null"]`, потому что «курсор не задан» —
+      законное значение, а не ошибка
+- [x] 3.3 `python -m pytest mcp-platform/tests/test_operation_schema_permissiveness.py -q`
+      — зелёный
+
+## 4. Батчинг (это и есть работа этого change'а)
+
+- [x] 4.1 `DataService.claim_tasks(batch=…, cursor=…) -> ClaimedBatch`
+- [x] 4.2 `DataService.claim_task()` сохранён как представление
+      `claim_tasks(batch=1)` — словарь либо `None`
+- [x] 4.3 `DISTINCT ON (chat_id)` в отборе: не более одной задачи на чат
+- [x] 4.4 Курсор keyset по `(created_at, id)`, `next_cursor` только по
+      полному батчу
+- [x] 4.5 Порядок выдачи по времени создания; курсор берётся из
+      **упорядоченной** выдачи, а не из порядка `RETURNING`
+- [x] 4.6 Границы: `batch < 1` — отказ; потолок `data.max_rows`
+- [x] 4.7 `claim_tasks` внесён в `OPERATION_AUDIENCE`
+      (`capabilities/data/service/registry.py`) с классом
+      `JOB_AUDIENCE_RUNTIME`. **Без этого пункт прогонял не был сделан:**
+      метод звал пул, но класс его работы не был записан поимённо, и
+      `test_db_job_classes.py::TestEveryPoolCallIsDeclared` это отверг.
+      Общий обход ловит дефект, только пока метод зовёт `self.submit`
+      прямо, — поэтому рядом добавлен поимённый страж
+      `TestQueueCaptureHasAJobClass`, живущий и после такой рефакторинги.
+
+## 5. Тесты
+
+- [x] 5.1 Успешный путь каждой операции (**было**)
+- [x] 5.2 Отказ каждой операции (**было**)
+- [x] 5.3 Границы батча: неположительный, нецелый, шире потолка,
+      полный/неполный
+- [x] 5.4 Курсор: выдача, keyset-фильтр, разбор по последнему
+      разделителю, кривой курсор, пустой курсор
+- [x] 5.5 Порядок выдачи и курсор по **новейшей** строке
+- [x] 5.6 `TestQueueCaptureHasAJobClass`: у захвата очереди есть класс
+      работы, он именно `runtime`, и страж **падает**, если запись
+      убрать (проверка самой проверки)
+
+## 6. Спека
+
+- [x] 6.1 Новая capability `data/task-queue` — дельта в этом каталоге
+- [x] 6.2 `openspec validate 2026-10-04-task-queue-platform-ops` — проходит
+
+## Не в этом change'е
+
+- [ ] Шаг 2: переключение канала на вызовы операций (feature-флаг, старый
+      SQL как fallback) — `lib/channels/queue_ops.py`,
+      `lib/channels/postgres_channel.py`. Файлы принадлежат соседнему
+      change'у.
+- [ ] Шаг 3: удаление `workspace/utils/db.py` и прямого SQL в `lib/`.
+- [ ] Шаг 4: удаление tombstone'ов `_claim_task.py` / `_update_task_status.py`
+      на платформе.

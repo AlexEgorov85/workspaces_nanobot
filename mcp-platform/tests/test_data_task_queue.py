@@ -313,7 +313,7 @@ class TestClaimTask:
         service, conn = _service()
         service.claim_task()
         sql, _params = _stmt(conn, "RETURNING ID, CHAT_ID")
-        assert "ORDER BY created_at ASC" in sql
+        assert "ORDER BY picked.created_at ASC" in sql
 
     def test_updates_status_to_processing(self) -> None:
         service, conn = _service()
@@ -326,7 +326,10 @@ class TestClaimTask:
         service.claim_task(error_retry_delay_sec=12.0)
         sql, params = _stmt(conn, "RETURNING ID, CHAT_ID")
         assert sql.count("interval '1 second' * %s") == 2
-        assert params == [12.0, 12.0]
+        # Потолок батча стоит между двумя backoff: он пришёл вместе с
+        # батчингом, и его место в списке параметров — часть контракта,
+        # а не деталь реализации LIMIT.
+        assert params == [12.0, 1, 12.0]
 
 
 class TestClaimTaskPriority:
@@ -342,14 +345,14 @@ class TestClaimTaskPriority:
         sql, _params = _stmt(conn, "RETURNING ID, CHAT_ID")
         assert "ANY(%s)" not in sql
 
-    def test_parameter_order_is_backoff_then_list_then_backoff(self) -> None:
+    def test_parameter_order_is_backoff_then_list_then_batch_then_backoff(self) -> None:
         """Регрессия тихой подмены: если порядок плейсхолдеров разъедется,
         число уйдёт в ``ANY(%s)``, и priority-путь перестанет работать всегда —
         без единой ошибки."""
         service, conn = _service()
         service.claim_task(error_retry_delay_sec=7.0, priority_contents=("/stop",))
         _sql, params = _stmt(conn, "RETURNING ID, CHAT_ID")
-        assert params == [7.0, ["/stop"], 7.0]
+        assert params == [7.0, ["/stop"], 1, 7.0]
 
     def test_empty_priority_list_still_claims(self) -> None:
         service, conn = _service()
@@ -394,6 +397,182 @@ class TestClaimTaskGuards:
         service, conn = _service(claim_rows=[_task_row()])
         service.claim_task()
         assert conn.audiences == [AUDIENCE_RUNTIME]
+
+
+def _task_rows(*ids: str) -> list[tuple[object, ...]]:
+    """Несколько строк выдачи с различимым ``created_at`` и ``id``."""
+    return [
+        (
+            row_id,
+            f"chat-{row_id}",
+            "user-1",
+            f"текст {row_id}",
+            None,
+            {},
+            f"2026-10-02T10:0{index}:00Z",
+        )
+        for index, row_id in enumerate(ids)
+    ]
+
+
+class TestClaimTaskBatch:
+    """Батч — требование переноса, а не украшение.
+
+    Без него каждый опрос платит круговой оборот по stdio за одну задачу, и
+    поллинг стоит дороже прямого SQL, который он заменяет: миграция ускорила
+    бы ровно то, что должна убрать.
+    """
+
+    def test_returns_every_claimed_row(self) -> None:
+        service, _ = _service(claim_rows=_task_rows("a", "b", "c"))
+        claimed = service.claim_tasks(batch=3)
+        assert [row["id"] for row in claimed.tasks] == ["a", "b", "c"]
+
+    def test_empty_queue_is_empty_list_not_error(self) -> None:
+        service, _ = _service(claim_rows=[])
+        claimed = service.claim_tasks(batch=5)
+        assert claimed.tasks == []
+        assert claimed.next_cursor is None
+
+    def test_batch_limit_reaches_the_query(self) -> None:
+        service, conn = _service(claim_rows=_task_rows("a", "b"))
+        service.claim_tasks(batch=7)
+        _sql, params = _stmt(conn, "RETURNING ID, CHAT_ID")
+        assert 7 in params
+
+    def test_one_task_per_chat(self) -> None:
+        """Подзапрос читает снимок ДО ``UPDATE``: без ``DISTINCT ON (chat_id)``
+        две ожидающие задачи одного чата попали бы в одну выдачу."""
+        service, conn = _service()
+        service.claim_tasks(batch=5)
+        sql, _params = _stmt(conn, "RETURNING ID, CHAT_ID")
+        assert "DISTINCT ON (chat_id)" in sql
+        assert "ORDER BY chat_id, created_at ASC" in sql
+
+    def test_single_row_helper_still_returns_dict(self) -> None:
+        """Одиночный захват остаётся словарём: канал различает «взял задачу» и
+        «взял пустую пачку» разбором ответа, а не длиной списка."""
+        service, _ = _service(claim_rows=_task_rows("a"))
+        assert service.claim_task() == {
+            "id": "a",
+            "chat_id": "chat-a",
+            "user_id": "user-1",
+            "content": "текст a",
+            "media": None,
+            "metadata": {},
+            "created_at": "2026-10-02T10:00:00Z",
+        }
+
+    def test_single_row_helper_is_batch_of_one(self) -> None:
+        service, conn = _service(claim_rows=_task_rows("a"))
+        service.claim_task()
+        _sql, params = _stmt(conn, "RETURNING ID, CHAT_ID")
+        assert params[-2] == 1
+
+
+class TestClaimTaskBatchBounds:
+    @pytest.mark.parametrize("bad", [0, -1, -10])
+    def test_non_positive_batch_is_rejected(self, bad: int) -> None:
+        """Ноль задач — это не «ничего не брать», а молчаливая потеря очереди:
+        опрос продолжал бы считать её пустой и никогда не сообщил бы почему."""
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError) as excinfo:
+            service.claim_tasks(batch=bad)
+        assert "минимум одна задача" in str(excinfo.value)
+
+    def test_non_integer_batch_is_rejected(self) -> None:
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError):
+            service.claim_tasks(batch="много")
+
+    def test_batch_is_capped_by_platform_max_rows(self) -> None:
+        """Потолок — платформы, а не вызывающей стороны: молчаливый обрез
+        выглядел бы как «взял всё, что просил»."""
+        service, conn = _service(max_rows=4)
+        service.claim_tasks(batch=1000)
+        _sql, params = _stmt(conn, "RETURNING ID, CHAT_ID")
+        assert params[-2] == 4
+
+
+class TestClaimTaskCursor:
+    def test_full_batch_returns_cursor(self) -> None:
+        service, _ = _service(claim_rows=_task_rows("a", "b"))
+        claimed = service.claim_tasks(batch=2)
+        assert claimed.next_cursor == "2026-10-02T10:01:00Z|b"
+
+    def test_partial_batch_returns_no_cursor(self) -> None:
+        """Курсор по неполному батчу заморозил бы опрос: задачи, пришедшие
+        позже, оказались бы за курсором и ждали бы навсегда."""
+        service, _ = _service(claim_rows=_task_rows("a"))
+        assert service.claim_tasks(batch=5).next_cursor is None
+
+    def test_cursor_becomes_keyset_filter(self) -> None:
+        service, conn = _service(claim_rows=_task_rows("b"))
+        service.claim_tasks(batch=1, cursor="2026-10-02T10:00:00Z|a")
+        sql, params = _stmt(conn, "RETURNING ID, CHAT_ID")
+        assert "(created_at, id) > (%s, %s)" in sql
+        assert "2026-10-02T10:00:00Z" in params
+        assert "a" in params
+
+    def test_cursor_keeps_last_occurred_column(self) -> None:
+        """Разбор по ПОСЛЕДНЕМУ разделителю: время может содержать что угодно,
+        а разбирать по первому ``|`` значило бы принять ``created_at`` за часть
+        идентификатора и увести опрос не туда."""
+        service, conn = _service()
+        service.claim_tasks(batch=1, cursor="2026-10-02T10:00:00Z|id|with|pipes")
+        _sql, params = _stmt(conn, "RETURNING ID, CHAT_ID")
+        assert params[-2] == 1
+        assert params[1] == "2026-10-02T10:00:00Z|id|with"
+        assert params[2] == "pipes"
+
+    def test_broken_cursor_is_refused(self) -> None:
+        """Молча начать с головы на кривом курсоре значило бы пропустить
+        задачи и не сообщить об этом: очередь выглядела бы пустой."""
+        service, _ = _service()
+        with pytest.raises(InvalidRequestError) as excinfo:
+            service.claim_tasks(batch=1, cursor="мусор")
+        assert "не разбирается" in str(excinfo.value)
+
+    def test_empty_cursor_means_start_from_head(self) -> None:
+        service, conn = _service()
+        service.claim_tasks(batch=1, cursor="")
+        sql, _params = _stmt(conn, "RETURNING ID, CHAT_ID")
+        assert "(created_at, id) > (%s, %s)" not in sql
+
+
+class TestClaimTaskBatchOrdering:
+    @staticmethod
+    def _shuffled() -> list[tuple[object, ...]]:
+        """Строки, отданные ``RETURNING`` вразнобой относительно ``created_at``.
+
+        Время задано явно и НЕ по позиции: иначе «перестановка» совпала бы с
+        порядком очереди, и проверка сортировки прошла бы на неотсортированных
+        данных — то есть не проверяла бы ничего.
+        """
+        return [
+            ("c", "2026-10-02T12:00:00Z"),
+            ("a", "2026-10-02T10:00:00Z"),
+            ("b", "2026-10-02T11:00:00Z"),
+        ]
+
+    @staticmethod
+    def _rows(pairs: list[tuple[str, str]]) -> list[tuple[object, ...]]:
+        return [
+            (row_id, f"chat-{row_id}", "user-1", f"текст {row_id}", None, {}, stamp)
+            for row_id, stamp in pairs
+        ]
+
+    def test_rows_are_returned_in_queue_order(self) -> None:
+        """``RETURNING`` не обещает порядок, а курсор строится из последней
+        строки: без сортировки опрос продолжился бы с произвольной точки и
+        пропустил бы задачи между страницами."""
+        service, _ = _service(claim_rows=self._rows(self._shuffled()))
+        claimed = service.claim_tasks(batch=3)
+        assert [row["id"] for row in claimed.tasks] == ["a", "b", "c"]
+
+    def test_cursor_points_at_the_newest_row(self) -> None:
+        service, _ = _service(claim_rows=self._rows(self._shuffled()))
+        assert service.claim_tasks(batch=3).next_cursor == "2026-10-02T12:00:00Z|c"
 
 
 class TestAppendAssistantMessage:

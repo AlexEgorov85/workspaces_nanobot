@@ -39,7 +39,12 @@ OPERATION_AUDIENCE: dict[str, str] = {
     # Журнал: внутренние потоки процесса, модель сюда не ходит.
     "_write_events": JOB_AUDIENCE_RUNTIME,
     # Очередь задач и контекст оборота — служебные операции канала.
+    # ``claim_tasks`` — батчевый захват, а ``claim_task`` — его представление
+    # для одной задачи. Оба зовут пул (второй через первый), и оба обязаны
+    # быть здесь поимённо: класс работы у очереди один, а запись без
+    # поимённой строки выглядит как готовый реестр, в котором её нет.
     "claim_task": JOB_AUDIENCE_RUNTIME,
+    "claim_tasks": JOB_AUDIENCE_RUNTIME,
     "update_task_status": JOB_AUDIENCE_RUNTIME,
     "unstick_tasks": JOB_AUDIENCE_RUNTIME,
     "release_claimed_tasks": JOB_AUDIENCE_RUNTIME,

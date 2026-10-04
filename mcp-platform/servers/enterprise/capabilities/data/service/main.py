@@ -161,10 +161,11 @@ def normalize_level(value: str | None) -> str:
 def _journal_min_level(value: str | None) -> str | None:
     """Привести порог журнала к шкале; ``None`` — писать всё.
 
-    Порог присылает агент флагом ``--log-min-level`` при старте, из того же
-    ключа его конфигурации, что и у его писателя, поэтому объявлять его
-    ещё и в ``platform.json`` нельзя: два места — это два ответа на вопрос
-    «каким уровнем пишется журнал», и разъезд между ними молчалив.
+    Порог присылает агент блоком настроек при старте
+    (``--agent-settings-file``), из того же ключа его конфигурации, что и
+    у его писателя, поэтому объявлять его ещё и в ``platform.json``
+    нельзя: два места — это два ответа на вопрос «каким уровнем пишется
+    журнал», и разъезд между ними молчалив.
 
     Незнакомое значение — **отказ на старте**, а не откат к ``INFO`` (тот же
     класс, что и у неизвестного профиля): подмена молча переключила бы
@@ -178,15 +179,15 @@ def _journal_min_level(value: str | None) -> str | None:
     подъёме процесса, и это проблема развёртывания, а не плохой запрос
     вызывающей стороны.
 
-    Отсутствие флага — не ошибка и не «дефолт INFO»: платформа пишет всё,
-    как писала до появления флага.
+    Отсутствие значения — не ошибка и не «дефолт INFO»: платформа пишет
+    всё, как писала до появления порога.
     """
     if value is None or not str(value).strip():
         return None
     try:
         return _normalize_level(value)
     except ValueError as exc:
-        raise InfrastructureError(f"--log-min-level: {exc}") from exc
+        raise InfrastructureError(f"журнал: порог {exc}") from exc
 
 
 # -- момент события и ключ порядка ------------------------------------------
@@ -352,6 +353,24 @@ class SearchPage:
     hits: tuple[SearchHit, ...]
     next_offset: int | None
     truncated: bool = False
+
+
+@dataclass(frozen=True)
+class ClaimedBatch:
+    """Захваченная пачка задач с курсором продолжения.
+
+    Курсор — keyset по ``(created_at, id)`` последней выданной строки, а не
+    смещение: очередь меняется под ногами опроса, и ``OFFSET`` там начинает
+    либо перекрываться, либо пропускать задачи.
+
+    ``next_cursor`` заполняется **только** по полному батче. Неполный батч —
+    это «очередь дошла до конца», и следующий опрос обязан начаться с головы:
+    задачи, пришедшие позже, за курсором не видны и остались бы ждать
+    навсегда. ``None`` на неполном батче — это и есть сигнал «начни с головы».
+    """
+
+    tasks: list[dict[str, Any]]
+    next_cursor: str | None = None
 
 
 #: Колонки зеркала сессий, которые пишет ``mirror_session``. Порядок — это
@@ -1456,20 +1475,22 @@ class DataService:
         {"pending", "processing", "error", "failed", "cancelled", "completed"}
     )
 
-    def claim_task(
+    def claim_tasks(
         self,
         *,
         audience: str = AUDIENCE_RUNTIME,
         error_retry_delay_sec: float = 5.0,
         priority_contents: list[str] | tuple[str, ...] | None = None,
+        batch: int = 1,
+        cursor: str | None = None,
         task_table: tuple[str, str] | None = None,
-    ) -> dict[str, Any] | None:
-        """Атомарно захватить одну задачу очереди.
+    ) -> ClaimedBatch:
+        """Атомарно захватить до ``batch`` задач очереди.
 
         Захват — это ``UPDATE … SET status='processing' … RETURNING``: два
-        конкурирующих поллинга не могут взять одну строку, потому что в
-        внешнем ``WHERE`` повторяется то же условие отбора, что и в
-        подзапросе. Снятие этого повтора — тихая двойная обработка.
+        конкурирующих вызова не могут взять одну строку, потому что во внешнем
+        ``WHERE`` повторяется то же условие отбора, что и в подзапросе. Снятие
+        этого повтора — тихая двойная обработка, и заметить её можно не сразу.
 
         Отбор: ``role='user'``, статус ``pending`` либо ``error`` старше
         ``error_retry_delay_sec``; ``cancelled`` исключён; и в том же чате не
@@ -1477,45 +1498,83 @@ class DataService:
         список команд, которые должны пройти раньше очереди (priority-поллинг
         канала); для обычного поллинга не передаётся.
 
-        Возвращает захваченную строку в доменном виде либо ``None``, если
-        задач нет. ``None`` — не ошибка: пустая очередь это нормальное
-        состояние, и оборачивать его в исключение заставило бы канал
-        отличать «нечего делать» от «сломалось» по тексту.
+        **Не более одной задачи на чат.** Отбор идёт через
+        ``DISTINCT ON (chat_id)``: подзапрос читает снимок, каким он был
+        ДО ``UPDATE``, поэтому без этого отбора две ожидающие задачи одного
+        чата попали бы в одну выдачу — и «одна незавершённая задача на чат»
+        держалась бы ровно до того момента, пока батч шире единицы.
+
+        ``cursor`` — keyset по ``(created_at, id)`` последней выданной строки.
+        Он нужен не для красоты: без него опрос, вернувший полный батч, обязан
+        был бы либо доверять своей памяти о последней строке, либо начинать с
+        головы очереди и каждый раз перечитывать уже обработанное. Смещение
+        (``OFFSET``) для этого не годится: очередь меняется под ногами, и
+        страницы начинают перекрываться или пропускать задачи.
+
+        Порядок параметров — это порядок плейсхолдеров в тексте: сначала
+        backoff подзапроса, затем список priority, затем пара курсора, затем
+        потолок батча, затем backoff внешнего ``WHERE``. Перестановка не
+        синтаксическая ошибка, а тихая подмена: backoff ушёл бы в
+        ``ANY(%s)``, и priority-путь отсекался бы всегда.
         """
         self._require_runtime(audience, "claim_task")
+
+        try:
+            limit = int(batch)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(
+                f"claim_task: batch должен быть целым числом, получено {batch!r}"
+            ) from exc
+        if limit < 1:
+            raise InvalidRequestError(
+                f"claim_task: batch={limit} — минимум одна задача; ноль и "
+                "отрицательное значение не означают «ничего не брать», а "
+                "означали бы молчаливую потерю очереди"
+            )
+        # Потолок платформы, а не вызывающей стороны: батч шире него — это
+        # запрос, который нельзя обслужить одним ответом, и урезать его молча
+        # было бы хуже, чем сказать правду.
+        limit = min(limit, self._max_rows)
+
+        after = _decode_task_cursor(cursor)
         table = _qualified(task_table or self._require_task_table("claim_task"))
 
-        # Порядок параметров — это порядок плейсхолдеров в тексте: сначала
-        # backoff подзапроса, затем список priority, затем backoff внешнего
-        # WHERE. Перестановка не синтаксическая ошибка, а тихая подмена:
-        # backoff ушёл бы в ANY(%s), и priority-путь отсекался бы всегда.
         priority_clause = ""
+        cursor_clause = ""
         params: list[Any] = [error_retry_delay_sec]
         if priority_contents is not None:
-            priority_clause = "  AND content = ANY(%s)\n"
+            priority_clause = "          AND content = ANY(%s)\n"
             params.append(list(priority_contents))
+        if after is not None:
+            cursor_clause = "          AND (created_at, id) > (%s, %s)\n"
+            params.extend([after[0], after[1]])
+        params.append(limit)
         params.append(error_retry_delay_sec)
 
         sql = f"""
             UPDATE {table}
             SET status = 'processing', updated_at = NOW()
-            WHERE id = (
-                SELECT id FROM {table}
-                WHERE role = 'user'
-                  AND (
-                      status = 'pending'
-                      OR (status = 'error'
-                          AND updated_at + interval '1 second' * %s < NOW())
-                  )
-                  AND status != 'cancelled'
-{priority_clause}                  AND NOT EXISTS (
-                      SELECT 1 FROM {table} m2
-                      WHERE m2.chat_id = {table}.chat_id
-                        AND m2.role = 'user'
-                        AND m2.status = 'processing'
-                  )
-                ORDER BY created_at ASC
-                LIMIT 1
+            WHERE id IN (
+                SELECT picked.id FROM (
+                    SELECT DISTINCT ON (chat_id) id, chat_id, created_at
+                    FROM {table}
+                    WHERE role = 'user'
+                      AND (
+                          status = 'pending'
+                          OR (status = 'error'
+                              AND updated_at + interval '1 second' * %s < NOW())
+                      )
+                      AND status != 'cancelled'
+{priority_clause}{cursor_clause}                      AND NOT EXISTS (
+                          SELECT 1 FROM {table} m2
+                          WHERE m2.chat_id = {table}.chat_id
+                            AND m2.role = 'user'
+                            AND m2.status = 'processing'
+                      )
+                    ORDER BY chat_id, created_at ASC, id ASC
+                ) picked
+                ORDER BY picked.created_at ASC, picked.id ASC
+                LIMIT %s
             )
             AND (
                 status = 'pending'
@@ -1526,7 +1585,51 @@ class DataService:
             RETURNING {self._TASK_RETURNING}
         """
 
-        return self.submit(lambda conn: _fetchone_dict(conn, sql, params), audience=audience)
+        rows = self.submit(
+            lambda conn: _fetchall_dicts(conn, sql, params), audience=audience
+        )
+        ordered = _ordered_tasks(rows)
+        return ClaimedBatch(
+            tasks=ordered,
+            # Курсор выдаётся только по полному батчу: неполный означает, что
+            # очередь дошла до конца, и следующий опрос должен начаться с
+            # головы — иначе задачи, пришедшие после него, остались бы за
+            # курсором навсегда.
+            #
+            # Берётся ПОСЛЕДНЯЯ строка упорядоченной выдачи, а не последняя
+            # строка ``RETURNING``: тот порядок не обещан, и курсор от него
+            # увел бы опрос с произвольной точки, пропустив всё между
+            # страницами.
+            next_cursor=task_cursor(ordered[-1]) if len(ordered) == limit else None,
+        )
+
+    def claim_task(
+        self,
+        *,
+        audience: str = AUDIENCE_RUNTIME,
+        error_retry_delay_sec: float = 5.0,
+        priority_contents: list[str] | tuple[str, ...] | None = None,
+        task_table: tuple[str, str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Одна задача очереди, либо ``None``, если задач нет.
+
+        Представление ``claim_tasks(batch=1)`` для вызывающих, которым пачка не
+        нужна: одиночная выдача остаётся словарём, а не списком из одного
+        элемента, иначе канал различал бы «взял одну задачу» и «взял пустую
+        пачку» разбором ответа.
+
+        Пустая очередь — не ошибка: это нормальное состояние, и оборачивать
+        его в исключение заставило бы канал отличать «нечего делать» от
+        «сломалось» по тексту ответа.
+        """
+        claimed = self.claim_tasks(
+            audience=audience,
+            error_retry_delay_sec=error_retry_delay_sec,
+            priority_contents=priority_contents,
+            batch=1,
+            task_table=task_table,
+        )
+        return claimed.tasks[0] if claimed.tasks else None
 
     def update_task_status(
         self,
@@ -3203,3 +3306,71 @@ def _fetchone_dict(
             return None
         names = [d[0] for d in (cur.description or ())]
         return dict(zip(names, row, strict=True))
+
+
+def _fetchall_dicts(
+    conn: Any, sql: str, params: list[Any]
+) -> list[dict[str, Any]]:
+    """Строки в доменном виде: список словарей, пустой — если строк нет.
+
+    Пачка читается именно так, а не через ``_fetchone_dict`` по одной: батч
+    существует ради одного оборота, и обход построчно вернул бы ту же
+    стоимость, ради устранения которой батч и вводится.
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        if cur.description is None:
+            return []
+        names = [d[0] for d in (cur.description or ())]
+        return [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
+
+
+def _task_sort_key(row: dict[str, Any]) -> tuple[str, str]:
+    """Ключ порядка keyset-курсора: ``(created_at, id)`` как строки.
+
+    Сравнение строк, а не значений: ``created_at`` из драйвера приходит то
+    ``datetime``, то строкой, и смешанное сравнение ``datetime`` со ``str``
+    подняло бы ``TypeError`` ровно на той выдаче, где очередь непуста.
+    """
+    return (str(row.get("created_at") or ""), str(row.get("id") or ""))
+
+
+def _ordered_tasks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Выдача в порядке очереди, независимо от порядка строк от ``RETURNING``.
+
+    Порядок нужен не для красоты: курсор продолжения строится из последней
+    строки, и если ``RETURNING`` вернул их вразнобой, опрос продолжился бы
+    с произвольной точки и пропустил бы задачи между страницами.
+    """
+    return sorted(rows, key=_task_sort_key)
+
+
+def task_cursor(row: dict[str, Any]) -> str:
+    """Курсор по строке: ``(created_at, id)`` одной строкой через ``|``.
+
+    Разделитель ``|`` выбран потому, что ни ISO-время, ни идентификатор его
+    не содержат, а курсор переживает процесс опроса и приходит обратно
+    строкой — поэтому проверить его дешевле, чем разбирать молча.
+    """
+    created_at, row_id = _task_sort_key(row)
+    return f"{created_at}|{row_id}"
+
+
+def _decode_task_cursor(cursor: str | None) -> tuple[str, str] | None:
+    """Разобрать курсор в пару значений для ``(created_at, id) > (%s, %s)``.
+
+    Кривой курсор — отказ, а не «начать с головы»: молча проигнорированный
+    курсор выглядел бы как пустая очередь, и опрос продолжал бы крутиться
+    по уже обработанному, не сообщая ни об одном пропущенном задании.
+    """
+    if cursor is None or str(cursor).strip() == "":
+        return None
+    text = str(cursor)
+    parts = text.rsplit("|", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise InvalidRequestError(
+            f"claim_task: курсор {text!r} не разбирается — ожидается "
+            "'<created_at>|<id>'; молча начать с головы означало бы "
+            "пропустить задачи, а не сообщить о них"
+        )
+    return parts[0], parts[1]

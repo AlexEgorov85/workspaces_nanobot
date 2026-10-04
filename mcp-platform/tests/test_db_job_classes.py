@@ -545,6 +545,72 @@ class TestEveryPoolCallIsDeclared:
         )
 
 
+class TestQueueCaptureHasAJobClass:
+    """Батчевый захват объявлен поимённо, а не «по факту зовёт пул».
+
+    Общий обход ``TestEveryPoolCallIsDeclared`` этот дефект поймал — и это
+    ровно то, как он был найден. Но он ловит его **только пока метод зовёт
+    ``self.submit`` прямо**: уберём прямую постановку (делегация помощнику,
+    вынос SQL, рефакторинг) — и метод перестанет попадать в обход, а запись
+    в реестре останется единственным, что её объявляет. Поимённая запись без
+    поимённой проверки и есть тот «список выглядит рабочим», о котором
+    говорит докстринг модуля: выглядит — потому что читается как готовое
+    объявление класса, а класса нет.
+    """
+
+    #: Методы захвата очереди. ``claim_task`` — представление одиночного
+    #: захвата, ``claim_tasks`` — батчевый; оба обязаны иметь класс, потому
+    #: что оба обслуживают очередь, и класс у неё один.
+    QUEUE_CAPTURE = ("claim_task", "claim_tasks")
+
+    def test_queue_capture_is_declared_in_the_registry(self) -> None:
+        registry = _operation_audience()
+        missing = [name for name in self.QUEUE_CAPTURE if name not in registry]
+        assert not missing, (
+            f"захват очереди не объявлен в реестре классов: {missing}. "
+            "Пока записи нет, пул не знает, чья это работа, и обслуживает её "
+            "наравне со всем остальным. Объявить по образцу соседних "
+            "операций очереди: JOB_AUDIENCE_RUNTIME"
+        )
+
+    def test_queue_capture_runs_in_the_runtime_class(self) -> None:
+        """Класс захвата — служебный, как и у соседних операций очереди.
+
+        Проверяется не «какой-нибудь класс», а именно ``runtime``: запись с
+        другим значением выглядела бы заполненной, и «очередь обслуживается
+        как вызов модели» обнаружилось бы на живом контуре.
+        """
+        from libs.enterprise_data.audience import JOB_AUDIENCE_RUNTIME
+
+        registry = _operation_audience()
+        wrong = {
+            name: registry[name]
+            for name in self.QUEUE_CAPTURE
+            if name in registry and registry[name] != JOB_AUDIENCE_RUNTIME
+        }
+        assert not wrong, (
+            f"захват очереди объявлен не тем классом: {wrong}; "
+            f"ожидается {JOB_AUDIENCE_RUNTIME!r}"
+        )
+
+    def test_the_pin_actually_fails_without_the_entry(self) -> None:
+        """Проверка самой проверки: запись без стража не значит ничего.
+
+        Убеждаемся, что страж ловит удаление записи на подставном реестре.
+        Иначе он был бы зелёным на файле, где ``claim_tasks`` из реестра
+        убрали, — то есть проверял бы уже не то.
+        """
+        registry = _operation_audience()
+        trimmed = {k: v for k, v in registry.items() if k != "claim_tasks"}
+        offenders = _undeclared_callers(
+            MAIN.read_text(encoding="utf-8"), _rel(MAIN), trimmed
+        )
+        assert any("claim_tasks" in line for line in offenders), (
+            "страж перестал ловить удаление записи claim_tasks: "
+            f"{offenders} — поимённая проверка выше стала бы декорацией"
+        )
+
+
 class TestClassInSignature:
     def test_signature_class_matches_the_registry(self) -> None:
         """Объявление класса в сигнатуре обязано совпадать с реестром.
