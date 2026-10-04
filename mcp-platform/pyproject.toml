@@ -25,6 +25,10 @@ dependencies = [
     "sqlglot==30.17.0",
     # Владелец HTTP-клиента провайдера (libs/llm).
     "httpx>=0.27",
+    # ASGI-сервер транспорта streamable-http (servers/enterprise/
+    # http_transport.py). В mcp приходит транзитивно, но транспорт зовёт
+    # uvicorn напрямую, и объявление обязано называть то, что зовёт код.
+    "uvicorn>=0.30",
     # Владелец снимка (libs/enterprise_data/snapshot) и владелец индексов
     # (libs/vectors). Импортируются ЛЕНИВО, внутри функций: отсутствие любого
     # из них не должно мешать подняться серверу и ломать capability, которая

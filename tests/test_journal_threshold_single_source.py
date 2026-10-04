@@ -525,9 +525,17 @@ class TestOneSourceWithTwoReaders:
                 f"{file}::{constant} = {declared}, а путь в конфигурации — "
                 f"{CONFIG_KEY_PATH}. Это разные пути к одному значению."
             )
-            assert list(AGENT_BLOCK_PATHS.values()) == [declared], (
-                f"{file}: блок наполняется не тем путём — "
+            assert declared in list(AGENT_BLOCK_PATHS.values()), (
+                f"{file}: пути блока не содержат путь порога — "
                 f"{list(AGENT_BLOCK_PATHS.values())}"
+            )
+            # Число ключей блока — не его инвариант: к порогу добавились пути
+            # транспорта, и завтра добавятся другие. Инвариант в том, что пути
+            # не повторяются: два ключа на один путь означали бы, что одно
+            # значение едет в платформу под двумя именами.
+            values = list(AGENT_BLOCK_PATHS.values())
+            assert len(values) == len(set(values)), (
+                f"{file}: два ключа блока указывают на один путь — {values}"
             )
 
     def test_writer_and_the_block_resolve_the_same_value(self) -> None:

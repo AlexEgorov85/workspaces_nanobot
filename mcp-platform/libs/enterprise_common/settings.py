@@ -882,6 +882,25 @@ _s("ENTERPRISE_SESSION_META_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "порог долговечного журнала, ниже которого события не пишутся; "
        "приходит блоком агента, окружение не читается",
        file_key="logging.db.min_level"),
+    # Транспорт процесса платформы. Приходит тем же блоком агента, и по той же
+    # причине окружение не читается: окружение приоритетнее файла и такой
+    # «экспорт» молча затирал бы объявление.
+    _s("ENTERPRISE_TRANSPORT_MODE", "str", OPTIONAL, OWNER_AGENT,
+       "servers/enterprise/http_transport.py:requested_transport",
+       "транспорт процесса платформы: stdio или http; приходит блоком агента",
+       file_key="transport.mode"),
+    _s("ENTERPRISE_TRANSPORT_BIND", "str", OPTIONAL, OWNER_AGENT,
+       "servers/enterprise/http_transport.py:loopback_host",
+       "адрес слушания http-транспорта; принимается только loopback",
+       file_key="transport.bind"),
+    _s("ENTERPRISE_TRANSPORT_PORT", "int", OPTIONAL, OWNER_AGENT,
+       "servers/enterprise/http_transport.py:bind_listener",
+       "запрос порта: 0 — выдай свободный, число — занми этот",
+       file_key="transport.port"),
+    _s("ENTERPRISE_TRANSPORT_NOTIFY_FD", "int", OPTIONAL, OWNER_AGENT,
+       "servers/enterprise/http_transport.py:notify_address",
+       "дескриптор, куда пишется фактический адрес; открывает агент",
+       file_key="transport.notify_fd"),
 )
 
 #: Имя -> настройка. Построен один раз; единственный источник правды.
@@ -1034,6 +1053,14 @@ SHARED_SETTINGS: tuple[str, ...] = (
     "ENTERPRISE_POOL_JOB_MAX_RETRIES",
     "ENTERPRISE_POOL_PRINT_ACTIVITY",
     "ENTERPRISE_POOL_RESERVED_WORKERS",
+    # Транспорт процесса платформы: stdio или http, адрес слушания, запрошенный
+    # порт и дескриптор уведомления. Объявляет их агент, а читает `server` —
+    # то есть владение разделено, а сам разделяемый код стоит в `servers/`, а не
+    # в capability, поэтому объявлены здесь, рядом с пулом.
+    "ENTERPRISE_TRANSPORT_MODE",
+    "ENTERPRISE_TRANSPORT_BIND",
+    "ENTERPRISE_TRANSPORT_PORT",
+    "ENTERPRISE_TRANSPORT_NOTIFY_FD",
     # Классы работ: как и сам пул, делятся между capability (в базу пишет
     # `data`, журнал читает `audit`, снимок заливает загрузчик), поэтому
     # объявлены здесь, а не в секции `data`. Пределы модельной и рантайм-

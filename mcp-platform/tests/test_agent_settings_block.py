@@ -425,3 +425,161 @@ class TestOldDeliveryIsGone:
             "main не передаёт разобранный путь в build(): флаг разбирается и "
             "не применяется"
         )
+
+
+#: Настройки транспорта, которые блок обязан нести. В реестр их вносит владелец
+#: ``libs/enterprise_common/settings.py``; здесь они нужны как **контракт**: по
+#: ним видно, что именно объявление должно закрыть, и по ним же проверяется,
+#: что до объявления значение действительно не доезжает.
+TRANSPORT_DECLARATION = (
+    ("ENTERPRISE_TRANSPORT_MODE", "str", "transport.mode"),
+    ("ENTERPRISE_TRANSPORT_BIND", "str", "transport.bind"),
+    ("ENTERPRISE_TRANSPORT_PORT", "int", "transport.port"),
+    ("ENTERPRISE_TRANSPORT_NOTIFY_FD", "int", "transport.notify_fd"),
+)
+
+
+def _declare_transport_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Внести объявление транспорта в реестр — только на время теста.
+
+    Подмена нужна не для того, чтобы обойти проверку, а чтобы доказать путь
+    доставки, пока объявление в реестре ещё не внесено. Продакшн-код при этом
+    не трогается: подменяется кортеж настроек в модуле реестра, и ``Settings``
+    читает его при разборе блока.
+    """
+    from libs.enterprise_common import settings as registry
+
+    extra = tuple(
+        registry.Setting(
+            name=name,
+            kind=kind,
+            default=registry.OPTIONAL,
+            owner=OWNER_AGENT,
+            reader="servers/enterprise/http_transport.py:requested_transport",
+            purpose="адрес транспорта приходит блоком агента",
+            file_key=key,
+        )
+        for name, kind, key in TRANSPORT_DECLARATION
+    )
+    monkeypatch.setattr(registry, "SETTINGS", registry.SETTINGS + extra)
+
+
+class TestPortKey:
+    """Порт транспорта приходит блоком, а не аргументом запуска (Ф1.4)."""
+
+    def test_port_never_appears_in_argv(self) -> None:
+        """Ни одного флага про порт в production-модулях платформы.
+
+        По AST, а не по тексту: имя флага может появиться в строке внутри
+        докстринга, и grep-ствраж тогда орал бы на безобидную прозу, а
+        пропускал бы константу в коде.
+        """
+        found: dict[str, list[str]] = {}
+        for path in PLATFORM_ROOT.rglob("*.py"):
+            if "tests" in path.parts or "__pycache__" in path.parts:
+                continue
+            docstrings = {
+                id(node.body[0].value)
+                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef))
+                and ast.get_docstring(node)
+                and isinstance(node.body[0], ast.Expr)
+            }
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and id(node) not in docstrings
+                    and node.value.startswith("--")
+                    and "port" in node.value.lower()
+                ):
+                    found.setdefault(str(path.relative_to(PLATFORM_ROOT)), []).append(
+                        node.value
+                    )
+        assert found == {}, f"порт появился в argv платформы: {found}"
+
+    def test_block_value_reaches_the_transport_request(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Путь доставки целиком: значение блока → запрос транспорта.
+
+        Проверяется с объявлением, **подставленным в реестр на время теста**:
+        так доказывается, что читатель платформы устроен верно, и падение после
+        объявления в реестре невозможно — оно этот тест не сломает.
+        """
+        from servers.enterprise import http_transport
+
+        _declare_transport_settings(monkeypatch)
+        block = block_file(
+            tmp_path,
+            {
+                "transport.mode": "http",
+                "transport.bind": "127.0.0.1",
+                "transport.port": 8790,
+                "transport.notify_fd": 7,
+            },
+        )
+        request = http_transport.requested_transport(settings_with(tmp_path, block))
+        assert request.mode == "http"
+        assert request.bind == "127.0.0.1"
+        assert request.port == 8790
+        assert request.notify_fd == 7
+
+    def test_absent_port_key_means_ephemeral(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Нет ключа ``port`` при ``http`` — ``0``, «выдай свободный»."""
+        from servers.enterprise import http_transport
+
+        _declare_transport_settings(monkeypatch)
+        block = block_file(
+            tmp_path, {"transport.mode": "http", "transport.notify_fd": 7}
+        )
+        request = http_transport.requested_transport(settings_with(tmp_path, block))
+        assert request.port == 0
+
+    def test_empty_value_means_the_same_as_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Пустой ``port`` — тоже «выдай свободный», а не «не число».
+
+        Реестр отдаёт пустое значение ключа маркером ``OPTIONAL``, и если бы
+        читатель не отличал его от отсутствия, оператор получил бы отказ
+        «не число» на значении, которое он не писал.
+        """
+        from servers.enterprise import http_transport
+
+        _declare_transport_settings(monkeypatch)
+        block = block_file(
+            tmp_path,
+            {"transport.mode": "http", "transport.port": "", "transport.notify_fd": 7},
+        )
+        request = http_transport.requested_transport(settings_with(tmp_path, block))
+        assert request.port == 0
+
+    def test_port_arrives_in_block(self, tmp_path: Path) -> None:
+        """Тот же путь доставки на **живом** реестре, без подстановки.
+
+        Ключи транспорта внесены в реестр платформы
+        (``libs/enterprise_common/settings.py``, ``owner=OWNER_AGENT``), поэтому
+        блок с ними принимается. Метка ``xfail`` снята 2026-10-04.
+
+        ``notify_fd`` в блоке обязателен: при ``mode=http`` фактический адрес
+        назначает ОС в момент бинда, и сообщить его больше нечем, кроме
+        дескриптора, который открывает агент. Без него транспорт отказывает
+        раньше, чем что-либо привяжет, — и это правильно.
+        """
+        from servers.enterprise import http_transport
+
+        block = block_file(
+            tmp_path,
+            {
+                "transport.mode": "http",
+                "transport.bind": "127.0.0.1",
+                "transport.port": 8790,
+                "transport.notify_fd": 7,
+            },
+        )
+        request = http_transport.requested_transport(settings_with(tmp_path, block))
+        assert request.mode == "http"
+        assert request.port == 8790

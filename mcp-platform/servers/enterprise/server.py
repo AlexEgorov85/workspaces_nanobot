@@ -58,6 +58,7 @@ from libs.enterprise_common.settings import (
     job_class_setting_names,
     pool_config,
 )
+from servers.enterprise import http_transport
 
 #: Корень платформы: ``mcp-platform/``. Нужен и загрузчику (для модульных имён),
 #: и проверке зависимостей.
@@ -564,6 +565,8 @@ def build(
     capabilities: frozenset[str] | None = None,
     profile: str | None = None,
     agent_settings_path: Path | None = None,
+    *,
+    settings: Settings | None = None,
 ) -> tuple[Any, ToolRegistry, ToolContainer]:
     """Собрать сервер: настройки, пул, сервисы, реестр, транспорт.
 
@@ -576,6 +579,11 @@ def build(
         agent_settings_path: файл блока настроек агента, путь приходит
             аргументом запуска (:data:`AGENT_SETTINGS_FILE_FLAG`). ``None`` —
             блок не передан, и настройки агента не применяются.
+        settings: уже разобранные настройки. Нужны ``main``: блок читает он
+            же (по нему выбирается транспорт), и второй :class:`Settings`
+            означал бы двух независимых читателей одного файла. ``None`` —
+            разобрать самому из ``profile`` и ``agent_settings_path``, как это
+            делают все прежние вызовы.
 
     Возвращает ``(server, registry, container)`` — чтобы тест мог проверить
     реестр, не поднимая транспорт.
@@ -589,8 +597,10 @@ def build(
     wanted = _selected(capabilities)
     # Блок читается и проверяется здесь, один раз, до сборки сервисов: отказ
     # на неизвестном ключе должен остановить подъём до того, как что-либо
-    # схватит настройки.
-    settings = Settings(profile=profile, agent_settings_path=agent_settings_path)
+    # схватит настройки. ``main`` приносит сюда свой разобранный экземпляр —
+    # блок один, и читать его дважды означало бы два независимых ответа на
+    # вопрос, что агент объявил.
+    settings = settings or Settings(profile=profile, agent_settings_path=agent_settings_path)
     if _needs_data(wanted):
         _check_dependencies(settings)
         _configure_dsn(settings)
@@ -906,7 +916,7 @@ def _prepare_capabilities(container: Any) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Поднять сервер по stdio. Точка входа для MCP-клиента агента.
+    """Поднять сервер по stdio или streamable-http. Точка входа агента.
 
     Args:
         argv: аргументы командной строки; ``None`` — ``sys.argv[1:]``.
@@ -915,15 +925,27 @@ def main(argv: list[str] | None = None) -> None:
     потребителей вне агента (skill-конвейер в отдельном процессе). Такой
     процесс не трогает ни PostgreSQL, ни файл снимка, поэтому он не может
     стать их вторым владельцем.
+
+    Транспорт выбирает **блок настроек агента**, а не аргумент запуска: порт
+    и адрес — передаваемые настройки, и доставка у них одна. Разбор argv
+    повторяется здесь трижды и это дёшево: он чистый, без ввода-вывода.
+    Читается при этом один раз сам блок — ``build`` получает тот же
+    :class:`Settings`, что и разбор транспорта.
     """
     import anyio
     from mcp.server.stdio import stdio_server
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    settings = Settings(
+        profile=_profile_from_argv(argv),
+        agent_settings_path=_agent_settings_path_from_argv(argv),
+    )
+    request = http_transport.requested_transport(settings)
     transport, _, container = build(
         _capabilities_from_argv(argv),
         profile=_profile_from_argv(argv),
         agent_settings_path=_agent_settings_path_from_argv(argv),
+        settings=settings,
     )
     # ``services``, а не ``get``: у процесса без ``data`` такого сервиса
     # нет, и строгий ``get`` уронил бы старт с «сервис не зарегистрирован»
@@ -938,6 +960,9 @@ def main(argv: list[str] | None = None) -> None:
     _prepare_capabilities(container)
     try:
         async def _serve() -> None:
+            if request.mode == http_transport.MODE_HTTP:
+                await http_transport.serve_http(transport, request)
+                return
             async with stdio_server() as (read_stream, write_stream):
                 await transport.run(
                     read_stream,

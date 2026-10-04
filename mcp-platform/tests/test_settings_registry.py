@@ -193,13 +193,66 @@ def _registry_read_names(path: Path) -> set[str]:
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in SETTINGS_ACCESSORS
             and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
         ):
             continue
-        if ENV_NAME_LITERAL.match(node.args[0].value):
-            names.add(node.args[0].value)
+        argument = node.args[0]
+        # Чтение через именованную константу модуля — то же чтение, что и через
+        # литерал: ``TRANSPORT_SETTING = "ENTERPRISE_TRANSPORT_MODE"`` и
+        # ``settings.get(TRANSPORT_SETTING)``. Сканер окружения эту indirection
+        # уже разыменовывает вторым проходом (``ENV_NAME_LITERAL``); страж
+        # реестра обязан делать то же, иначе именованная константа объявила бы
+        # живую настройку непрочитанной — то есть ровно тот ложный отказ,
+        # которого страж существует, чтобы не допускать.
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            value = argument.value
+        elif isinstance(argument, ast.Name):
+            value = _module_string_constants(tree).get(argument.id, "")
+        else:
+            continue
+        if ENV_NAME_LITERAL.match(value):
+            names.add(value)
+    # Остаётся форма, которую не видно синтаксически: константа уходит в
+    # хелпер параметром и в ``settings.get()`` попадает уже как ``name``.
+    # (``_declared(settings, TRANSPORT_SETTING)`` -> ``settings.get(name)``.)
+    # Условие — модуль вообще читает реестр (хотя бы один ``settings.get(...)``),
+    # а свидетельством служит константа, которая **объявлена и используется**:
+    # на мёртвую константу ``ast.Name`` никто не ссылается. Ложное «прочитано»
+    # возможно — константа может использоваться не в том вызове, — поэтому
+    # правило сознательно узкое и описано здесь, а не выдаётся за полноту.
+    reads_registry = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in SETTINGS_ACCESSORS
+        and node.args
+        for node in ast.walk(tree)
+    )
+    if reads_registry:
+        constants = _module_string_constants(tree)
+        referenced = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        names |= {value for name, value in constants.items() if name in referenced}
     return names
+
+
+def _module_string_constants(tree: ast.AST) -> dict[str, str]:
+    """Модульные константы-строки, названные по образцу настройки."""
+    constants: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        if not ENV_NAME_LITERAL.match(node.value.value):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = node.value.value
+    return constants
 
 
 def _declarative_names() -> set[str]:

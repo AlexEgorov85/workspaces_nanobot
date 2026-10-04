@@ -82,6 +82,15 @@ BLOCK_FILE_MODE = 0o600
 #: двух имён проверяет ``tests/test_mcp_platform_declaration.py``.
 JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
 
+#: Транспорт процесса платформы. Порт едет блоком вместе с режимом: агент
+#: должен знать, на каком порту поднимется второй процесс, иначе ему не на
+#: что опереться при проверке занятости. Объявляет эти пути платформа
+#: (``settings.py``, ``file_key`` каждой настройки) — здесь только адресация.
+TRANSPORT_MODE_PATH: tuple[str, ...] = ("transport", "mode")
+TRANSPORT_BIND_PATH: tuple[str, ...] = ("transport", "bind")
+TRANSPORT_PORT_PATH: tuple[str, ...] = ("transport", "port")
+TRANSPORT_NOTIFY_FD_PATH: tuple[str, ...] = ("transport", "notify_fd")
+
 #: Ключи блока, которые агент наполняет из своего ``config.json``.
 #:
 #: Ключ блока совпадает с точечным путём в конфигурации агента, поэтому запись
@@ -91,6 +100,10 @@ JOURNAL_MIN_LEVEL_PATH: tuple[str, ...] = ("logging", "db", "min_level")
 #: платформа не принимает, можно лишь вместе с красным тестом.
 AGENT_BLOCK_PATHS: dict[str, tuple[str, ...]] = {
     "logging.db.min_level": JOURNAL_MIN_LEVEL_PATH,
+    "transport.mode": TRANSPORT_MODE_PATH,
+    "transport.bind": TRANSPORT_BIND_PATH,
+    "transport.port": TRANSPORT_PORT_PATH,
+    "transport.notify_fd": TRANSPORT_NOTIFY_FD_PATH,
 }
 
 
