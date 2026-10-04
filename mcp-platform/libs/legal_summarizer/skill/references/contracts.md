@@ -131,5 +131,5 @@ data_store/cache/skills/legal_summarizer/<operation_id>/
   `--operation-id --confirm`. Уже записанные `chunks/*.json` НЕ
   переобрабатываются.
 * **Document cache**: при первом прогоне через session-папку
-  (`data_store/cache/sessions/<key>/...`) chunk-summaries
+  (`data_store/sessions/<key>/files/...`) chunk-summaries
   сохраняются на диск и переиспользуются для follow-up вопросов.

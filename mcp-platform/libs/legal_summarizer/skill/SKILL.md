@@ -103,7 +103,7 @@ python "C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.p
 - **Один** аргумент с абсолютным путём к `cli.py` — без `cd ... &&`
   (PowerShell не поддерживает `&&`).
 - Путь к файлу — **абсолютный** (берётся из media payload сообщения,
-  либо из `data_store/cache/sessions/<session_key>/<file>`).
+  либо из `data_store/sessions/<session_key>/files/<file>`).
 - На первом запуске для длинного документа — **всегда** добавляй
   `--estimate-only`, чтобы получить `confirmation_required` и показать
   пользователю меню `brief/detailed/вопрос`.
