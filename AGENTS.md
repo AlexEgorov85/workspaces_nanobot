@@ -84,9 +84,12 @@
 
 ## File Storage Policy
 
-- Новые файлы, создаваемые в рамках сессии, сохраняй под `workspace/data_store/sessions/<session_key>/`
-  (политика `workspace/AGENTS.md`, корень объявляет `mcp-platform/platform.json → execution.session_root`).
-  Не пиши напрямую в корень проекта.
+- Новые файлы, создаваемые в рамках сессии, сохраняй в `files/` каталога сессии —
+  `workspace/data_store/sessions/<session_key>/files/`
+  (политика `workspace/AGENTS.md`; корень объявляет
+  `mcp-platform/platform.json → execution.session_root`, раскладку — `SESSION_SUBDIRS`
+  платформы). `files/` — единственное место, куда пишет агент, шесть остальных
+  подкаталогов каталога сессии принадлежат платформе. Не пиши напрямую в корень проекта.
 - ~~Кэш документов legal_summarizer: `workspace/data_store/cache/sessions/<safe_session_key>/documents/<document_id>/`~~ — **больше не агентский.** С 2026-10-02 домен живёт в `mcp-platform/libs/legal_summarizer/`, и корень его кэша приходит из реестра (`ENTERPRISE_LEGAL_CACHE_ROOT`, объявление — `mcp-platform/platform.json → legal_summarizer`), а не выводится из `Path(__file__).parents[N]`. Ключ сессии берётся из `session_id` контракта операции, не из `SESSION_KEY` в окружении. `document_id` — SHA-256 **содержимого** документа, поэтому одинаковое содержимое под разными путями делит один кэш-разбор. Конвенция имён сессий в агенте (`safe_session_key`) прежняя: `workspace.utils.session_key.safe_session_key`.
 - Для редактирования существующих файлов (`AGENTS.md`, `lib/`, `*.py`) — обычные `edit_file` / `apply_patch`.
 - **Не используй `>`, `>>` в `exec` для создания файлов** — `session_file_redirect_hook` их не перехватывает.

@@ -1229,7 +1229,9 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 - `lib/utils/outbound_meta.py` — единый фильтр служебных outbound
   (`system`, `audit`, `tool_audit`, `_assemble_outbound`-артефакты).
 - `SessionFileStore` (`workspace/utils/session_file_store.py`) — общий стор
-  вложений под `data_store/sessions/<key>/attachments/`.
+  вложений в `data_store/sessions/<key>/files/attachments/` (рядом `files/results/` —
+  выгрузки инструментов). Каталог сессии даёт резолвер
+  `lib/services/session_files.py`; собственную раскладку хранилище больше не выводит.
 
 При добавлении нового канала: наследовать `nanobot.channels.base.BaseChannel`
 и делегировать `start/stop/send/send_delta/poll_once` в `MessageExchange`.
@@ -1666,7 +1668,7 @@ Postgres/Redis. Теперь — один, через `MessageExchange`.
 
 Утилита для существующих развёртываний: читает `agent_conversation_messages`,
 конвертирует старые `{filename, data}` в `{filename, file_id, mime_type,
-file_size}` (payload → `data_store/sessions/_shared/attachments/`,
+file_size}` (payload → `data_store/sessions/<key>/files/attachments/`,
 в БД — только `file_id`). Идемпотентна: записи с уже проставленным
 `file_id` пропускаются, HTTP/HTTPS-ссылки не трогает. CLI:
 `python scripts/backfill_media_aw.py [--dry-run]`.
@@ -1793,7 +1795,7 @@ nanobot/
 │
 ├── workspace/                            # runtime-данные и плагины-хуки
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
-│   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/sessions/
+│   │   ├── session_file_redirect_hook.py #     перенаправление create_file/write/write_file + media тула message в files/
 │   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
 │   │   └── debug_stream_diag.py          #     диагностика стриминга
 │   ├── tools/                            # кастомные tool'ы (auto-discover через project_tool_loader.register_project_tools)
