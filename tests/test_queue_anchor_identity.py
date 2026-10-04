@@ -456,3 +456,107 @@ class TestMcpEnvelopeIsNotTheJournal:
         svc = _svc()
         asyncio.run(make_inbound_logger_bus(svc)(_inbound_message()))
         assert _events(svc, "agent.received")[0].request_id is None
+
+
+class TestQuestionAnchorShape:
+    """Форма значения якоря — объявленный контракт, а не «поместилось» в VARCHAR(256).
+
+    Отвергнутый вариант проверки — длина. Подпись ``subagent:43ddfc56`` короче
+    256 символов и при этом не идентификатор вопроса; проверка по длине держала
+    бы ровно ту правдоподобную ложь, которую change и снимает.
+    """
+
+    def test_queue_id_is_accepted(self):
+        from lib.services.db_logging_service import is_question_anchor
+
+        assert is_question_anchor(QUESTION_ID)
+        assert is_question_anchor(QUESTION_ID.upper())
+
+    def test_declared_subagent_space_is_accepted(self):
+        """Второе объявленное пространство — не вопрос, но и не отвергнутое."""
+        from lib.services.db_logging_service import is_question_anchor
+
+        assert is_question_anchor("subagent:43ddfc56-1f7e-4a1b-9c3d-2e5a6b7c8d90")
+
+    def test_empty_is_not_an_anchor(self):
+        """«Повода не было» обязано отличаться от «повод есть»."""
+        from lib.services.db_logging_service import is_question_anchor
+
+        assert is_question_anchor(None) is False
+        assert is_question_anchor("") is False
+        assert is_question_anchor("   ") is False
+
+    def test_sentinels_and_arbitrary_shapes_are_rejected(self):
+        from lib.services.db_logging_service import is_question_anchor
+
+        for value in (
+            "startup-enterprise-mcp-health",  # sentinel стартовой пробы
+            "probe-req-1",                    # служебный идентификатор
+            "msg-0001",                       # похож на короткий, но не UUID
+            "subagent:",                      # префикс без task_id
+            "1" * 300,                        # влезает в VARCHAR(256)? нет — и не UUID
+        ):
+            assert is_question_anchor(value) is False, value
+
+    def test_known_live_leftovers_are_rejected(self):
+        """Формы, реально лежащие в боевой таблице после f7e4a8d.
+
+        Не «гипотетические плохие значения», а те, что записаны в локальной базе:
+        у части из них длина заведомо меньше 256.
+        """
+        from lib.services.db_logging_service import is_question_anchor
+
+        for value in ("msg-0001", "probe-req-1", "subagent:43ddfc56-x", "subagent:"):
+            assert is_question_anchor(value) is False, value
+        assert is_question_anchor("subagent:43ddfc56-1f7e-4a1b-9c3d-2e5a6b7c8d90") is True
+
+
+class TestCompactionEventIsAnchored:
+    """Якорь в компаундере: событие compact'а принадлежит своему обороту.
+
+    До правки ``agent.compacted`` подписывался ``user_id`` текущего вопроса, но
+    идентификатора вопроса не нёс. Подпись говорила «этот вопрос», джойн не
+    находил ничего — привязанность выглядела лучше, чем она есть. Именно эту
+    форму change называет вредной, только по ``user_id`` вместо выдуманного UUID.
+    """
+
+    def test_event_carries_current_question_id(self):
+        from lib.services import context_compaction as cc
+
+        fake = type("Ctx", (), {"sender_id": SENDER, "message_id": QUESTION_ID})()
+
+        class _CtxMod:
+            @staticmethod
+            def current_request_context():
+                return fake
+
+        real = sys.modules.get("nanobot.agent.tools.context")
+        sys.modules["nanobot.agent.tools.context"] = _CtxMod
+        try:
+            assert cc._current_request_sender_id() == SENDER
+            assert cc._current_request_id() == QUESTION_ID
+        finally:
+            if real is not None:
+                sys.modules["nanobot.agent.tools.context"] = real
+
+    def test_compaction_without_question_stays_empty(self):
+        """Вне оборота (CLI без строки очереди) якорь пустой, а не выдуманный."""
+        from lib.services import context_compaction as cc
+
+        svc = _svc()
+        svc.is_running = lambda: True  # поток журнала в тесте не поднимается
+        inst = object.__new__(cc.ContextCompactionService)
+        inst._db_logging_service = svc
+        asyncio.run(inst._record_event_log("sess", {}, "сжато"))
+        events = _events(svc, "agent.compacted")
+        assert len(events) == 1
+        assert not events[0].request_id
+
+    def test_non_anchor_value_does_not_reach_anchor_field(self):
+        """Значение, которое якорем не является, в поле якоря не попадает."""
+        from lib.services import context_compaction as cc
+        from lib.services.db_logging_service import is_question_anchor
+
+        assert cc._anchor_or_none("startup-enterprise-mcp-health", is_question_anchor) is None
+        assert cc._anchor_or_none(QUESTION_ID, is_question_anchor) == QUESTION_ID
+        assert cc._anchor_or_none(None, is_question_anchor) is None

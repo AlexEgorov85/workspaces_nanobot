@@ -128,7 +128,7 @@ COMMENT ON COLUMN public.agent_gateway_logs.id          IS 'PK события (U
 COMMENT ON COLUMN public.agent_gateway_logs."timestamp" IS 'Момент ЗАПИСИ строки (ставит база при сбросе батча). Событийным временем является occurred_at.';
 COMMENT ON COLUMN public.agent_gateway_logs.level       IS 'Уровень логирования: DEBUG/INFO/WARN/ERROR.';
 COMMENT ON COLUMN public.agent_gateway_logs.event_type  IS 'Каноническое имя события из словаря platform.json → data.log_unknown_event_type_policy; при policy=strict имя вне словаря отказывает батчем.';
-COMMENT ON COLUMN public.agent_gateway_logs.request_id  IS 'FK-логически на agent_question_runs.request_id.';
+COMMENT ON COLUMN public.agent_gateway_logs.request_id  IS 'ИДЕНТИФИКАТОР ВОПРОСА (якорь оборота) либо пусто — см. change 2026-10-04-queue-as-anchor-identity Ф1. Значение: id строки role=''user'' очереди, взятой оборотом (она же agent_question_runs.request_id), либо объявленное второе пространство subagent:<task_id>. Пусто означает «повода не было»: подписной участок есть, а якоря нет, и это разные вещи. Выдуманный идентификатор, sentinel стартовой пробы (startup-*) и служебные probe-* в это поле не пишутся (UUID4-схема и sentinel отменены коммитом f7e4a8d). Отдельной колонки-якоря нет намеренно: пришлось бы расширять фиксированный список колонок у двух писателей журнала, из которых боевой писатель — платформа. Признак-маркер отдельного события хранится в существующих actor/event_type/channel/metadata.';
 COMMENT ON COLUMN public.agent_gateway_logs.session_id  IS 'Денормализованный channel:chat_id для удобства.';
 COMMENT ON COLUMN public.agent_gateway_logs.channel     IS 'Канал (telegram/cli/etc).';
 COMMENT ON COLUMN public.agent_gateway_logs.actor       IS 'Кто инициировал событие (user/agent/system).';

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -562,6 +563,48 @@ class LogEvent:
 @dataclass
 class _FlushSentinel:
     pass
+
+
+#: Идентификатор ВОПРОСА: ``id`` строки ``role='user'`` очереди, объявленный
+#: ``UUID`` в ``sql/channels/create_public_agent_conversation_messages.sql:11``.
+#: Второе объявленное пространство имён в этом поле — подагентский запуск
+#: ``subagent:<task_id>`` (``runtime_patcher``); он помечен ``is_subagent`` и
+#: parent_request_id, поэтому в вопрос не выдаётся, но и не отвергается.
+#:
+#: Всё остальное — sentinel стартовой пробы (``startup-enterprise-mcp-health``),
+#: служебные ``probe-*`` и выдуманные UUID — в поле идентификатора вопроса не
+#: попадает (change 2026-10-04-queue-as-anchor-identity, Ф1.4). Проверка по форме,
+#: а НЕ по длине: длина ``VARCHAR(256)`` не является «поместилось — значит,
+#: годится» (в предложении ровно это и было неправдой — и длина 256 подписи
+#: ``subagent:43ddfc56`` не мешала).
+_QUESTION_ANCHOR_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+_SUBAGENT_ANCHOR_PREFIX = "subagent:"
+
+
+def is_question_anchor(value: str | None) -> bool:
+    """Значение пригодно на роль идентификатора вопроса в поле ``request_id``.
+
+    Истина для ``id`` строки очереди (UUID) и для объявленного подагентского
+    ``subagent:<task_id>``. Всё прочее — нет, включая непустые строки чужой формы:
+    пустое значение и мусорное значение обязаны отличаться по исходу, иначе
+    «повода не было» и «повод выдуман» снова станут одним и тем же.
+    """
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate:
+        return False
+    if _QUESTION_ANCHOR_RE.match(candidate):
+        return True
+    # Подагентский ``task_id`` — тоже ``uuid4`` (``runtime_patcher``), поэтому
+    # после префикса проверяется та же форма. Префикс сам по себе не годен:
+    # ``subagent:`` и ``subagent:43ddfc56-x`` — это не объявленное пространство,
+    # а опечатка, и она не должна молча попадать в поле якоря.
+    if not candidate.startswith(_SUBAGENT_ANCHOR_PREFIX):
+        return False
+    return bool(_QUESTION_ANCHOR_RE.match(candidate[len(_SUBAGENT_ANCHOR_PREFIX):]))
 
 
 @dataclass

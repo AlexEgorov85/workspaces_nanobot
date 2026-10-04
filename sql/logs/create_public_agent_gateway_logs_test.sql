@@ -155,7 +155,7 @@ COMMENT ON COLUMN public.agent_gateway_logs_test.id          IS 'PK событи
 COMMENT ON COLUMN public.agent_gateway_logs_test."timestamp" IS 'Момент ЗАПИСИ строки (ставит база при сбросе батча). Событийным временем является occurred_at.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.level       IS 'Уровень логирования: DEBUG/INFO/WARN/ERROR.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.event_type  IS 'Каноническое имя события из словаря платформы; при policy=strict имя вне словаря отказывает батчем.';
-COMMENT ON COLUMN public.agent_gateway_logs_test.request_id  IS 'FK-логически на agent_question_runs_test.request_id.';
+COMMENT ON COLUMN public.agent_gateway_logs_test.request_id  IS 'ИДЕНТИФИКАТОР ВОПРОСА (якорь оборота) либо пусто — см. change 2026-10-04-queue-as-anchor-identity Ф1. Контракт идентичен боевой таблице: id строки role=''user'' очереди взятого оборота либо объявленное второе пространство subagent:<task_id>; пусто означает «повода не было», выдуманный идентификатор и sentinel пробы сюда не пишутся. Отдельной колонки-якоря нет намеренно, признак-маркер лежит в actor/event_type/channel/metadata.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.session_id  IS 'Денормализованный channel:chat_id для удобства.';
 COMMENT ON COLUMN public.agent_gateway_logs_test.channel     IS 'Канал (telegram/cli/etc).';
 COMMENT ON COLUMN public.agent_gateway_logs_test.actor       IS 'Кто инициировал событие (user/agent/system).';

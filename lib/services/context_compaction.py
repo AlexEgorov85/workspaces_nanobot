@@ -351,13 +351,17 @@ class ContextCompactionService:
 
         ``user_id`` берётся из identity-store текущего request (для
         ``history_search(session_scope="all")`` как security boundary).
+        ``request_id`` — идентификатор вопроса из очереди
+        (``RequestContext.message_id``, см. ``_current_request_id``): событие
+       compact'а принадлежит тому обороту, чей контекст сжало, и без якоря
+        строка не джойнилась ни с одним прогоном.
         При отсутствии identity-store — событие пишется с ``user_id IS NULL``
         и НЕ участвует в ``scope='all'`` (безопасный default). ``DbLoggingService``
         резолвит ``user_id`` через ``_enqueue`` security-boundary path,
         но явное значение через LogEvent.user_id имеет приоритет (для
         случаев вроде subagent'ов, которым нужно прокинуть identity родителя).
         """
-        from lib.services.db_logging_service import LogEvent, try_log_event
+        from lib.services.db_logging_service import LogEvent, is_question_anchor, try_log_event
 
         summary = text[:200] if text else "context compacted"
         payload = {
@@ -379,6 +383,10 @@ class ContextCompactionService:
             summary=summary,
             payload=payload,
             user_id=_current_request_sender_id(),
+            # Поле идентификатора вопроса не должно занимать значение, которое
+            # идентификатором вопроса не является. Проверка по форме, а не по
+            # длине: ``VARCHAR(256)`` — это не «поместилось, значит годится».
+            request_id=_anchor_or_none(_current_request_id(), is_question_anchor),
         )
         try:
             try_log_event(
@@ -600,4 +608,51 @@ def _current_request_sender_id() -> str | None:
     sender_id = getattr(ctx, "sender_id", None)
     if isinstance(sender_id, str) and sender_id:
         return sender_id
+    return None
+
+
+def _anchor_or_none(value: str | None, predicate) -> str | None:
+    """Значение проходит ``predicate`` — берётся, иначе остаётся пустым.
+
+    Обёртка нужна, чтобы вызывающая сторона не дублировала проверку в две строки
+    и чтобы «не прошло» означало одно и то же во всех местах, где агенту есть
+    дело до поля идентификатора вопроса: пусто, а не «как получится».
+    """
+    if predicate is None:
+        return value
+    try:
+        return value if predicate(value) else None
+    except Exception:
+        return None
+
+
+def _current_request_id() -> str | None:
+    """Идентификатор ВОПРОСА текущего request (или ``None``).
+
+    ``RequestContext.message_id`` — это ``metadata["message_id"]`` входящего
+    сообщения, то есть ``id`` строки ``role='user'`` очереди, взятой этим
+    оборотом (change 2026-10-04-queue-as-anchor-identity, Ф1.1). До правки
+    событие ``agent.compacted`` подписывалось ``user_id`` текущего вопроса, но
+    идентификатора вопроса не несло: строка выглядела принадлежащей вопросу по
+    подписи, а джойнилась ни с чем. Это ровно та форма, которую change называет
+    «привязанность выглядит лучше, чем она есть», только по ``user_id`` вместо
+    выдуманного UUID.
+
+    Пустое значение — законное состояние: сжатие может быть вызвано вне оборота
+    (например, из CLI без строки очереди), и подставлять тогда нечего. Идентификатор
+    НЕ выдумывается никогда.
+    """
+    try:
+        from nanobot.agent.tools.context import current_request_context
+    except Exception:
+        return None
+    try:
+        ctx = current_request_context()
+    except Exception:
+        return None
+    if ctx is None:
+        return None
+    message_id = getattr(ctx, "message_id", None)
+    if isinstance(message_id, str) and message_id:
+        return message_id
     return None

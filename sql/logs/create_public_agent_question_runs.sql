@@ -51,7 +51,7 @@ END
 $distribution$;
 
 COMMENT ON TABLE  public.agent_question_runs IS 'Контекст вопроса/прогона: пользователь, агент, статус, вопрос/ответ, summary. Одна строка на request_id.';
-COMMENT ON COLUMN public.agent_question_runs.request_id        IS 'PK — ID сообщения, вызвавшего обработку.';
+COMMENT ON COLUMN public.agent_question_runs.request_id        IS 'PK и ЯКОРЬ ОБОРОТА: id строки role=''user'' очереди, взятой этим оборотом, а не идентификатор, придуманный на лету. Значение порождается очередью (её id) и держится до конца оборота; UUID4-схема выдумывала несуществующий вопрос и отменена коммитом f7e4a8d (change 2026-10-04-queue-as-anchor-identity Ф1). Второе объявленное пространство — subagent:<task_id> при is_subagent: true.';
 COMMENT ON COLUMN public.agent_question_runs.created_at        IS 'Время регистрации вопроса.';
 COMMENT ON COLUMN public.agent_question_runs.updated_at        IS 'Время последнего изменения (status/summary).';
 COMMENT ON COLUMN public.agent_question_runs.session_id        IS 'Ключ сессии (channel:chat_id).';

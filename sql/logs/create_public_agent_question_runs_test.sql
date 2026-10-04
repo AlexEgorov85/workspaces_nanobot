@@ -55,7 +55,7 @@ END
 $distribution$;
 
 COMMENT ON TABLE  public.agent_question_runs_test IS 'Test-профиль: контекст вопроса/прогона. Структурный клон public.agent_question_runs; используется под профилем test.';
-COMMENT ON COLUMN public.agent_question_runs_test.request_id        IS 'PK — ID сообщения, вызвавшего обработку.';
+COMMENT ON COLUMN public.agent_question_runs_test.request_id        IS 'PK и ЯКОРЬ ОБОРОТА: id строки role=''user'' очереди, взятой этим оборотом, а не идентификатор, придуманный на лету (change 2026-10-04-queue-as-anchor-identity Ф1). Контракт идентичен боевой таблице; UUID4-схема отменена коммитом f7e4a8d. Второе объявленное пространство — subagent:<task_id> при is_subagent: true.';
 COMMENT ON COLUMN public.agent_question_runs_test.created_at        IS 'Время регистрации вопроса.';
 COMMENT ON COLUMN public.agent_question_runs_test.updated_at        IS 'Время последнего изменения (status/summary).';
 COMMENT ON COLUMN public.agent_question_runs_test.session_id        IS 'Ключ сессии (channel:chat_id).';
