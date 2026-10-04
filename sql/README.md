@@ -58,7 +58,18 @@ sql/
 │   ├── V002__vector_chunk_params.sql                    #   chunk_size/chunk_overlap/metric в agent_vector_index_config
 │   ├── V003__drop_vector_index_store.sql                #   ШАБЛОН: DROP <signature_table> (подставить вручную)
 │   ├── V004__agent_gateway_logs_user_id.sql             #   user_id + backfill + индекс в agent_gateway_logs
-│   └── V006__drop_agent_worker_claims.sql               #   DROP agent_worker_claims (снят протокол аренды)
+│   ├── V006__drop_agent_worker_claims.sql               #   DROP agent_worker_claims (снят протокол аренды)
+│   ├── V007__drop_benchmark_tables.sql                  #   DROP agent_benchmark_runs/results (снята подсистема)
+│   ├── V008__agent_gateway_logs_event_time_columns.sql  #   seq + occurred_at в agent_gateway_logs
+│   ├── V009__agent_gateway_logs_event_time_indexes.sql  #   индексы под момент события и ключ порядка
+│   ├── V010__agent_session_mirror_replica_key.sql       #   replica_id в ключ зеркала сессий
+│   ├── V011__agent_session_mirror_indexes.sql           #   индексы зеркала сессий
+│   ├── V012__test_profile_journal_and_session_message_key.sql
+│   │                                                     #   колонки/индексы/ключ, объявленные DDL,
+│   │                                                     #   но не доехавшие до существующих баз
+│   ├── V013__test_profile_session_mirror_replica_key.sql #   test-зеркало сессий в боевой форме
+│   └── V014__drop_conversation_messages_e2e_artifact.sql
+│                                                       #   DROP артефакта разовой проверки очереди
 │
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)
@@ -99,7 +110,7 @@ python tools/migrate.py --baseline          # штамповать сущест�
   реальное имя таблицы оператор подставляет и выполняет DROP вручную;
 - существующая БД: после первой установки выполнить `--baseline`
   (V001 не содержит DDL — только точка отсчёта);
-- новые изменения схемы — новый файл `V007__*.sql` и далее; ретроактивно
+- новые изменения схемы — новый файл `V015__*.sql` и далее; ретроактивно
   менять применённые миграции нельзя. Номера не переиспользуются: в истории
   уже был `V005__create_agent_cache_ownership.sql` (удалён вместе с
   `cache_ownership.py`), и базы, где он применился, хранят `005` в
