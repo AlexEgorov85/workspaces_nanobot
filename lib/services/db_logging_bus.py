@@ -40,7 +40,6 @@ runner туда положил) — иначе None.
 from __future__ import annotations
 
 import logging
-import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -87,25 +86,45 @@ def make_inbound_logger(
             content = getattr(msg, "content", "") or ""
             media = [p for p in (getattr(msg, "media", None) or []) if isinstance(p, str) and p]
             media = media_serialize(media) if media else None
-            # request_id: берём message_id, если канал его передаёт, иначе
-            # генерируем стабильный UUID. БЕЗ этого websocket-канал
-            # (message_id=None) никогда не регистрировал question_runs, и
-            # ~97% событий оставались без request_id (не джойнились к
-            # agent_question_runs). См. fix request_id-linkage.
-            request_id = message_id or str(uuid.uuid4())
+            # request_id — это id взятой строки очереди (``message_id``),
+            # и он МОЖЕТ БЫТЬ ПУСТЫМ. Подставлять сюда сгенерированный UUID
+            # нельзя: у вопроса из очереди такого идентификатора нет и не
+            # будет, а журнал выглядел бы привязанным к несуществующему
+            # вопросу. Именно этой подстановкой на живых данных были
+            # подписаны 4087 строк из 4138 (99,3 %) — данные на месте,
+            # подпись чужая (change 2026-10-04-queue-as-anchor-identity,
+            # Ф0.1). Пустое значение — нормальное состояние поля:
+            # ``register_request`` при пустом ``request_id`` не создаёт
+            # строку прогона, но кладёт снимок личности ВХОДА, и события
+            # оборота остаются подписанными ``user_id`` (см.
+            # ``db_logging_service._resolve_event_user_id_without_request``).
+            request_id = message_id or None
             if session_key:
                 # Отдельно от записи входящего: сбой регистрации убивает и
                 # request_id индекса, то есть ВСЕ события оборота остаются без
                 # связи с прогоном. Раньше это уходило в общий ``except`` и
                 # терялось целиком — теперь видно и в логе, и в счётчике.
                 try:
-                    service.register_request(
+                    registered = service.register_request(
                         session_key, request_id,
                         user_id=sender_id, chat_id=chat_id, channel=channel,
                         agent_id=agent_id,
                         question=content,
                         media=media or None,
                     )
+                    if not registered:
+                        # ``False`` здесь — не отказ, а «регистрировать
+                        # нечего»: у входящего нет ``message_id`` взятой
+                        # строки очереди. Путать это с упавшей регистрацией
+                        # нельзя — счётчики у них разные
+                        # (``registration_skipped`` против
+                        # ``registration_failures``), а выглядели одинаково.
+                        logger.debug(
+                            "входящее без вопроса: прогон не создаётся, "
+                            "личность оборота взята из снимка входа "
+                            "(session=%s sender=%s)",
+                            session_key, sender_id,
+                        )
                 except Exception as exc:  # noqa: BLE001 - публикацию не роняем
                     logger.warning(
                         "входящее: контекст вопроса не зарегистрирован "
@@ -196,7 +215,13 @@ def make_outbound_logger(
             ch = getattr(msg, "channel", "") or ""
             cid = getattr(msg, "chat_id", "") or ""
             session_id = f"{ch}:{cid}" if (ch or cid) else ""
-            request_id = meta.get("message_id") or service.get_request_id(session_id)
+            # Идентификатор вопроса для исходящего: ``message_id`` из meta
+            # (его кладёт канал) иначе in-memory индекс сессии. Второй
+            # источник пуст после перезапуска процесса, поэтому отсутствие
+            # ``request_id`` здесь — законное состояние, а не повод что-то
+            # доставлять: личность события (``session_id``+``user_id``)
+            # восстанавливается в сервисе из снимка личности ВХОДА.
+            request_id = meta.get("message_id") or service.get_request_id(session_id) or None
             media = [p for p in (getattr(msg, "media", None) or []) if isinstance(p, str) and p]
             media = media_serialize(media) if media else None
             service.log_outbound(

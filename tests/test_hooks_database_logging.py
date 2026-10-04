@@ -75,7 +75,19 @@ class TestDatabaseLoggingHook:
         assert kwargs["latency_ms"] == pytest.approx(100.0)
         assert kwargs["status"] == "ok"
 
-    def test_on_execute_tool_error(self, sys_path):
+    def test_on_execute_tool_error_defers_to_the_audit_hook(self, sys_path):
+        """Отказ пишет ``ToolAuditHook``, и этот хук не пишет его второй раз.
+
+        Писателей должно быть ровно два на весь отказ: платформа пишет свой
+        (``metadata.source=enterprise_mcp``), агент — свой
+        (``metadata.source=nanobot``). Третий, выглядящий как «подстраховка»,
+        дал бы две строки ``tool.failed`` на один отказ, а журнал читают как
+        одну запись на событие. Владелец — ``ToolAuditHook``, потому что он
+        есть в ``ctx.hooks`` безусловно и переживает оборот, а этот хук — нет.
+
+        Проверяется и то, что запись времени старта снята: иначе на каждый
+        отказ оставалась бы запись в ``_tool_start_times``.
+        """
         from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
@@ -89,13 +101,12 @@ class TestDatabaseLoggingHook:
         tool = MagicMock()
         params = {}
 
+        hook._tool_start_times["tc3"] = 1.0
         asyncio.run(
             hook.on_execute_tool_error(ctx, tool_call, tool, params, RuntimeError("boom"))
         )
-        kwargs = service.log_tool_result.call_args.kwargs
-        assert kwargs["status"] == "error"
-        assert "boom" in kwargs["error"]
-        assert kwargs["level"] == "ERROR"
+        service.log_tool_result.assert_not_called()
+        assert "tc3" not in hook._tool_start_times
 
     def test_after_run_emits_event(self, sys_path):
         from lib.hooks.database_logging_hook import DatabaseLoggingHook
@@ -481,44 +492,105 @@ class TestBusLoggers:
             "file_size": 0,
         }]
 
-    def test_inbound_logger_generates_request_id_without_message_id(self):
+    def test_inbound_logger_does_not_invent_request_id(self):
+        """Входящее без ``message_id`` не получает выдуманный идентификатор.
+
+        По живому замеру этой подстановкой были подписаны 4087 строк журнала
+        из 4138 (99,3 %): идентификатора, которого нет и не может быть в
+        очереди. Поле вопроса обязано остаться пустым, а личность события
+        обеспечивается отдельно (``user_id``) — см.
+        ``tests/test_queue_anchor_identity.py``.
+        """
         from lib.services.db_logging_bus import make_inbound_logger
 
         service = MagicMock()
         logger = make_inbound_logger(service)
         msg = MagicMock()
-        msg.channel = "websocket"
+        msg.channel = "cli"
         msg.chat_id = "c1"
-        msg.session_key = "websocket:c1"
+        msg.session_key = "cli:c1"
         msg.content = "привет"
-        msg.metadata = {}  # websocket не кладёт message_id
+        msg.metadata = {}  # канал не положил message_id взятой строки очереди
         msg.sender_id = "u9"
         msg.media = []
         asyncio.run(logger(msg))
         reg = service.register_request.call_args
         assert reg is not None
-        rid = reg.args[1]  # request_id — второй позиционный аргумент
-        assert rid  # сгенерированный UUID, не пустой
-        # inbound-событие несёт тот же request_id → джойн к question_runs
-        assert service.log_inbound.call_args.kwargs["request_id"] == rid
+        assert reg.args[1] is None, (
+            "идентификатор вопроса выдуман: у входящего нет message_id "
+            "взятой строки очереди, значит и вопроса не было"
+        )
+        # Регистрация состоялась «вхолостую» — это не отказ, и счётчики у
+        # этого состояния и у упавшей регистрации разные.
+        service.register_request.return_value = False
+        service.log_inbound.assert_called_once()
+        assert service.log_inbound.call_args.kwargs["request_id"] is None
+        # Личность входа уходит в регистрацию: снимок кладёт сервис.
+        assert reg.kwargs["user_id"] == "u9"
 
-    def test_factory_generates_request_id_when_missing(self):
+    def test_inbound_logger_keeps_queue_message_id(self):
+        """Контроль к предыдущему: у сообщения из очереди ``message_id``
+        ЕСТЬ, и он без изменений становится идентификатором вопроса."""
+        from lib.services.db_logging_bus import make_inbound_logger
+
+        service = MagicMock()
+        service.register_request.return_value = True
+        logger = make_inbound_logger(service)
+        msg = MagicMock()
+        msg.channel = "postgres"
+        msg.chat_id = "chat-A"
+        msg.session_key = "postgres:chat-A"
+        msg.content = "вопрос"
+        msg.metadata = {"message_id": "m-123"}
+        msg.sender_id = "u9"
+        msg.media = []
+        asyncio.run(logger(msg))
+        reg = service.register_request.call_args
+        assert reg.args[1] == "m-123"
+        assert service.log_inbound.call_args.kwargs["request_id"] == "m-123"
+
+    def test_factory_does_not_invent_request_id_when_missing(self):
+        """Фабрика хука НЕ выдумывает ``request_id`` и НЕ регистрирует оборот.
+
+        Раньше она брала индекс, а при ``None`` генерировала UUID и писала
+        строку прогона от своего имени. Теперь оборота нет — значит, нет и
+        строки ``agent_question_runs``: регистрировать нечего.
+        """
         from lib.hooks.database_logging_hook import make_db_logging_hook_factory
 
         svc = MagicMock()
         svc.get_request_id.return_value = None
         factory = make_db_logging_hook_factory(svc, agent_id="main")
         turn = MagicMock()
-        turn.session_key = "websocket:c1"
+        turn.session_key = "cli:c1"
         hook = factory(turn)
-        assert hook._request_id  # сгенерированный UUID
-        svc.register_request.assert_called_once()
-        assert svc.register_request.call_args.args[1] == hook._request_id
+        assert hook._request_id is None, (
+            "выдуманный идентификатор занял поле идентификатора вопроса"
+        )
+        svc.register_request.assert_not_called()
 
-    def test_factory_passes_user_id_from_identity_store(self):
-        """``register_request`` вызывается с ``user_id`` из identity-store
-        (RequestContext.sender_id), чтобы пара {request_id, user_id}
-        попала в индекс для последующего автозаполнения в ``_enqueue``."""
+    def test_factory_takes_request_id_from_index(self):
+        """Контроль: у оборота с вопросом ``request_id`` берётся из индекса
+        и остаётся в инстансе — все события оборота несут его и находят
+        строку ``agent_question_runs``."""
+        from lib.hooks.database_logging_hook import make_db_logging_hook_factory
+
+        svc = MagicMock()
+        svc.get_request_id.return_value = "m-123"
+        factory = make_db_logging_hook_factory(svc, agent_id="main")
+        turn = MagicMock()
+        turn.session_key = "postgres:chat-A"
+        hook = factory(turn)
+        assert hook._request_id == "m-123"
+        svc.register_request.assert_not_called()
+
+    def test_factory_does_not_register_turn_at_all(self):
+        """Регистрация оборота — дело входящего сообщения, не хука.
+
+        Проверка на отсутствие вызова, а не на его аргументы: пока фабрика
+        звала ``register_request``, личность входа могла быть продублирована
+        ею же, с пустым ``user_id``, и переписать снимок входа.
+        """
         from lib.hooks.database_logging_hook import make_db_logging_hook_factory
 
         svc = MagicMock()
@@ -531,26 +603,35 @@ class TestBusLoggers:
             return_value="alice",
         ):
             factory(turn)
-        kwargs = svc.register_request.call_args.kwargs
-        assert kwargs.get("user_id") == "alice"
+        svc.register_request.assert_not_called()
 
-    def test_factory_passes_user_id_none_when_no_identity_store(self):
-        """Без RequestContext → ``user_id=None`` в register_request (события
-        пишутся с ``user_id IS NULL`` и НЕ попадают в scope='all')."""
+    def test_factory_ignores_identity_store_for_registration(self):
+        """``RequestContext.sender_id`` хук больше не подставляет в оборот.
+
+        Источник истины — входящее сообщение (``sender_id`` оттуда кладёт
+        ``db_logging_bus`` в снимок личности входа). Подстановка отсюда
+        переписывала бы снимок входа личностью, взятой не из входа.
+        """
         from lib.hooks.database_logging_hook import make_db_logging_hook_factory
 
         svc = MagicMock()
         svc.get_request_id.return_value = None
         factory = make_db_logging_hook_factory(svc, agent_id="main")
         turn = MagicMock()
-        turn.session_key = "websocket:c1"
+        turn.session_key = "telegram:42"
+        with patch(
+            "lib.hooks.database_logging_hook._current_request_sender_id",
+            return_value="alice",
+        ):
+            hook = factory(turn)
+        assert hook._request_id is None
+        svc.register_request.assert_not_called()
+        # Подмена identity-store не влияет на решение фабрики: вопроса нет.
         with patch(
             "lib.hooks.database_logging_hook._current_request_sender_id",
             return_value=None,
         ):
-            factory(turn)
-        kwargs = svc.register_request.call_args.kwargs
-        assert kwargs.get("user_id") is None
+            assert factory(turn)._request_id is None
 
 
 class TestRunFinishedEventShape:

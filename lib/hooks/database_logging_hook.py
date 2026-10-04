@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -214,29 +213,16 @@ def make_db_logging_hook_factory(
     def _factory(turn_context: Any) -> DatabaseLoggingHook:
         session_key = getattr(turn_context, "session_key", None) or None
         request_id = None
-        # ``user_id`` берём из identity-store текущего request (если есть)
-        # и пробрасываем в ``register_request``, чтобы индекс хранил
-        # пару {request_id, user_id} — это security boundary для
-        # ``history_search(session_scope="all")``. При отсутствии
-        # identity-store (websocket без RequestContext, тесты) —
-        # ``user_id`` остаётся ``None``, события пишутся с ``user_id IS NULL``
-        # и НЕ участвуют в ``scope='all'`` (безопасный default).
-        user_id = _current_request_sender_id()
+        # ``request_id`` оборота берётся из индекса сервиса, и он МОЖЕТ БЫТЬ
+        # ПУСТЫМ: у входящего не было ``message_id`` взятой строки очереди
+        # (фоновый вызов, правка в ``cli``). Выдумывать его здесь нельзя —
+        # второй источник подстановки, который подписал 99,3 % строк журнала
+        # чужим именем (change 2026-10-04-queue-as-anchor-identity, Ф0.1).
+        # Пустое значение не лишает события личности: ``user_id`` подставляет
+        # сервис из снимка личности ВХОДА той же сессии, а строку прогона
+        # никто и не должен был создавать — вопроса не было.
         if session_key and db_logging_service is not None:
             request_id = db_logging_service.get_request_id(session_key)
-            # Если inbound не зарегистрировал вопрос (websocket без message_id
-            # или inbound не прошёл через шину) — создаём request_id сами,
-            # чтобы ВСЕ события оборота несли его и джойнились к question_runs.
-            if request_id is None:
-                request_id = str(uuid.uuid4())
-                try:
-                    db_logging_service.register_request(
-                        session_key, request_id,
-                        user_id=user_id,
-                        agent_id=agent_id,
-                    )
-                except Exception:
-                    pass
         return DatabaseLoggingHook(
             db_logging_service,
             agent_id=agent_id,
@@ -252,10 +238,17 @@ def make_db_logging_hook_factory(
 def _current_request_sender_id() -> str | None:
     """``RequestContext.sender_id`` текущего request (или ``None``).
 
-    Единственная точка обращения к identity-store из
-    ``make_db_logging_hook_factory``. Инкапсулирует зависимость от
-    nanobot 0.3.0: если поле будет переименовано, адаптация делается
-    в этой функции.
+    Единственная точка обращения к identity-store в этом модуле.
+    Инкапсулирует зависимость от nanobot 0.3.0: если поле будет переименовано,
+    адаптация делается в этой функции.
+
+    **Из фабрики хуков она больше не зовётся, и это не потеря.** Фабрика
+    больше не регистрирует оборот (выдуманный ``request_id`` запрещён), а
+    личность событий подставляет сервис — из снимка личности ВХОДА, который
+    кладёт ``register_request`` на входящем сообщении, где ``sender_id`` и
+    так известен. Функция остаётся, потому что это единственное место, где
+    известно устройство identity-store nanobot, и её подменяют в тестах
+    (``tests/test_subagent_logging.py``).
     """
     try:
         from nanobot.agent.tools.context import current_request_context
@@ -535,23 +528,22 @@ class DatabaseLoggingHook(AgentHook):
         params: Any,
         error: Any,
     ) -> None:
+        """Отказ инструмента в журнал пишет ``ToolAuditHook``, а не этот хук.
+
+        Оба видят один и тот же отказ: и сюда, и в ``after_iteration`` хука
+        аудита он приходит одним и тем же вызовом. Писать отсюда и оттуда
+        означало бы две строки ``tool.failed`` на один отказ, а журнал читают
+        как одну запись на событие.
+
+        Владелец выбран не случайно: ``ToolAuditHook`` есть в ``ctx.hooks``
+        безусловно, а этот хук — только при ``DbLoggingService`` и только
+        на время оборота. Отказ, случившийся вне оборота, обязан быть записан
+        стороной, которая переживает оборот.
+        """
+        # Время старта всё же снимаем: иначе запись для этого вызова останется
+        # в ``_tool_start_times`` навсегда и утечёт по одной записи на отказ.
         tool_call_id = str(getattr(tool_call, "id", None) or id(tool_call))
-        start = self._tool_start_times.pop(tool_call_id, None)
-        latency_ms = (time.time() - start) * 1000.0 if start is not None else 0.0
-        try:
-            self._service.log_tool_result(
-                session_id=context.session_key or "",
-                tool_name=str(getattr(tool_call, "name", "?")),
-                result=None,
-                latency_ms=latency_ms,
-                tool_call_id=tool_call_id,
-                status="error",
-                error=str(error),
-                level="ERROR",
-                request_id=self._request_id,
-            )
-        except Exception as exc:
-            logger.warning("DbLoggingHook.on_execute_tool_error failed: %s", exc)
+        self._tool_start_times.pop(tool_call_id, None)
 
     # ------------------------------------------------------------------
     # Run-level summary

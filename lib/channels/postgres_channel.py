@@ -681,11 +681,41 @@ class PostgresChannel(BaseChannel):
              (та же логика, что в ``_poll_once``, плюс фильтр
              ``content = ANY(%s)`` для всех priority-команд).
           2. re-check статуса (race-fix из user_stop_signal).
-          3. Если кандидат — priority-команда, диспатчим через
-             ``_handle_message`` с ``metadata["priority"]=True``,
-             ``assistant_msg_id=None``, минуя ``acquire_slot``/
-             ``chat_inflight``.
-          4. Освобождаем claim + lease + msg_ctx.
+          3. assistant-заглушка + ``metadata["answer_id"]`` — РОВНО как на
+             общем пути ``_poll_once``, с тем же откатом при неудаче.
+          4. Диспатчим через ``_handle_message`` с
+             ``metadata["priority"]=True``, минуя ``acquire_slot`` и
+             ``chat_inflight`` (объявленное исключение, обоснование ниже).
+          5. Снимаем claim + msg_ctx + msg_chat.
+
+        **Что здесь объявленное исключение, а что — снятый обход.** Различаются
+        ОТБОРЫ, а не доставка: приоритет — свойство выборки, дальше задача идёт
+        тем же путём, что и любая.
+
+        Слот и ``chat_inflight`` НЕ берутся, и это исключение объявлено
+        (решение владельца от 2026-10-04), потому что иначе команда
+        прерывания не работает: priority-опрос зовётся ДО ``is_slot_free()``
+        (``message_exchange._poll_loop:188``, комментарий ``:166-167`` прямо
+        называет этот путь доставкой команд, «которые должны прерывать
+        активные обычные turn'ы той же сессии»), а ``acquire_slot`` — это
+        ``await self._semaphore.acquire()``. При ``max_concurrent=1`` и
+        активном turn'е ``/stop`` ждал бы слот, который освободит только тот
+        самый turn, который он и должен прервать: взаимоблокировка, а не
+        задержка, плюс встаёт цикл опроса. **Предел ожидания на слоте здесь
+        равен нулю** — ни ожидания, ни таймаута ожидания в коде не
+        появляется. Лишний ``_release_slot`` из отката при сбое диспатча
+        безопасен: ``exchange.release_slot`` идемпотентен по ключу (ранний
+        ``return``, если ключа нет в ``_inflight``), поэтому счётчик занятых
+        слотов не рассинхронизируется.
+
+        Снятый обход — assistant-заглушка и ``answer_id``. Раньше здесь шли с
+        ``assistant_msg_id=None``, и ответ на команду не доходил до чата
+        вовсе: ``_resolve_turn_context`` не находил ни ``answer_id``
+        (``:1780``), ни ``_msg_ctx`` (``:1784-1788``), срабатывал warning
+        «cannot resolve turn context» и ``_cleanup_unresolvable_turn``, то
+        есть пользователь команды ответа не видел. С откатом по умолчанию
+        ``_mark_failed(..., None, "dispatch_error")`` платформа ещё и не могла
+        удалить заглушку — ``assistant_msg_id`` ей не передавался.
         """
         from lib.channels.message_exchange import priority_command_contents
 
@@ -723,8 +753,33 @@ class PostgresChannel(BaseChannel):
         media_paths, _ = self._resolve_media_paths_and_hints(media)
         media = media_paths
 
+        # Assistant-заглушка — до диспатча и тем же способом, что на общем
+        # пути (``:1045``): ответ должен попасть в очередь по ``reply_to`` от
+        # этой строки, а без её ``id`` исходящее не резолвится и ответ
+        # теряется. Откат при неудаче — тоже общий (``:1054-1058``): задача
+        # возвращается в ``pending`` и ждёт следующего опроса.
+        try:
+            assistant_msg_id = await self._insert_assistant_message(
+                user_msg_id, chat_id
+            )
+            self._lifecycle_log(
+                "assistant_created", user_msg_id, chat_id=chat_id,
+                assistant_msg_id=assistant_msg_id,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to insert assistant placeholder for {}", user_msg_id,
+            )
+            await self._ops.update_task_status(
+                user_msg_id, "pending", role="user",
+                session_id=f"chat:{chat_id}", user_id=user_id,
+            )
+            self._claimed_ids.discard(user_msg_id)
+            return False
+
         # Priority не занимает обычный slot и не блокирует chat для
-        # последующих сообщений. Никакого assistant-placeholder.
+        # последующих сообщений (исключение объявлено в докстринге выше).
+        # ``_msg_chat`` нужен: отсюда ``_mark_failed`` берёт чат.
         self._msg_chat[user_msg_id] = chat_id
         self._activity_print(
             "claimed_priority",
@@ -735,7 +790,7 @@ class PostgresChannel(BaseChannel):
 
         meta: dict[str, Any] = {
             "message_id": user_msg_id,
-            "answer_id": None,
+            "answer_id": assistant_msg_id,
             "priority": True,
             **raw_meta,
         }
@@ -752,14 +807,20 @@ class PostgresChannel(BaseChannel):
             self.logger.exception(
                 "Failed to dispatch priority message {}", user_msg_id,
             )
-            await self._mark_failed(user_msg_id, None, "dispatch_error")
+            # Тот же откат, что на общем пути (``:1086``), и с настоящим
+            # ``assistant_msg_id`` — платформа по нему удаляет заглушку,
+            # чтобы пользователь не видел ошибочный статус.
+            await self._mark_failed(user_msg_id, assistant_msg_id, "dispatch_error")
             return True
 
-        # Priority не оставляет следа в slot/inflight — но claim и lease
-        # должны быть освобождены. ``_handle_message`` через
-        # ``bus.publish_inbound`` доставит ``/stop`` в AgentLoop.run(),
-        # где ``commands.is_priority(raw)`` инициирует ``cmd_stop`` →
-        # ``_cancel_active_tasks(effective_key)``.
+        # Claim и msg_chat снимаем сразу, как и раньше: этот вызов не держит
+        # слот, а ответ придёт по ``meta["answer_id"]`` — якорь теперь в
+        # meta, а не в ``_msg_ctx``, поэтому ранний ``pop`` последствий не
+        # имеет. ``_chat_inflight`` тут не трогаем: флагом чата владеет
+        # обычный путь, и снимать его чужой рукой нельзя.
+        # ``_handle_message`` через ``bus.publish_inbound`` доставит ``/stop``
+        # в AgentLoop.run(), где ``commands.is_priority(raw)`` инициирует
+        # ``cmd_stop`` → ``_cancel_active_tasks(effective_key)``.
         self._claimed_ids.discard(user_msg_id)
         self._msg_ctx.pop(user_msg_id, None)
         self._msg_chat.pop(user_msg_id, None)

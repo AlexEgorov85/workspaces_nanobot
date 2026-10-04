@@ -8,11 +8,21 @@
 Тесты проверяют:
   * priority claim фильтрует по ``content = '/stop'``;
   * priority path не вызывает ``acquire_slot`` / ``add_inflight``;
-  * priority path не создаёт assistant-placeholder;
+  * priority path НЕ создаёт assistant-placeholder только в одном случае —
+    когда заглушка не создалась (отказ платформы), и тогда задача
+    возвращается в ``pending``; в штатном пути заглушка создаётся, как на
+    обычном, и её ``id`` попадает в ``meta["answer_id"]``;
   * priority path обходит ``chat_inflight`` (даже если chat активен);
-  * priority path освобождает захват + msg_ctx + msg_chat;
+  * лишний ``_release_slot`` из отката не рассинхронизирует счётчик
+    слотов (он идемпотентен по ключу);
+  * priority path освобождает claim + msg_ctx + msg_chat;
   * ``MessageExchange._poll_loop`` вызывает ``poll_priority_inbound``
     первым и обрабатывает его даже при ``is_slot_free() == False``.
+
+Границы объявлены намеренно и не должны «улучшаться» тестами: слот и
+``chat_inflight`` на priority-пути НЕ берутся (``acquire_slot`` — это
+``await self._semaphore.acquire()``, а команда прерывания обязана дойти до
+turn'а, который сам держит слот; предел ожидания равен нулю).
 """
 from __future__ import annotations
 
@@ -158,6 +168,9 @@ class TestPollPriorityOnce:
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
+        # Заглушка ответа создаётся на этом пути, как на обычном: без неё
+        # исходящее не резолвится. Само создание проверяется отдельным тестом.
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
         exchange = MagicMock()
         exchange.acquire_slot = AsyncMock()
@@ -186,6 +199,7 @@ class TestPollPriorityOnce:
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
         exchange = MagicMock()
         exchange.acquire_slot = AsyncMock()
@@ -194,9 +208,89 @@ class TestPollPriorityOnce:
         assert result is True
 
         ch._handle_message.assert_awaited_once()
+        # Флагом чата владеет обычный путь: priority-задача его не снимает.
+        assert "chat-A" in ch._chat_inflight
 
     @pytest.mark.asyncio
-    async def test_priority_dispatch_does_not_create_assistant_placeholder(
+    async def test_priority_dispatch_creates_assistant_placeholder(
+        self, priority_polling_mock_db
+    ):
+        """Заглушка ответа создаётся — как на обычном пути.
+
+        Раньше шли с ``assistant_msg_id=None``, и ответ на команду не доходил
+        до чата: ``_resolve_turn_context`` не находил ни ``answer_id``, ни
+        ``_msg_ctx``, срабатывал warning и ``_cleanup_unresolvable_turn``, то
+        есть пользователь команды ответа не видел. Заглушка — якорь ответа.
+        """
+        PostgresChannel, _, _, db = priority_polling_mock_db
+        ch = _make_channel(priority_polling_mock_db)
+
+        ch._claim_one = AsyncMock(return_value={
+            "id": "m-stop",
+            "chat_id": "chat-A",
+            "user_id": "u",
+            "content": "/stop",
+            "media": "[]",
+            "metadata": "{}",
+            "created_at": None,
+        })
+        db.responses["get_message"] = {"message": {"status": "processing"}}
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
+        ch._handle_message = AsyncMock()
+
+        exchange = MagicMock()
+        result = await ch._poll_priority_once(exchange)
+
+        assert result is True
+        ch._insert_assistant_message.assert_awaited_once_with("m-stop", "chat-A")
+        meta_arg = ch._handle_message.await_args.kwargs["metadata"]
+        assert meta_arg.get("answer_id") == "asst-1", (
+            "meta без answer_id не резолвится: ответ теряется вместе с "
+            "записью assistant в очереди"
+        )
+
+    @pytest.mark.asyncio
+    async def test_priority_placeholder_failure_returns_task_to_pending(
+        self, priority_polling_mock_db
+    ):
+        """Отказ создания заглушки откатывается так же, как на обычном пути.
+
+        Задача возвращается в ``pending`` (счётчик попыток НЕ растёт: виноват
+        не обработчик, а запись), ``_claimed_ids`` и ``_msg_ctx`` чисты, до
+        агента дело не доходит.
+        """
+        PostgresChannel, _, _, db = priority_polling_mock_db
+        ch = _make_channel(priority_polling_mock_db)
+
+        ch._claim_one = AsyncMock(return_value={
+            "id": "m-stop",
+            "chat_id": "chat-A",
+            "user_id": "u",
+            "content": "/stop",
+            "media": "[]",
+            "metadata": "{}",
+            "created_at": None,
+        })
+        db.responses["get_message"] = {"message": {"status": "processing"}}
+        ch._insert_assistant_message = AsyncMock(side_effect=RuntimeError("нет"))
+        ch._handle_message = AsyncMock()
+
+        exchange = MagicMock()
+        result = await ch._poll_priority_once(exchange)
+
+        assert result is False
+        ch._handle_message.assert_not_awaited()
+        assert db.calls_to("update_task_status"), "задача не возвращена в очередь"
+        args = db.calls_to("update_task_status")[0]["arguments"]
+        assert args["status"] == "pending"
+        assert db.calls_to("fail_task") == [], (
+            "fail_task увеличивает retry_count задаче, которая не виновата"
+        )
+        assert "m-stop" not in ch._claimed_ids
+        assert "m-stop" not in ch._msg_ctx
+
+    @pytest.mark.asyncio
+    async def test_priority_dispatch_sets_priority_metadata(
         self, priority_polling_mock_db
     ):
         PostgresChannel, _, _, db = priority_polling_mock_db
@@ -218,12 +312,21 @@ class TestPollPriorityOnce:
         exchange = MagicMock()
         await ch._poll_priority_once(exchange)
 
-        ch._insert_assistant_message.assert_not_called()
+        meta_arg = ch._handle_message.await_args.kwargs["metadata"]
+        assert meta_arg.get("priority") is True
+        assert meta_arg.get("answer_id") == "asst-1"
 
     @pytest.mark.asyncio
-    async def test_priority_dispatch_sets_priority_metadata(
+    async def test_priority_dispatch_failure_rolls_back_like_common_path(
         self, priority_polling_mock_db
     ):
+        """Сорванный диспатч откатывается тем же вызовом, что и на обычном.
+
+        Отличие от прежнего кода было одно и оно ломало откат:
+        ``_mark_failed(..., None, "dispatch_error")`` — платформа не получала
+        ``assistant_msg_id`` и не могла удалить заглушку, которую теперь
+        создаёт этот путь.
+        """
         PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
@@ -237,14 +340,23 @@ class TestPollPriorityOnce:
             "created_at": None,
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
-        ch._handle_message = AsyncMock()
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
+        ch._handle_message = AsyncMock(side_effect=RuntimeError("диспатч упал"))
+        db.responses["fail_task"] = {"status": "error", "retry_count": 1}
 
         exchange = MagicMock()
-        await ch._poll_priority_once(exchange)
+        result = await ch._poll_priority_once(exchange)
 
-        meta_arg = ch._handle_message.await_args.kwargs["metadata"]
-        assert meta_arg.get("priority") is True
-        assert meta_arg.get("answer_id") is None
+        assert result is True
+        failed = db.calls_to("fail_task")
+        assert len(failed) == 1
+        assert failed[0]["arguments"]["assistant_msg_id"] == "asst-1", (
+            "откат обязан знать id заглушки: без него ошибочная запись "
+            "остаётся видимой пользователю"
+        )
+        assert failed[0]["arguments"]["reason"] == "dispatch_error"
+        assert "m-stop" not in ch._claimed_ids
+        assert "m-stop" not in ch._msg_ctx
 
     @pytest.mark.asyncio
     async def test_priority_dispatch_releases_claim_ctx_chat(
@@ -264,6 +376,7 @@ class TestPollPriorityOnce:
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
         ch._claimed_ids.add("m-stop")
         ch._msg_ctx["m-stop"] = {"x": 1}
@@ -300,6 +413,50 @@ class TestPollPriorityOnce:
         await ch._poll_priority_once(exchange)
 
         ch._release_slot.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_priority_rollback_slot_release_is_idempotent(
+        self, priority_polling_mock_db
+    ):
+        """Лишний ``_release_slot`` в откате не рассинхронизирует слоты.
+
+        Это то самое исключение, ради которого откат сделан общим с обычным
+        путём: слот на priority-пути не брался, значит ключа нет в
+        ``_inflight``, а ``release_slot`` при отсутствии ключа выходит раньше
+        ``_semaphore.release()``. Счётчик занятых слотов обязан остаться
+        прежним — иначе ``/stop`` отпустил бы слот чужого turn'а.
+        """
+        PostgresChannel, _, _, db = priority_polling_mock_db
+        ch = _make_channel(priority_polling_mock_db)
+
+        free_before = ch.exchange._semaphore._value
+        ch._claim_one = AsyncMock(return_value={
+            "id": "m-stop",
+            "chat_id": "chat-A",
+            "user_id": "u",
+            "content": "/stop",
+            "media": "[]",
+            "metadata": "{}",
+            "created_at": None,
+        })
+        db.responses["get_message"] = {"message": {"status": "processing"}}
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
+        ch._handle_message = AsyncMock(side_effect=RuntimeError("диспатч упал"))
+        db.responses["fail_task"] = {"status": "error", "retry_count": 1}
+
+        await ch._poll_priority_once(MagicMock())
+
+        # ``_mark_failed`` зовёт ``_release_slot``, хотя слот не брался.
+        assert "m-stop" not in ch.exchange.inflight
+        assert ch.exchange._semaphore._value == free_before, (
+            "слот освобождён без взятого: счётчик разошёлся с реальностью"
+        )
+        # И для сравнения: у взятого слота откат освобождает ровно один.
+        await ch.exchange.acquire_slot()
+        ch.exchange.add_inflight("m-normal")
+        ch._release_slot("m-normal")
+        assert "m-normal" not in ch.exchange.inflight
+        assert ch.exchange._semaphore._value == free_before
 
     @pytest.mark.asyncio
     async def test_priority_skips_cancelled_race(self, priority_polling_mock_db):
@@ -358,6 +515,7 @@ class TestPollPriorityInbound:
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
         exchange = MagicMock()
         result = await ch.poll_priority_inbound(exchange)
@@ -431,6 +589,7 @@ class TestPriorityRaceConditions:
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
         exchange = MagicMock()
         exchange.acquire_slot = AsyncMock()
@@ -459,6 +618,7 @@ class TestPriorityRaceConditions:
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock(side_effect=RuntimeError("boom"))
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._mark_failed = AsyncMock()
 
         exchange = MagicMock()
@@ -466,6 +626,9 @@ class TestPriorityRaceConditions:
         assert result is True
 
         ch._mark_failed.assert_awaited_once()
+        # Откат получает настоящий id заглушки: без него платформа не может
+        # удалить ошибочную запись ответа.
+        assert ch._mark_failed.await_args.args[1] == "asst-1"
         # cleanup НЕ делается нашим кодом, если _mark_failed был вызван
         # (он сам управляет cleanup).
 
@@ -488,6 +651,7 @@ class TestPriorityRaceConditions:
         })
         db.responses["get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
+        ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._release_slot = MagicMock()
 
         exchange = MagicMock()

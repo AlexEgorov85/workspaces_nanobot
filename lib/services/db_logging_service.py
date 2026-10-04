@@ -145,6 +145,30 @@ def is_probe_event_type(event_type: str) -> bool:
     return any(value.startswith(prefix) for prefix in PROBE_EVENT_PREFIXES)
 
 
+def _wire_error_code(error: str | None) -> str:
+    """Код отказа в том же виде, в каком его пишет платформа.
+
+    Конверт отказа — это ``[code] message``, и разбирает его ровно одна
+    функция в проекте (:py:func:`lib.services.enterprise_mcp_client._split_error_code`).
+    Своя копия здесь разошлась бы с ней при первом же расширении словаря
+    кодов, и ``error_code`` стал бы полем, которое читают, но не сверяют.
+
+    Отказ без кода — не отказ платформы (бросок инструмента, таймаут, обрыв),
+    и его код назван своими словами, а не подставлен платформенным.
+    """
+    if not error:
+        return "tool_error"
+    try:
+        from lib.services.enterprise_mcp_client import _split_error_code
+
+        code, _message = _split_error_code(str(error))
+    except Exception:  # noqa: BLE001 - разбор кода не должен ронять запись отказа
+        return "tool_error"
+    if code == "operation_failed" and not str(error).lstrip().startswith("["):
+        return "tool_error"
+    return code
+
+
 def try_log_event(
     svc: Any | None,
     log_event: LogEvent,
@@ -360,6 +384,32 @@ def _event_seq(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _turn_identity_snapshot(
+    request_id: str | None, user_id: str | None
+) -> dict[str, Any]:
+    """Снимок личности ВХОДА: ``{request_id, user_id, at_seq}``.
+
+    ``request_id`` здесь может быть ``None``, и это нормальное состояние:
+    вход без ``message_id`` взятой строки очереди — это вызов, у которого
+    вопроса не было, а не сломанный вопрос. Снимок существует ради второй
+    компоненты (``user_id``), поэтому он не зависит от наличия вопроса.
+
+    ``at_seq`` — момент появления снимка по шкале ``next_event_seq``. Он
+    нужен читателю, чтобы отличить «событие пришло после этого входа» от
+    «событие пришло раньше и было отложено»: во втором случае личность
+    принадлежит другому входу, и выдавать её — утечка (см.
+    ``_resolve_event_user_id_without_request``).
+
+    Блокировку индекса не берёт: вызывающий (``register_request``) держит её
+    сам, иначе пара «индекс + снимок» писалась бы в два захода.
+    """
+    return {
+        "request_id": request_id,
+        "user_id": user_id,
+        "at_seq": next_event_seq(),
+    }
 
 
 def event_time_columns(metadata: Any) -> tuple[int, str]:
@@ -619,6 +669,11 @@ class DbLoggingService:
         self._state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
+        # Батчи, отложенные до решения о транспорте. Копии событий, а не
+        # ссылки на очередь: очередь к моменту решения уже пуста, и держать
+        # её ради «подпитки» означало бы удерживать батчи в памяти без
+        # границы жизни.
+        self._deferred_batches: list[list[LogEvent]] = []
         # Итог журнала печатается один раз за процесс: повторный stop() (или
         # перезапуск сервиса) не должен превращать остановку в поток строк.
         self._stats_reported = False
@@ -648,6 +703,15 @@ class DbLoggingService:
             # сообщении (см. ``db_logging_bus.make_inbound_logger``). Оборот
             # без request_id в журнале: события уйдут без связи с прогоном.
             "registration_failures": 0,
+            # Регистрация прошла штатно, но ставить было нечего: у входящего
+            # нет ``message_id`` взятой строки очереди, то есть вопроса не
+            # было. Это НЕ отказ и не должно выглядеть как него: раньше
+            # ``register_request`` возвращал ``False`` в этом случае, шина
+            # принимала ``False`` за успех, и «выдумали идентификатор» и
+            # «регистрация упала» выглядели в счётчиках одинаково. Разведение
+            # обязано быть видно: у первого события остаются ``session_id`` и
+            # ``user_id`` (личность входа), у второго — ничего.
+            "registration_skipped": 0,
             "last_purge_at": None,
             "last_purged_events": 0,
             "last_purged_runs": 0,
@@ -671,6 +735,14 @@ class DbLoggingService:
             # журнал читается по одному набору счётчиков, и «счётчик пробных
             # у платформы» не должен означать разные вещи у агента.
             "suppressed_probe_events": {},
+            # Потери ПО ИМЕНИ. ``dropped``/``failed`` отвечают на вопрос
+            # «сколько», а этот словарь — на вопрос «почему», и без него
+            # потеря и отсутствие события выглядят одинаково: счётчик растёт,
+            # строк в таблице нет, и сказать, что произошло, нечем. Ключи
+            # объявлены здесь, а не заводятся по месту: причина появляется
+            # только там, где её можно назвать, и появление новой причины
+            # обязано быть решением.
+            "loss_reasons": {},
         }
         # Оба правила предупреждают ОДИН раз на значение, а не на событие:
         # иначе поток проб в проде превратил бы предупреждение в шум, ради
@@ -688,17 +760,24 @@ class DbLoggingService:
         # разные ключи — коллизий нет.
         # ``user_id`` денормализован для security boundary в
         # ``history_search(session_scope="all")``. ``get_request_user_id``
-        # НЕ вводится публично — индекс читается только внутри ``_enqueue``
-        # (через request_id matching), чтобы ни один компонент не получил
-        # бы способ резолвить чужой identity по session_key.
+        # НЕ вводится публично — и индекс, и снимок личности читаются ТОЛЬКО
+        # внутри резолва ``_enqueue``, чтобы ни один компонент не получил бы
+        # способ резолвить чужой identity по session_key. Публичного читателя
+        # «кто сейчас владеет сессией» по-прежнему не существует, и добавлять
+        # его нельзя: в режиме ``cli`` сессия общая.
         self._request_index: dict[str, dict[str, str | None]] = {}
         # Снимок личности ВХОДА оборота. Живёт отдельно от индекса вопросов и
         # переживает ``clear_request``: финальный ответ оборота публикуется уже
         # после конца оборота, когда индекс пуст, а подписать событие без
         # ``session_id``+``user_id`` транспорт не может (см.
-        # ``_take_turn_identity``). Кладёт ``register_request``, забирает
-        # ``log_outbound`` для ``agent.delivered`` — ровно один раз.
-        self._turn_identity: dict[str, dict[str, str | None]] = {}
+        # ``_take_turn_identity``). Кладёт ``register_request`` — в том числе
+        # когда вопроса не было (``request_id=None``): личность входа нужна и
+        # фоновому вызову, иначе его события ушли бы в fallback-файл (см.
+        # ``_resolve_event_user_id_without_request``). Помимо пары полей несёт
+        # ``at_seq`` — момент появления, чтобы отложенное событие не унаследовало
+        # личность следующего входа. Тип значений — ``Any``, а не ``str|None``,
+        # именно из-за ``at_seq``.
+        self._turn_identity: dict[str, dict[str, Any]] = {}
         self._request_index_lock = threading.Lock()
         self._schema_ok = False
 
@@ -735,6 +814,29 @@ class DbLoggingService:
         self._transport_pending = bool(transport_pending)
         if mcp_writer is not None and fallback_sink is not None:
             mcp_writer.on_fallback = self._write_fallback
+        if not self._transport_pending:
+            self._release_deferred_batches()
+
+    def _release_deferred_batches(self) -> None:
+        """Отдать отложенные батчи выбранному транспорту.
+
+        Это и есть то решение, которого ждал ``_defer_batch``. Отложенный
+        батч уже учтён в ``dropped`` и уже лёг в локальный след — то есть
+        он не потерян и может быть доставлен позже без потери. Повторная
+        доставка дописывает строки в таблицу, а не заменяет локальный след:
+        локальный след и есть обещание доставки, и он остаётся правдой.
+
+        Отмена прежних счётчиков не делается: батч, дошедший до таблицы,
+        должен быть виден и в ``dropped`` (его откладывали), и в
+        ``written`` (он доставлен). Итог потерь печатается один раз за
+        процесс, и задним числом вычитать из него нельзя — это сделало бы
+        итог зависящим от порядка событий.
+        """
+        with self._state_lock:
+            pending = self._deferred_batches
+            self._deferred_batches = []
+        for batch in pending:
+            self._flush_batch_via_mcp(batch)
 
     def start(self) -> None:
         """Запустить worker-поток."""
@@ -768,12 +870,71 @@ class DbLoggingService:
         # остановки подписчик не должен отдать их следующему start().
         with self._request_index_lock:
             self._turn_identity.clear()
+        self._abandon_deferred_batches()
         if not self._stats_reported:
             self._stats_reported = True
             self.report_stats()
 
+    def _abandon_deferred_batches(self) -> None:
+        """Объявить отложенные батчи брошенными — до остановки они не доставлены.
+
+        Батчи, для которых решение о транспорте так и не приняли, остаются в
+        локальном следе (их отложили именно поэтому), но «дождётся решения»
+        без ``stop`` — это обещание без адресата. Остановка — единственная
+        точка, где исчерпывающий список неизвестного сказать можно.
+        """
+        with self._state_lock:
+            pending = self._deferred_batches
+            self._deferred_batches = []
+        if not pending:
+            return
+        total = sum(len(batch) for batch in pending)
+        self._note_loss(
+            "транспорт журнала не выбран до остановки: батч остался в локальном следе",
+            total,
+        )
+        logger.warning(
+            "DbLoggingService.stop: %s событий в %s батчах не доставлены — "
+            "транспорт журнала не был выбран, след в %s",
+            total,
+            len(pending),
+            self._fallback_path() or "<не задан>",
+        )
+
     def is_running(self) -> bool:
+        """Жив ли worker-поток журнала.
+
+        Проверяется и признак, и поток: ``_running`` остаётся ``True`` после
+        того, как поток упал, и тогда «журнал работает» говорило бы правду
+        только по одному из двух признаков. Мёртвый поток означает, что батч
+        копится в очереди и не уходит никуда, поэтому поднимать это в
+        консоль оператора дешевле, чем разбираться потом по пустой таблице.
+        """
         return self._running and self._thread is not None and self._thread.is_alive()
+
+    def _fallback_path(self) -> str | None:
+        """Куда пишется локальный след, или ``None``, если след не задан.
+
+        Путь берётся у того объекта, который в него пишет, а не восстанавливается
+        здесь: два места, собирающие путь, разошлись бы на первом же переименовании,
+        и отчёт указывал бы на несуществующий файл — худший вид наблюдаемости,
+        когда след есть, а сказать, где он, нельзя.
+        """
+        return str(getattr(self._fallback_sink, "path", "") or "") or None
+
+    def _note_loss(self, reason: str, count: int = 1) -> None:
+        """Записать потерю под названной причиной.
+
+        Причина — не украшение, а часть наблюдаемости: ``dropped`` растёт от
+        событий с неполной личностью и от отказа платформы одинаково, и по
+        одному счётчику нельзя сказать, куда смотреть. Причины объявлены в
+        ``self._stats``; появление новой — решение, а не побочный эффект.
+        """
+        if count <= 0:
+            return
+        with self._state_lock:
+            reasons = self._stats["loss_reasons"]
+            reasons[reason] = int(reasons.get(reason, 0)) + int(count)
 
     # ------------------------------------------------------------------
     # Публичный API (неблокирующий)
@@ -912,8 +1073,35 @@ class DbLoggingService:
         Пара ``{request_id, user_id}`` обновляется атомарно под
         ``_request_index_lock`` — параллельный reader видит либо
         полностью старое состояние, либо полностью новое.
+
+        Returns:
+            ``True`` — строка прогона поставлена в очередь; ``False`` —
+            ставить нечего (``request_id`` пуст, то есть вопроса из очереди
+            не было) либо очередь переполнена.
+
+        **Пустой ``request_id`` — не отказ и не потеря личности.** Раньше
+        вызов без вопроса получал выдуманный UUID на входе
+        (``db_logging_bus``) и на выходе (``database_logging_hook``), и
+        99 % строк журнала подписывались чужим именем, которого нет и не
+        может быть в очереди. Теперь у них пустое значение поля вопроса, а
+        снимок личности ВХОДА кладётся в любом случае: ``sender_id`` больше
+        нигде в обороте не встретится, и без него события вызова остались бы
+        неподписанными, группа батча неполной, а строка ушла бы в
+        fallback-файл вместо ``agent_gateway_logs`` (см.
+        ``_resolve_event_user_id_without_request``).
         """
         if not request_id:
+            # ``_request_index`` здесь НЕ трогаем: у вызова без вопроса нет
+            # активного оборота, и подставлять его ``session_key`` в индекс
+            # вопросов значило бы выдумать запись, которой нет. Снимок
+            # личности — другое дело, он про отправителя, а не про вопрос.
+            if session_key:
+                with self._request_index_lock:
+                    self._turn_identity[session_key] = _turn_identity_snapshot(
+                        None, user_id,
+                    )
+            with self._state_lock:
+                self._stats["registration_skipped"] += 1
             return False
         if session_key:
             with self._request_index_lock:
@@ -926,10 +1114,9 @@ class DbLoggingService:
                 # блокировкой — читатель снимка увидит либо старую, либо новую
                 # пару целиком. ``clear_request`` его НЕ трогает: финальный
                 # ответ приходит после конца оборота (см. ``_take_turn_identity``).
-                self._turn_identity[session_key] = {
-                    "request_id": request_id,
-                    "user_id": user_id,
-                }
+                self._turn_identity[session_key] = _turn_identity_snapshot(
+                    request_id, user_id,
+                )
         return self._enqueue(_QuestionRunRecord(
             request_id=request_id,
             session_id=session_key,
@@ -999,7 +1186,7 @@ class DbLoggingService:
             update_only=True,
         ))
 
-    def _take_turn_identity(self, session_key: str) -> dict[str, str | None] | None:
+    def _take_turn_identity(self, session_key: str) -> dict[str, Any] | None:
         """Забрать снимок личности ВХОДА этой сессии — ровно один раз.
 
         Отвечает не на вопрос «кто сейчас владеет сессией», а на другой: «с кем
@@ -1176,13 +1363,32 @@ class DbLoggingService:
         summary = tool_name
         if status == "error" and error:
             summary = str(error)[: self._summary_max_chars]
+        # Имя события — по исходу, а не одно на оба. Отказ, названный
+        # ``tool.completed``, читается как успех с тегом в payload: отчёт по
+        # журналу («все вызовы завершились») оказывается правдой. Каноническое
+        # имя пишет и платформа (``tool.failed``), а писателя различает
+        # ``metadata.source``: ``enterprise_mcp`` у платформы, ``nanobot``
+        # у агента.
+        event_type = "tool.completed" if status == "ok" else "tool.failed"
+        payload: dict[str, Any] = {
+            "tool": tool_name,
+            "status": status,
+            "result": result,
+            "error": error,
+        }
+        if status != "ok":
+            # ``error_code`` и ``error_message`` — те же два поля, что у
+            # платформы (``execution/logger.py``). Читатель отказа не должен
+            # знать, чья это строка, чтобы её разобрать.
+            payload["error_code"] = _wire_error_code(error)
+            payload["error_message"] = str(error or "")
         return self.log_event(LogEvent(
-            event_type="tool.completed",
+            event_type=event_type,
             level=level,
             session_id=session_id,
             actor="agent",
             summary=summary,
-            payload={"tool": tool_name, "status": status, "result": result, "error": error},
+            payload=payload,
             metadata={"latency_ms": latency_ms, "tool_call_id": tool_call_id},
             request_id=request_id,
             name=tool_name,
@@ -1282,6 +1488,9 @@ class DbLoggingService:
             "running": self.is_running(),
             "queue_size": self._queue.qsize(),
             "oldest_queued_age_sec": self._compute_oldest_queued_age_sec(),
+            # Куда уходит непринятое. Без этого пути след существует, но
+            # указать на него нечем, а «потеряно N» без адреса не разбирается.
+            "fallback_path": self._fallback_path(),
         })
         return s
 
@@ -1321,7 +1530,17 @@ class DbLoggingService:
             "журнал агента: событий записано %s, потеряно %s, батчей %s, "
             "контекстов вопроса записано %s (пропущено %s, отказов %s), "
             "регистраций с ошибкой %s, в очереди %s, "
-            "уровней вне шкалы отброшено %s, пробных имён снято %s%s"
+            "уровней вне шкалы отброшено %s, пробных имён снято %s%s%s"
+        )
+        # Потери поимённо — обязательная часть итога, а не украшение: без неё
+        # «потеряно N» не отвечает на вопрос «почему», и пустая таблица рядом с
+        # растущим счётчиком снова выглядит как тишина.
+        reasons = stats.get("loss_reasons") or {}
+        by_reason = (
+            "; потери по причинам: "
+            + ", ".join(f"{name} — {count}" for name, count in sorted(reasons.items()))
+            if reasons
+            else "; потерь по причинам не зафиксировано"
         )
         args = (
             stats.get("written", 0),
@@ -1335,6 +1554,7 @@ class DbLoggingService:
             rejected,
             suppressed,
             f", последняя ошибка: {stats['last_error']}" if stats.get("last_error") else "",
+            by_reason,
         )
         # Потери — это WARNING, а не INFO: оператор с уровнем INFO увидит и
         # чистый итог, но молчание при потерях обойтись не может.
@@ -1467,8 +1687,14 @@ class DbLoggingService:
              ``event.request_id is not None`` AND индекс для
              ``event.session_id`` содержит запись с тем же
              ``request_id`` — подставляется ``user_id`` из индекса.
-          3. No inference. Иначе (``request_id is None``, request_id не
-             совпадает, или session_key отсутствует в индексе) —
+          3. Match by inbound snapshot. ``event.request_id is None`` — значит
+             у вызова НЕ было вопроса (фоновая служба, правка в ``cli``),
+             и сверять нечего. Тогда личность берётся из снимка личности
+             ВХОДА той же сессии — но только если снимок сам без вопроса и
+             появился раньше события (см.
+             ``_resolve_event_user_id_without_request``, где обе сверки).
+          4. No inference. Иначе (request_id не совпадает, снимок не
+             подходит, или session_key отсутствует в индексе) —
              ``event.user_id`` остаётся ``None``. Событие записывается
              с ``user_id IS NULL`` и НЕ участвует в ``scope="all"``.
 
@@ -1499,14 +1725,22 @@ class DbLoggingService:
 
         Вызывается из :py:meth:`_enqueue` перед постановкой события в
         очередь. Не делает ничего, если ``user_id`` уже задан producer'ом;
-        иначе пытается сопоставить ``event.request_id`` с текущим
-        request в индексе для ``event.session_id``. Никогда не выводит
-        ``user_id`` только по ``session_id`` — это закрывает класс атак
-        «событие-сирота получает текущего пользователя сессии».
+        иначе ищет личность, которой событие действительно принадлежит:
+        по ``request_id`` в индексе активного вопроса, а при пустом
+        ``request_id`` — по снимку личности ВХОДА (ветка 3 выше).
+
+        Никогда не выводит ``user_id`` только по ``session_id`` — это закрывает
+        класс атак «событие-сирота получает текущего пользователя сессии».
+        Ветка по снимку этому правилу не противоречит, потому что снимок
+        принадлежит конкретному ВХОДУ и сверяется с моментом события, а
+        сессия сама по себе личностью не является.
         """
         if event.user_id is not None:
             return
-        if event.request_id is None or event.session_id is None:
+        if event.session_id is None:
+            return
+        if event.request_id is None:
+            self._resolve_event_user_id_without_request(event)
             return
         with self._request_index_lock:
             entry = self._request_index.get(event.session_id)
@@ -1516,6 +1750,61 @@ class DbLoggingService:
             return
         resolved = entry.get("user_id")
         if isinstance(resolved, str):
+            event.user_id = resolved
+
+    def _resolve_event_user_id_without_request(self, event: LogEvent) -> None:
+        """Подписать событие БЕЗ вопроса личностью его собственного входа.
+
+        Событие с пустым ``request_id`` — это не потерянный вопрос, а вызов,
+        у которого вопроса не было: фоновый вызов службы, правка в ``cli``,
+        служебная проба. Такой вызов пришёл с ``sender_id``, и он лежит в
+        снимке личности ВХОДА, который кладёт ``register_request`` — в том
+        числе когда ``message_id`` взятой строки очереди не было вовсе.
+        Раньше личность в этом случае восстанавливалась только по
+        ``request_id``, то есть после снятия выдуманного идентификатора
+        подписать событие было нечем: группа батча неполная, и строка уходила
+        в fallback-файл вместо ``agent_gateway_logs``.
+
+        **Две сверки, без которых это была бы утечка, а не подпись.** Обе
+        проверяются здесь, а не объявляются в комментарии:
+
+        1. Снимок берётся, только если в нём САМОМ нет вопроса. Сессия с
+           зарегистрированным вопросом источником личности для события, этому
+           вопросу не принадлежащего, не является: в режиме ``cli`` одна
+           сессия обслуживает разных пользователей, и подпись по ней утекла бы
+           чужое событие в ``history_search(session_scope="all")``.
+        2. Снимок принимается, только если он появился ДО создания события
+           (``at_seq`` снимка против ``seq`` события). Это ровно та гонка,
+           ради которой в ветке выше ``request_id`` сверяется: отложенное
+           событие не должно унаследовать личность следующего входа той же
+           сессии. Шкала ``next_event_seq`` монотонна внутри процесса
+           (см. её пол), поэтому сравнение честное.
+
+        Не подошёл ни один снимок — остаётся ``None``: событие пишется с
+        ``user_id IS NULL`` и не участвует в ``scope="all"``. Это отказ от
+        подписи, а не потеря строки: подписать нечем, и выдумывать нельзя.
+        """
+        metadata = getattr(event, "metadata", None)
+        if not isinstance(metadata, dict):
+            return
+        event_seq = metadata.get(EVENT_SEQ_KEY)
+        if not isinstance(event_seq, int) or isinstance(event_seq, bool):
+            # Момент события неизвестен — значит, сравнить не с чем, а
+            # подписывать по сессии без сверки запрещено.
+            return
+        with self._request_index_lock:
+            snapshot = self._turn_identity.get(event.session_id)
+        if not isinstance(snapshot, dict):
+            return
+        if snapshot.get("request_id") is not None:
+            # Сессия сейчас в обороте с вопросом: этот снимок — про тот
+            # вопрос, и событие без ``request_id`` ему не принадлежит.
+            return
+        snapshot_seq = snapshot.get("at_seq")
+        if not isinstance(snapshot_seq, int) or snapshot_seq > event_seq:
+            return
+        resolved = snapshot.get("user_id")
+        if isinstance(resolved, str) and resolved:
             event.user_id = resolved
 
     def _worker(self) -> None:
@@ -1669,6 +1958,7 @@ class DbLoggingService:
             self._defer_batch(batch)
             return
         if not self._dsn:
+            self._note_loss("нет DSN и нет транспорта журнала")
             self._drop_batch(batch)
             return
         try:
@@ -1694,19 +1984,21 @@ class DbLoggingService:
                 self._stats["failed"] += len(batch)
                 self._stats["last_error"] = f"flush: {exc}"
                 self._stats["connected"] = False
+            self._note_loss(f"прямая запись в PostgreSQL отказала: {exc}", len(batch))
 
     def _defer_batch(self, batch: list[LogEvent]) -> None:
         """Батч, для которого транспорт ещё не выбран.
 
-        Не ``failed`` и не ``dropped`` в полном смысле: событие не
-        скомпрометировано, оно ушло в локальный след и дожидается решения.
-        Но не отметить его нельзя — иначе окно между ``start()`` и входом в
-        event loop выглядело бы в статистике как полностью успешная запись,
-        и журнал выглядел бы полным, будучи неполным.
+        Не ``failed``: событие не скомпрометировано. Но не отметить его нельзя
+        — иначе окно между ``start()`` и входом в event loop выглядело бы в
+        статистике как полностью успешная запись, и журнал выглядел бы полным,
+        будучи неполным.
 
-        Счётчики и локальный файл пишутся тем же путём, что и при отказе
-        платформы: разница только в ``last_error``, где названа настоящая
-        причина.
+        Ждёт решения **не вечно**: ``attach_transport`` сбрасывает отложенные
+        батчи в выбранный транспорт, а ``stop`` объявляет оставшиеся
+        брошенными под названной причиной. Раньше обещание «дожидается
+        решения» было невыполнимым: код, который читал бы отложенное обратно,
+        не существовал, и батч ждал ровно до конца процесса.
         """
         with self._state_lock:
             self._stats["dropped"] += len(batch)
@@ -1717,6 +2009,8 @@ class DbLoggingService:
                 self._stats["dropped_by_type"][etype] = (
                     self._stats["dropped_by_type"].get(etype, 0) + count
                 )
+            self._deferred_batches.append(list(batch))
+        self._note_loss("транспорт журнала не выбран на момент сброса", len(batch))
         self._write_fallback(batch)
 
     def _write_fallback(self, events: list[LogEvent]) -> None:
@@ -1764,6 +2058,7 @@ class DbLoggingService:
                     self._stats["dropped_by_type"][etype] = (
                         self._stats["dropped_by_type"].get(etype, 0) + count
                     )
+            self._note_loss(f"вызов log_events отвергнут или недоступен: {exc}", len(batch))
             return
 
         with self._state_lock:
@@ -1781,6 +2076,28 @@ class DbLoggingService:
                 self._stats[bucket][etype] = (
                     self._stats[bucket].get(etype, 0) + count
                 )
+        # Отказ платформы без исключения — случай, который раньше не был назван
+        # вовсе: счётчик рос, строк не появлялось, и сказать, что именно платформа
+        # отвергла, не мог никто.
+        #
+        # Причина формулируется широко, потому что ``McpLogWriter`` сводит ДВА
+        # разных отказа в один ``dropped``: недоступность транспорта и неполную
+        # личность вызова. Считать неполных событий здесь можно только для
+        # подсказки, а не как причину: при отказе транспорта их ноль, и назвать
+        # «неполная личность» было бы ложью, направленной ровно туда, где
+        # искать не надо.
+        if result.dropped:
+            incomplete = sum(
+                1
+                for event in batch
+                if not ((event.session_id or "").strip() and (event.user_id or "").strip())
+            )
+            self._note_loss(
+                f"не принято {result.dropped} из {len(batch)} вызовом log_events: "
+                f"отказ транспорта или неполная личность вызова "
+                f"(session_id+user_id неполны у {incomplete})",
+                result.dropped,
+            )
 
     def _handle_question_run_via_mcp(self, rec: _QuestionRunRecord) -> None:
         """Отдать контекст вопроса платформе операцией ``upsert_question_run``.
