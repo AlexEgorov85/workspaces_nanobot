@@ -224,6 +224,20 @@ async def _connect_enterprise_mcp(ctx) -> None:
             f"[green]✓[/green] enterprise-mcp: {len(operations)} операций, "
             "процесс поднят"
         )
+        # Куда ушёл stderr платформы. Без этой строки режим наблюдения
+        # молчал бы, и «окно не открылось» читалось бы как «смотреть
+        # не на что» — тем более что по умолчанию stderr уходит в
+        # stderr агента вперемешку с его журналом.
+        # ``markup=False`` вместо ``escape``: путь может содержать
+        # квадратные скобки, а баннер — это не разметка. Побочный
+        # плюс: не нужен ещё один импорт в файле, где поздние импорты
+        # уже есть и ruff на них ругается (E402).
+        console.print(
+            "  " + client.stderr_report(),
+            style="dim",
+            markup=False,
+            highlight=False,
+        )
         await _report_enterprise_mcp_health(ctx, client)
     except ConfigurationError as exc:
         # Расхождение профиля: повтор не поможет, перезапуск лишь повторит

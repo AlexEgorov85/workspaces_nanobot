@@ -880,7 +880,9 @@
           "servers.enterprise.server"
         ],
         "cwd": "${NANOBOT_PROJECT_ROOT}/mcp-platform",
-        "tool_timeout_sec": 30.0
+        "tool_timeout_sec": 30.0,
+        "_about_stderr_log": "Файл-приёмник stderr процесса платформы, плюс окно, его показывающее. Пусто или нет ключа — stderr уходит в stderr агента, как было. Объявление одно, читает его lib/services/enterprise_mcp_client.py; в argv процесса путь НЕ едет: это транспорт агента, а не настройка платформы.",
+        "stderr_log": "${NANOBOT_PROJECT_ROOT}/logs/enterprise-mcp.log"
       },
       "session_files": {
         "root": "${NANOBOT_WORKSPACE}/data_store/sessions"

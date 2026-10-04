@@ -26,6 +26,18 @@ PostgreSQL, а владелец у разделяемого ресурса до�
 делает вызов. Агенту они не нужны, и из этого следует практическое
 следствие — ключ провайдера не попадает в окружение процессов скиллов,
 которые этот клиент не поднимает.
+
+Про stderr
+----------
+
+Всё, что печатает сервер, уходит в stderr, и по умолчанию этот
+stderr — stderr агента: строки платформы оказываются в консоли
+вперемешку с журналом агента, и границы между ними не видно.
+Объявленный ``stderr_log`` (``gateway.agent.enterprise_mcp``)
+перенаправляет stderr в файл и показывает этот файл в отдельном
+окне; без объявления поведение прежнее. Механизм, зрители для обеих
+платформ и граница со вторым процессом платформы — в
+``lib/services/enterprise_mcp_stderr.py``.
 """
 
 from __future__ import annotations
@@ -42,6 +54,12 @@ from typing import Any
 
 from loguru import logger
 
+from lib.services.enterprise_mcp_stderr import (
+    StderrRedirect,
+    describe_redirect,
+    open_redirect,
+    write_marker,
+)
 from lib.services.session_files import SESSION_FILES_OPERATION
 
 DEFAULT_TOOL_TIMEOUT_SEC = 30.0
@@ -200,6 +218,7 @@ class EnterpriseMcpClient:
         tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
         server_name: str = "enterprise-mcp",
         db_logging_service: Any = None,
+        stderr_log: str | os.PathLike[str] | None = None,
     ) -> None:
         self._command = command
         self._args = list(args or [])
@@ -216,6 +235,15 @@ class EnterpriseMcpClient:
         # остальные сервисы, - из ApplicationContext. Создавать ради этого
         # отдельный компонент незачем: нужен метод журнала, а не новый объект.
         self._db_logging_service = db_logging_service
+        # Куда девать stderr процесса платформы. Объявленный путь
+        # перенаправляет его в файл и открывает файл в отдельном окне;
+        # без объявления stderr остаётся stderr агента, как было.
+        # Открывается лениво, при первом подъёме сессии: файл журнала
+        # должен появляться тогда, когда процесс действительно
+        # поднимается, а не при сборке настроек.
+        self._stderr_log = stderr_log
+        self._stderr: StderrRedirect | None = None
+        self._stderr_opened = False
 
     # -- состояние ---------------------------------------------------------
 
@@ -231,7 +259,38 @@ class EnterpriseMcpClient:
             "args": self._args,
             "cwd": self._cwd,
             "connected": self.is_connected,
+            # Объявленный путь виден и до подъёма сессии: баннер
+            # запуска печатается по ``describe()``, и перенаправление
+            # не должно выглядеть включившимся само по себе.
+            **describe_redirect(self._stderr, declared=self._stderr_log),
         }
+
+    def stderr_report(self) -> str:
+        """Стока для баннера запуска: куда ушёл stderr платформы.
+
+        Отчёт, а не признак успеха: файл мог не открыться, а окно —
+        не появиться (нет ``DISPLAY``, нет терминала). Молчаливое
+        "смотреть можно" хуже, чем строка, где сказано, что именно
+        видно и почему.
+        """
+        if self._stderr is not None:
+            # Файл называет сам клиент, а не текст зрителя: отчёт
+            # переживает подмену зрителя (в тестах, в headless) и
+            # не должен зависеть от того, как именно окно себя
+            # представило.
+            return (
+                f"stderr платформы: файл {self._stderr.path} — "
+                f"{self._stderr.viewer}"
+            )
+        if self._stderr_log:
+            return (
+                f"stderr платформы: файл {self._stderr_log} не открыт — "
+                "вывод идёт в stderr агента"
+            )
+        return (
+            "stderr платформы: stderr агента "
+            "(gateway.agent.enterprise_mcp.stderr_log не объявлен)"
+        )
 
     # -- вызов -------------------------------------------------------------
 
@@ -457,6 +516,19 @@ class EnterpriseMcpClient:
 
     # -- жизненный цикл ----------------------------------------------------
 
+    def _errlog(self) -> Any:
+        """Приёмник stderr процесса: файл из объявления или ``None``.
+
+        ``None`` — значение по умолчанию у ``stdio_client``, то есть
+        stderr агента: без объявления перенаправления не происходит и
+        SDK ведёт себя ровно как раньше. Файл открывается один раз на
+        клиента, и переподключение после обрыва дописывает в него же.
+        """
+        if not self._stderr_opened:
+            self._stderr_opened = True
+            self._stderr = open_redirect(self._stderr_log)
+        return self._stderr.handle if self._stderr is not None else None
+
     async def _ensure_session(self) -> Any:
         if self._session is not None:
             return self._session
@@ -475,7 +547,10 @@ class EnterpriseMcpClient:
                             args=self._args,
                             cwd=self._cwd,
                             env=self._child_env(),
-                        )
+                        ),
+                        # Публичный параметр SDK: stderr процесса в
+                        # stderr агента или в объявленный файл.
+                        errlog=self._errlog(),
                     )
                 )
                 session = await self._stack.enter_async_context(ClientSession(read, write))
@@ -512,6 +587,11 @@ class EnterpriseMcpClient:
         закроется stdin. Это штатный путь, а не ошибка.
         """
         loop, self._loop = self._loop, None
+        # Метка видна в окне зрителя: вывод перестанет появляться, и
+        # без неё молчание окна выглядело бы зависшей платформой.
+        write_marker(
+            self._stderr, "— сессия enterprise-mcp закрывается агентом —"
+        )
         if self._stack is None or loop is None:
             self._stack, self._session = None, None
             return
@@ -617,6 +697,11 @@ def client_from_settings(
     бы с первым при первой же правке — а хуже того, окружение приоритетнее
     файла, и такой «экспорт» молча побеждал бы объявление платформы.
 
+    Третий ключ раздела, ``stderr_log``, до платформы не доезжает и
+    остаётся на стороне агента: это путь файла-приёмника stderr
+    процесса. Пустое значение или отсутствие ключа означают прежнее
+    поведение — stderr уходит в stderr агента.
+
     Из настроек агента платформа получает ровно два значения: имя контура
     (``--profile``) и порог журнала (``--log-min-level``). Оба — при старте,
     оба читаются из ключей, которые платформа не объявляет, и оба приходят
@@ -650,10 +735,17 @@ def client_from_settings(
     min_level = _journal_min_level(settings)
     if min_level:
         args += [LOG_MIN_LEVEL_FLAG, min_level]
+    # stderr_log — НЕ настройка платформы и в argv не едет: это
+    # вопрос транспорта на стороне агента (куда девать stderr процесса,
+    # который агент и поднимает), а не объявление платформы. Поэтому
+    # его чтение не ломает контракт «агент не объявляет ничего для
+    # платформы», и страж границы остаётся зелёным.
+    stderr_log = str(section.get("stderr_log") or "").strip() or None
     return EnterpriseMcpClient(
         command=str(command),
         args=args,
         cwd=section.get("cwd"),
+        stderr_log=stderr_log,
         tool_timeout_sec=float(
             section.get("tool_timeout_sec") or DEFAULT_TOOL_TIMEOUT_SEC
         ),

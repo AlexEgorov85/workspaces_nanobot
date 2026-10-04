@@ -58,6 +58,16 @@ class _FakeClient:
             await asyncio.sleep(3600)
         return self._responses.get(operation, "{}")
 
+    def stderr_report(self) -> str:
+        """Строка баннера о stderr процесса платформы.
+
+        Двойник обязан знать про неё: рукопожатие печатает отчёт, и
+        подмена на ``getattr(..., None)`` в проде означала бы, что
+        настоящий клиент молча потерял метод, а баннер — строку. Здесь
+        падает сам двойник, то есть падает тест.
+        """
+        return "stderr платформы: stderr агента (тест)"
+
 
 def _ctx(client: object, **kw) -> types.SimpleNamespace:
     """Контекст для рукопожатия.
@@ -155,6 +165,17 @@ class TestHandshake:
         _connect(_FakeClient(operations=["a", "b", "c"]))
 
         assert "3 операций" in capsys.readouterr().out
+
+    def test_stderr_destination_is_reported(self, capsys):
+        """Баннер обязан называть, куда ушёл stderr платформы.
+
+        Без этой строки режим наблюдения молчал бы: «окно не открылось»
+        читалось бы ровно как «смотреть не на что», и отличить одно от
+        другого можно было бы только по факту отсутствия вывода.
+        """
+        _connect(_FakeClient())
+
+        assert "stderr платформы" in capsys.readouterr().out
 
     def test_disabled_section_is_reported_not_silent(self, capsys):
         """Выключенный раздел — тоже результат: молчание неотличимо от
