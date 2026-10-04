@@ -145,7 +145,7 @@ THEN `OutboundMessage.content` SHALL содержать ТОЛЬКО текст 
 ### Requirement: Не-регрессия публичного контракта OutboundMessage
 
 WHEN система формирует fallback-ответ,
-THEN `OutboundMessage` SHALL сохранить все обязательные поля (`channel`, `chat_id`, `content`, `metadata`) и SHALL быть совместим с downstream-каналами (PostgresChannel, RedisChannel, ConsoleLoop, Streamlit) без изменений в их обработчиках.
+THEN `OutboundMessage` SHALL сохранить все обязательные поля (`channel`, `chat_id`, `content`, `metadata`) и SHALL быть совместим с downstream-каналами (PostgresChannel, ConsoleLoop) без изменений в их обработчиках.
 
 #### Scenario: PostgresChannel не падает на fallback
 

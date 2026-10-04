@@ -356,7 +356,7 @@ ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod
 - Vector-storage (`oarb.audit_vectors`) — read-only.
 - Реестры (`agent_predefined_scripts`) — read-only.
 
-Если потребуется их изолировать (FAISS-пути, DuckDB-кеш, Streamlit-файлы,
+Если потребуется их изолировать (FAISS-пути, DuckDB-кеш,
 cron-файл) — это **отдельная задача**. Текущий change их не затрагивает.
 
 ## Что меняется в runtime
@@ -375,7 +375,7 @@ cron-файл) — это **отдельная задача**. Текущий ch
 **Не меняется:**
 
 - DSN, skill data, vector storage, реестры (намеренно общие).
-- Cron-файл, FAISS-пути, DuckDB-пути, Streamlit-файлы (out of scope).
+- Cron-файл, FAISS-пути, DuckDB-пути (out of scope).
 
 ## Тестирование
 

@@ -560,8 +560,8 @@ is out of scope».
 **Тесты:** `tests/test_database_logging_bridge.py` (мост),
 `tests/test_runtime_patcher.py::TestPatchContextBridgeSeed` (патч 2b),
 `tests/test_postgres_channel.py::TestPostgresChannelContextWindow`
-(live-update + drop), `tests/test_streamlit_app.py::TestRenderContextWindow`
-(UI), `tests/test_console_loop.py::TestPrintContextWindow` (CLI).
+(live-update + drop),
+`tests/test_console_loop.py::TestPrintContextWindow` (CLI).
 
 ### Управление сжатием контекста: `ContextCompactionService`
 
@@ -744,13 +744,6 @@ async def _notify(self, session_key, report):
 
 **UI:**
 
-* **Streamlit** (`streamlit_app.py`):
-  * `_load_chat_history` поднимает флаг `compact_notice=True`, если
-    `metadata.kind == "context_compact"`.
-  * В рендере (строка ~290): ``<div class="compact-notice">🗜️ {content}</div>``
-    через CSS-стиль — жёлтый фон, левая полоска `#f0c040`,
-    мелкий шрифт, отступы. Не путается с обычными
-    assistant-сообщениями.
 * **CLI** (`lib/cli/console_loop.py`): `_run_cli_compact` печатает
   через Rich: `[cyan]🗜️ {text}[/cyan]` при успехе, `[yellow]🗜️ ...`
   при ошибке.
@@ -758,7 +751,7 @@ async def _notify(self, session_key, report):
   если `print_to_terminal=true`, Rich-вывод `[dim]🗜️ {text}[/dim]`
   (по образцу `print_worker_activity`).
 * **loguru**: всегда пишется INFO-строка вида
-  `Context compaction [token] postgres:streamlit: archived=12, tokens 34500→12300`
+  `Context compaction [token] postgres:chat_42: archived=12, tokens 34500→12300`
   (и аналогично для авто — `Auto context compaction [idle] ...`).
 
 **Что не делается (явные «нет»):**
@@ -882,7 +875,7 @@ UI читает то, что есть, и не обязан понимать к�
 | `error` | `str` | `PostgresChannel._mark_failed` | — | никогда | Только в строках со статусом `error` или `failed`. Краткое описание причины: `"dispatch_error"`, `"write_error"`. |
 | `reasoning` | `str` | `PostgresChannel._flush_reasoning` (live) + `_finalize_turn` (atomic append) | дописывается через `_reasoning_io_lock` | никогда | Полный текст рассуждений модели (chain-of-thought). Может быть очень длинным. |
 | `context_window` | `dict` | `PostgresChannel._flush_live_context` (live) | перезаписывается каждые `_flush_interval` сек | никогда | Метрика занятости контекстного окна: `{used: int, limit: int, pct: float (0..1, 4 знака), model: str}`. См. подсекцию «Метрика занятости контекстного окна» выше. |
-| `_tool_audit` | `list[dict]` | `RuntimePatcher.patch_assemble_outbound` (финальный outbound) | — | никогда | Массив записей вызовов инструментов за оборот. Рендерится в UI (Streamlit) и CLI. |
+| `_tool_audit` | `list[dict]` | `RuntimePatcher.patch_assemble_outbound` (финальный outbound) | — | никогда | Массив записей вызовов инструментов за оборот. Рендерится в CLI и в канале PostgreSQL. |
 
 **Не пишется в `metadata`:** `_final_turn` (флаг протокола канала,
 в БД не пишется как значимое поле), `latency_ms` (для логов).

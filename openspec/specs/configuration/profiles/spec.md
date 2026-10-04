@@ -187,8 +187,7 @@ explicitly ALLOWS a single, well-bounded autouse-fixture in
 `tests/conftest.py` with the following constraints:
 
 - **Scope:** only in `tests/conftest.py` (not in any
-  `workspace/`, `lib/`, `tools/`, `gateway.py`, `cli_agent.py`,
-  `streamlit_app.py`).
+  `workspace/`, `lib/`, `tools/`, `gateway.py`, `cli_agent.py`).
 - **Behavior:** the autouse-fixture MAY call
   `config._initialize_settings(profile="test")` once per pytest
   session **iff** `config.is_settings_initialized()` returns
@@ -204,9 +203,9 @@ explicitly ALLOWS a single, well-bounded autouse-fixture in
   Acceptance tests that explicitly verify lifecycle behavior
   (`tests/test_profile_lifecycle.py`) and subprocess-based
   entrypoint acceptance tests (`tests/test_gateway.py`,
-  `tests/test_cli_agent.py`, `tests/test_streamlit_app.py`)
-  MUST NOT depend on the fixture — they run in fresh
-  subprocesses and verify behavior independently.
+  `tests/test_cli_agent.py`) MUST NOT depend on the fixture —
+  they run in fresh subprocesses and verify behavior
+  independently.
 - **Documented intent:** `tests/conftest.py` MUST contain a
   comment block explaining why the fixture exists, the
   constraints above, and the reference to this requirement.
@@ -386,14 +385,6 @@ any entrypoint.
   module level
 - **THEN** its invocation contract is independent of `--profile`
 
-#### Scenario: Streamlit invocation is explicitly defined
-
-- **WHEN** Streamlit is invoked as
-  `streamlit run streamlit_app.py -- --profile=prod`
-- **THEN** the resolved profile SHALL be `prod`
-- **AND THEN** the supported invocation pattern is exactly that
-  form (no other invocation pattern is part of this change)
-
 ### Requirement: Integration test verifies runtime configuration, not only banner
 
 The change SHALL include an end-to-end test that verifies a
@@ -430,9 +421,9 @@ failure mode where the banner said `prod` but the runtime used
 ### Requirement: Profile is passed to application subprocesses only through --profile
 
 For every subprocess spawned by application runtime that is itself
-an application entrypoint (`gateway.py`, `cli_agent.py`,
-`streamlit_app.py`), the parent SHALL pass the active profile as
-an explicit `--profile=<value>` CLI argument. The profile value
+an application entrypoint (`gateway.py`, `cli_agent.py`), the
+parent SHALL pass the active profile as an explicit
+`--profile=<value>` CLI argument. The profile value
 SHALL be derived from `SETTINGS["profile"]`. The profile SHALL
 NOT be transported via environment variables, files, IPC, or any
 other side-channel.
@@ -451,43 +442,6 @@ other side-channel.
   `SETTINGS["profile"]`
 - **AND THEN** no second `_resolve_mode`, no env lookup, no default
   SHALL be invoked at the boundary
-
-### Requirement: Streamlit st.rerun does not trigger "already initialized"
-
-`streamlit_app.py` SHALL guard its module-level
-`_initialize_settings(...)` call with a `_initialized` flag set on the
-module itself after the first successful call.
-
-**Rationale:** Streamlit's runpy-based execution re-executes the script
-on `st.rerun()`, so module-level code in `streamlit_app.py` runs
-multiple times within a single process. To honor both the Streamlit
-lifecycle and the strict «second call → already initialized» contract
-of `config._initialize_settings`, the guard prevents the second CALL
-from happening; the `_initialize_settings` function itself stays
-strict.
-
-**This guard is not auto-init, profile switching, or a fallback** — it
-is explicit protection against Streamlit's physical re-execution of the
-script body.
-
-`streamlit_app.py` receives its profile through argv
-(`streamlit run streamlit_app.py -- --profile=<value>`), NOT through
-environment variables. `streamlit_app.py` is out of scope for this
-change beyond this documented contract; its removal is tracked by the
-separate change `remove-streamlit-runtime`.
-
-#### Scenario: Streamlit st.rerun does not trigger "already initialized"
-
-- **WHEN** `streamlit run streamlit_app.py -- --profile=prod`
-  succeeds and `_initialize_settings("prod")` is called once
-- **AND WHEN** `st.rerun()` re-executes the script body
-- **THEN** the guard SHALL skip the second `_initialize_settings(...)`
-  call
-- **AND THEN** the `_initialize_settings` function SHALL NOT have
-  been called a second time within this process
-- **AND THEN** the application SHALL continue running with the
-  already-published `SETTINGS`
-- **AND THEN** `SETTINGS["profile"]` SHALL continue to be `"prod"`
 
 ### Requirement: CLI entrypoint имеет фиксированный профиль test
 

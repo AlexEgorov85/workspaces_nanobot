@@ -254,12 +254,9 @@ LLM-вызовы в production):
 | `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Единая PG-таблица-хранилище сырых эмбеддингов. Регистрируется через `TableRegistry.register_infra("vector.storage", ...)` |
 | `gateway.vector.index.indexes.*` | `{}` | Конфиг vector-индексов (`VectorIndexConfig` per name; см. CHANGELOG → Resource Model Refactoring). PG-реестр `public.agent_vector_index_config` больше не читается кодом. |
 | `cli.show_context_window` | `true` | Метка занятости контекстного окна в CLI |
-| `streamlit.enabled` | не задано (`None`) — отключено по умолчанию | Гейт запуска Streamlit-UI на :8501 (явное `true` включает) |
 
 **Удалённые ключи**:
 
-- `streamlit.failed_window_sec` → `streamlit.error_window_sec`
-  (теперь окно повтора `error`-задач, а не `failed`).
 - `gateway.vector_index.cache_tables` — удалён (был мёртв: никем не читался).
 - `gateway.vector_index.storage_tables` (list) → `gateway.vector.index.storage_table` (str)
   — единая общая storage-таблица для runtime'а. Если у вас был список с одной
@@ -359,12 +356,12 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 | Изменение | Действие |
 |-----------|----------|
-| `.env` → `config.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway` в `config.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
+| `.env` → `config.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `gateway` в `config.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
 | Провайдерские ключи больше не через `export` | Секция `# providers: llm` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически (env-переменная — каноническая `LLM_API_KEY`) |
 | `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `public.agent_vector_index_config` (см. [docs/VECTOR_INDEXES.md](VECTOR_INDEXES.md)) |
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
 | `data-analyzer`, `html_presentation_generator` | Удалены. Убрать из импортов и `config.json` |
-| `pg_agent_worker.py` | Удалён. Использовать `streamlit_app.py` + `PostgresChannel` |
+| `pg_agent_worker.py` | Удалён. Использовать `PostgresChannel`, поднимаемый из `gateway.py` / `cli_agent.py` |
 
 **Код (если вы форкали):**
 

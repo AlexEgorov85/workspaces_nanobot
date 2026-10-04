@@ -40,8 +40,7 @@ here. Work with relative paths.
 - офисные форматы: `python-docx`, `openpyxl`, `xlrd`, `pypdf`,
   `pdfplumber`, `python-pptx`, `Pillow`, `chardet`;
 - инфраструктура: `psycopg2-binary`, `duckdb`, `faiss-cpu`, `numpy`,
-  `pyarrow`, `redis`, `httpx`, `loguru`, `PyYAML`, `streamlit`,
-  `sqlglot`, `nanobot`.
+  `pyarrow`, `redis`, `httpx`, `loguru`, `PyYAML`, `sqlglot`, `nanobot`.
 
 **Установить пакет агент не может** — оболочки нет, а установка на лету всё равно была
 бы неверным шагом: если пакета нет в `requirements.txt`, это запрос на расширение

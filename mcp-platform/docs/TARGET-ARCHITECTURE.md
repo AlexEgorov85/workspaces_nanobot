@@ -627,8 +627,7 @@ chunk_overlap, metric).
 | Модуль | Строк | Зачем существует |
 |---|---:|---|
 | `cli_agent.py` | 294 | Терминальный REPL оператора |
-| `gateway.py` | 522 | Долгоживущий сервер: каналы, пул воркеров, запуск Streamlit |
-| `streamlit_app.py` | 669 | Веб-интерфейс для нетехнических пользователей |
+| `gateway.py` | 522 | Долгоживущий сервер: каналы, пул воркеров |
 | `lib/services/runtime_patcher.py` | 2252 | Патчи AgentLoop под enterprise-поведение. **Не переносим** |
 | `lib/core/application_context.py` | 1816 | Точка сборки сервисов, lifecycle |
 | `lib/channels/postgres_channel.py` | 2190 | Транспорт сообщений + мультимашинная аренда задач |
@@ -876,14 +875,15 @@ enterprise-стек». Разбор — `design.md` §7.1.
 
 ### 10.3 Streamlit
 
-`streamlit_app.py` (669) + `lib/services/subprocess_manager.py` (149, существует
-**только** для его запуска) + логика spawn в `gateway.py`.
+**Выполнено.** Убраны `streamlit_app.py` (669) и
+`lib/services/subprocess_manager.py` (149, существовал **только** для его
+запуска), а также логика spawn в `gateway.py`.
 
-`workspace/utils/media.py` (259) сокращается — каналы ещё его читают.
-Тесты: `test_streamlit_app.py` уходит, `test_profile_lifecycle.py` — частично.
-Настройки `streamlit.*` удаляются.
+`workspace/utils/media.py` (259) сокращён — каналы ещё его читают.
+`test_streamlit_app.py` удалён, `test_profile_lifecycle.py` — частично.
+Настройки `streamlit.*` удалены.
 
-**Потеря:** веб-интерфейс как продуктовая поверхность.
+**Потеря:** веб-интерфейс как продуктовая поверхность. Принято осознанно.
 
 ### 10.4 Итог по остатку агента
 

@@ -21,7 +21,7 @@ Upstream предоставляет два кандидата для интег�
 2. **Wrapper в `Console`** (внутренний метод `AgentLoop.console`,
    используется для отправки стрима в CLI). Минусы: не публичный hook;
    `console` вызывается только при CLI-стриме, не для всех каналов
-   (postgres, streamlit, websocket).
+   (postgres, cli).
 3. **Патч на `RuntimeEventPublisher`** (subclass override). Минусы:
    ломает локальный fan-out для других потребителей (если upstream когда-то
    подключит других подписчиков); выходит за рамки нашего scope.
@@ -58,7 +58,7 @@ Upstream предоставляет два кандидата для интег�
 | Альтернатива | Почему отклонено |
 |---|---|
 | Обёртка `_state_build` | Приватный API upstream (может исчезнуть); monkey-patch на приватный метод создаёт скрытую зависимость |
-| Wrapper в `Console` | `console` не публичный hook; вызывается только для CLI-стрима, не для postgres/streamlit/websocket |
+| Wrapper в `Console` | `console` не публичный hook; вызывается только для CLI-стрима, не для postgres/cli |
 | Патч на `RuntimeEventPublisher` | Subclass override ломает локальный fan-out для других потребителей; выходит за scope |
 | **Observer через `bus.subscribe(TurnRuntimeAdmitted)`** ✓ | Публичный pub-sub API, fan-out для всех каналов, явный lifecycle, расширяемо |
 

@@ -76,7 +76,7 @@
 - `data` — данные, кеш, векторы (`CacheProvider`, `VectorIndexService`)
 - `observability` — логирование, мониторинг (`DatabaseLogging`, `EventLogging`)
 - `infrastructure` — инфраструктура (`RuntimePatcher`, Hooks, SubprocessManagement)
-- `interfaces` — интерфейсы (CLI, Gateway, Streamlit)
+- `interfaces` — интерфейсы (CLI, Gateway)
 - `security` — безопасность (`SqlSafety`)
 - `skills` — навыки (`AuditAnalyzer`, `LegalSummarizer`, `OfficeFiles`)
 - `testing` — тестирование, бенчмарки (Benchmarks)

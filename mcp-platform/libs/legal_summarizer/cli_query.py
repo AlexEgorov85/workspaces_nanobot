@@ -9,7 +9,7 @@ JSON с нужным полем.
 
 Чисто stdlib (``json``, ``pathlib``, ``argparse``) — кросс-платформенный
 (Windows + Linux). Кодировка вывода UTF-8 (см. ``PYTHONIOENCODING`` на
-entry-points gateway/cli_agent/streamlit_app).
+entry-points gateway/cli_agent).
 
 Использование::
 

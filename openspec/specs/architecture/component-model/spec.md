@@ -350,8 +350,7 @@ openspec/specs/
 │   └── hooks/
 ├── interfaces/
 │   ├── cli/
-│   ├── gateway/
-│   └── streamlit/
+│   └── gateway/
 ├── security/
 │   └── sql-safety/
 └── testing/
