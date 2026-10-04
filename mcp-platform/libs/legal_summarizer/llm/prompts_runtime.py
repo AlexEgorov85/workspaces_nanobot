@@ -33,12 +33,15 @@ _PROMPT_FILES = {
 
 
 def load_prompt(name: str) -> str:
-    """Прочитать системный промпт из ``prompts/<name>.md``."""
+    """Прочитать системный промпт из ``skill/prompts/<name>.md``."""
     p = _PROMPT_FILES.get(name)
     if p is None or not p.is_file():
         raise FileNotFoundError(
-            f"Не найден файл промпта: {p}. Промпты лежат в "
-            "servers/enterprise/capabilities/legal_summarizer/skill/prompts/."
+            f"Не найден файл промпта: {p}. Промпты лежат с доменом, в "
+            "mcp-platform/libs/legal_summarizer/skill/prompts/ — рядом с "
+            "SKILL.md, а не в capabilities/: тот каталог зарезервирован под "
+            "операции, и страж test_no_capability_without_operations требует "
+            "в нём tools/*.py (см. комментарий выше)."
         )
     return p.read_text(encoding="utf-8")
 

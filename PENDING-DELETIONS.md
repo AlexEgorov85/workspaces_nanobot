@@ -828,32 +828,50 @@ change'а не влияет. Проверено: `workspace/data_store/cache/ski
 
 ## Находки 2026-10-04: агентские навыки вне зоны загрузки
 
-### `mcp-platform/libs/legal_summarizer/skill/` — СНЕСТИ ВРУЧНУЮ
+### `mcp-platform/libs/legal_summarizer/skill/SKILL.md` — снести ТОЛЬКО этот файл
 
-Агентский `SKILL.md` лежал в библиотеке платформы. `SkillsLoader` читает
+Агентский `SKILL.md` лежит в библиотеке платформы. `SkillsLoader` читает
 только `workspace/skills`, `workspace/plugins` и свой встроенный каталог
 (`workspace_skills = workspace / "skills"`), поэтому файл **никогда не
 загружался**: модель его не читала ни разу. Внутри он звал
 `python workspace/skills/legal_summarizer/scripts/cli.py` — пути не
-существует ни одной части, так что даже будь файл загружен, он увёл бы
-модель в никуда.
+существует ни одной части, настоящий вход `mcp-platform/libs/legal_summarizer/cli.py`,
+без `scripts/`.
+
+**Ошибка, почти стоившая конвейера (2026-10-04).** Сначала здесь было написано
+«снести каталог `skill/` целиком», и владелец его снёс. Это сломало рабочий
+код: `libs/legal_summarizer/llm/prompts_runtime.py` грузит
+`skill/prompts/*.md` на каждом суммари, а `tests/legal_summarizer/architecture/test_skill_layout.py`
+требует `prompts/`, `references/`, `SKILL.md` и `README.md`. Восстановлено
+из HEAD, конвейер проверен (`load_prompt` отдаёт все три промпта, 16 тестов
+стража раскладки зелёные).
+
+Вывод, который стоит держать: **«файл не загружается» — это утверждение о
+файле, а не о каталоге.** Прежде чем сносить каталог, надо установить, что
+именно в нём читается во время работы. Здесь это выяснилось только потому,
+что страж раскладки упал, — а не чтением.
 
 Домен жив: capability `legal_summarizer` есть и в `platform.json`, и в
 `servers/enterprise/capabilities/legal_summarizer`, операция
 `query_operation` объявлена в
-`config.json → tools.mcpServers.enterprise.enabled_tools`. Снести надо
-только каталог `skill/` — то, что к capability отношения не имеет.
+`config.json → tools.mcpServers.enterprise.enabled_tools`.
 
-Снос заблокирован: политика рантайма не даёт запустить доверенный
-`mavis-trash`, а обходить её нельзя. Команда для владельца:
+Порядок сноса (снос заблокирован политикой рантайма, обходить нельзя):
 
-```powershell
-rm -- "mcp-platform/libs/legal_summarizer/skill"
-```
+1. Снять `test_skill_md_exists` в
+   `mcp-platform/tests/legal_summarizer/architecture/test_skill_layout.py` —
+   он кодирует ошибочное предположение, что это «каталог навыка».
+2. `rm -- "mcp-platform/libs/legal_summarizer/skill/SKILL.md"`
+3. Почистить `KNOWN_MISPLACED_SKILLS` в
+   `tests/test_agent_facing_docs_contract.py` — страж падает и на новом
+   нарушении, и на протухшей записи, специально чтобы список не стал
+   «разрешением на всё».
 
-После сноса страж `tests/test_agent_facing_docs_contract.py` потребует
-почистить `KNOWN_MISPLACED_SKILLS` — он падает и на новом нарушении, и на
-протухшей записи, специально чтобы список не стал «разрешением на всё».
+Уже сделано 2026-10-04: из `SKILL.md` убран frontmatter `name:` /
+`metadata.nanobot` (с `always: true` файл выглядел навыком, и перенос
+каталога в `workspace/skills` тихо вооружил бы модель инструкцией запускать
+отключённую оболочку) и исправлены два неверных пути к `cli.py`. После
+этого файл безвреден, и сносить его — уже не срочно.
 
 ### `config.json → tools.column_descriptions` — мёртвая секция, решение за владельцем
 

@@ -1,22 +1,44 @@
 ---
 name: legal_summarizer
-description: Юридический анализ PDF/DOCX/TXT — CLI capability, запускается вызывающим, у которого есть оболочка: `python <skill>/scripts/cli.py --file <path>`. Skill сам решает, нужен ли пользовательский confirm; для длинных документов (оценка > 2 минут) сначала вернёт confirmation_required. `office_files.extract_metadata()` (раньше `summarize()`) — это НЕ саммари, а метаданные; не подменяй cli. Агенту оболочка недоступна: см. «Статус» ниже.
-metadata: {"nanobot":{"emoji":"📄","always":true}}
+description: >-
+  НЕ навык агента: каталог вне зоны загрузки SkillsLoader, файл в контекст
+  модели не попадает. Документирует CLI capability для вызывающего с оболочкой
+  (`python mcp-platform/libs/legal_summarizer/cli.py --file <path>`). Агенту
+  оболочка недоступна (`tools.exec.enable = false`); из агента доступно
+  только чтение состояния существующей операции — операция платформы
+  `query_operation` по `operation_id`.
 ---
 
-> **Статус (после отключения `exec`).** Документ ниже описывает CLI-точку входа
-> capability для вызывающего, у которого есть оболочка. У агента оболочки нет
-> (`tools.exec.enable = false`), поэтому модель не может ни запустить `cli.py`, ни
-> опрашивать его через `write_stdin`: **все указания ниже про запуск `python …/cli.py`
-> и про опрос сессии к модели неприменимы.** Из агента доступно только чтение
-> состояния уже существующей операции платформой — операция `query_operation` по
-> `operation_id`. Запуск нового прогона из агента после решения об отключении `exec`
-> невозможен; если он нужен — это отдельная операция платформы, а не вызов оболочки.
+# Legal Summarizer — точка входа CLI capability
 
-# Legal Summarizer — единственный путь: `cli.py`
+> **Это не навык агента.** Навыки читает `SkillsLoader` из
+> `workspace/skills` и `workspace/plugins`; этот каталог он не смотрит, и
+> файл никогда не попадал в контекст модели. Frontmatter `name:` /
+> `metadata.nanobot` убран намеренно: с ним файл выглядел бы навыком
+> (и выглядел так при `always: true`), и перенос каталога в `workspace/skills`
+> тихо вооружил бы модель инструкцией запускать отключённую оболочку.
+> На настоящий навык агента ссылается
+> `workspace/skills/enterprise_mcp/SKILL.md` — там контракт вызовов.
+
+> **Для агента недоступно.** `tools.exec.enable = false`, поэтому ни
+> `cli.py`, ни опрос сессии через `write_stdin` невозможны. Из агента доступно
+> только чтение состояния уже существующей операции — операция платформы
+> `query_operation` по `operation_id`. Запуск нового прогона из агента
+> невозможен; если он нужен — это отдельная операция платформы, а не вызов
+> оболочки.
+
+> **Осторожно с этим каталогом.** Здесь лежат системные промпты конвейера
+> (`prompts/*.md`), которые грузит `libs/legal_summarizer/llm/prompts_runtime.py`
+> на каждом суммари. Каталог нельзя сносить целиком: стражи
+> `tests/legal_summarizer/architecture/test_skill_layout.py` требуют и
+> `prompts/`, и `references/`. Снести можно только этот `SKILL.md` — и
+> вместе с `test_skill_md_exists` в том стражe.
+
+Ниже — документация CLI-точки входа capability для вызывающего, у которого
+есть оболочка.
 
 > ⚠️ **ПРАВИЛО #1 (нарушать нельзя):** саммари делает ТОЛЬКО
-> `python workspace/skills/legal_summarizer/scripts/cli.py --file <path>`. Никаких
+> `python <каталог навыка>/scripts/cli.py --file <path>`. Никаких
 > прямых вызовов `workspace.utils.office_files.extract_metadata()`,
 > `extract_text()` или `from utils.office_files import …`.
 >
@@ -88,7 +110,7 @@ python "C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.p
 ### Каноническая команда (bash / Linux)
 
 ```bash
-python workspace/skills/legal_summarizer/scripts/cli.py --file "<path>" [--flags...]
+python mcp-platform/libs/legal_summarizer/cli.py --file "<path>" [--flags...]
 ```
 
 | Параметр | Обязательный | Описание |
@@ -271,13 +293,13 @@ Wrapper-уровневые `error_type`, не зависящие от CLI:
 
 ## Что внутри
 
-Skill состоит из:
+Capability состоит из:
 
-* `scripts/cli.py` — CLI entry point.
-* `scripts/cli_query.py` — follow-up по `operation_id`.
-* `scripts/` — executable runtime Skill (9 runtime-слоёв:
+* `cli.py` — CLI entry point.
+* `cli_query.py` — follow-up по `operation_id`.
+* девять runtime-слоёв рядом с ними:
   `application/`, `cache/`, `chunking/`, `document/`, `execution/`,
-  `llm/`, `output/`, `planning/`, `retrieval/`).
+  `llm/`, `output/`, `planning/`, `retrieval/`.
 * `prompts/` — LLM-инструкции (summarize / section_reduce / reduce).
 * `references/` — подробные документы: `architecture.md`, `contracts.md`,
   `testing.md`.

@@ -51,9 +51,10 @@ LOADABLE_SKILL_DIRS = ("workspace/skills", "workspace/plugins")
 #: втором — чистки этого списка.
 KNOWN_MISPLACED_SKILLS = {
     "mcp-platform/libs/legal_summarizer/skill/SKILL.md": (
-        "change 2026-10-03-session-files: снятие заблокировано политикой "
-        "рантайма, удалить вручную. Навык не загружается SkillsLoader; "
-        "агент ходит в домен операцией mcp_enterprise_query_operation"
+        "каталог не загружается SkillsLoader. Снести можно ТОЛЬКО этот файл: "
+        "рядом лежат prompts/ (грузятся llm/prompts_runtime.py на каждом "
+        "суммари) и references/, и оба требуются стражем "
+        "test_skill_layout.py. Перед сносом снять test_skill_md_exists."
     )
 }
 
