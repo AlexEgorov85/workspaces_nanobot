@@ -138,10 +138,23 @@ def load_definition(path: Path, container: ToolContainer, root: Path) -> ToolDef
     except ToolLoadError as exc:
         raise ToolLoadError(exc.message, path=str(path), name=name) from exc
 
-    # Схема строится здесь, а не автором файла: иначе описание параметра и его
-    # сигнатура разъезжаются, и расхождение всплывает в рантайме.
+    # Объявленная автором схема — это схема. Раньше она затиралась здесь
+    # безусловно, и объявление ``INPUT_SCHEMA`` в файлах операций было мёртвой
+    # декларацией, выглядящей авторитетно: автор читал её, чтобы понять контракт
+    # операции, и она не говорила правды. Из-за этого потерялась правка
+    # ``claim_task`` (``"type": ["array","null"]``) — верная по смыслу и
+    # неиспользуемая.
+    #
+    # Состояние «объявлено, а на проводе другое» недопустимо: оно ловушка и
+    # стоило уже одной потерянной правки. Промежуточного варианта нет — либо
+    # объявление истинно, либо его нет. «Не объявлено» выражается существующим
+    # дефолтом ``ToolDefinition.input_schema = {}``; отдельного поля не заводим.
     try:
-        schema = build_input_schema(definition.handler)
+        schema = (
+            dict(definition.input_schema)
+            if definition.input_schema
+            else build_input_schema(definition.handler)
+        )
     except ToolLoadError as exc:
         raise ToolLoadError(exc.message, path=str(path), name=name) from exc
 

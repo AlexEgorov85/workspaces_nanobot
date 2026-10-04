@@ -28,6 +28,11 @@ from servers.enterprise.capabilities.data.service.main import (
     DataService,
 )
 
+# Поля с дефолтом None объявлены как список типов вместе с null:
+# обработчик это значение принимает, и сериализация вызывающей стороны
+# (json) присылает именно null, а не отсутствие поля. Узкий тип здесь
+# отвергал бы законный вызов на проводе, до конвейера и без следа в
+# журнале. Страж: tests/test_operation_schema_permissiveness.py.
 INPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -40,16 +45,16 @@ INPUT_SCHEMA = {
             "description": "Текст заметки, видимый пользователю в истории диалога.",
         },
         "metadata": {
-            "type": "object",
+            "type": ["object", "null"],
             "description": "Машиночитаемая часть: kind и сводка отчёта о сжатии.",
         },
         "media": {
-            "type": "array",
+            "type": ["array", "null"],
             "items": {},
             "description": "Вложения строки; по умолчанию пустой список.",
         },
         "buttons": {
-            "type": "array",
+            "type": ["array", "null"],
             "items": {},
             "description": "Кнопки строки; по умолчанию пустой список.",
         },

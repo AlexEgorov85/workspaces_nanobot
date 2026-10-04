@@ -70,20 +70,70 @@ class TestSchemaBuilding:
         """Регрессия: у ``int | None`` есть ``__name__ == "Union"``.
 
         Подстрочная проверка объявляла такое объединение строкой, и модель
-        получала подсказку «передай число строкой».
+        получала подсказку «передай число строкой». При этом ``NoneType``
+        больше не выбрасывается молча: объединение публикуется списком типов
+        вместе с ``null``, иначе значение, которое обработчик принимает,
+        отвергалось бы валидатором SDK ДО конвейера.
         """
 
         def handler(count: int | None = None, payload: dict[str, object] | None = None) -> None:
             return None
 
         schema = build_input_schema(handler)
-        assert schema["properties"]["count"]["type"] == "integer"
-        assert schema["properties"]["payload"]["type"] == "object"
+        assert schema["properties"]["count"]["type"] == ["integer", "null"]
+        assert schema["properties"]["payload"]["type"] == ["object", "null"]
+        assert schema["required"] == []
+
+    def test_optional_container_union_accepts_null(self) -> None:
+        """Ровно та форма, которая роняла ``claim_task`` на каждом опросе.
+
+        ``list[str] | None = None`` публиковался как ``{"type": "array"}``, и
+        ``null`` — обычный поллинг — отвергался. Теперь ``null`` в списке типов.
+        """
+
+        def handler(priority_contents: list[str] | None = None) -> None:
+            return None
+
+        schema = build_input_schema(handler)
+        assert schema["properties"]["priority_contents"]["type"] == ["array", "null"]
+        assert schema["required"] == []
+
+    def test_non_nullable_union_keeps_single_type(self) -> None:
+        """Объединение без ``NoneType``, но однородное по JSON-типу.
+
+        Две аннотации, дающие один и тот же тип JSON, — это не неоднородное
+        объединение: схема у него есть, и она точна.
+        """
+
+        def handler(items: list[str] | set[str]) -> None:
+            return None
+
+        schema = build_input_schema(handler)
+        assert schema["properties"]["items"]["type"] == "array"
+        assert schema["required"] == ["items"]
+
+    def test_heterogeneous_union_is_refused(self) -> None:
+        """Неоднородное объединение объявлять нечем — значит, объявлять не будем.
+
+        Раньше бралась первая часть, и модель получала заведомо неверный тип.
+        Отказ на загрузке виден сразу; отказ на проводе — нет.
+        """
+
+        def handler(count: int | str) -> None:
+            return None
+
+        with pytest.raises(ToolLoadError) as excinfo:
+            build_input_schema(handler)
+        message = str(excinfo.value)
+        assert "count" in message, message
+        assert "handler" in message, message
 
     def test_json_type_rejects_nothing_harmfully(self) -> None:
         assert _json_type(object) == "object"
         assert _json_type(int) == "integer"
         assert _json_type(str) == "string"
+        assert _json_type(int | None) == ["integer", "null"]
+        assert _json_type(type(None)) == "null"
 
     def test_missing_annotation_fails(self) -> None:
         def handler(name) -> None:  # noqa: ANN001 - намеренно без аннотации

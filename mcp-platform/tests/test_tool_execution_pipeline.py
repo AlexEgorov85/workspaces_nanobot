@@ -576,15 +576,48 @@ def test_journal_records_start_and_completion(tmp_path: Path) -> None:
     assert completed["metadata"]["component"] == "tool_execution"
 
 
-def test_result_body_never_reaches_the_journal(tmp_path: Path) -> None:
-    """Иначе журнал дублировал бы тело — и чувствительные данные с ним."""
+def test_result_body_reaches_the_journal_only_as_a_capped_excerpt(tmp_path: Path) -> None:
+    """Тело результата попадает в журнал выдержкой, а не целиком.
+
+    Прежнее правило запрещало тело вовсе, и потому оставляло журнал бесполезным
+    для разбора инцидента: по ``result_hash`` нельзя понять, что именно вернула
+    операция. Теперь тело видно на ограниченном префиксе.
+
+    Страж прежней формулировки проходил по счастливому случаю: обработчик не
+    принимал переданный ему параметр, вызов падал, и результата не существовало
+    — проверялось отсутствие того, чего и не было. Здесь вызов УСПЕШЕН, поэтому
+    утверждение о выдержке имеет предмет.
+    """
     sink = Sink()
-    secret = "секретное-значение"
-    layer = make_layer(tmp_path, sink=sink)
-    layer.pipeline.execute(
-        definition(lambda: {"hits": [secret]}), {"payload": secret}, call_meta()
+    body = "строка-результата-" * 500
+    layer = make_layer(tmp_path, sink=sink, ENTERPRISE_EXEC_LOG_RESULT_EXCERPT_BYTES=1024)
+    layer.pipeline.execute(definition(lambda **_: {"hits": [body]}), {}, call_meta())
+    completed = sink.of("tool.completed")
+    excerpt = completed["payload"]["result_excerpt"]
+    assert excerpt, "тело результата в журнале не появилось — разбирать нечего"
+    assert completed["payload"]["result_truncated"] is True
+    assert len(excerpt.encode("utf-8")) <= 1024, len(excerpt.encode("utf-8"))
+    assert body not in json.dumps(sink.rows, ensure_ascii=False), "тело попало в журнал целиком"
+
+
+def test_non_whitelisted_arguments_never_reach_the_journal(tmp_path: Path) -> None:
+    """Тело АРГУМЕНТОВ в журнал не попадает: только поля из белого списка.
+
+    Часть контракта не изменилась. Белый список остаётся белым: новый параметр
+    операции не должен начинать писаться в журнал молча, а объём выдержки не
+    должен зависеть от того, сколько полей у операции оказалось.
+    """
+    sink = Sink()
+    unlisted = "аргумент-вне-белого-списка"
+    layer = make_layer(
+        tmp_path, sink=sink, ENTERPRISE_EXEC_LOG_ARG_FIELDS="event_type"
     )
-    assert secret not in json.dumps(sink.rows, ensure_ascii=False)
+    layer.pipeline.execute(
+        definition(lambda **_: {"ok": True}),
+        {"event_type": "smoke", "payload": unlisted},
+        call_meta(),
+    )
+    assert unlisted not in json.dumps(sink.rows, ensure_ascii=False)
 
 
 def test_only_whitelisted_argument_fields_are_recorded(tmp_path: Path) -> None:

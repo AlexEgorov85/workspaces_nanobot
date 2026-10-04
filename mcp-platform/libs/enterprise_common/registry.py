@@ -55,6 +55,12 @@ class ToolDefinition:
     ``input_schema``, который агент видит в discovery; отдельного JSON-файла
     со схемой нет намеренно: две записи об одном параметре разъезжаются, и
     расхождение обнаруживается только в рантайме.
+
+    ``input_schema``, если он задан, — **та схема, что уходит на провод**, и
+    вывод из подписи тогда не выполняется. Объявление нужно там, где подпись
+    выводима недостаточно (``items``, ``description``, состав объектов) или где
+    автоматический вывод опасен. Пустой дефолт — единственный признак
+    «не объявлено», отдельного поля для этого нет.
     """
 
     name: str
@@ -198,7 +204,13 @@ def build_input_schema(handler: Callable[..., Any]) -> dict[str, Any]:
                 name=getattr(handler, "__name__", ""),
             )
         annotation = hints[param_name]
-        properties[param_name] = {"type": _json_type(annotation)}
+        properties[param_name] = {
+            "type": _json_type(
+                annotation,
+                owner=getattr(handler, "__name__", ""),
+                param=param_name,
+            )
+        }
         if param.default is inspect.Parameter.empty:
             required.append(param_name)
 
@@ -209,25 +221,56 @@ def build_input_schema(handler: Callable[..., Any]) -> dict[str, Any]:
     }
 
 
-def _json_type(annotation: Any) -> str:
+def _json_type(annotation: Any, *, owner: str = "", param: str = "") -> str | list[str]:
     """Отображение аннотации Python → JSON Schema.
 
     Разбирается через ``get_origin``/``get_args``, а не через подстроку в
     ``str(annotation)``: у ``int | None`` есть ``__name__ == "Union"``, и
     подстрочная проверка молча объявляла любую аннотацию-объединение строкой.
     Для модели это означало бы «передай словарь строкой».
+
+    ``NoneType`` в объединении **не выбрасывается**. Раньше он отбрасывался, и
+    ``list[str] | None`` публиковался как ``{"type": "array"}``: значение
+    ``null`` — законное, штатное, означающее «без фильтра», — отвергалось
+    валидатором SDK как ``None is not of type 'array'``. Отказ рождался ДО
+    конвейера, поэтому не классифицировался платформой и не попадал в журнал:
+    агент видел отказ, журнал молчал. Теперь такое объединение публикуется
+    списком типов ``["array", "null"]`` — идиома уже принята в проекте
+    (``log_events.py``).
+
+    Неоднородное объединение без ``NoneType`` (``int | str``) точной схемы не
+    имеет: брать первую часть — значит объявить заведомо неверный тип, и
+    модель пришлёт не то. Такая операция обязана объявить схему руками, иначе
+    загрузка падает здесь, а не отказом на проводе.
     """
     origin = get_origin(annotation)
 
     if origin is Union or origin is types.UnionType:
-        parts = [a for a in get_args(annotation) if a is not type(None)]
+        args = get_args(annotation)
+        nullable = type(None) in args
+        parts = [a for a in args if a is not type(None)]
         if not parts:
-            return "string"
-        if len(parts) > 1:
-            # Объединение неоднородно (например int | str). Точной схемы у
-            # него нет; берём первую непустую часть и не врём дальше.
-            return _json_type(parts[0])
-        return _json_type(parts[0])
+            return "null"
+        types_found: list[str] = []
+        for part in parts:
+            found = _json_type(part, owner=owner, param=param)
+            for name in found if isinstance(found, list) else [found]:
+                if name not in types_found:
+                    types_found.append(name)
+        if len(types_found) > 1:
+            # Неоднородное объединение. Единственное, что можно объявить
+            # честно, — «любой из типов», но модель получит подсказку, которой
+            # нет у обработчика, и отказ станет ещё и её виной. Отказываем.
+            raise ToolLoadError(
+                f"параметр {param or '<без имени>'!r} аннотирован неоднородным "
+                f"объединением ({types_found}); схема для него не выводится — "
+                "объявите input_schema руками",
+                name=owner,
+            )
+        if not nullable:
+            return types_found[0]
+        # Тип один и nullable — публикуем список, а не одиночный тип.
+        return [types_found[0], "null"]
 
     if origin in (list, set, frozenset, tuple):
         return "array"
