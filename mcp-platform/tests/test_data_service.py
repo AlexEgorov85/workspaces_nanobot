@@ -93,6 +93,11 @@ class ScriptedConn:
         # строки, иначе тест продолжил бы требовать ровно того, что волна
         # классов работ как раз убрала.
         self.batches: list[tuple[str, list[tuple[object, ...]]]] = []
+        # Шаблоны строк, переданные ``execute_values_on`` отдельным
+        # аргументом. Список рядом с ``batches``, а не вместо него: форма
+        # партии разбирается в других тестах, и менять её ради одного
+        # нельзя. Сам факт передачи шаблона — часть контракта сброса.
+        self.templates: list[str | None] = []
 
     def cursor(self) -> ScriptedCursor:
         return ScriptedCursor(self)
@@ -157,6 +162,7 @@ def _fake_db(rows: list[tuple[object, ...]] | None = None) -> ModuleType:
         """
         batch = [tuple(row) for row in rows]
         conn_.batches.append((sql, batch))
+        conn_.templates.append(template)
         return len(batch)
 
     module.run = run  # type: ignore[attr-defined]
@@ -408,6 +414,45 @@ class TestSchemaCheck:
 # --- log_event -------------------------------------------------------------
 
 
+def _top_level_count(template: str) -> int:
+    """Число выражений в скобках шаблона — без вложенности и строковых литералов."""
+    inner = template.strip()[1:-1]
+    depth = 0
+    quoted = False
+    count = 1
+    for char in inner:
+        if char == "'":
+            quoted = not quoted
+            continue
+        if quoted:
+            continue
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            count += 1
+    return count
+
+
+def _driver_accepts(sql: str) -> None:
+    """Разборщик самого драйвера обязан принять этот SQL.
+
+    Это ровно тот разборщик, который держал журнал пустым: ``execute_values``
+    зовёт ``_split_sql`` и требует ровно одного ``%s``. Имя приватное — да,
+    и это осознанно: единственная проверка, которая говорит с драйвером, а не
+    с нашим представлением о нём. Если psycopg2 её уберёт, тест падает
+    вслух — контракт перепроверят, а не перестанут проверять молча.
+
+    Шаблон сюда НЕ подаётся: его драйвер не разбирает, а подставляет в
+    готовую строку от её длины, поэтому ``_split_sql`` на нём падает
+    законно и ничего не говорит о вставке.
+    """
+    from psycopg2.extras import _split_sql
+
+    _split_sql(sql.encode("utf-8"))
+
+
 class TestLogEvent:
     def test_empty_event_type_rejected(self, service: DataService) -> None:
         with pytest.raises(InvalidRequestError, match="event_type"):
@@ -450,11 +495,11 @@ class TestLogEvent:
         assert sql.lstrip().startswith("INSERT"), sql
         assert len(rows) == 2, f"в партии должны быть оба события, получили {rows!r}"
 
-    def test_placeholder_count_matches_row_width(self) -> None:
-        """Ширина строки обязана совпадать с числом плейсхолдеров.
+    def test_journal_insert_matches_execute_values_contract(self) -> None:
+        """SQL сброса обязан быть исполнимым для ``execute_values``.
 
-        PostgreSQL проверил бы это сам, но на фейковом пуле расхождение
-        осталось бы незамеченным до первого реального INSERT.
+        Проверять тут нечего ровно до первого реального INSERT: фейковый пул
+        принимает любой текст, а ``EventBuffer.flush`` глотает отказ по замыслу.
         """
         db = _fake_db()
         svc = _service(db=db, buffer_flush_interval=0.0)
@@ -464,7 +509,26 @@ class TestLogEvent:
         sql, rows = db.conn.batches[0]  # type: ignore[union-attr]
         assert len(rows) == 1, rows
         row = rows[0]
-        assert sql.count("%s") == len(row)
+        assert sql.count("%s") == 1, (
+            f"execute_values требует ровно один плейсхолдер в SQL, а тут "
+            f"{sql.count('%s')}: {sql}"
+        )
+        # Якорь не обёрнут в скобки. В скобках драйвер не разворачивает список
+        # строк, а склеивает их в ОДНУ строку из записей — и PostgreSQL
+        # отвечает «больше целевых столбцов, чем выражений».
+        assert sql.rsplit("VALUES", 1)[1].strip() == "%s", sql
+        # Шаблон передан: без него драйвер выводит число плейсхолдеров из
+        # длины кортежа и не знает про `now()`.
+        template = db.conn.templates[0]  # type: ignore[union-attr]
+        assert template is not None, "execute_values без template не знает про now()"
+        assert template.count("%s") == len(row), f"{template} против {row}"
+        # Выражений в шаблоне столько же, сколько колонок в списке.
+        columns = sql[sql.index("(") + 1 : sql.rindex(") VALUES")]
+        assert _top_level_count(template) == columns.count(",") + 1, (
+            f"{template} против списка колонок {columns}"
+        )
+        # И наконец — разборщик драйвера.
+        _driver_accepts(sql)
         assert json.loads(row[5]) == {"k": "v"}
 
     def test_failed_flush_is_counted_not_raised(self) -> None:

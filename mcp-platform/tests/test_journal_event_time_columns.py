@@ -79,6 +79,10 @@ class ScriptedConn:
         # в пул через ``try_submit`` и пишет через ``execute_values_on``, поэтому
         # «дошло до БД» читается отсюда, а не из следов курсора.
         self.batches: list[tuple[str, list[tuple[object, ...]]]] = []
+        # Шаблон строки, переданный ``execute_values_on`` отдельным аргументом.
+        # В SQL его больше нет: там только якорь, а развёртка строк — работа
+        # драйвера. Позиции значений читаются поэтому отсюда.
+        self.templates: list[str | None] = []
 
     def cursor(self) -> ScriptedCursor:
         return ScriptedCursor(self)
@@ -126,6 +130,7 @@ def _fake_db() -> ModuleType:
     ) -> int:
         batch = [tuple(row) for row in rows]
         conn_.batches.append((sql, batch))
+        conn_.templates.append(template)
         return len(batch)
 
     module.run = run  # type: ignore[attr-defined]
@@ -145,21 +150,56 @@ def service() -> DataService:
     )
 
 
-def _flushed(service: DataService) -> list[tuple[str, list[tuple[object, ...]]]]:
+def _flushed(
+    service: DataService,
+) -> list[tuple[str, str, list[tuple[object, ...]]]]:
     """Партии батчей, дошедших до БД, с их строками.
 
     Раньше здесь разбирались ``INSERT`` среди заявлений курсора. Сброс идёт в
     пул без ожидания места и пишет одной вставкой, поэтому доказательство
     «дошло до БД» — это партия, а не пообъектный след курсора.
     """
+    templates = service._db.conn.templates  # type: ignore[union-attr]
     return [
-        (sql, rows)
-        for sql, rows in service._db.conn.batches  # type: ignore[union-attr]
+        (sql, templates[position], rows)
+        for position, (sql, rows) in enumerate(  # type: ignore[union-attr]
+            service._db.conn.batches  # type: ignore[union-attr]
+        )
         if "INSERT INTO" in sql
     ]
 
 
-def _param_index(sql: str, name: str) -> int:
+def _expressions(template: str) -> list[str]:
+    """Выражения одной строки из шаблона ``execute_values``.
+
+    Шаблон — это ``(выражение, ..., выражение)``; вложенности и запятых внутри
+    строковых литералов в нём нет, но разбор по ``split(",")`` всё равно врал бы
+    на ``::jsonb``-приведениях и на строковых значениях, поэтому считаем
+    глубину скобок, а не запятые.
+    """
+    inner = template.strip()[1:-1]
+    parts: list[str] = []
+    depth = 0
+    quoted = False
+    current: list[str] = []
+    for char in inner:
+        if char == "'":
+            quoted = not quoted
+        if not quoted:
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth -= 1
+            elif char == "," and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+                continue
+        current.append(char)
+    parts.append("".join(current).strip())
+    return parts
+
+
+def _param_index(sql: str, template: str, name: str) -> int:
     """Индекс значения колонки в кортеже параметров INSERT-а.
 
     Позиция колонки в списке колонок и позиция в параметрах — НЕ одно и то же:
@@ -171,9 +211,7 @@ def _param_index(sql: str, name: str) -> int:
         c.strip().strip('"')
         for c in re.search(r"\(([^)]*)\)\s*VALUES", sql).group(1).split(",")
     ]
-    values = [
-        v.strip() for v in re.search(r"VALUES\s*\((.*)\)\s*$", sql, re.S).group(1).split(",")
-    ]
+    values = _expressions(template)
     assert len(columns) == len(values), (
         f"колонок {len(columns)}, значений {len(values)}: значения перестали "
         "соответствовать колонкам"
@@ -181,8 +219,8 @@ def _param_index(sql: str, name: str) -> int:
     return sum(1 for v in values[: columns.index(name)] if v.startswith("%s"))
 
 
-def _column(sql: str, row: tuple, name: str) -> object:
-    return row[_param_index(sql, name)]
+def _column(sql: str, template: str, row: tuple, name: str) -> object:
+    return row[_param_index(sql, template, name)]
 
 
 def _agent_batch(seq: int, occurred_at: str) -> list[dict]:
@@ -205,10 +243,10 @@ class TestPlatformStampsItsOwnEvents:
         service._buffer.flush()
 
         assert _flushed(service), "событие не дошло до БД"
-        sql, rows = _flushed(service)[0]
+        sql, template, rows = _flushed(service)[0]
         row = rows[0]
-        seq = _column(sql, row, "seq")
-        occurred_at = _column(sql, row, "occurred_at")
+        seq = _column(sql, template, row, "seq")
+        occurred_at = _column(sql, template, row, "occurred_at")
         assert isinstance(seq, int) and seq > 0, "платформа не поставила ключ порядка"
         # Форма ISO-8601 с явным смещением UTC (``+00:00``), а не ``Z``: и то и
         # другое разбирается ``timestamptz`` и оба переживают backfill-приведение.
@@ -220,10 +258,10 @@ class TestPlatformStampsItsOwnEvents:
         """Два независимых ``now()`` разошлись бы на микросекунды."""
         service.log_event("tool.completed", name="grep")
         service._buffer.flush()
-        sql, rows = _flushed(service)[0]
+        sql, template, rows = _flushed(service)[0]
         row = rows[0]
-        seq = _column(sql, row, "seq")
-        occurred_at = _column(sql, row, "occurred_at")
+        seq = _column(sql, template, row, "seq")
+        occurred_at = _column(sql, template, row, "occurred_at")
         parsed = datetime.fromisoformat(occurred_at).timestamp()
         assert abs(parsed - seq / 1_000_000_000) < 1e-6, (
             "ключ порядка и момент события взяты из разных мгновений"
@@ -235,8 +273,8 @@ class TestPlatformStampsItsOwnEvents:
             service.log_event("tool.started", name=f"step-{i}")
         service._buffer.flush()
         seqs = [
-            _column(sql, row, "seq")
-            for sql, rows in _flushed(service)
+            _column(sql, template, row, "seq")
+            for sql, template, rows in _flushed(service)
             for row in rows
         ]
         assert len(seqs) == 5
@@ -262,7 +300,7 @@ class TestPlatformStampsItsOwnEvents:
 
         flushed = _flushed(service)
         assert len(flushed) == 1, f"ожидалась одна вставка на батч, получили {len(flushed)}"
-        assert len(flushed[0][1]) == 3, flushed[0][1]
+        assert len(flushed[0][2]) == 3, flushed[0][2]
         assert service._db.audiences == [AUDIENCE_RUNTIME]  # type: ignore[union-attr]
 
     def test_stamping_survives_a_json_round_trip(self, service: DataService) -> None:
@@ -272,9 +310,9 @@ class TestPlatformStampsItsOwnEvents:
         wire = json.loads(json.dumps(agent_event))
         service.log_events([wire], session_id="cli:1", user_id="u1")
         service._buffer.flush()
-        sql, rows = _flushed(service)[0]
-        assert _column(sql, rows[0], "seq") == seq
-        assert _column(sql, rows[0], "occurred_at") == occurred_at
+        sql, template, rows = _flushed(service)[0]
+        assert _column(sql, template, rows[0], "seq") == seq
+        assert _column(sql, template, rows[0], "occurred_at") == occurred_at
 
     def test_accept_is_the_single_stamping_point(self, service: DataService) -> None:
         """Новый путь записи в журнал не может обойти штамповку молча.
@@ -297,11 +335,11 @@ class TestAgentMomentIsNotOverwritten:
         service.log_events(_agent_batch(seq, occurred_at), session_id="cli:1", user_id="u1")
         service._buffer.flush()
 
-        sql, rows = _flushed(service)[0]
-        assert _column(sql, rows[0], "seq") == seq, (
+        sql, template, rows = _flushed(service)[0]
+        assert _column(sql, template, rows[0], "seq") == seq, (
             "платформа перебила момент агента своим — в колонку уехал момент приёма батча"
         )
-        assert _column(sql, rows[0], "occurred_at") == occurred_at
+        assert _column(sql, template, rows[0], "occurred_at") == occurred_at
 
     def test_stamp_helper_is_a_no_op_for_a_stamped_event(self) -> None:
         event = {

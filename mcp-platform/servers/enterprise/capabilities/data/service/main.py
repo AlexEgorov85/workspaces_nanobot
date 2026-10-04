@@ -1012,18 +1012,33 @@ class DataService:
         # Последние две колонки — `seq` и `occurred_at`, момент события и ключ
         # порядка, разобранные из `metadata` (единственного места, где они
         # живут). Они добавлены В КОНЕЦ списка колонок, чтобы порядок
-        # плейсхолдеров прежних полей не сдвинулся: по нему написан страж
-        # `tests/test_data_service.py::test_placeholder_count_matches_row_width`
+        # выражений прежних полей не сдвинулся: по нему написан страж
+        # `tests/test_data_service.py::test_journal_insert_matches_execute_values_contract`
         # и по нему же платформенный тест разбора строки. Колонка `timestamp`
         # остаётся моментом ЗАПИСИ строки (`now()`), а `occurred_at` — моментом
         # СОБЫТИЯ: подставлять событийный момент в момент записи запрещено
         # требованием «Порядок и момент события переживают границу процессов».
+        # ``VALUES %s`` — якорь ровно ОДИН и БЕЗ скобок вокруг него.
+        # ``execute_values`` сам разворачивает шаблон в список строк, поэтому
+        # плейсхолдеров в SQL больше одного быть не может: второй вызывает
+        # ``ValueError: the query contains more than one '%s' placeholder``
+        # ещё до похода в базу, и весь батч молча теряется (именно так журнал
+        # стоял пустым, пока страж сравнивал счётчик плейсхолдеров с шириной
+        # строки — то есть закреплял сломанную форму).
         sql = (
             f'INSERT INTO "{schema}"."{table}" '
             "(id, \"timestamp\", event_type, name, level, summary, payload, "
             "session_id, user_id, request_id, channel, actor, metadata, "
             "seq, occurred_at) "
-            "VALUES (%s, now(), %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, "
+            "VALUES %s"
+        )
+        # Шаблон одной строки. Порядок выражений обязан совпадать с порядком
+        # колонок, а ``now()`` — момент ЗАПИСИ, не момент события: тот живёт
+        # в ``occurred_at``. Шаблон явный, потому что ``execute_values`` без
+        # него выводит число плейсхолдеров из длины кортежа (14) и не знает
+        # про ``now()`` — колонок 15, и вставка падает.
+        template = (
+            "(%s, now(), %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, "
             "%s::jsonb, %s, %s)"
         )
         rows = [
@@ -1079,7 +1094,7 @@ class DataService:
             )
 
         def _work(conn: Any) -> None:
-            insert_many(conn, sql, rows)
+            insert_many(conn, sql, rows, template=template)
 
         # Отказ пула — ``PoolBusyError`` — переводится на язык буфера: буфер
         # различает «не записалось сейчас» и «не запишется уже никогда», а
