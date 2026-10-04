@@ -35,7 +35,6 @@ from typing import Any
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from rich.console import Console
 from utils.jsonb import decode_jsonb as _decode_jsonb
 from utils.media import (
     deserialize as media_deserialize,
@@ -56,8 +55,6 @@ from lib.services.session_files import (
     current_session_file_resolver,
 )
 from lib.utils.outbound_meta import FINAL_TURN_KEY, is_dropped
-
-console = Console()
 
 
 def _session_dir_resolver() -> SessionFileResolver:
@@ -189,9 +186,22 @@ class PostgresChannel(BaseChannel):
         self._claimed_ids: set[str] = set()
 
         # ---- вывод активности пула воркеров в терминал ----
-        # Включается в gateway отключаемой опцией `gateway.print_worker_activity`
-        # (project.json). Печатает: взял задачу / закончил / размер очереди.
-        self._print_worker_activity: bool = bool(_get("print_worker_activity", False))
+        # Глубину вывода объявляет ОДИН ключ ``gateway.console_level``
+        # (``quiet|turn|trace``, дефолт ``turn``). Активность воркеров — факт
+        # оборота, поэтому она видна на ``turn`` и ``trace``: прежний дефолт
+        # ``print_worker_activity=false`` означал, что за оборотом при
+        # ``log_level=INFO`` не видно ничего, и это был дефект наблюдаемости.
+        # Явный ключ в конфиге канала — только ручка тестов и standalone.
+        _declared_activity = _get("print_worker_activity", None)
+        if _declared_activity is None:
+            from lib.services.operator_console import (
+                CONSOLE_LEVEL_TURN,
+                depth_visible,
+            )
+
+            self._print_worker_activity: bool = depth_visible(CONSOLE_LEVEL_TURN)
+        else:
+            self._print_worker_activity = bool(_declared_activity)
         # последний напечатанный (pending, error) — чтобы не спамить строку очереди
         self._last_queue_summary: tuple[int, int] | None = None
 
@@ -385,19 +395,49 @@ class PostgresChannel(BaseChannel):
     # Активность пула воркеров (опциональный вывод в терминал gateway)
     # ------------------------------------------------------------------
     #
-    # Включается отключаемой опцией ``gateway.print_worker_activity``
-    # (project.json). Печатает через Rich-консоль, когда воркер взял
-    # задачу, закончил её (completed/error/failed) и текущий размер
-    # очереди (pending/error). Форматом повторяет вывод токенов LLM.
+    # Включается объявленной глубиной вывода ``gateway.console_level``
+    # (``operator_console.depth_visible("turn")``): факты оборота видны на
+    # ``turn`` и ``trace``. Явный ``print_worker_activity`` в конфиге канала
+    # остаётся только как ручка для тестов и standalone-запуска, где
+    # ``configure_loguru`` не вызывался; в gateway ключ выводится из уровня,
+    # поэтому второй ручки выбора глубины не остаётся. Печатает: взял
+    # задачу / закончил / простой / размер очереди. Форматом повторяет вывод
+    # токенов LLM.
 
-    def _activity_print(self, line: str) -> None:
-        """Напечатать строку активности воркера, если флаг включён."""
-        if self._print_worker_activity:
-            # cp1251-консоль Windows не переваривает юникодные стрелки —
-            # заменяем на ASCII-эквивалент до вывода. markup=False держит
-            # квадратные метки ([task-worker], [очередь-задач]) как текст.
-            safe = line.replace("←", "<-").replace("→", "->")
-            console.print(safe, style="dim", markup=False)
+    def _activity_print(
+        self,
+        phase: str,
+        *,
+        task: str | None = None,
+        chat: str | None = None,
+        detail: str = "",
+        extra: str = "",
+    ) -> None:
+        """Отдать консоли факт активности воркера.
+
+        Канал НЕ печатает факт сам: он собирает объект и отдаёт общий
+        рендер (``lib/services/operator_console.py``). Раньше здесь был
+        ``rich.console.print`` с собственной подстановкой стрелок и
+        ``markup=False`` — это был второй формат построчного вывода, и
+        колонки «кто»/«задача» у такой строки не было вовсе.
+        """
+        if not self._print_worker_activity:
+            return
+        try:
+            from lib.services.operator_console import emit, worker_fact
+
+            emit(worker_fact(
+                worker=self._worker_id,
+                phase=phase,
+                task=task,
+                chat=chat,
+                detail=detail,
+                extra=extra,
+            ))
+        except Exception:
+            # Активность — не факт оборота: её потеря не должна ронять
+            # обработку задачи.
+            pass
 
     def _lifecycle_log(
         self,
@@ -492,9 +532,22 @@ class PostgresChannel(BaseChannel):
             if summary != self._last_queue_summary:
                 self._last_queue_summary = summary
                 total = pending + error
-                self._activity_print(
-                    f"[очередь-задач] pending={pending}, error={error} (итого {total})"
-                )
+                if total == 0:
+                    # «Работать не над чем» — САМ ФАКТ, а не отсутствие
+                    # строк. Без него «очередь пуста» и «воркер завис» в
+                    # терминале неразличимы, и это ровно тот дефект
+                    # наблюдаемости, который change закрывает. Носитель —
+                    # существующий маркер ``TASK lifecycle``: записи в журнале
+                    # у этого факта нет, и выдумывать имя события нельзя.
+                    self._activity_print(
+                        "idle",
+                        extra=f"pending={pending} error={error} (итого {total})",
+                    )
+                else:
+                    self._activity_print(
+                        "queue",
+                        extra=f"pending={pending} error={error} (итого {total})",
+                    )
         except Exception as e:
             self.logger.debug("Worker queue stats error: {}", e)
 
@@ -674,8 +727,10 @@ class PostgresChannel(BaseChannel):
         # последующих сообщений. Никакого assistant-placeholder.
         self._msg_chat[user_msg_id] = chat_id
         self._activity_print(
-            f"→ [priority] {self._worker_id} взял priority {user_msg_id} "
-            f"(chat {chat_id}): {self._preview(content)}"
+            "claimed_priority",
+            task=user_msg_id,
+            chat=chat_id,
+            detail=self._preview(content),
         )
 
         meta: dict[str, Any] = {
@@ -709,8 +764,7 @@ class PostgresChannel(BaseChannel):
         self._msg_ctx.pop(user_msg_id, None)
         self._msg_chat.pop(user_msg_id, None)
         self._activity_print(
-            f"× [priority] {self._worker_id} обработал priority {user_msg_id} "
-            f"(chat {chat_id})"
+            "handled_priority", task=user_msg_id, chat=chat_id,
         )
         return True
 
@@ -1009,8 +1063,8 @@ class PostgresChannel(BaseChannel):
         self._chat_inflight.add(chat_id)
         self._msg_chat[user_msg_id] = chat_id
         self._activity_print(
-            f"→ [task-worker] {self._worker_id} взял задачу {user_msg_id} "
-            f"(chat {chat_id}): {self._preview(content)}"
+            "claimed", task=user_msg_id, chat=chat_id,
+            detail=self._preview(content),
         )
 
         meta: dict[str, Any] = {
@@ -1120,8 +1174,8 @@ class PostgresChannel(BaseChannel):
             self._reasoning_buffers.pop(assistant_msg_id, None)
         self._drop_context_bridge(chat_id)
         self._activity_print(
-            f"← [task-worker] {self._worker_id} закончил задачу {user_msg_id} "
-            f"(chat {chat_id or '?'}) [{status}]: {reason}"
+            "finished", task=user_msg_id, chat=chat_id,
+            detail=f"исход={status} причина={reason}",
         )
 
     def _drop_context_bridge(self, chat_id: str | None) -> None:
@@ -1473,8 +1527,8 @@ class PostgresChannel(BaseChannel):
                 if chat_id:
                     self._drop_context_bridge(chat_id)
                 self._activity_print(
-                    f"× [task-worker] {self._worker_id} отменил задачу "
-                    f"{user_msg_id} (chat {chat_id}) [cancelled by user]"
+                    "cancelled", task=user_msg_id, chat=chat_id,
+                    detail="отменена пользователем",
                 )
                 return
             self._lifecycle_log(
@@ -1505,8 +1559,7 @@ class PostgresChannel(BaseChannel):
         if chat_id:
             self._drop_context_bridge(chat_id)
         self._activity_print(
-            f"← [task-worker] {self._worker_id} закончил задачу {user_msg_id} "
-            f"(chat {chat_id}) [completed]"
+            "finished", task=user_msg_id, chat=chat_id, detail="исход=completed",
         )
 
     async def send_delta(

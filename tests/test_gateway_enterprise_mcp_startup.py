@@ -19,6 +19,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 GATEWAY = REPO_ROOT / "gateway.py"
 
 
+def _console(captured) -> str:
+    """Весь вывод запуска — блочные баннеры и построчные факты вместе.
+
+    Раньше всё это печаталось в stdout через rich, и проверять было нечего.
+    Теперь построчные факты и вердикты идут тем же объявленным форматом в
+    stderr (loguru — общий sink), а блочные строки (смоук-баннер) остались
+    rich в stdout. Тесты ниже проверяют, что текст дошёл до консоли
+    оператора; РАЗДЕЛЕНИЕ потоков проверяется отдельно, в
+    ``tests/test_operator_console_*.py`` — иначе каждый из этих тестов
+    таскал бы с собой ещё и утверждение о потоке.
+
+    ``capfd`` вместо ``capsys`` — сознательно: sink loguru привязан к
+    ``sys.stderr`` на старте процесса (так объявлен уровень вывода), и
+    sys-подмена ``capsys`` его не видит, тогда как подмена файлового
+    дескриптора видит. Проверять надо то, что оператор реально увидит.
+    """
+    return captured.out + captured.err
+
+
 class _FakeClient:
     """Клиент, который считает вызовы и помнит переданную идентичность."""
 
@@ -144,7 +163,7 @@ class TestHandshake:
 
         assert client.calls == 1
 
-    def test_unavailable_server_is_not_swallowed(self, capsys):
+    def test_unavailable_server_is_not_swallowed(self, capfd):
         """Отказ обязан дойти до GatewayRunner: иначе каналы поднялись бы,
         задачи забирались бы, а tool'ы отвечали бы ошибкой."""
         from lib.services.enterprise_mcp_client import EnterpriseMcpUnavailable
@@ -157,16 +176,16 @@ class TestHandshake:
         # Причина обязана быть в выводе: GatewayRunner сообщает только
         # «Gateway exited unexpectedly, restarting in 1.0s» — без этой
         # строки причина подъёма в логе не ищется нигде.
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "НЕ ПОДНЯЛСЯ" in out
         assert "процесс не поднялся" in out
 
-    def test_operation_count_reported(self, capsys):
+    def test_operation_count_reported(self, capfd):
         _connect(_FakeClient(operations=["a", "b", "c"]))
 
-        assert "3 операций" in capsys.readouterr().out
+        assert "3 операций" in _console(capfd.readouterr())
 
-    def test_stderr_destination_is_reported(self, capsys):
+    def test_stderr_destination_is_reported(self, capfd):
         """Баннер обязан называть, куда ушёл stderr платформы.
 
         Без этой строки режим наблюдения молчал бы: «окно не открылось»
@@ -175,14 +194,14 @@ class TestHandshake:
         """
         _connect(_FakeClient())
 
-        assert "stderr платформы" in capsys.readouterr().out
+        assert "stderr платформы" in _console(capfd.readouterr())
 
-    def test_disabled_section_is_reported_not_silent(self, capsys):
+    def test_disabled_section_is_reported_not_silent(self, capfd):
         """Выключенный раздел — тоже результат: молчание неотличимо от
         «секция объявлена, но поднялась незаметно»."""
         _connect(None)
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "не объявлен" in out
 
 
@@ -224,19 +243,19 @@ class TestHealthSummary:
 
         assert set(client.call_ops) == {"list_indexes", "schema_check", "list_scripts"}
 
-    def test_healthy_capabilities_are_summarised(self, capsys):
+    def test_healthy_capabilities_are_summarised(self, capfd):
         _connect(self._client(), **_ctx_kw("prod"))
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "2/2 ready" in out
         assert "4/4 таблиц" in out
         assert "6 скриптов" in out
 
-    def test_alignment_runs_as_part_of_the_health_report(self, capsys):
+    def test_alignment_runs_as_part_of_the_health_report(self, capfd):
         """Сводка обязана довести дело до сверки, а не остановиться на счётчиках."""
         _connect(self._client("test"), **_ctx_kw("test"))
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "согласован" in out
         assert "profile=test" in out
 
@@ -257,14 +276,14 @@ class TestHealthSummary:
             assert meta["workspaces/session_id"].startswith("startup:")
             assert meta["workspaces/user_id"].startswith("startup:")
 
-    def test_probe_failure_does_not_fail_startup(self, capsys):
+    def test_probe_failure_does_not_fail_startup(self, capfd):
         """Платформа отвечает, но одна capability сломана — это не повод
         ронять шлюз и уводить его в бесконечный рестарт."""
         client = self._client(call_error=RuntimeError("снимок недоступен"))
 
         _connect(client, **_ctx_kw("prod"))  # не должно бросить
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "снимок недоступен" in out
         assert "процесс поднят" in out
 
@@ -282,7 +301,7 @@ class TestHealthSummary:
             # платформа отвечает боевыми именами, агент ждёт тестовые
             _connect(client, **_ctx_kw("prod"))
 
-    def test_hanging_probe_is_bounded(self, capsys, monkeypatch):
+    def test_hanging_probe_is_bounded(self, capfd, monkeypatch):
         """Одна зависшая capability не должна держать старт.
 
         Каждая проба обёрнута в ``asyncio.wait_for(..., 20.0)``: без
@@ -308,7 +327,7 @@ class TestHealthSummary:
 
         assert requested, "ни одна проба не была ограничена по времени"
         assert set(requested) == {20.0}, requested
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "проба не ответила" in out
         assert out.count("проба не ответила") == 3, (
             "ограничена должна быть каждая проба, а не только первая"
@@ -355,7 +374,7 @@ class TestTableAlignment:
             "public.oarb.audits",
         ]
 
-    def test_aligned_profile_passes(self, capsys):
+    def test_aligned_profile_passes(self, capfd):
         from gateway import _verify_platform_table_alignment
 
         _verify_platform_table_alignment(
@@ -368,9 +387,9 @@ class TestTableAlignment:
             self._platform("test"),
         )
 
-        assert "согласован" in capsys.readouterr().out
+        assert "согласован" in _console(capfd.readouterr())
 
-    def test_prod_needs_no_overlay_and_passes(self, capsys):
+    def test_prod_needs_no_overlay_and_passes(self, capfd):
         from gateway import _verify_platform_table_alignment
 
         _verify_platform_table_alignment(
@@ -383,7 +402,7 @@ class TestTableAlignment:
             self._platform("prod"),
         )
 
-        assert "согласован" in capsys.readouterr().out
+        assert "согласован" in _console(capfd.readouterr())
 
     def test_forgotten_platform_overlay_fails_startup(self):
         """Агент перекрыл, платформа — нет: это ровно тот прежний дефект."""
@@ -440,7 +459,7 @@ class TestTableAlignment:
             )
         assert "question_runs_table" in str(exc.value)
 
-    def test_unanswered_probe_does_not_fail_startup(self, capsys):
+    def test_unanswered_probe_does_not_fail_startup(self, capfd):
         """schema_check не ответил — причина уже показана в сводке.
 
         Добивать старт второй ошибкой из-за той же причины незачем.
@@ -728,7 +747,7 @@ class TestHandshakeFailureRefusesStartup:
         assert "channels.start_all" not in log, log
         assert "agent.run" not in log, log
 
-    def test_reason_is_printed_before_the_refusal(self, monkeypatch, capsys):
+    def test_reason_is_printed_before_the_refusal(self, monkeypatch, capfd):
         """``GatewayRunner`` печатает только «Gateway exited unexpectedly,
         restarting in 1.0s» — без этой строки причина подъёма не ищется
         ни в одном логе."""
@@ -739,7 +758,7 @@ class TestHandshakeFailureRefusesStartup:
         with pytest.raises(EnterpriseMcpUnavailable):
             _run_gateway(monkeypatch, [], client)
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "НЕ ПОДНЯЛСЯ" in out
         assert "процесс не поднялся" in out
 
@@ -810,12 +829,12 @@ class TestCliHandshake:
 
         asyncio.run(_connect_enterprise_mcp(_cli_ctx([], client)))
 
-    def test_disabled_section_is_not_an_error(self, capsys):
+    def test_disabled_section_is_not_an_error(self, capfd):
         """Раздел выключен — сервера нет по решению оператора, падать не на что.
         Молчание было бы неотличимо от «объявлен, но поднялся незаметно»."""
         self._connect(None)
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "не объявлен" in out
 
     def test_client_is_probed_once(self):
@@ -825,10 +844,10 @@ class TestCliHandshake:
 
         assert client.calls == 1
 
-    def test_operation_count_reported(self, capsys):
+    def test_operation_count_reported(self, capfd):
         self._connect(_FakeClient(operations=["a", "b", "c"]))
 
-        assert "3 операций" in capsys.readouterr().out
+        assert "3 операций" in _console(capfd.readouterr())
 
     def test_unavailable_server_refuses_startup(self):
         """Отказ обязан подняться наружу: иначе REPL откроется, и первый
@@ -855,7 +874,7 @@ class TestCliHandshake:
         assert isinstance(exc.value.__cause__, EnterpriseMcpUnavailable)
         assert "процесс не поднялся" in str(exc.value)
 
-    def test_reason_is_readable_and_stack_trace_free(self, capsys):
+    def test_reason_is_readable_and_stack_trace_free(self, capfd):
         """CLI интерактивен: пользователю нужен вердикт и подсказка, а не дамп."""
         from cli_agent import CliStartupError
         from lib.services.enterprise_mcp_client import EnterpriseMcpUnavailable
@@ -865,13 +884,13 @@ class TestCliHandshake:
         with pytest.raises(CliStartupError):
             self._connect(client)
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "НЕ ПОДНЯЛСЯ" in out
         assert "процесс не поднялся" in out
         assert "mcp-platform/platform.json" in out, "нет подсказки, что проверять"
         assert "Traceback" not in out
 
-    def test_profile_mismatch_keeps_configuration_error_type(self, capsys):
+    def test_profile_mismatch_keeps_configuration_error_type(self, capfd):
         """Ошибка конфигурации не должна выглядеть как «сервер не отвечает».
 
         В gateway такой отказ сохраняет тип ``ConfigurationError`` (→ exit 2),
@@ -888,7 +907,7 @@ class TestCliHandshake:
         with pytest.raises(ConfigurationError):
             TestCliHandshake._connect(client)
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "КОНФИГУРАЦИЯ" in out
         assert "расходятся" in out
 
@@ -1131,7 +1150,7 @@ class TestCliPatchedBranch:
         assert log.index("ctx.start") < log.index("handshake"), log
 
     def test_patched_branch_reports_no_stack_trace_by_default(
-        self, monkeypatch, capsys
+        self, monkeypatch, capfd
     ):
         """Подача отказа — тоже контракт, и на второй ветке она такая же."""
         import cli_agent
@@ -1143,7 +1162,7 @@ class TestCliPatchedBranch:
         with pytest.raises(cli_agent.CliStartupError):
             _run_cli_branch(monkeypatch, patched=True, client=client)
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "НЕ ПОДНЯЛСЯ" in out
         assert "Traceback" not in out
 
@@ -1242,7 +1261,7 @@ class TestCliTableAlignment:
 
     @pytest.mark.parametrize("patched, branch", _CLI_BRANCHES)
     def test_profile_mismatch_refuses_startup_as_configuration_error(
-        self, monkeypatch, patched, branch, capsys
+        self, monkeypatch, patched, branch, capfd
     ):
         """Расхождение — ошибка конфигурации, а не «платформа не отвечает».
 
@@ -1269,7 +1288,7 @@ class TestCliTableAlignment:
 
     @pytest.mark.parametrize("patched, branch", _CLI_BRANCHES)
     def test_profile_mismatch_exits_two_and_is_not_masked_as_one(
-        self, monkeypatch, patched, branch, capsys
+        self, monkeypatch, patched, branch, capfd
     ):
         """Ключевое требование: код выхода остаётся 2.
 
@@ -1294,7 +1313,7 @@ class TestCliTableAlignment:
 
         code = cli_agent.main(argv)
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert code == 2, (
             f"{branch}: расхождение профиля обязано давать 2, а не {code}"
         )
@@ -1310,7 +1329,7 @@ class TestCliTableAlignment:
         assert "repl" not in log, (branch, log)
 
     def test_alignment_failure_is_reported_before_it_is_raised(
-        self, monkeypatch, capsys
+        self, monkeypatch, capfd
     ):
         """Вердикт печатается ДО ``raise``.
 
@@ -1325,12 +1344,12 @@ class TestCliTableAlignment:
                 **_cli_profile_harness_kw(),
             )
 
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "КОНФИГУРАЦИЯ" in out
         assert "расходятся" in out
         assert "platform.json" in out, "нет подсказки, что синхронизировать"
 
-    def test_unanswered_probe_does_not_refuse_startup(self, monkeypatch, capsys):
+    def test_unanswered_probe_does_not_refuse_startup(self, monkeypatch, capfd):
         """Проба не ответила — это неполнота capability, а не отказ запуска.
 
         Платформа-то ответила; ронять REPL из-за одной недоступной сводки
@@ -1343,7 +1362,7 @@ class TestCliTableAlignment:
         )
 
         assert "repl" in log, log
-        out = capsys.readouterr().out
+        out = _console(capfd.readouterr())
         assert "schema_check недоступен" in out
 
 
@@ -1360,7 +1379,7 @@ class TestCliStartupBoundary:
         monkeypatch.setattr(cli_agent, "_entrypoint_main", boom)
 
     def test_startup_failure_exits_nonzero_with_reason(
-        self, monkeypatch, capsys
+        self, monkeypatch, capfd
     ):
         import cli_agent
         from lib.services.enterprise_mcp_client import EnterpriseMcpUnavailable
@@ -1375,14 +1394,14 @@ class TestCliStartupBoundary:
 
         code = cli_agent.main([])
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert code == 1
         assert "enterprise-mcp" in captured.err
         assert "Traceback" not in captured.err, (
             "в интерактивной консоли стек-трейс по умолчанию не нужен"
         )
 
-    def test_traceback_only_when_explicitly_requested(self, monkeypatch, capsys):
+    def test_traceback_only_when_explicitly_requested(self, monkeypatch, capfd):
         """Разработчику трассировка доступна, но только по явному запросу."""
         import cli_agent
 
@@ -1394,7 +1413,7 @@ class TestCliStartupBoundary:
         code = cli_agent.main([])
 
         assert code == 1
-        assert "Traceback" in capsys.readouterr().err
+        assert "Traceback" in capfd.readouterr().err
 
     def test_configuration_error_still_exits_two(self, monkeypatch):
         """Отказ конфигурации и отказ зависимости — разные коды: смешанные,

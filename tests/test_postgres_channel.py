@@ -703,38 +703,66 @@ class TestPostgresChannelWorkerActivity:
 
     @pytest.mark.asyncio
     async def test_activity_print_disabled_silent(self, mock_db_and_psycopg):
+        """Выключенная активность не отдаёт консоли ничего.
+
+        Молчание намеренное и проверяемое: без ручки вывода факт не
+        собирается вовсе, а не собирается и теряется.
+        """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=False)
-        with patch("lib.channels.postgres_channel.console") as console:
-            ch._activity_print("hello")
-            console.print.assert_not_called()
+        with patch("lib.services.operator_console.emit") as emit:
+            ch._activity_print("claimed", task="m-1", chat="chat-1")
+            emit.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_activity_print_enabled_prints(self, mock_db_and_psycopg):
+    async def test_activity_print_enabled_hands_over_a_fact(self, mock_db_and_psycopg):
+        """Канал отдаёт факт общему рендеру, а не печатает сам.
+
+        Раньше тест требовал вызов ``rich.console.print`` — то есть охранял
+        второй формат построчного вывода, у которого не было колонок
+        «кто» и «задача». Теперь граница проверяется там, где она стала:
+        факт собран и отдан на печать.
+        """
+        from lib.services.operator_console import LIFECYCLE_MARKER
+
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
-        with patch("lib.channels.postgres_channel.console") as console:
-            ch._activity_print("hello")
-            console.print.assert_called_once()
-            assert "hello" in console.print.call_args.args[0]
+        with patch("lib.services.operator_console.emit") as emit:
+            ch._activity_print(
+                "claimed", task="m-1", chat="chat-1", detail="привет!",
+            )
+            emit.assert_called_once()
+            fact = emit.call_args.args[0]
+            assert fact.marker == LIFECYCLE_MARKER
+            assert fact.who == ch._worker_id
+            assert "task=m-1" in fact.detail
+            assert "phase=claimed" in fact.detail
+            assert "chat=chat-1" in fact.detail
+            assert "привет!" in fact.detail
 
     @pytest.mark.asyncio
     async def test_report_queue_prints_on_change_only(self, mock_db_and_psycopg):
+        """Размер очереди — факт, и появляется он по изменению.
+
+        Тот же размер — не событие: иначе консоль повторяла бы
+        неизменившееся состояние, и строка перестала бы значить
+        «что-то произошло».
+        """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
         mock_db.responses["queue_stats"] = {"pending": 3, "error": 1}
-        with patch("lib.channels.postgres_channel.console") as console:
+        with patch("lib.services.operator_console.emit") as emit:
             await ch._report_queue()
-            console.print.assert_called_once()
-            assert "pending=3" in console.print.call_args.args[0]
-            assert "error=1" in console.print.call_args.args[0]
-            # то же значение — повторно не печатаем
+            emit.assert_called_once()
+            detail = emit.call_args.args[0].detail
+            assert "phase=queue" in detail
+            assert "pending=3" in detail
+            assert "error=1" in detail
             await ch._report_queue()
-            assert console.print.call_count == 1
-            # изменилось — печатаем
+            assert emit.call_count == 1
             mock_db.responses["queue_stats"] = {"pending": 4, "error": 0}
             await ch._report_queue()
-            assert console.print.call_count == 2
+            assert emit.call_count == 2
 
     @pytest.mark.asyncio
     async def test_report_queue_disabled_skips_query(self, mock_db_and_psycopg):
@@ -745,7 +773,13 @@ class TestPostgresChannelWorkerActivity:
         assert not mock_db.was_called("queue_stats")
 
     @pytest.mark.asyncio
-    async def test_poll_once_prints_took_task(self, mock_db_and_psycopg):
+    async def test_poll_once_hands_over_claimed_fact(self, mock_db_and_psycopg):
+        """Захват задачи — факт с личностью воркера, задачей и чатом.
+
+        Именно этих трёх колонок не хватало оператору: по старой строке
+        «взял задачу m-1» было видно, что что-то началось, но не кто
+        начал и в каком чате.
+        """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
 
@@ -754,7 +788,7 @@ class TestPostgresChannelWorkerActivity:
                 "id": "m-1",
                 "chat_id": "chat-1",
                 "user_id": "user-1",
-                "content": "Привет!",
+                "content": "привет!",
                 "metadata": "{}",
                 "media": [],
             }
@@ -768,17 +802,19 @@ class TestPostgresChannelWorkerActivity:
         exchange.acquire_slot = AsyncMock()
         exchange.is_slot_free = lambda: True
 
-        with patch("lib.channels.postgres_channel.console") as console:
+        with patch("lib.services.operator_console.emit") as emit:
             result = await ch._poll_once(exchange)
             assert result is True
-            console.print.assert_called_once()
-            text = console.print.call_args.args[0]
-            assert "взял задачу m-1" in text
-            assert "chat-1" in text
-            assert "Привет!" in text
+            emit.assert_called_once()
+            fact = emit.call_args.args[0]
+            assert fact.who == ch._worker_id
+            assert "phase=claimed" in fact.detail
+            assert "task=m-1" in fact.detail
+            assert "chat=chat-1" in fact.detail
+            assert "привет!" in fact.detail
 
     @pytest.mark.asyncio
-    async def test_poll_once_took_disabled_not_printed(self, mock_db_and_psycopg):
+    async def test_poll_once_disabled_hands_over_nothing(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=False)
 
@@ -801,17 +837,17 @@ class TestPostgresChannelWorkerActivity:
         exchange.acquire_slot = AsyncMock()
         exchange.is_slot_free = lambda: True
 
-        with patch("lib.channels.postgres_channel.console") as console:
+        with patch("lib.services.operator_console.emit") as emit:
             result = await ch._poll_once(exchange)
             assert result is True
-            console.print.assert_not_called()
+            emit.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mark_failed_prints_finished(self, mock_db_and_psycopg):
+    async def test_mark_failed_hands_over_finished_fact(self, mock_db_and_psycopg):
+        """Исход отказа виден в факте: без него «воркер закончил» и
+        «пользователь получил» неразличимы."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
-
-        mock_db.responses["fail_task"] = {"status": "failed", "retry_count": 6}
 
         ch._msg_chat["m-1"] = "chat-1"
         exchange = MagicMock()
@@ -820,16 +856,19 @@ class TestPostgresChannelWorkerActivity:
         ch.exchange = exchange
 
         mock_db.responses["fail_task"] = {"status": "error", "retry_count": 1}
-        with patch("lib.channels.postgres_channel.console") as console:
+        with patch("lib.services.operator_console.emit") as emit:
             await ch._mark_failed("m-1", "a-1", "dispatch_error")
-            console.print.assert_called_once()
-            text = console.print.call_args.args[0]
-            assert "закончил задачу m-1" in text
-            assert "[error]" in text
-            assert "chat-1" in text
+            emit.assert_called_once()
+            fact = emit.call_args.args[0]
+            assert "phase=finished" in fact.detail
+            assert "task=m-1" in fact.detail
+            assert "chat=chat-1" in fact.detail
+            assert "исход=error" in fact.detail
+            assert "причина=dispatch_error" in fact.detail
 
     @pytest.mark.asyncio
-    async def test_finalize_turn_prints_completed(self, mock_db_and_psycopg):
+    async def test_finalize_turn_hands_over_completed_fact(self, mock_db_and_psycopg):
+        """Успешный финал — факт с исходом completed."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
         mock_db.responses["finalize_turn"] = {"outcome": "completed"}
@@ -849,12 +888,13 @@ class TestPostgresChannelWorkerActivity:
         msg.media = []
         msg.buttons = []
 
-        with patch("lib.channels.postgres_channel.console") as console:
+        with patch("lib.services.operator_console.emit") as emit:
             await ch.send(msg)
-            console.print.assert_called_once()
-            text = console.print.call_args.args[0]
-            assert "закончил задачу m-1" in text
-            assert "[completed]" in text
+            emit.assert_called_once()
+            fact = emit.call_args.args[0]
+            assert "phase=finished" in fact.detail
+            assert "task=m-1" in fact.detail
+            assert "исход=completed" in fact.detail
 
 
 class TestPostgresChannelContextWindow:

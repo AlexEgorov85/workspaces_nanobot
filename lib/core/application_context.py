@@ -55,6 +55,23 @@ DEPRECATED_ENABLE_KWARGS = frozenset({
 })
 
 
+def _declared_depth_shows(depth: str) -> bool:
+    """Видна ли глубина ``depth`` при действующем ``gateway.console_level``.
+
+    Замена чтения ``gateway.print_llm_calls``/``print_db_activity``: флагов
+    больше нет, глубина объявляется одним ключом, и спрашивается ровно то же
+    правило отбора, по которому консоль решает, печатать ли строку
+    (``operator_console.depth_visible``). Отказ чтения — ``False``: без
+    объявленного уровня глубокие факты не выводятся.
+    """
+    try:
+        from lib.services.operator_console import depth_visible
+
+        return depth_visible(depth)
+    except Exception:
+        return False
+
+
 def _resolve_enable_kwargs(
     kwargs: dict[str, Any],
     *,
@@ -96,7 +113,12 @@ def _resolve_enable_kwargs(
         "enable_db_logging": bool(gateways.get("enable_db_logging", True)),
         "enable_audit": bool(gateways.get("enable_audit", True)),
         "enable_cron": bool(gateways.get("enable_cron", False)),
-        "print_llm_calls": bool(gateways.get("print_llm_calls", False)),
+        # Глубина вывода объявляется ОДНИМ ключом ``gateway.console_level``;
+        # по одному факту на вызов модели — это ``trace``. Спрашивается
+        # ДЕЙСТВУЮЩИЙ уровень процесса, а не флаг из ``gateways``: тот же
+        # вопрос задаётся консолью при печати, и источник истины должен быть
+        # один, иначе хук печатал бы то, чего терминал не показывает.
+        "print_llm_calls": _declared_depth_shows("trace"),
     }
 
     out = dict(defaults)
@@ -306,11 +328,10 @@ class ApplicationContext:
         # применяется ДО создания сервисов, чтобы воркеры пула использовали
         # заданные min_conn/max_conn/pool_timeout и т.п.
         if isinstance(pg_section, dict) and isinstance(pg_section.get("pool"), dict):
-            _db_print = bool(
-                ctx.config_service.settings_section("gateway").get(
-                    "print_db_activity", False
-                )
-            )
+            # Активность db-worker'ов — по одному факту на операцию пула,
+            # то есть объявленная глубина ``trace`` (бывший флаг
+            # ``gateway.print_db_activity``, снятый вместе с тремя другими).
+            _db_print = _declared_depth_shows("trace")
             _configure_db_pool(
                 pg_section.get("pool", {}), print_activity=_db_print
             )
@@ -644,6 +665,12 @@ class ApplicationContext:
         if self.runtime_health is not None:
             self.runtime_health.mark_started()
 
+        # Баннер обязан НАЗЫВАТЬ действующую глубину вывода: иначе оператор не
+        # знает, что он настроил, и отличить «тишину по настройке» от «тишины
+        # из-за поломки» нечем. Здесь, а не в точке входа, потому что объявлять
+        # должен ОДИН код и для gateway, и для CLI.
+        _announce_console_output()
+
         # Переопределения системных шаблонов nanobot из workspace/overrides/
         # (например, русская инструкция Consolidator). Безопасно-идемпотентно;
         # при отсутствии каталога молча пропускается.
@@ -887,6 +914,48 @@ def _print_startup_block(text: str) -> None:
         Console(soft_wrap=True).print(text, markup=False, highlight=False)
     except Exception:
         print(text)
+
+
+def _announce_console_output() -> None:
+    """Объявить действующую глубину вывода и пределы этой работы.
+
+    Баннер (не блочный инвентарный блок, который остаётся rich ради
+    ``tools/diagnose_startup.py``) уходит в общий построчный поток: объявление
+    о состоянии процесса — такой же однострочный факт, как приём задачи или
+    доставка ответа, и второй формат для него означал бы ровно тот дефект,
+    который change закрывает.
+
+    Заодно объявляется остаточная дыра этой работы: периодической
+    heartbeat-строки простоя нет — у неё нет владельца состояния воркеров и
+    таймера, а этот change состояние воркеров не заводит. Поэтому «тишина без
+    событий» и «тишина после факта простоя» — РАЗНЫЕ состояния, и назвать
+    границу лучше, чем оставить её недосмотром.
+    """
+    try:
+        from lib.services.operator_console import (
+            CONSOLE_LEVELS,
+            effective_console_level,
+            emit,
+            pending_legacy_warnings,
+            startup_fact,
+        )
+    except Exception:
+        return
+    try:
+        level = effective_console_level()
+        emit(startup_fact(
+            f"консоль: уровень={level} "
+            f"(допустимо {' | '.join(CONSOLE_LEVELS)})"
+        ))
+        for warning in pending_legacy_warnings():
+            emit(startup_fact(f"консоль: {warning}", level="WARN"))
+        emit(startup_fact(
+            "консоль: heartbeat-строки простоя в этой версии нет — воркер, не "
+            "видевший ни одного изменения очереди, молчит; отличить его от "
+            "простоя по одному факту idle нельзя"
+        ))
+    except Exception:
+        pass
 
 
 def _log_connected_hooks(ctx: ApplicationContext) -> None:
@@ -1695,8 +1764,8 @@ def _configure_db_pool(pool_cfg: dict, print_activity: bool = False) -> None:
     connect_max_retries/idle_timeout_sec/job_max_retries``. Неизвестные
     ключи игнорируются (``set_pool_config`` принимает только известные).
 
-    ``print_activity`` — вывод активности db-worker'ов (гейт
-    ``gateway.print_db_activity``), кладётся в конфиг пула как
+    ``print_activity`` — вывод активности db-worker'ов (глубина
+    ``trace`` по ``gateway.console_level``), кладётся в конфиг пула как
     ``print_activity``.
     """
     try:

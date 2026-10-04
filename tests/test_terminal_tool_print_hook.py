@@ -69,11 +69,22 @@ class _LogSink:
 
 @contextlib.contextmanager
 def _patched_loguru(sink: _LogSink):
+    """Sink loguru с БОЕВЫМ форматом строки консоли.
+
+    Раньше здесь стоял собственный ``format="{level.no}|{extra[channel]}|{message}"``.
+    Это был ровно тот дефект, который описала change: тест проверял формат с
+    ``{extra[channel]}``, которого в бою нет (``configure_loguru`` ставил sink
+    вообще без ``format=``), поэтому строка хука проходила тест и при этом
+    была неотличима от любой другой строки журнала. Теперь формат берётся из
+    единственного объявления ``operator_console.LINE_FORMAT`` — иначе тест
+    снова проверял бы не тот формат, что в бою.
+    """
     from loguru import logger
 
+    from lib.services.operator_console import LINE_FORMAT
+
     handler_id = logger.add(
-        sink.write, level="DEBUG", serialize=True,
-        format="{level.no}|{extra[channel]}|{message}",
+        sink.write, level="DEBUG", serialize=True, format=LINE_FORMAT,
     )
     try:
         yield
@@ -229,7 +240,14 @@ class TestTerminalToolPrintHook:
         assert len(msg) < len(long_arg) + len(long_err) + 100
 
     def test_channel_is_tools(self, mock_nanobot_agent):
-        """Канал ``tools``, не дефолтный ``app``/имя-модуля."""
+        """Исполнитель передаётся полем ``who``, а ``channel`` НЕ подменяется.
+
+        ``channel`` — транспорт: в loguru у нанобота это
+        ``logger.bind(channel=self.name)`` канала, и в журнале
+        ``LogEvent.channel`` — тоже транспорт. Хук раньше биндил
+        ``channel="tools"``, то есть одна колонка значила и канал, и
+        подсистему; теперь подсистема приходит явно именованным полем ``who``.
+        """
         TerminalToolPrintHook = mock_nanobot_agent["TerminalToolPrintHook"]
         sink = _LogSink()
         hook = TerminalToolPrintHook()
@@ -243,7 +261,11 @@ class TestTerminalToolPrintHook:
         with _patched_loguru(sink):
             asyncio.run(run())
 
-        assert sink.records[0]["extra"].get("channel") == "tools"
+        extra = sink.records[0]["extra"]
+        assert extra.get("who") == "tools"
+        assert "channel" not in extra, (
+            "хук больше не подменяет channel: подсистема идёт полем who"
+        )
 
     def test_per_session_isolation(self, mock_nanobot_agent):
         """Старт-тайминги двух сессий изолированы (конкурентные обороты)."""

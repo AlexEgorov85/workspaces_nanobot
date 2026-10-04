@@ -701,10 +701,7 @@
     "exec_timeout": 0,
     "exec_timeout_cap_sec": 3600,
     "log_level": "INFO",
-    "print_llm_calls": true,
-    "print_worker_activity": false,
-    "print_db_activity": false,
-    "print_tools": false,
+    "console_level": "turn",
     "restart_initial_delay_sec": 1.0,
     "restart_max_delay_sec": 30.0,
     "compact": {

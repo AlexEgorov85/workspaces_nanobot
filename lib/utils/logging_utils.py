@@ -22,6 +22,16 @@ unexpectedly» из ``GatewayRunner``.
 настройки (``gateway.log_level``/``cli.log_level``), что и у него самого.
 Мост ставится здесь, в общей шве настройки, — иначе ``cli_agent.py`` и
 ``gateway.py`` разошлись бы по поведению.
+
+**Формат построчной строки.** Раньше sink ставился без ``format=``, и работал
+дефолтный формат loguru, в котором нет ни подсистемы, ни задачи. Теперь
+формат берётся из ``lib.services.operator_console.LINE_FORMAT`` — он объявлен
+там РОВНО ОДИН РАЗ, и этот модуль его импортирует, а не собирает свой.
+Два sink'а с ОДНИМ форматом: первый — обычные записи под
+``gateway.log_level``, второй — факты консоли, отобранные по объявленной
+глубине ``gateway.console_level`` (см. ``operator_console``). Фильтры, а не
+уровни: иначе объявленная глубина была бы неотличима от подъёма уровня
+логгера, а факт пришлось бы печатать дважды.
 """
 
 from __future__ import annotations
@@ -138,23 +148,135 @@ def configure_stdlib_bridge(level: str) -> logging.Handler | None:
     return handler
 
 
-def configure_loguru(level: str, *, env_var: str | None = None) -> None:
+def _fact_depth(record: dict) -> str | None:
+    """Объявленная глубина факта консоли из записи loguru, иначе ``None``."""
+    try:
+        from lib.services.operator_console import CONSOLE_FACT_EXTRA_KEY
+
+        return (record["extra"] or {}).get(CONSOLE_FACT_EXTRA_KEY)
+    except Exception:
+        return None
+
+
+def main_sink_filter(record: dict) -> bool:
+    """Пропускает всё, что НЕ является фактом консоли.
+
+    Объявлен на уровне модуля, а не внутри функции: это ПРАВИЛО отбора, и
+    страж, который проверяет «что оператор видит на объявленной глубине»,
+    должен брать ровно это правило, а не писать своё — иначе проверка
+    проходила бы при сломанной консоли.
+    """
+    return _fact_depth(record) is None
+
+
+def console_sink_filter(record: dict) -> bool:
+    """Пропускает факт консоли, если его глубина видна при текущем уровне.
+
+    Здесь — и ТОЛЬКО здесь — выбирается, что показывать. Уровень loguru
+    остаётся объявленным ``gateway.log_level``: повышать его вместо отбора
+    здесь означало бы поднять до DEBUG весь шум ради факта простоя.
+    """
+    depth = _fact_depth(record)
+    if depth is None:
+        return False
+    try:
+        from lib.services.operator_console import depth_visible
+
+        return depth_visible(depth)
+    except Exception:
+        return False
+
+
+class _CurrentStderr:
+    """Пишет в ТЕКУЩИЙ ``sys.stderr`` на каждый вызов.
+
+    Sink, привязанный к объекту ``sys.stderr``, взятому ОДИН раз на старте,
+    продолжает писать туда, куда писал тогда, — даже если поток с тех пор
+    перенаправили. Для вывода оператора это делает «куда я смотрю»
+    свойством момента настройки вместо свойства процесса, и проверять
+    вывод становится нечем. Позднее разрешение потока — единственный способ
+    сделать вывод независимым от способа перенаправления (перенаправляет
+    его тест, инструмент наблюдения или оператор вручную).
+
+    Отдельный объект, а не ``sys.stderr`` само по себе, — намеренно: иначе
+    ``logger.add`` снова схватил бы текущий объект и проблема вернулась бы.
+    """
+
+    def write(self, message: str) -> int:
+        stream = sys.stderr
+        if stream is None:
+            return len(message)
+        return stream.write(message)
+
+    def flush(self) -> None:
+        stream = sys.stderr
+        if stream is not None:
+            try:
+                stream.flush()
+            except (AttributeError, ValueError, OSError):
+                pass
+
+
+def configure_loguru(
+    level: str,
+    *,
+    env_var: str | None = None,
+    console_level: str | None = None,
+) -> list[str]:
     """Настроить loguru на вывод в ``sys.stderr`` с указанным уровнем.
 
     Args:
         level: Уровень логирования (DEBUG/INFO/WARNING/ERROR).
         env_var: Имя переменной окружения, куда продублировать уровень
             (``os.environ.setdefault`` — не перезатирает уже заданное).
+        console_level: Объявленная глубина вывода консоли
+            (``gateway.console_level``). ``None`` — прочитать из конфига.
+            НЕ выводится повышением ``level``: глубина и уровень логгера —
+            разные ручки, иначе факт простоя (сегодня DEBUG) пришлось бы
+            поднимать до DEBUG целиком.
+
+    Returns:
+        Предупреждения о старых булевых ключах с уровнем, который из них
+        следует (пустой список, если их нет). Печатать их должен вызывающий:
+        на этом шаге sink ещё только поставлен.
 
     Мост stdlib → loguru ставится здесь, а не в точках входа: иначе
     ``cli_agent.py`` и ``gateway.py`` разошлись бы по поведению.
     """
+    warnings: list[str] = []
     if env_var:
         import os
 
         os.environ.setdefault(env_var, str(level))
     try:
+        if console_level is None:
+            from lib.services.config_service import ConfigService
+            from lib.services.operator_console import (
+                console_level_of,
+                legacy_flag_warnings,
+            )
+
+            gateway_settings = ConfigService().settings_section("gateway") or {}
+            console_level = console_level_of(gateway_settings)
+            warnings = legacy_flag_warnings(gateway_settings)
+    except Exception:
+        from lib.services.operator_console import (
+            DEFAULT_CONSOLE_LEVEL,
+            set_console_level,
+        )
+
+        console_level = DEFAULT_CONSOLE_LEVEL
+        warnings = []
+    try:
         from loguru import logger
+
+        from lib.services.operator_console import (
+            LINE_FORMAT,
+            PLACEHOLDER,
+            set_console_level,
+        )
+
+        set_console_level(console_level)
 
         # Windows Python 3.7+: sys.stderr.encoding по умолчанию cp1251.
         # Без reconfigure loguru получает UnicodeEncodeError на кириллице
@@ -168,8 +290,23 @@ def configure_loguru(level: str, *, env_var: str | None = None) -> None:
         except (AttributeError, ValueError, OSError):
             pass  # старый Python или уже сконфигурирован
 
+        # Дефолтные ``who``/``task`` — чтобы запись, которой исполнитель не
+        # привязывал, не роняла формат отсутствующим ключом. Сами колонки
+        # при этом печатаются плейсхолдером, а не пустотой.
+        logger.configure(extra={"who": PLACEHOLDER, "task": PLACEHOLDER})
+
+        # ДВА sink'а ОДНОГО формата, а не два формата. Разделение по
+        # фильтру, а не по уровню: факт консоли уходит в свой sink всегда (на
+        # ``INFO``, независимо от ``gateway.log_level``) и печатается РОВНО
+        # один раз, потому что второй sink его не пропускает. Иначе
+        # объявленный уровень был бы неотличим от простого DEBUG-шума.
         logger.remove()
-        logger.add(sys.stderr, level=level)
+        logger.add(_CurrentStderr(), level=level, format=LINE_FORMAT,
+                   filter=main_sink_filter)
+        logger.add(
+            _CurrentStderr(), level="INFO", format=LINE_FORMAT,
+            filter=console_sink_filter,
+        )
     except Exception:
         pass
     # Мост stdlib ставится после sink'а: перенаправлять некуда, пока
@@ -179,3 +316,13 @@ def configure_loguru(level: str, *, env_var: str | None = None) -> None:
         configure_stdlib_bridge(level)
     except Exception:
         pass
+    # Предупреждения о старых ключах отдаются баннеру
+    # (``ApplicationContext.start``): объявлять о настройке вывода из
+    # настройки вывода — значит зависеть от того, успел ли подняться процесс.
+    try:
+        from lib.services.operator_console import set_legacy_warnings
+
+        set_legacy_warnings(warnings)
+    except Exception:
+        pass
+    return warnings

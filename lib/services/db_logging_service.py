@@ -285,6 +285,12 @@ EVENT_SEQ_COLUMN = "seq"
 EVENT_SOURCE_KEY = "source"
 EVENT_SOURCE_NANOBOT = "nanobot"
 
+#: Исполнители для колонки ``who`` консоли оператора. Имена те же, что у
+#: префиксов событий журнала (``tool.*``/``llm.*``), и по этой причине НЕ
+#: берутся из словаря имён: это люди и подсистемы, а не типы событий.
+CONSOLE_WHO_TOOLS = "tools"
+CONSOLE_WHO_LLM = "llm"
+
 #: Каноническое выражение порядка строк оборота.
 #:
 #: Объявлено РОВНО в одном месте: читатели обязаны переиспользовать его, а
@@ -474,6 +480,16 @@ class LogEvent:
     JOIN'а по чужой сессии открывает окно для утечки. Колонка
     заполняется через ``DbLoggingService`` явно (от producer'а или через
     request_id matching в ``_enqueue``) и через backfill-миграцию V004.
+
+    Поля ``who`` и ``task`` — ЯВНО ИМЕНОВАННАЯ личность факта для консоли
+    оператора (``lib/services/operator_console.py``). Они лежат на объекте
+    события, а не собираются рендерером из окружения: только так консоль и
+    журнал остаются двумя стоками одного факта. ``who`` — исполнитель
+    (воркер, хук, подсистема), ``task`` — идентификатор задачи/оборота.
+    Ключ ``channel`` для этого НЕ используется: и здесь, и в loguru у
+    нанобота это ТРАНСПОРТ. Если писатель ``who``/``task`` не проставил,
+    рендерер берёт ``actor``/``request_id``/``session_id`` — тоже поля
+    события, а не окружение.
     """
 
     event_type: str
@@ -489,6 +505,8 @@ class LogEvent:
     name: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     queued_at: float | None = None
+    who: str | None = None
+    task: str | None = None
 
 
 @dataclass
@@ -808,6 +826,16 @@ class DbLoggingService:
         именно потому, что пробное имя не обязано быть каноническим: оно
         приходит снаружи и про уровень своего не знает.
 
+        Здесь же, тем же вызовом, событие уходит во ВТОРОЙ сток — консоль
+        оператора (``lib/services/operator_console.py``). Это и есть «консоль
+        как представление события»: один объект, два стока, расхождение
+        возможно только отбором и форматированием. Отдельной шины, очереди
+        или подписки ради консоли здесь нет и не заводится.
+
+        Печать ПОСЛЕ принятия события журналом: строка в консоли не должна
+        заменять запись в базе, иначе факт, отброшенный отбором или
+        переполнением очереди, выглядел бы в терминале как записанный.
+
         Returns:
             ``True`` — событие в очереди. ``False`` — отбор по правилу (пробное
             имя, уровень ниже порога, уровень вне шкалы) либо переполнение
@@ -824,7 +852,24 @@ class DbLoggingService:
         if not passes:
             return False
         self._stamp_event_time(event)
-        return self._enqueue(event)
+        enqueued = self._enqueue(event)
+        if enqueued:
+            self._emit_console_line(event)
+        return enqueued
+
+    @staticmethod
+    def _emit_console_line(event: LogEvent) -> None:
+        """Отдать принятое событие консоли оператора.
+
+        Отказ печати не имеет права уронить запись в журнал, поэтому он
+        глотается целиком: консоль — второй сток, а не условие записи.
+        """
+        try:
+            from lib.services.operator_console import emit_event
+
+            emit_event(event)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Контекст вопроса (таблица agent_question_runs) + индекс session_key→request_id
@@ -1030,6 +1075,8 @@ class DbLoggingService:
             summary=content[: self._summary_max_chars] if content else "",
             payload=payload,
             request_id=request_id or message_id,
+            who=channel or None,
+            task=session_id,
         ))
 
     def log_outbound(
@@ -1081,6 +1128,8 @@ class DbLoggingService:
             metadata={"latency_ms": latency_ms, "tokens_used": tokens_used},
             request_id=effective_request_id,
             user_id=user_id,
+            who="agent",
+            task=session_id,
         ))
 
     def log_tool_call(
@@ -1102,6 +1151,8 @@ class DbLoggingService:
             payload={"tool": tool_name, "args": args or {}, "tool_call_id": tool_call_id},
             request_id=request_id,
             name=tool_name,
+            who=CONSOLE_WHO_TOOLS,
+            task=session_id,
         ))
 
     def log_tool_result(
@@ -1135,6 +1186,8 @@ class DbLoggingService:
             metadata={"latency_ms": latency_ms, "tool_call_id": tool_call_id},
             request_id=request_id,
             name=tool_name,
+            who=CONSOLE_WHO_TOOLS,
+            task=session_id,
         ))
 
     def log_llm_call(
@@ -1175,6 +1228,8 @@ class DbLoggingService:
                 "usage": usage or {},
             },
             request_id=request_id,
+            who=CONSOLE_WHO_LLM,
+            task=session_id,
         ))
 
     def log_sync_event(

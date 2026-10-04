@@ -15,12 +15,21 @@
 время — из ``before_execute_tools``. Изолировано по ``session_key``
 (как ``ToolAuditHook``), чтобы конкурентные обороты не путали события.
 
-Флага отключения у хука нет. Ключ ``gateway.print_tools`` в ``config.json``
-(сейчас ``false``) **нигде не читается** — ни здесь, ни в ``AgentFactory``, ни
-в ``ApplicationContext``; выставить его не влияет на вывод. Упоминания ключа
-в этом докстринге, в ``lib/core/agent_factory.py`` и в ``docs/ARCHITECTURE.md``
-оставлены как напоминание о расхождении, а не как описание работающей
-настройки. Хук печатает всегда.
+Строка идёт через общий рендер консоли (``lib/services/operator_console.py``):
+хук отдаёт объект факта и больше ничего не печатает. Исполнитель передаётся
+полем ``who``, а НЕ ``bind(channel="tools")``: ключ ``channel`` занят
+транспортом — в loguru у нанобота (``nanobot/channels/base.py``) и в журнале
+(``LogEvent.channel``) — и одна колонка не может значить и то и другое.
+Имя строки (``tool.completed``) взято из словаря журнала, поэтому ``grep`` в
+терминале равен SQL в базе по тому же факту.
+
+Ключ ``gateway.console_level`` (``quiet|turn|trace``, дефолт ``turn``)
+определяет, будет ли строка видна вообще: по одному факту на вызов
+инструмента — это глубина ``trace``. Отдельного флага у хука нет и не
+было: ``gateway.print_tools`` в ``config.json`` **нигде не читается** — ни
+здесь, ни в ``AgentFactory``, ни в ``ApplicationContext``. Упоминания ключа
+в этом докстринге и в ``docs/ARCHITECTURE.md`` остались как напоминание о
+расхождении, а не как описание работающей настройки.
 """
 
 from __future__ import annotations
@@ -30,12 +39,7 @@ import re
 import time
 from typing import Any
 
-from loguru import logger
 from nanobot.agent import AgentHook
-
-# Метка канала: «tools» — конкретный подсистемный канал для живого вывода
-# tool-вызовов, чтобы не уезжать в общий fallback (``__main__``/модуль).
-logger = logger.bind(channel="tools")
 
 _DEFAULT_KEY = ""
 
@@ -128,11 +132,19 @@ class TerminalToolPrintHook(AgentHook):
         ]
 
     async def after_iteration(self, ctx: Any) -> None:
+        from lib.services.db_logging_service import CONSOLE_WHO_TOOLS
+        from lib.services.operator_console import (
+            CONSOLE_LEVEL_TRACE,
+            ConsoleFact,
+            emit,
+        )
+
         key = self._bucket_key(ctx)
         starts = self._starts.pop(key, [])
         calls = list(getattr(ctx, "tool_calls", None) or [])
         events = getattr(ctx, "tool_events", None) or []
         results = getattr(ctx, "tool_results", None) or []
+        task = key or _DEFAULT_KEY
         for i, ev in enumerate(events):
             if i >= len(calls):
                 continue
@@ -149,11 +161,10 @@ class TerminalToolPrintHook(AgentHook):
             if status == "error":
                 err = str(detail)[:_MAX_ERROR_CHARS]
                 if args_str:
-                    logger.error(
-                        "✗ {} ({}) — {}", name, args_str, err,
-                    )
+                    message = f"✗ {name} ({args_str}) — {err}"
                 else:
-                    logger.error("✗ {} — {}", name, err)
+                    message = f"✗ {name} — {err}"
+                level = "ERROR"
             else:
                 preview = (
                     _format_result(results[i])
@@ -161,8 +172,21 @@ class TerminalToolPrintHook(AgentHook):
                     else ""
                 )
                 if preview:
-                    logger.info(
-                        "✓ {} → {} ({}ms)", name, preview, dur_ms,
-                    )
+                    message = f"✓ {name} → {preview}"
                 else:
-                    logger.info("✓ {} ({}ms)", name, dur_ms)
+                    message = f"✓ {name}"
+                level = "INFO"
+            # Один объект факта на строку, одна функция рендера. Хук НЕ
+            # печатает сам — иначе появился бы второй формат построчного
+            # вывода, а колонка «кто» у этой строки снова бы пропала.
+            emit(ConsoleFact(
+                # Имя из словаря журнала, а не выдуманное: тот же факт
+                # пишется журналом как ``tool.completed`` (``log_tool_result``),
+                # поэтому grep в терминале и SQL находят одно и то же.
+                marker="tool.completed",
+                detail=f"{message} ({dur_ms}ms)",
+                who=CONSOLE_WHO_TOOLS,
+                task=task,
+                depth=CONSOLE_LEVEL_TRACE,
+                event_level=level,
+            ))

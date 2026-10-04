@@ -131,9 +131,12 @@ def _required_keys():
         ("gateway.llm_timeout", 300),
         ("gateway.exec_timeout", 0),
         ("gateway.log_level", "INFO"),
-        ("gateway.print_llm_calls", True),
-        ("gateway.print_worker_activity", False),
-        ("gateway.print_db_activity", False),
+        # Глубина вывода объявляется ОДНИМ ключом. Четыре булева флага
+        # (``print_llm_calls``/``print_worker_activity``/``print_db_activity``/
+        # ``print_tools``) больше не выбирают глубину: их отсутствие
+        # проверяет отдельный страж ``test_single_level_replaces_the_boolean_
+        # flags`` в ``tests/test_operator_console_levels.py``.
+        ("gateway.console_level", "turn"),
         ("gateway.restart_initial_delay_sec", 1.0),
         ("gateway.restart_max_delay_sec", 30.0),
         # gateway.duckdb_query / gateway.vector_search — удалены (этап 18):

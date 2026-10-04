@@ -111,11 +111,28 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     """
     import config as _cfg
 
+    # Импорт нанобота — ПЕРЕД настройкой вывода, и это не стилистика.
+    # ``nanobot/cli/commands.py:29-41`` при импорте делает
+    # ``logger.remove()`` и ставит свой sink с форматом
+    # ``{extra[channel]}``. Настройка вывода, поставленная до этого
+    # импорта, оказывалась перебитой первой же последующей строкой,
+    # и весь запуск печатал чужой формат.
+    from nanobot.cli.commands import __logo__, __version__
+
     # 1. Lifecycle-gate: публикация SETTINGS на основе argv --profile.
     #    ``_SUPPORTED_PROFILES`` в argparse уже гарантирует whitelist,
     #    но ``_initialize_settings`` повторяет проверку (defensive —
     #    если кто-то вызовет lifecycle-gate напрямую минуя CLI).
     _cfg._initialize_settings(profile=args.profile)
+
+    # Настройка вывода — до сборки контекста, и это не «для галочки»:
+    # ``ApplicationContext.create()`` сам логирует хуки, инструменты
+    # и project tools, и стоял он ниже. Эти строки уходили в формат
+    # нанобота, а всё после — в формат консоли оператора, то есть
+    # один и тот же запуск печатал два формата. Смоук это не
+    # показывал: страж проверял порядок только относительно ветки
+    # ``--smoke``, а не относительно первого же логирования.
+    _configure_logging(_cfg.SETTINGS)
 
     from lib.core.application_context import ApplicationContext
     from lib.lifecycle.gateway_runner import GatewayRunner
@@ -132,10 +149,14 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     # UnboundLocalError (Python видит имя в теле функции и считает
     # его локальным; ветка else не имеет своего импорта).
     from lib.utils.project_version import project_version
-    from nanobot.cli.commands import __logo__, __version__
 
     if args.smoke:
         runtime_table = ctx.settings["logging"]["db"]["table_name"]
+        # Баннер смоука остаётся в stdout: это блок, а не построчный факт.
+        # Машинный маркер ``OK_SMOKE_COMPLETE`` читают пять проверок
+        # (``tests/test_profile_lifecycle.py`` и ещё четыре) — соглашение о
+        # результате запуска, а не факт для человека. Перенос построчных
+        # фактов в stderr его не затрагивает.
         console.print(
             f"{__logo__} nanobot gateway smoke · "
             f"project v{project_version()} · nanobot {__version__} · "
@@ -143,8 +164,6 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
         )
         console.print("OK_SMOKE_COMPLETE")
         return
-
-    _configure_logging(ctx.settings)
 
     console.print(
         f"{__logo__} Starting nanobot gateway · project v{_project_version()} "
@@ -211,53 +230,62 @@ async def _connect_enterprise_mcp(ctx) -> None:
     """
     client = getattr(ctx, "enterprise_mcp", None)
     if client is None:
-        console.print(
-            "[yellow]○[/yellow] enterprise-mcp: не объявлен "
+        _verdict(
+            "enterprise-mcp: не объявлен "
             "(раздел gateway.agent.enterprise_mcp выключен) — "
-            "инструменты данных ответят структурной ошибкой"
+            "инструменты данных ответят структурной ошибкой",
+            level="WARN",
         )
         return
 
     try:
         operations = await client.list_operations()
-        console.print(
-            f"[green]✓[/green] enterprise-mcp: {len(operations)} операций, "
-            "процесс поднят"
-        )
+        _verdict(f"enterprise-mcp: {len(operations)} операций, процесс поднят")
         # Куда ушёл stderr платформы. Без этой строки режим наблюдения
         # молчал бы, и «окно не открылось» читалось бы как «смотреть
         # не на что» — тем более что по умолчанию stderr уходит в
         # stderr агента вперемешку с его журналом.
-        # ``markup=False`` вместо ``escape``: путь может содержать
-        # квадратные скобки, а баннер — это не разметка. Побочный
-        # плюс: не нужен ещё один импорт в файле, где поздние импорты
-        # уже есть и ruff на них ругается (E402).
-        console.print(
-            "  " + client.stderr_report(),
-            style="dim",
-            markup=False,
-            highlight=False,
-        )
+        _verdict(client.stderr_report())
         await _report_enterprise_mcp_health(ctx, client)
     except ConfigurationError as exc:
         # Расхождение профиля: повтор не поможет, перезапуск лишь повторит
         # ту же ошибку через backoff. Сообщение печатается целиком, потому
         # что в логе иначе остаётся только «Gateway exited unexpectedly».
-        console.print(f"[red]✗ enterprise-mcp: КОНФИГУРАЦИЯ[/red] — {exc}")
+        _verdict(f"enterprise-mcp: КОНФИГУРАЦИЯ — {exc}", level="ERROR")
         raise
     except Exception as exc:
         # Именно этот вывод спасает при разборе инцидента: без него
         # ``GatewayRunner`` сообщает только «Gateway exited unexpectedly,
-        # restarting in 1.0s», и причина — не поднявшаяся платформа —
-        # не читается ни в одном логе.
-        console.print(
-            f"[red]✗ enterprise-mcp: НЕ ПОДНЯЛСЯ[/red] — {type(exc).__name__}: {exc}"
+        # restarting in 1.0s», и причина — не поднявшаяся платформа — не
+        # читается ни в одном логе. Строка уходит ДО ``raise``
+        # (``runtime/entrypoints``), и уровнем ERROR, а не INFO: отказ рукопо-
+        # жатия не должен быть отсеян отбором глубины.
+        _verdict(
+            f"enterprise-mcp: НЕ ПОДНЯЛСЯ — {type(exc).__name__}: {exc}",
+            level="ERROR",
         )
-        console.print(
-            "[red]  проверьте: mcp-platform/platform.json, "
-            "mcp-platform/.secrets.env, доступность python и БД[/red]"
+        _verdict(
+            "проверьте: mcp-platform/platform.json, "
+            "mcp-platform/.secrets.env, доступность python и БД",
+            level="ERROR",
         )
         raise
+
+
+def _verdict(text: str, *, level: str = "INFO", who: str = "gateway") -> None:
+    """Вердитная строка баннера в общий построчный поток консоли.
+
+    Раньше такие строки печатались ``rich.console.print`` в stdout, то есть
+    ВТОРЫМ потоком со своим синтаксисом и своими правилами кодировки. Теперь
+    это тот же объявленный формат и тот же поток, что и факты оборота
+    (``lib/services/operator_console.py``). Блочный инвентарный баннер в
+    ``ApplicationContext`` остаётся rich — его читает
+    ``tools/diagnose_startup.py`` регулярками, привязанными к началу строки,
+    и это исключение объявлено намеренно.
+    """
+    from lib.services.operator_console import emit, startup_fact
+
+    emit(startup_fact(text, who=who, level=level))
 
 
 async def _report_enterprise_mcp_health(ctx, client) -> None:
@@ -289,21 +317,39 @@ async def _report_enterprise_mcp_health(ctx, client) -> None:
     )
 
     platform_tables: list[str] | None = None
-    for capability, operation, render in probes:
+    for capability, operation, render_line in probes:
+        healthy = True
         try:
             raw = await asyncio.wait_for(
                 client.call(operation, arguments={}, identity=identity),
                 timeout=20.0,
             )
             payload = json.loads(raw)
-            line = render(payload)
+            line = render_line(payload)
             if operation == "schema_check":
                 platform_tables = list(payload.get("tables") or [])
+                healthy = bool(payload.get("ok"))
+            elif operation == "list_indexes":
+                indexes = payload.get("indexes") or []
+                healthy = bool(indexes) and all(
+                    i.get("state") == "ready" for i in indexes
+                )
+            elif operation == "list_scripts":
+                count = payload.get("count")
+                if count is None:
+                    count = len(payload.get("scripts") or [])
+                healthy = bool(count)
         except asyncio.TimeoutError:
-            line = "[red]проба не ответила за 20 с[/red]"
+            line = "проба не ответила за 20 с"
+            healthy = False
         except Exception as exc:  # noqa: BLE001
-            line = f"[red]{type(exc).__name__}: {exc}[/red]"
-        console.print(f"    [dim]·[/dim] {capability:<8} {line}")
+            line = f"{type(exc).__name__}: {exc}"
+            healthy = False
+        _verdict(
+            f"{capability}: {line}",
+            level="INFO" if healthy else "WARN",
+            who="platform",
+        )
 
     _verify_platform_table_alignment(ctx, platform_tables)
 
@@ -363,8 +409,8 @@ def _verify_platform_table_alignment(ctx, platform_tables: list[str] | None) -> 
         if value and _bare(value) not in platform_bare
     }
     if not missing:
-        console.print(
-            "    [dim]·[/dim] tables   [green]профиль согласован[/green] "
+        _verdict(
+            f"tables: профиль согласован "
             f"({len(expected)} таблиц, profile={settings.get('profile', 'prod')})"
         )
         return
@@ -382,10 +428,15 @@ def _verify_platform_table_alignment(ctx, platform_tables: list[str] | None) -> 
 
 
 def _indexes_line(data: dict) -> str:
-    """``3/3 индекса ready (10, 100, 10 векторов)``."""
+    """``3/3 индекса ready (10, 100, 10 векторов)``.
+
+    Возвращается ГОЛЫЙ текст, без rich-разметки: строка уходит в общий
+    построчный поток loguru, и ``[red]`` в нём был бы виден как мусор.
+    Тяжесть строки задаёт вызывающий (см. ``_report_enterprise_mcp_health``).
+    """
     indexes = data.get("indexes") or []
     if not indexes:
-        return "[yellow]индексы не объявлены[/yellow]"
+        return "индексы не объявлены"
     ready = [i for i in indexes if i.get("state") == "ready"]
     counts = ", ".join(str(i.get("vector_count", "?")) for i in indexes)
     if len(ready) != len(indexes):
@@ -394,7 +445,7 @@ def _indexes_line(data: dict) -> str:
             for i in indexes
             if i.get("state") != "ready"
         )
-        return f"[red]{len(ready)}/{len(indexes)} ready ({bad})[/red]"
+        return f"{len(ready)}/{len(indexes)} ready ({bad})"
     return f"{len(ready)}/{len(indexes)} ready (векторов: {counts})"
 
 
@@ -403,9 +454,8 @@ def _schema_line(data: dict) -> str:
     if data.get("ok"):
         return f"{data.get('found')}/{data.get('expected')} таблиц на месте"
     missing = ", ".join(str(t) for t in (data.get("missing") or [])) or "неизвестно"
-    return (
-        "[red]не хватает таблиц: %s (найдено %s/%s)[/red]"
-        % (missing, data.get("found"), data.get("expected"))
+    return "не хватает таблиц: %s (найдено %s/%s)" % (
+        missing, data.get("found"), data.get("expected"),
     )
 
 
@@ -416,7 +466,7 @@ def _scripts_line(data: dict) -> str:
         scripts = data.get("scripts")
         count = len(scripts) if isinstance(scripts, list) else 0
     if not count:
-        return "[yellow]реестр скриптов пуст — будет только generate_sql[/yellow]"
+        return "реестр скриптов пуст — будет только generate_sql"
     return f"{count} скриптов в реестре"
 
 
@@ -533,31 +583,45 @@ def _configure_logging(settings) -> None:
     ``logging.getLogger``, подчиняются тому же уровню, что и loguru.
     Раньше ``gateway.log_level`` управлял только loguru, и ``INFO`` из
     stdlib-модулей не доходил до консоли вовсе.
+
+    Глубина вывода консоли объявляется ОДНИМ ключом ``gateway.console_level``
+    и не выводится повышением ``log_level`` — иначе факт простоя (сегодня
+    DEBUG) пришлось бы поднимать до DEBUG целиком.
+
+    Старые булевы ключи дают предупреждение с уровнем, который из них
+    следует, и печатаются в баннер: молчаливый игнор изменил бы вывод у того,
+    кто их выставил, без единого слова.
     """
     try:
         from lib.services.config_service import ConfigService
 
-        log_level = ConfigService().settings_section("gateway").get("log_level", "INFO")
+        gateway_settings = ConfigService().settings_section("gateway") or {}
+        log_level = gateway_settings.get("log_level", "INFO")
     except Exception:
+        gateway_settings = {}
         log_level = "INFO"
     from lib.utils.logging_utils import configure_loguru
 
-    configure_loguru(log_level)
+    warnings = configure_loguru(log_level)
+    return warnings
 
 
 def _gateway_print_worker_activity() -> bool:
-    """Прочитать флаг вывода активности пула воркеров в терминал.
+    """Видна ли активность пула воркеров при объявленной глубине вывода.
 
-    Читает ``gateway.print_worker_activity`` из `project.json` (секция gateway).
-    Отключаемая опция: `false` по умолчанию.
+    Глубину объявляет ОДИН ключ ``gateway.console_level``
+    (``operator_console.depth_visible("turn")``), а не этот флаг: прежний
+    дефолт ``false`` означал, что за оборотом при ``log_level=INFO`` не было
+    видно ничего.
     """
     try:
-        from lib.services.config_service import ConfigService
-
-        value = ConfigService().settings_section("gateway").get("print_worker_activity", False)
+        from lib.services.operator_console import (
+            CONSOLE_LEVEL_TURN,
+            depth_visible,
+        )
     except Exception:
         return False
-    return bool(value)
+    return depth_visible(CONSOLE_LEVEL_TURN)
 
 
 def _report_db_pool_startup() -> None:
