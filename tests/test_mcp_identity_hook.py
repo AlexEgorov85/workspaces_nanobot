@@ -5,6 +5,11 @@
 присваивание на ``setdefault``, второй тест упадёт, а первый останется
 зелёным — и подмена идентичности вернётся незамеченной.
 
+Вторая пара, к которой предъявляется то же требование: «отказ поднят» и
+«отказ превращён патчем в синтетический результат». Отказ без патча ушёл бы
+из ``execute_tool_calls`` и уронил оборот, а патч без отказа означал бы
+молчаливый пропуск вызова без личности.
+
 Соответствие имён ключей платформе проверяет
 ``tests/test_mcp_platform_declaration.py``, а не этот файл: сверять надо с
 объявлением в ``mcp-platform``, а не с собственным ожиданием теста.
@@ -15,16 +20,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from nanobot.agent import AgentHookContext
+from nanobot.providers.base import ToolCallRequest
 
 from lib.hooks.mcp_identity_hook import (
     IDENTITY_KEYS,
     MCP_TOOL_PREFIX,
     McpIdentityHook,
+    McpIdentityRefused,
 )
+from lib.hooks.repeat_guard_hook import RepeatGuardBlocked
 
 SESSION_KEY = "postgres:chat-42"
 SENDER_ID = "alice"
@@ -67,6 +77,56 @@ def _with_sender(sender_id: str | None):
             None if sender_id is None else SimpleNamespace(sender_id=sender_id)
         ),
     )
+
+
+def _iter_ctx() -> AgentHookContext:
+    """Настоящий контекст итерации: ``session_key`` пуст — вызова оборота нет."""
+    return AgentHookContext(iteration=0, messages=[], session_key=None)
+
+
+class _CountingRegistry:
+    """Реестр, считающий реальные исполнения инструмента.
+
+    Нужен, чтобы доказать, что отказ по личности — точка решения: после него
+    счётчик обязан остаться нулевым. Любое его увеличение означало бы, что
+    вызов уехал к платформе без личности, то есть молчаливый пропуск вернулся.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, name, params):
+        # Именно async: upstream делает ``await tools.execute(...)``.
+        self.calls += 1
+        return f"ok:{name}"
+
+
+@contextmanager
+def _guarded_call():
+    """Применить патч ``repeat_guard_block`` к настоящему
+    ``nanobot.agent.tools.execution._execute_tool_call`` на время теста.
+
+    Откат обязателен: патч глобальный, и оставленный поверх следующего теста
+    он замаскировал бы регрессию. ``execute_tool_calls`` обращается к функции
+    через глобал модуля, поэтому патч живёт всё время прогона.
+
+    Отсчёт берётся от функции на входе, а не от «настоящей» оригинала
+    upstream: ``apply_all()`` из других тестов патчит модуль глобально и не
+    откатывает его, поэтому к моменту запуска атрибут уже может быть обёрнут.
+    Проверка потому и на поведении: обёртка обязана ловить
+    ``RepeatGuardBlocked`` вместе с подклассами.
+    """
+    from nanobot.agent.tools import execution as exec_mod
+
+    from lib.services.runtime_patcher import RuntimePatcher
+
+    original = exec_mod._execute_tool_call
+    try:
+        ok, message = RuntimePatcher().patch_repeat_guard_block()
+        assert ok, f"патч repeat_guard_block не применился: {message}"
+        yield exec_mod._execute_tool_call
+    finally:
+        exec_mod._execute_tool_call = original
 
 
 class TestIdentityInjection:
@@ -215,16 +275,22 @@ class TestIncompleteIdentity:
         assert first["request_id"] != second["request_id"]
 
     def test_no_injection_without_sender(self):
+        """Подстановки нет — и вызов отвергнут, а не выпущен в сеть.
+
+        Молча пропущенный вызов уезжал к платформе без личности и получал
+        оттуда внутренний код ``identity_missing``.
+        """
         hook = McpIdentityHook(_service())
         params: dict = {}
-        with _with_sender(None):
+        with _with_sender(None), pytest.raises(McpIdentityRefused):
             asyncio.run(_run(hook, params))
         assert params == {}
 
     def test_no_injection_without_session_key(self):
+        """Сессии нет — тот же отказ: подставлять нечего и некуда."""
         hook = McpIdentityHook(_service())
         params: dict = {}
-        with _with_sender(SENDER_ID):
+        with _with_sender(SENDER_ID), pytest.raises(McpIdentityRefused):
             asyncio.run(_run(hook, params, context=_context(session_key=None)))
         assert params == {}
 
@@ -318,26 +384,129 @@ class TestGeneratedRequestId:
         assert len(after_second) == len(after_first)
 
 
-class TestWarnings:
-    def test_warns_once_per_hook(self, caplog):
-        """Иначе каждый вызов оборота добавил бы одинаковую строку в журнал.
+class TestRefusal:
+    """Отказ по личности: он обязан быть виден и не ронять оборот.
 
-        Отказ остался только для вызова ВНЕ оборота: нет ни отправителя, ни
-        сессии — подставлять нечего, и внятный отказ лучше выдуманной личности.
+    Отказ приходит не из платформы, а из агента, поэтому он идёт путём
+    защитника от повторов — тем же приёмом подкласса, что и отказ редиректа
+    файлов сессии.
+    """
+
+    def test_reraise_is_enabled(self):
+        """``reraise=False`` превратил бы отказ в молчаливый no-op.
+
+        Диспетчер хуков (``nanobot/agent/hook.py:174-183``) глотает
+        исключение каждого хука и логирует его: отказ «сработал бы» и вызов
+        всё равно уехал бы в платформу без личности.
+        """
+        assert McpIdentityHook(_service())._reraise is True
+
+    def test_refusal_type_is_caught_by_repeat_guard_patch(self):
+        """Отказ — подкласс типа, который ловит патч, но имя у него своё.
+
+        Патч ``repeat_guard_block`` ловит ``RepeatGuardBlocked`` (свой тип),
+        и подкласс ловится тем же предложением ``except`` — поэтому отказ не
+        роняет оборот. Имя обязано отличаться: иначе читатель журнала не
+        отличил бы блокировку повторов от отказа по личности, не разбирая
+        текст.
         """
         hook = McpIdentityHook(_service())
-        params: dict = {}
-        with caplog.at_level("WARNING"), _with_sender(None):
+        with _with_sender(None), pytest.raises(McpIdentityRefused) as caught:
+            asyncio.run(_run(hook, {}))
+        exc = caught.value
+        assert isinstance(exc, RepeatGuardBlocked)
+        assert type(exc).__name__ != "RepeatGuardBlocked"
+
+    def test_refusal_carries_call_for_synthetic_result(self):
+        """Отказ несёт контекст вызова: из него патч строит результат.
+
+        Без ``tool_call`` событие получило бы имя ``"?"``, без ``context`` —
+        подстраховку из аргументов оригинала, а ``on_execute_tool_error``
+        остался бы без вызова. Аргументы при этом обязаны остаться нетронутыми:
+        отказ не подставляет.
+        """
+        hook = McpIdentityHook(_service())
+        params: dict = {"operation": "run_script"}
+        with _with_sender(None), pytest.raises(McpIdentityRefused) as caught:
+            asyncio.run(_run(hook, params))
+        exc = caught.value
+        assert exc.tool_call.name == f"{MCP_TOOL_PREFIX}run_script"
+        assert exc.params is params
+        assert exc.context is not None
+        assert params == {"operation": "run_script"}
+
+    def test_reason_names_missing_identity_and_forbids_retry(self):
+        """Причину читает модель, поэтому она обязана быть внятной.
+
+        Текст попадает в синтетический результат патча, и модель принимает по
+        нему решение: назвать, чего не хватает, и сказать, что повтор того же
+        вызова не поможет. Прежний ``identity_missing`` был кодом без смысла.
+        """
+        hook = McpIdentityHook(_service())
+        with _with_sender(None), pytest.raises(McpIdentityRefused) as caught:
+            asyncio.run(_run(hook, {}))
+        reason = str(caught.value)
+        assert "session_id" in reason
+        assert "user_id" in reason
+        assert "не поможет" in reason
+
+    def test_refusal_logged_at_error_on_every_call(self, caplog):
+        """Запись об отказе — на КАЖДЫЙ вызов, а не одна на процесс.
+
+        Прежнее предупреждение «одно на процесс» описывало состояние,
+        повторяющееся на каждом вызове оборота, и после первого раза
+        переставало различать «один отказ» и «отказов двести».
+        """
+        hook = McpIdentityHook(_service())
+        with caplog.at_level(logging.ERROR), _with_sender(None):
             for _ in range(3):
-                asyncio.run(_run(hook, params))
-        assert sum("McpIdentityHook" in r.message for r in caplog.records) == 1
+                with pytest.raises(McpIdentityRefused):
+                    asyncio.run(_run(hook, {}))
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 3, [r.message for r in caplog.records]
+        assert all("McpIdentityHook" in r.message for r in errors)
 
-    def test_generated_path_does_not_warn(self, caplog):
-        """Досылка — не авария: предупреждений она не даёт.
+    def test_refusal_becomes_synthetic_tool_result(self):
+        """Сквозной путь через патч: отказ — значение, оборот продолжается.
 
-        Иначе канал без вопроса (webUI, CLI) писал бы в журнал то же
-        предупреждение на каждом вызове, и «вызов отвергнут» нельзя было бы
-        отличить от «вызов дослан».
+        ``before_execute_tool`` вызывается на
+        ``nanobot/agent/tools/execution.py:165`` — **вне** ``try``, который
+        начинается строкой 166, поэтому необработанный отказ ушёл бы из
+        ``execute_tool_calls`` и уронил весь оборот (``asyncio.gather`` без
+        ``return_exceptions`` отменяет заодно соседние вызовы). Патч
+        ``repeat_guard_block`` — единственная точка, где результат ещё можно
+        подменить.
+        """
+        with _guarded_call() as guarded:
+            hook = McpIdentityHook(_service())
+            registry = _CountingRegistry()
+            tool_call = ToolCallRequest(
+                id="tc-1",
+                name=f"{MCP_TOOL_PREFIX}run_script",
+                arguments={"script_id": "s-1"},
+            )
+            with _with_sender(None):
+                result, event = asyncio.run(
+                    guarded(registry, tool_call, {}, {}, hook, _iter_ctx(), dict)
+                )
+
+        assert isinstance(result, str)
+        assert result.startswith(f"Error: {McpIdentityRefused.__name__}: "), result
+        assert "не поможет" in result
+        assert event["status"] == "error"
+        assert event["name"] == tool_call.name
+        assert registry.calls == 0, (
+            "инструмент выполнился после отказа по личности — отказ перестал "
+            "быть точкой решения"
+        )
+        assert tool_call.arguments == {"script_id": "s-1"}
+
+    def test_generated_path_does_not_refuse(self, caplog):
+        """Досылка — не авария: ни отказа, ни записей ``WARNING`` и выше.
+
+        Иначе канал без вопроса (webUI, CLI) отказывал бы в MCP целиком, и
+        «вызов отвергнут по личности» нельзя было бы отличить от «вызов
+        дослан».
         """
         hook = McpIdentityHook(_service(request_id=None))
         with caplog.at_level("DEBUG"), _with_sender(SENDER_ID):

@@ -7,7 +7,10 @@
 (неочередной канал — webUI, CLI), вызывающая сторона досылает самостоятельное
 значение (требование «Вызывающая сторона модели подставляет личность хуком»
 спеки ``runtime/call-contract``). Отсутствие ``session_id`` или ``user_id`` —
-другое дело: подстановки нет вовсе, и вызов отвергается.
+другое дело: подставлять нечего, и отказ поднимает **сам хук**, до похода в
+платформу (:class:`McpIdentityRefused`), так что модель получает читаемую
+причину отказа, а не внутренний код платформы ``identity_missing``, где
+«попробовать иначе» бессмысленно: личности у вызова не будет и в следующий раз.
 
 **Зачем это нужно.** Платформа исполняет операцию в изоляции вызвавшего:
 журнал событий, каталог сессии и корпоративные выборки строятся по личности
@@ -15,6 +18,13 @@
 (``mcp-platform/libs/enterprise_common/execution/context.py``). Модель эти
 значения не знает и знать не должна: подставленная моделью сессия выглядела
 бы в журнале как настоящая.
+
+**Почему отказ поднимает хук, а не платформа.** Тот же приём, что и у отказа
+редиректа файлов сессии (``SessionFileRedirectBlocked``): тип отказа — подкласс
+``RepeatGuardBlocked``, который ловит уже существующий патч
+``repeat_guard_block`` (``lib/services/runtime_patcher.py``). Молча пропущенный
+вызов уезжал в сеть без личности, платформа отвергала его ``identity_missing``,
+и модель получала внутренний код, где ничего нельзя поменять.
 
 **Почему аргументами, а не ``params._meta``.** Нанобот зовёт MCP так:
 ``MCPToolWrapper.execute`` → ``session.call_tool(name, arguments=kwargs)``
@@ -47,6 +57,7 @@ from typing import Any
 
 from nanobot.agent import AgentHook
 
+from lib.hooks.repeat_guard_hook import RepeatGuardBlocked
 from lib.services.turn_identity import (
     IDENTITY_KEYS,  # noqa: F401 - реэкспорт: контракт сверяют тесты платформы
     call_identity,
@@ -70,6 +81,24 @@ MCP_TOOL_PREFIX = "mcp_enterprise_"
 #: копию, которая перестала быть используемой.
 
 
+class McpIdentityRefused(RepeatGuardBlocked):
+    """Вызов операции платформы отвергнут: у него нет личности оборота.
+
+    Подкласс, а не новый тип — ровно тот приём, что уже применён к отказу
+    редиректа файлов сессии (``SessionFileRedirectBlocked``): превращать отказ
+    в синтетический результат инструмента умеет существующий патч
+    ``repeat_guard_block``, и он ловит ``RepeatGuardBlocked``; подкласс
+    ловится тем же предложением ``except``. Второй механизм отказа означал бы,
+    что патч придётся расширять на каждый новый повод — и что при его
+    отсутствии этот отказ, в отличие от отказа защитника от повторов, дойдёт
+    до диспетчера хуков и уронит весь оборот.
+
+    Имя типа обязано отличаться от ``RepeatGuardBlocked``: по журналу читатель
+    обязан различать отказ защитника от повторов и отказ по личности, не
+    разбирая текст.
+    """
+
+
 class McpIdentityHook(AgentHook):
     """Подставляет личность оборота в аргументы вызова операции платформы.
 
@@ -85,16 +114,15 @@ class McpIdentityHook(AgentHook):
         *,
         tool_prefix: str = MCP_TOOL_PREFIX,
     ) -> None:
-        super().__init__()
+        # ``reraise``: без него диспетчер хуков проглатывает исключение и
+        # логирует его — отказ стал бы молчаливым no-op, который при этом
+        # выглядит работающим (см. ``SessionFileRedirectHook``).
+        super().__init__(reraise=True)
         self._db_logging_service = db_logging_service
         self._tool_prefix = tool_prefix
-        # Предупреждение о ненайденном request_id повторялось бы на каждом
-        # вызове оборота и забило журнал одинаковыми строками, поэтому оно
-        # одно на процесс.
-        self._warned_incomplete = False
         # Счётчик досылок — для строки на уровне ``debug``. Публичным он не
         # сделан: читателю достаточно увидеть в журнале, что досылка была, а
-        # число проверяется через ``caplog``, как и предупреждение выше.
+        # число проверяется через ``caplog``.
         self._generated_request_ids = 0
 
     # ------------------------------------------------------------------
@@ -110,16 +138,37 @@ class McpIdentityHook(AgentHook):
     ) -> None:
         if not isinstance(params, dict):
             return
-        if not self._tool_name(tool_call, tool).startswith(self._tool_prefix):
+        tool_name = self._tool_name(tool_call, tool)
+        if not tool_name.startswith(self._tool_prefix):
             return
 
         identity = self._identity(context)
         if identity is None:
-            # Подставлять нечего. Вызов уйдёт без личности и будет отвергнут
-            # платформой с ``identity_missing`` — это внятнее, чем выдуманная
-            # сессия, которая выглядела бы настоящей в журнале.
-            self._warn_once()
-            return
+            # Отказ, а не пропуск. Молча уехавший вызов платформа отвергает
+            # внутренним кодом ``identity_missing``, и модель получает код без
+            # смысла: «попробовать иначе» там невозможно. Этот текст увидит
+            # модель в синтетическом результате патча, поэтому он обязан
+            # называть, чего не хватает, и говорить, что повтор не поможет.
+            reason = (
+                "вызов операции платформы вне оборота: не хватает личности "
+                "вызова — session_id и/или user_id (сессии и/или отправителя). "
+                "Подставлять нечего: выдуманные значения в журнале выглядели "
+                "бы как настоящий вход чужого пользователя. Повтор этого "
+                "вызова не поможет — личность есть только у вызова внутри "
+                "оборота. Скажи пользователю, что операция недоступна вне "
+                "оборота, и предложи обычные инструменты (работа с файлами, "
+                "поиск)."
+            )
+            # ``error`` на КАЖДЫЙ отказ: прежнее «одно на процесс» после первого
+            # раза переставало различать один отказ и отказов двести.
+            logger.error("McpIdentityHook: отвергнут вызов %s — %s", tool_name, reason)
+            raise McpIdentityRefused(
+                reason,
+                context=context,
+                tool_call=tool_call,
+                tool=tool,
+                params=params,
+            )
 
         # Присваивание, а не setdefault: см. докстринг модуля.
         params.update(identity)
@@ -202,12 +251,3 @@ class McpIdentityHook(AgentHook):
             return name
         name = getattr(tool, "name", None)
         return name if isinstance(name, str) else ""
-
-    def _warn_once(self) -> None:
-        if self._warned_incomplete:
-            return
-        self._warned_incomplete = True
-        logger.warning(
-            "McpIdentityHook: личность оборота неполна, вызовы mcp_enterprise_* "
-            "уйдут без неё и будут отвергнуты платформой (identity_missing)"
-        )
