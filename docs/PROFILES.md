@@ -62,7 +62,8 @@ session_manager.json      ← per-deploy override (опционально)
 
 Три из этих таблиц пишет **не агент, а платформа**: журнал и прогоны
 вопросов уходят операциями `data.log_events` / `data.upsert_question_run`, очередь
-задач — операциями `data.claim_task` / `complete` / `data.append_assistant_message`.
+задач — операциями `data.claim_task` / `data.finalize_turn` /
+`data.append_assistant_message`.
 Поэтому одного `profiles/test.jsonc` мало: платформе тоже нужно знать, в каком
 контуре она работает.
 
