@@ -52,7 +52,7 @@ Tool **не импортирует** Skill.
 ```python
 # Skill — процесс навыка, своего MCP-клиента у него нет.
 # К данным ходит через клиент платформы; адрес платформы он не знает.
-from libs.enterprise_client.llm import LlmClient            # операция complete
+from libs.enterprise_client.llm import LlmClient            # операция llm.complete
 # к данным — операции capability audit / data платформы
 
 # Агент (gateway / CLI) — композиционный корень
@@ -216,7 +216,7 @@ Step 7: do not use vector/search для COUNT/GROUP BY.
 - Tool'ы `run_predefined_script` и `nl_sql_generate` отсутствуют: их логика
   живёт в Skill (`predefined.run`, `generated_sql_mode.run`), а обращение к
   модели skill-side helper делает через клиент платформы
-  (`libs/enterprise_client/llm.py` → операция `complete`). Собственного
+  (`libs/enterprise_client/llm.py` → операция `llm.complete`). Собственного
   вызова провайдера у навыка нет, и настроек модели он не знает.
 
 CLI — **операционный** интерфейс доставки capability, а не архитектурное
@@ -362,7 +362,7 @@ manifest-причин описывали протокол, которого бо
 
 | Было (Tool) | Стало (операция) |
 |---|---|
-| `legal_summarizer_query(operation_id, field, max_chunk_summary_chars)` | `mcp_enterprise_query_operation` с той же семантикой полей (`stats` / `articles` / `chunks` / `sections` / `tree` / `all`) |
+| `legal_summarizer_query(operation_id, field, max_chunk_summary_chars)` | `mcp_enterprise_legal_summarizer_query_operation` с той же семантикой полей (`stats` / `articles` / `chunks` / `sections` / `tree` / `all`) |
 | wrapper переводил ошибки CLI в свой JSON | сервер отдаёт закрытый конверт `_execution` / `{"error": {"code", ...}}`; модель читает его напрямую |
 | «область видимости» задавалась аргументом инструмента | область задаётся личностью вызова, модель её не выбирает |
 

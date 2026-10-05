@@ -286,9 +286,9 @@ foo, bar, baz; skipped: qux (disabled by config)"`.
 | Tool | Файл | Действие | Конфиг |
 |---|---|---|---|
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (config.json) |
-| ~~`history_search`~~ | ~~`workspace/tools/history_search_tool.py`~~ | **удалён** (change `2026-10-03-mcp-native-tools`, п. D6): то же доступно модели как `mcp_enterprise_history_search`; область видимости задаёт личность вызова, а не аргумент | — |
-| ~~`legal_summarizer_query`~~ | ~~`workspace/tools/legal_summarizer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_query_operation` | — |
-| ~~`audit_analyzer_query`~~ | ~~`workspace/tools/audit_analyzer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}` | — |
+| ~~`history_search`~~ | ~~`workspace/tools/history_search_tool.py`~~ | **удалён** (change `2026-10-03-mcp-native-tools`, п. D6): то же доступно модели как `mcp_enterprise_data_history_search`; область видимости задаёт личность вызова, а не аргумент | — |
+| ~~`legal_summarizer_query`~~ | ~~`workspace/tools/legal_summarizer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_legal_summarizer_query_operation` | — |
+| ~~`audit_analyzer_query`~~ | ~~`workspace/tools/audit_analyzer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_{audit_list_scripts,audit_run_script,audit_generate_sql,vectors_vector_search}` | — |
 | `document_read` | `workspace/tools/document_read.py` | извлечение текста из офисных документов | `tools.document_read.*` (config.json) |
 
 Tools `duckdb_query` / `vector_search` **не существуют** (см.
@@ -299,9 +299,9 @@ capability `audit` платформы, отдаваемые модели как 
 **отсутствуют** — они нарушали §3, §22.1, §22.2 TARGET_ARCHITECTURE.md
 (импортировали skill через `importlib`); заменены на:
 
-- готовый скрипт — `mcp_enterprise_run_script` (каталог — `mcp_enterprise_list_scripts`);
-- vector search — `mcp_enterprise_vector_search`;
-- NL→SELECT — `mcp_enterprise_generate_sql` (запрос строит и проверяет платформа);
+- готовый скрипт — `mcp_enterprise_audit_run_script` (каталог — `mcp_enterprise_audit_list_scripts`);
+- vector search — `mcp_enterprise_vectors_vector_search`;
+- NL→SELECT — `mcp_enterprise_audit_generate_sql` (запрос строит и проверяет платформа);
 - runtime-context providers (`providers.py`, инъекция схемы/predefined в system
   prompt) — удалены полностью: схема БД и списки скриптов теперь доступны
   по требованию через `--list-scripts` / `--list-indexes`
@@ -319,9 +319,9 @@ Python-слоем навыка `audit_analyzer`. Раздел описывал �
 человек уводил бы в два несуществующих места сразу.
 
 Доступ к данным аудита теперь один: модель вызывает операции capability
-`audit` платформы как `mcp_enterprise_list_scripts`,
-`mcp_enterprise_run_script`, `mcp_enterprise_generate_sql` и
-`mcp_enterprise_vector_search` (объявление — `config.json → tools.mcpServers`,
+`audit` платформы как `mcp_enterprise_audit_list_scripts`,
+`mcp_enterprise_audit_run_script`, `mcp_enterprise_audit_generate_sql` и
+`mcp_enterprise_vectors_vector_search` (объявление — `config.json → tools.mcpServers`,
 белый список `enabled_tools`). Доменный разбор — в
 `workspace/skills/audit_analyzer/SKILL.md`, общий контракт вызовов — в
 `workspace/skills/enterprise_mcp/SKILL.md`. Личность вызова подставляет
@@ -369,7 +369,7 @@ python -m servers.enterprise.server --health
   завести два источника правды; до удаления кластера так и было, и именно это
   породило расхождение между тем, куда пишут, и откуда читают.
 * Диагностика (`MISSING` / `ORPHAN` / `STALE` / `INVALID`) — операция
-  `index_stats` capability `vectors` и `libs/vectors/signature.py`.
+  `vectors.index_stats` capability `vectors` и `libs/vectors/signature.py`.
 
 `tools/check_indexes.py` удалён вместе с ним; его логика целиком перенесена в
 `preload.py::compute_index_health` и `signature.py::verify_index_signature`.

@@ -87,7 +87,7 @@ workspace/skills/<skill_name>/
 | Доменная логика «как решать задачу X в нашей БД» | **Skill** |
 | Доменный workflow из нескольких шагов | **Skill** (`SKILL.md` + `scripts/`) |
 | Детерминированная операция **внутри** Skill workflow | **Skill script** |
-| LLM-фолбэк на естественном языке для конкретного домена | **Skill** (операция `generate_sql` платформы) |
+| LLM-фолбэк на естественном языке для конкретного домена | **Skill** (операция `audit.generate_sql` платформы) |
 | Тонкая обёртка вокруг generic utility для домена | **Skill** (описание поверх `workspace/utils/`) |
 | Capability, которую агент выбирает и вызывает **самостоятельно** | **Tool** (`workspace/tools/`) |
 | Реализация, общая для Skill и Tool | **`lib/services`** / **`lib/core`** |
@@ -101,8 +101,8 @@ workspace/skills/<skill_name>/
 > Каноничные примеры «generic, но не agent-facing»: свободный read-only
 > SQL, семантический поиск, NL→SQL для конкретной схемы. Для них Agent-facing
 > Tools (`duckdb_query`, `vector_search`, `nl_sql_generate`) **не создаются**:
-> их заменили операции capability `audit` (`run_script`, `generate_sql`,
-> `vector_search`) — см. `docs/skill-tool-architecture.md` §6–§8
+> их заменили операции capability `audit` и `vectors` (`audit.run_script`, `audit.generate_sql`,
+> `vectors.vector_search`) — см. `docs/skill-tool-architecture.md` §6–§8
 > и `docs/skill-tool-inventory.md` («Удалённые компоненты»).
 >
 > **Операция вместо Tool — не только про экономию строк.** Обёртка над
@@ -237,15 +237,15 @@ audit платформы — каталог готовых скриптов, и�
 ```text
 вопрос про данные аудита
           │
-          ├── «найди похожие / по смыслу»  ──→ vector_search
+          ├── «найди похожие / по смыслу»  ──→ vectors.vector_search
           │
           └── нужно посчитать / сгруппировать / отфильтровать
                     │
                     ├── в каталоге есть подходящий скрипт?
-                    │        ├── да  ──→ run_script
-                    │        └── нет ──→ generate_sql
+                    │        ├── да  ──→ audit.run_script
+                    │        └── нет ──→ audit.generate_sql
                     │
-                    └── (в любом случае сначала list_scripts)
+                    └── (в любом случае сначала audit.list_scripts)
 ```
 
 Рядом держите таблицу операций с обязательными аргументами
@@ -267,7 +267,7 @@ audit платформы — каталог готовых скриптов, и�
 > проверяются до выполнения. Здесь только бизнес-глоссарий.
 
 Исключение — **логические имена индексов**: их skill называет прямо, потому что
-передаёт `index_name` в `vector_search`, и каждое объявленное имя обязано быть
+передаёт `index_name` в `vectors.vector_search`, и каждое объявленное имя обязано быть
 описано (`tests/test_audit_analyzer_skill_doc.py` сверяет список в `SKILL.md` с
 `platform.json` в обе стороны).
 
@@ -389,7 +389,7 @@ audit платформы — каталог готовых скриптов, и�
 `content_columns`, `embedding_columns`, `track_column`, `chunk_size` /
 `chunk_overlap`, `metric`, `enabled`) и `platform.json` → `vectors.storage_table`
 (таблица сырых эмбеддингов). Модель узнаёт имена индексов операцией
-`list_indexes`, а не из `config.json`. Прежнее `gateway.vector.index.*` снято
+`vectors.list_indexes`, а не из `config.json`. Прежнее `gateway.vector.index.*` снято
 целиком.
 
 **Чего в `skills.<name>` быть не должно** (всё это — платформенные понятия, и
@@ -459,9 +459,9 @@ Pydantic-валидация выполняется на старте в `Applica
 
 Единственный вход skill'а к данным аудита — операции capability `audit`
 платформы, объявленные в `config.json → tools.mcpServers` и приходящие как
-`mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}`. Параметры
+`mcp_enterprise_{audit_list_scripts,audit_run_script,audit_generate_sql,vectors_vector_search}`. Параметры
 прогона skill берёт из своей секции
-`config.json → gateway.agent.skills.<name>`, а к LLM ходит операцией `complete`
+`config.json → gateway.agent.skills.<name>`, а к LLM ходит операцией `llm.complete`
 capability `llm`.
 
 ---
@@ -505,8 +505,8 @@ capability `llm`. В агенте этого кода больше нет: ни 
 
 | Поверхность | Кто использует | Когда |
 |---|---|---|
-| **Операции capability `audit` по MCP** | `config.json → tools.mcpServers.enterprise` | Единственный вход к данным аудита: `mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}` |
-| **Операция `complete` capability `llm`** | Клиент платформы `mcp-platform/libs/enterprise_client/llm.py` | Обращение к модели из skill'а, запущенного подпроцессом |
+| **Операции capability `audit` по MCP** | `config.json → tools.mcpServers.enterprise` | Единственный вход к данным аудита: `mcp_enterprise_{audit_list_scripts,audit_run_script,audit_generate_sql,vectors_vector_search}` |
+| **Операция `llm.complete` capability `llm`** | Клиент платформы `mcp-platform/libs/enterprise_client/llm.py` | Обращение к модели из skill'а, запущенного подпроцессом |
 
 Прямого доступа к данным у skill'а больше нет: снимком владеет capability `data`,
 индексами — capability `vectors`, и оба живут в процессе `enterprise-mcp`.
@@ -573,11 +573,11 @@ Skill пишет инструкции в терминах capability, не Pytho
 
 | Capability | Контракт | Конфиг |
 |---|---|---|
-| `mcp_enterprise_list_scripts` | — → каталог допустимых скриптов | `config.json → tools.mcpServers.enterprise.enabled_tools` |
-| `mcp_enterprise_run_script` | `{script, params}` → `{status, columns, rows, ...}` | там же |
-| `mcp_enterprise_generate_sql` | `{query}` → SQL и результат | там же |
-| `mcp_enterprise_vector_search` | `{query, index_name}` → результаты поиска | `mcp-platform/platform.json → vectors.indexes` |
-| `mcp_enterprise_list_indexes` | — → имена и состояние векторных индексов | `mcp-platform/platform.json → vectors.indexes` |
+| `mcp_enterprise_audit_list_scripts` | — → каталог допустимых скриптов | `config.json → tools.mcpServers.enterprise.enabled_tools` |
+| `mcp_enterprise_audit_run_script` | `{script, params}` → `{status, columns, rows, ...}` | там же |
+| `mcp_enterprise_audit_generate_sql` | `{query}` → SQL и результат | там же |
+| `mcp_enterprise_vectors_vector_search` | `{query, index_name}` → результаты поиска | `mcp-platform/platform.json → vectors.indexes` |
+| `mcp_enterprise_vectors_list_indexes` | — → имена и состояние векторных индексов | `mcp-platform/platform.json → vectors.indexes` |
 | `compact_context` tool | `{session_key, force}` | `config.json → gateway.compact.*` |
 
 Skill-side CLI (`scripts/cli.py` с `--mode predefined|vector|generated_sql`)

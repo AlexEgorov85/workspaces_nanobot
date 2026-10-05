@@ -44,7 +44,7 @@
 | Стор | Тип данных | Назначение | Retention |
 |---|---|---|---|
 | `LLMUsageStore` | Content-free metadata-only | UI-графики, cost-tracking | Upstream (WAL, hardcoded в nanobot 0.3.5) |
-| `DbLoggingService` → `agent_gateway_logs` | Content-rich structured events | `history_search`, audit-trail | `logging.db.retention_days` (configurable) |
+| `DbLoggingService` → `agent_gateway_logs` | Content-rich structured events | `data.history_search`, audit-trail | `logging.db.retention_days` (configurable) |
 
 **Параллельная запись в оба стора ЗАПРЕЩЕНА** для одного и того
 же события. `LLMUsageStore` — единственный writer для

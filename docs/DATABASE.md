@@ -155,7 +155,7 @@
 это и есть смысл кэша.
 
 **Транспорт записи журнала — `lib/services/log_transport.py`.** Слой выбирает
-запись событий либо напрямую в PostgreSQL, либо операцией `log_events`
+запись событий либо напрямую в PostgreSQL, либо операцией `data.log_events`
 `enterprise-mcp`; при переходе на платформу агент перестаёт владеть пулом записи
 журнала. Учётные данные (`session_id`/`user_id`/`request_id`) операция берёт из
 контекста вызова, а не из тела батча, поэтому батч дробят по вызовам.
@@ -183,7 +183,7 @@
 | `skills.audit_analyzer.enabled` | Вкл/выкл навыка | `true` |
 | ~~`skills.audit_analyzer.tables[*].name`~~ | — | **удалено**: состав таблиц аудита объявляет платформа — `mcp-platform/platform.json` → `audit.tables` (именно по этому списку capability `audit` проверяет сгенерированный запрос, и отсюда capability `data` наполняет снимок). Секция навыка не ослабла: `SkillSettings` — `extra="forbid"` (`lib/core/project_settings.py:500`), остаток ключа поднимает `ConfigurationError` на старте |
 | ~~`skills.audit_analyzer.tables[*].label`~~ | — | **удалено** вместе с полем: `label` — платформенное понятие (`audit.tables[*]`, например `public.agent_predefined_scripts` → `scripts_registry`); в агенте его не читал никто |
-| ~~`skills.audit_analyzer.vector_indexes[*].name`~~ | — | **удалено**: имена и параметры индексов объявляет capability `vectors` — `mcp-platform/platform.json` → `vectors.indexes`; модель узнаёт их операцией `list_indexes` (FAISS в памяти процесса, persisted-файлов нет) |
+| ~~`skills.audit_analyzer.vector_indexes[*].name`~~ | — | **удалено**: имена и параметры индексов объявляет capability `vectors` — `mcp-platform/platform.json` → `vectors.indexes`; модель узнаёт их операцией `vectors.list_indexes` (FAISS в памяти процесса, persisted-файлов нет) |
 | ~~`skills.audit_analyzer.llm.*`~~ | — | **удалено (9.6)**: выбор модели принадлежит capability `llm`. `max_tokens` / `temperature` объявляет платформа — `mcp-platform/platform.json` → `llm.max_tokens` / `llm.temperature` |
 | ~~`skills.audit_analyzer.cli.*`~~ | — | **удалено вместе с CLI навыка (фаза 9)**: `default_mode` / `max_retries` / `timeout_sec` больше не существуют, режим выбирает модель, а не флаг командной строки |
 | ~~`gateway.vector.index.storage_table`~~ | Таблица сырых эмбеддингов. Регистрация через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` **снята (фаза 5)**: индексы объявляет платформа, `mcp-platform/platform.json` → `vectors.storage_table` | `oarb.audit_vectors` |
@@ -237,7 +237,7 @@ DSN подключается только через `channels.postgres.dsn` в 
 > снятый `lib/utils/duckdb_query.py`, снятый `lib/core/skill_config.py`, а также
 > заменены на платформу `tools/build_vectors.py` и `tools/check_indexes.py`
 > (вместо них — `mcp-platform/servers/enterprise/build_index.py` и операция
-> `index_stats`).
+> `vectors.index_stats`).
 > Из `requirements.txt` агента убраны `duckdb`, `faiss-cpu`, `numpy`, `pyarrow`.
 > `TableRegistry`, `skill_registration.py` и `infra_registration.py` тоже сняты
 > вместе с реестром: состав снимка объявляет capability `data`

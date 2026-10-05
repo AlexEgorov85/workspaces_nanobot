@@ -63,7 +63,7 @@ flowchart LR
   Это не capability: операций у него нет и модель его не видит. События
   `cache_load_started` / `cache_load_done` пишет он, а не агент.
 - Данные аудита агент берёт операциями capability `audit`, семантический поиск —
-  операцией `vector_search` у capability `vectors`. Агентских tool'ов
+  операцией `vectors.vector_search` у capability `vectors`. Агентских tool'ов
   `duckdb_query` / `vector_search` в `workspace/tools/` больше нет; вход агента к
   данным аудита — операции `mcp_enterprise_*` capability `audit`.
 - Векторные индексы capability `vectors` собирает **на старте сервера платформы**,
@@ -72,7 +72,7 @@ flowchart LR
   `error`) возвращается в ответе, поэтому «индекс не поднят» наблюдаемо, а не
   спрятано за пустой выдачей. На старте **gateway** выполняется по одной дешёвой
   пробной операции на capability (`gateway._report_enterprise_mcp_health`:
-  `list_indexes` / `schema_check` / `list_scripts`), и её результат печатается
+  `vectors.list_indexes` / `data.schema_check` / `audit.list_scripts`), и её результат печатается
   вердиктом — то есть подъём шлюза индексы не пересобирает, а сверяет состояние.
 - Навык `audit_analyzer` — тонкий: в `workspace/skills/audit_analyzer/` остался
   только `SKILL.md`, своего CLI у него больше нет.
@@ -166,7 +166,7 @@ readiness не входят: снимком и индексами владеет
 | ~~`preload_service.py`~~ | **Удалён 2026-10-01.** FAISS-preload и чистая функция `compute_index_health` живут в `mcp-platform/libs/vectors/preload.py`. Прогон индекса **не отменён** — его зовёт платформа: `servers/enterprise/server.py::_prepare_capabilities` вызывает `ensure_index` для каждого объявленного и включённого индекса **до старта event loop**, так что к моменту обслуживания запросов FAISS уже в памяти. Агентский preload вызывался из runtime только для собственного кэша, а снимок теперь открывает capability `data` (`mcp-platform/libs/enterprise_data/snapshot/store.py`). Standalone-утилиты сборки индексов в агенте нет — она уехала на платформу (`mcp-platform/servers/enterprise/build_index.py`). |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
-| ~~`schema_formatter.py`~~ | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Доменную схему теперь знает платформа: её объявляет capability `audit` (`mcp-platform/platform.json` → `audit.tables`) и отдаёт операцией `schema_check`. |
+| ~~`schema_formatter.py`~~ | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Доменную схему теперь знает платформа: её объявляет capability `audit` (`mcp-platform/platform.json` → `audit.tables`) и отдаёт операцией `data.schema_check`. |
 | ~~`nl_sql_runner.py`~~ | **Удалён** — общая логика NL→SELECT pipeline, равно как и CLI навыка `audit_analyzer` (в `workspace/skills/audit_analyzer/` остался только `SKILL.md`). Замена: SQL к данным аудита формирует агент сам либо операция capability `audit`; доступ к данным дают операции `mcp_enterprise_*`, объявленные в `config.json → tools.mcpServers`. |
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
@@ -290,7 +290,7 @@ PG→DuckDB sync-путь пишет события (`sync_service_started`,
 что едет вместе с событием в JSONB `metadata`. В `metadata` значения
 **транспорт**: таблицу читают и фильтруют по колонкам, а разбирает
 `metadata` в колонки единственный табличный писатель (у агента —
-`_insert_batch`, у платформы — операция `log_events`).
+`_insert_batch`, у платформы — операция `data.log_events`).
 
 | Поле | Смысл | Читаемо как |
 |---|---|---|
@@ -309,7 +309,7 @@ PG→DuckDB sync-путь пишет события (`sync_service_started`,
 назад (шаг NTP) перевернуть порядок двух событий.
 
 `occurred_at` пишется не в колонку `timestamp`, потому что обе колонки
-заполняют два писателя, а платформенная операция `log_events` пишет
+заполняют два писателя, а платформенная операция `data.log_events` пишет
 в `timestamp` `now()` в SQL
 (`mcp-platform/servers/enterprise/capabilities/data/service/main.py`).
 Если бы агент писал туда момент события, одна колонка означала бы разное в
@@ -420,7 +420,7 @@ is out of scope».
 ### Видимость «тихих» ошибок: preload векторов и канал
 
 Общий принцип: проблемы, которые раньше молча проглатывались, должны
-попадать в `agent_gateway_logs` (post-factum, `history_search`) и в
+попадать в `agent_gateway_logs` (post-factum, `data.history_search`) и в
 терминал gateway (мгновенно). Два источника «тихих» сбоев подняты на
 этот уровень:
 
@@ -430,12 +430,12 @@ is out of scope».
 старте платформы, до event loop (`_prepare_capabilities`). Наблюдаемость переехала
 на другую сторону той же границы:
 
-* `list_indexes` у capability `vectors` отдаёт состояние каждого индекса
+* `vectors.list_indexes` у capability `vectors` отдаёт состояние каждого индекса
   (`missing` / `building` / `ready` / `error`), поэтому «индекс не поднят» —
   это поле в ответе, а не пустая выдача;
 * на старте gateway выполняет по одной дешёвой пробной операции на capability
-  (`gateway._report_enterprise_mcp_health`): `vectors → list_indexes`,
-  `data → schema_check`, `audit → list_scripts`. По индексам печатается
+  (`gateway._report_enterprise_mcp_health`): `vectors → vectors.list_indexes`,
+  `data → data.schema_check`, `audit → audit.list_scripts`. По индексам печатается
   `N/M ready` с перечислением неготовых (`_indexes_line`), то есть расхождение
   «объявлено, но не собрано» видно на старте, а не после первого поиска;
 * отказ **одной** пробы не роняет старт — платформа отвечает, а неполнота
@@ -872,7 +872,7 @@ UI читает то, что есть, и не обязан понимать к�
 | `message_id` | `str` (UUID) | `PostgresChannel._poll_once` (в `meta` для assistant-placeholder) | — | никогда | ID user-сообщения, на которое это assistant-сообщение — ответ. Пара `message_id ↔ answer_id` (взаимные ссылки в соседних строках). |
 | `answer_id` | `str` (UUID) | `PostgresChannel._poll_once` (в `meta` для user-строки) | — | никогда | ID assistant-placeholder, созданного сразу при клейме. Позволяет каналу находить строку для обновления. |
 | `session_key` | `str` | Передаётся в `raw_meta` (UI/внешний клиент) | — | никогда | Полный ключ сессии nanobot, формат `<channel>:<chat_id>`. Если не передан в raw_meta, канал подставляет `f"postgres:{chat_id}"` (см. `postgres_channel.py:718`). |
-| `retry_count` | `int` | Операция платформы `fail_task` (`capabilities/data/service/main.py`) | инкрементируется при каждом `error`/`stuck` | никогда | Сколько раз задача была в `error`. При `>= max_stuck_retries` → `failed`. Инкремент делает платформа: канал получает готовый `retry_count` в ответе операции (`lib/channels/postgres_channel.py:1225`). |
+| `retry_count` | `int` | Операция платформы `data.fail_task` (`capabilities/data/service/main.py`) | инкрементируется при каждом `error`/`stuck` | никогда | Сколько раз задача была в `error`. При `>= max_stuck_retries` → `failed`. Инкремент делает платформа: канал получает готовый `retry_count` в ответе операции (`lib/channels/postgres_channel.py:1225`). |
 | `error` | `str` | `PostgresChannel._mark_failed` | — | никогда | Только в строках со статусом `error` или `failed`. Краткое описание причины: `"dispatch_error"`, `"write_error"`. |
 | `reasoning` | `str` | `PostgresChannel._flush_reasoning` (live) + `_finalize_turn` (atomic append) | дописывается через `_reasoning_io_lock` | никогда | Полный текст рассуждений модели (chain-of-thought). Может быть очень длинным. |
 | `context_window` | `dict` | `PostgresChannel._flush_live_context` (live) | перезаписывается каждые `_flush_interval` сек | никогда | Метрика занятости контекстного окна: `{used: int, limit: int, pct: float (0..1, 4 знака), model: str}`. См. подсекцию «Метрика занятости контекстного окна» выше. |
@@ -919,7 +919,7 @@ meta: dict[str, Any] = {
 | `PostgresChannel._flush_reasoning` | `postgres_channel.py:530` | live, каждые `_flush_interval` сек | `reasoning` (дописывается) |
 | `PostgresChannel._finalize_turn` | `postgres_channel.py:1156` | на `_turn_end` | `reasoning` (atomic append остатков) |
 | `PostgresChannel._flush_live_context` | `postgres_channel.py:560-570` | live, каждые `_flush_interval` сек | `context_window` (перезаписывается) |
-| Операция платформы `unstick_tasks` | `capabilities/data/service/main.py` | `_unstick_loop`, истёк `processing_timeout` | `retry_count++` (затем `status='error'` или `'failed'`). Агентский `_reclaim_and_heal` удалён вместе с протоколом lease. |
+| Операция платформы `data.unstick_tasks` | `capabilities/data/service/main.py` | `_unstick_loop`, истёк `processing_timeout` | `retry_count++` (затем `status='error'` или `'failed'`). Агентский `_reclaim_and_heal` удалён вместе с протоколом lease. |
 | `PostgresChannel._mark_failed` | `postgres_channel.py:835-836` | ошибка диспетчера/записи | `retry_count++`, `error=<reason>` |
 | `RuntimePatcher.patch_assemble_outbound` | `lib/services/runtime_patcher.py:730, 722, 96` | на финальном outbound | `_tool_audit` (если есть), `_final_turn: true` (внутренний протокол), `context_window` (если есть) |
 | `ContextCompactionService._write_history_notice` | `lib/services/context_compaction.py:332` | после успешного сжатия (ручного или авто) | `kind: "context_compact"`, `compact: {…}` |
@@ -1243,7 +1243,7 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 ### Захват задач и статусы (`agent_conversation_messages`)
 
 Захват задачи (сообщения веб-чата) делает **платформа**: канал вызывает
-операцию `claim_task` через `QueueOps` (`lib/channels/queue_ops.py`), а SQL
+операцию `data.claim_task` через `QueueOps` (`lib/channels/queue_ops.py`), а SQL
 живёт в `mcp-platform/servers/enterprise/capabilities/data/service/main.py`
 (`claim_task`). В `lib/channels/postgres_channel.py` нет ни `psycopg2`, ни
 `fetchval`, ни `execute(` — ноль совпадений по каждому из трёх; контракт
@@ -1474,7 +1474,7 @@ priority polling доставляет `/stop` в шину, дальше рабо
 помечает сообщение как `cancelled` ДО того, как polling его
 захватил — polling его пропускает (race-free по `UPDATE ... WHERE
 id IN (...)`). После claim — повторная проверка статуса операцией
-`get_message` (`PostgresChannel._status_of`); если между выбором кандидата и
+`data.get_message` (`PostgresChannel._status_of`); если между выбором кандидата и
 polling не диспатчит и освобождает claim. В `_finalize_turn` —
 ещё один re-check: если user стал cancelled пока LLM работала,
 финальный ответ не публикуется, освобождаются слот и контекст.
@@ -1487,7 +1487,7 @@ polling не диспатчит и освобождает claim. В `_finalize_t
 | `max_concurrent=2`, A+B работают, A `/stop` | priority polling доставляет `/stop` → отменяется A, B продолжает |
 | A–J работают, F `/stop` | priority polling доставляет `/stop` → отменяется только F, остальные 9 не задеты |
 | row cancelled до claim | polling skip через `AND status != 'cancelled'` |
-| row cancelled после claim (race) | re-check `get_message` → drop + cleanup |
+| row cancelled после claim (race) | re-check `data.get_message` → drop + cleanup |
 | row cancelled во время LLM | `_finalize_turn` drop response, slot released |
 
 Тесты: `tests/test_user_stop_signal.py` (DB safety net + race checks),
@@ -1497,7 +1497,7 @@ polling не диспатчит и освобождает claim. В `_finalize_t
 **Модель захвата — одна.** Таблицы аренды `agent_worker_claims` больше нет
 (удалена миграцией `sql/migrations/V006__drop_agent_worker_claims.sql`),
 протокол lease/heartbeat/reclaim снят из канала. Захват задачи — одна
-операция платформы `claim_task` (внутри — `UPDATE ... RETURNING`, батчем по
+операция платформы `data.claim_task` (внутри — `UPDATE ... RETURNING`, батчем по
 `batch`): состояние захвата хранится в самой строке задачи
 (`status='processing'`). Эксклюзивность обеспечивает внешний `AND`,
 повторяющий условие подзапроса: если задачу уже взял другой захват,
@@ -1737,7 +1737,7 @@ file_size}` (payload → `data_store/sessions/<key>/files/attachments/`,
   Проверка синхронна и должна быть быстрой, поэтому ходить в процесс ей нельзя;
   свежесть наблюдения видна в `detail` (возраст последней пробы). Required-ness
   тот же, что у `postgres`: через платформу идут **все** выходы к данным —
-  журнал (`log_events`), очередь (`claim_task`), зеркало, — поэтому её
+  журнал (`data.log_events`), очередь (`data.claim_task`), зеркало, — поэтому её
   недоступность останавливает работу, а не ухудшает её.
 - **Наблюдение, а не разовая проверка.** Рукопожатие `_connect_enterprise_mcp`
   подтверждает подъём процесса на старте и ничего не говорит о его дальнейшей
@@ -1758,7 +1758,7 @@ nanobot/
 ├── docs/                                  # каталог технической документации (навигация — docs/README.md)
 ├── tools/                                # инфраструктурные CLI-утилиты
 │   ├── ~~build_vectors.py~~              #   снят 2026-10-01 → mcp-platform build_index
-│   └── ~~check_indexes.py~~              #   снят: логика у capability vectors (index_stats)
+│   └── ~~check_indexes.py~~              #   снят: логика у capability vectors (vectors.index_stats)
 ├── sql/                                  # DDL сгруппированы по доменам
 │   ├── README.md                          #   порядок применения, каталог
 │   ├── session/                           #   session_meta + session_messages
@@ -1876,11 +1876,11 @@ Python-пакет, CLI-обёртки `cli.py` / `cli_query.py`, слои `domai
 | Что | Где |
 |---|---|
 | capability `legal_summarizer` | `mcp-platform/libs/legal_summarizer/` (домен), регистрация — `mcp-platform/platform.json` → `legal_summarizer` |
-| Операция follow-up по разобранному документу | `mcp-platform/servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py`, модели — как `mcp_enterprise_query_operation` |
+| Операция follow-up по разобранному документу | `mcp-platform/servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py`, модели — как `mcp_enterprise_legal_summarizer_query_operation` |
 | Что именно модели видно | `config.json` → `tools.mcpServers.enterprise.enabled_tools` |
 | Контракт вызова | `workspace/skills/enterprise_mcp/SKILL.md` |
 
-Операция `query_operation(operation_id, field, max_chunk_summary_chars)` несёт
+Операция `legal_summarizer.query_operation(operation_id, field, max_chunk_summary_chars)` несёт
 ту же семантику полей, что снятый tool: `stats` / `articles` / `chunks` /
 `sections` / `tree` / `all`. Документ заново не разбирается — ответ берётся из
 сохранённого состояния операции, а область видимости задаётся личностью

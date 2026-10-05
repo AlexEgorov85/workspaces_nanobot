@@ -8,8 +8,8 @@
 Вся векторная подсистема принадлежит платформе (`mcp-platform`), capability
 `vectors`. В дереве агента (`lib/`, `workspace/`) её кода не осталось: сборка,
 эмбеддинги, подпись индекса, чанкинг и FAISS уехали на платформу фазами 4, 5 и
-9. Агент обращается к ней только через MCP-операции `vector_search`,
-`list_indexes`, `index_stats`.
+9. Агент обращается к ней только через MCP-операции `vectors.vector_search`,
+`vectors.list_indexes`, `vectors.index_stats`.
 
 | Слой | Модуль |
 |------|--------|
@@ -41,7 +41,7 @@ flowchart LR
     PG --> LOAD["capability data<br/>загрузка снимка"]
     LOAD --> SNAP["снимок DuckDB<br/>platform.json → data.snapshot_path"]
     SNAP --> OWN["owner.py<br/>FAISS в памяти, сборка на старте"]
-    OWN --> SE["vector_search()"]
+    OWN --> SE["vectors.vector_search()"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class CFG,SRC,BL,EMB core
@@ -63,7 +63,7 @@ flowchart LR
 |--------|-----------|-----------|-----------|
 | `oarb.audit_vectors` (значение `platform.json → vectors.storage_table`) | Сырые эмбеддинги `REAL[]` + метаданные (`chunk_index`/`chunk_count`, `content_hash`, `row_data` JSONB, `synced_at`) | `libs/vectors/builder.py` | capability `data` → снимок → `libs/vectors/owner.py` |
 | Снимок DuckDB (`platform.json → data.snapshot_path`) | Локальная реплика PG-таблиц, в том числе векторов | capability `data` (загрузчик) | `libs/vectors/owner.py` |
-| FAISS-индекс в памяти | Поисковый индекс (`IndexFlatIP`) | `libs/vectors/indexing.py::build_faiss_index` | `owner.py` → операция `vector_search` |
+| FAISS-индекс в памяти | Поисковый индекс (`IndexFlatIP`) | `libs/vectors/indexing.py::build_faiss_index` | `owner.py` → операция `vectors.vector_search` |
 
 DDL: `sql/audit_analyzer/create_oarb_audit_vectors.sql`. Таблица
 `public.agent_vector_index_store` (persisted FAISS-кеш) **удалена** миграцией
@@ -234,7 +234,7 @@ python -m servers.enterprise.build_index --index objects_index
 PostgreSQL, а поиск читает их из снимка. Без перезагрузки поиск продолжит
 выдавать прежние результаты, и сборка будет выглядеть сделанной, но невидимой.
 
-**5. Проверьте состояние** — операцией capability `index_stats` (она не строит
+**5. Проверьте состояние** — операцией capability `vectors.index_stats` (она не строит
 индекс) либо повторным `--dry-run`.
 
 ## Как обновить существующий индекс
@@ -336,7 +336,7 @@ DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 ### Удалить индекс из конфигурации
 
 Убрать объект из `platform.json → vectors.indexes`. Вектора останутся в
-`storage_table` и станут «сиротами» — они видны в `list_indexes` как
+`storage_table` и станут «сиротами» — они видны в `vectors.list_indexes` как
 `declared: false`. Чистить их нужно вручную, `DELETE ... WHERE source = ...`.
 
 ## Recovery
@@ -347,7 +347,7 @@ DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 | Удалили/испортили снимок | Перезагрузка снимка силами capability `data`; вектора в PG целы, пересборка не нужна |
 | Удалили индекс из `platform.json` | Вернуть объявление, затем `--full-rebuild` |
 | Сменили модель эмбеддинга | `--full-rebuild` — иначе поиск будет отдавать `stale_index` |
-| Индекс не находится | Проверьте `vectors.enable` и `enabled` индекса, затем `list_indexes` |
+| Индекс не находится | Проверьте `vectors.enable` и `enabled` индекса, затем `vectors.list_indexes` |
 
 ## Сборка одного индекса
 
@@ -437,7 +437,7 @@ DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 
 ## Поиск
 
-Агент ходит к поиску MCP-операцией `vector_search`
+Агент ходит к поиску MCP-операцией `vectors.vector_search`
 (`servers/enterprise/capabilities/vectors/tools/vector_search.py`), а не прямым
 вызовом провайдера. На стороне платформы — `owner.py::search(query, index_name,
 top_k, threshold)`.
@@ -458,7 +458,7 @@ top_k, threshold)`.
 Раньше эти причины собирались в строковое поле `provider._search_error`, и
 пустой результат с пустой причиной был самым частым «непонятно, что сломалось».
 Теперь причина приходит отдельным кодом, а состояние индекса — операцией
-`index_stats`.
+`vectors.index_stats`.
 
 ## declared vs runtime
 
@@ -467,10 +467,10 @@ runtime (набор `source` в снимке) делают операции capa
 
 | Операция | Что отвечает | Поднимает FAISS |
 |---|---|---|
-| `list_indexes` | все известные индексы и их состояние | нет |
-| `index_stats` | метрики одного индекса: векторы, размерность, время сборки, число поисков | нет |
+| `vectors.list_indexes` | все известные индексы и их состояние | нет |
+| `vectors.index_stats` | метрики одного индекса: векторы, размерность, время сборки, число поисков | нет |
 
-`list_indexes` для каждого индекса отдаёт `state` (`missing`/`building`/
+`vectors.list_indexes` для каждого индекса отдаёт `state` (`missing`/`building`/
 `ready`/`error`), `declared` (объявлен ли), `vector_count`, `dimension`,
 `metric`, `error`, `error_code`.
 

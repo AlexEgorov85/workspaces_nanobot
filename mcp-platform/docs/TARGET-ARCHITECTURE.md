@@ -14,11 +14,11 @@
 | **DuckDB** | **остаётся** локальным снимком под владением capability `data`. Удаляется слой владения, а не снимок — см. §1.1 |
 | **Агент** | `nanobot-ai==0.3.5` не меняется. Знает только LLM, диалог, сессию, MCP-клиент |
 | **Домены** | audit и legal — capability, а не процессы. Живут в `capabilities/<name>/` |
-| **Доступ к данным** | **Модель не пишет SQL.** Три входа: `run_script`, `generate_sql`, `history_search`. Всё исполняемое спроектировано заранее — см. §3.4 |
+| **Доступ к данным** | **Модель не пишет SQL.** Три входа: `audit.run_script`, `audit.generate_sql`, `data.history_search`. Всё исполняемое спроектировано заранее — см. §3.4 |
 | **Владение ресурсами** | Пул и очередь PostgreSQL, векторные индексы и LLM-клиент — по одному владельцу. Обход запрещён стражем — см. §3.1 |
 | **Документы** | **остаются в агенте** нативным tool'ом. `office_files.py` не переезжает, офисные пакеты остаются в его `requirements` |
 | **Наполнение сервера** | Динамический реестр: `capabilities/*/tools/*.py` → авто-регистрация. `server.py` не знает список инструментов заранее — см. §3.3 |
-| **Вне capability** | Две вещи живут не в `capabilities/*/tools/`: платформенная операция `read_result` (постраничное чтение артефакта результата) и эталон сервера `servers/_template/`, от которого новую capability копируют, а не пишут с нуля |
+| **Вне capability** | Две вещи живут не в `capabilities/*/tools/`: платформенная операция `platform.read_result` (постраничное чтение артефакта результата) и эталон сервера `servers/_template/`, от которого новую capability копируют, а не пишут с нуля |
 
 Цепочка данных не сокращается — меняется её владелец:
 
@@ -57,7 +57,7 @@
 диалекте DuckDB: позиционные `?` в `sql_template` и в `WHERE name = ?` загрузчика,
 схема по умолчанию `main`. Перенос на PostgreSQL — это миграция реестра целиком
 плюс правки в сборщике и загрузчике, ради выигрыша, которого вызывающий не видит.
-`run_script` и `generate_sql` сегодня исполняются против снимка, и это
+`audit.run_script` и `audit.generate_sql` сегодня исполняются против снимка, и это
 эмпирически проверенный путь.
 
 **Цена решения принимается явно**, а не списывается: файл на диске, путь в
@@ -111,12 +111,15 @@ PostgreSQL владеет соединениями одна. Запрет на �
   │  capabilities/                                                │
   │    data/      12 операций: журнал · чтение · очередь задач ·  │
   │               сообщения; доступа к данным нет                 │
-  │    audit/     list_scripts · run_script · generate_sql        │
+  │    audit/     audit.list_scripts · audit.run_script ·         │
+  │               audit.generate_sql                              │
   │               весь запрос к данным; SQL от модели не идёт     │
-  │    vectors/   vector_search · list_indexes · index_stats      │
+  │    vectors/   vectors.vector_search · vectors.list_indexes ·  │
+  │             vectors.index_stats                               │
   │             FAISS — в памяти, сборка на старте до loop        │
-  │    llm/       complete · embed                                │
-  │    legal_summarizer/   query_operation · service/             │
+  │    llm/       llm.complete · llm.embed                        │
+  │    legal_summarizer/ legal_summarizer.query_operation         │
+  │                           · service/                          │
   ├───────────────────────────────────────────────────────────────┤
   │  libs/enterprise_common   реестр · ошибки · конфиг            │
   │  libs/enterprise_data     пул PG · очередь · sql_safety       │
@@ -128,7 +131,8 @@ PostgreSQL владеет соединениями одна. Запрет на �
   │  libs/enterprise_client   клиент LLM для внешних процессов    │
   │  libs/office              разбор документов                   │
   │  libs/legal_summarizer    доменная логика capability          │
-  │  servers/enterprise/tools/  read_result — вне capability      │
+  │  servers/enterprise/tools/  platform.read_result              │
+  │                             — вне capability                  │
   │  servers/_template/       эталон сервера capability           │
   └──────────────┬────────────────────────────────┬───────────────┘
                  │                                │ исходящий вызов
@@ -167,7 +171,7 @@ HTTP-клиент LLM, причём каждый будет выглядеть �
   владельцем;
 * `libs/legal_summarizer/` — доменная логика capability `legal_summarizer`
   (чанкинг, retrieval, исполнитель карт). Capability отдаёт наружу одну
-  операцию `query_operation`, домен наружу не выходит;
+  операцию `legal_summarizer.query_operation`, домен наружу не выходит;
 * `libs/office/parser.py` — разбор офисных документов, из него читает
   `libs/legal_summarizer/document/`. Агент при этом сохраняет собственный
   нативный tool для офисных файлов (§1, строка «Документы»).
@@ -188,7 +192,7 @@ Capability получает **готовый сервис** из контейн�
 прямой SQL в таблицы сессий.
 
 **Следствие для очереди.** Одна очередь означает, что медленная и быстрая работа
-конкурируют за одни и те же воркеры, а `generate_sql` умеет занимать воркер
+конкурируют за одни и те же воркеры, а `audit.generate_sql` умеет занимать воркер
 надолго: до четырёх вызовов LLM и одно неограниченное во времени исполнение.
 Поэтому у сервиса два входа: `submit(job)` — блокирующий, для работы с данными,
 и `accept(event)` — неблокирующий, буфер писателя журнала. Потеря события
@@ -376,7 +380,7 @@ loop** (`_prepare_capabilities` вызывается в `_run`), а не лен�
 запросу. Причина не только в удобстве: DuckDB лениво тянет `numpy`/`pandas` на
 первом `execute` с параметрами, а обработчики операций идут в воркерах AnyIO —
 такой импорт на Windows зависает намертво (проверено: >180 с вместо 0,2 с).
-`list_indexes` и `index_stats` по-прежнему отвечают сразу и **индекс не
+`vectors.list_indexes` и `vectors.index_stats` по-прежнему отвечают сразу и **индекс не
 поднимают** — они читают конфигурацию и снимок.
 
 ### 3.4 Поверхность доступа к данным: модель не пишет SQL
@@ -411,22 +415,22 @@ AST-валидацией. Обоснование было практичное: 
 
 | Вход | Кто пишет SQL | Чем ограничен | Capability |
 |---|---|---|---|
-| `run_script` | реестр `public.agent_predefined_scripts` | шаблон из реестра; вызывающий приносит имя и типизированные значения | `audit` |
-| `generate_sql` | LLM внутри сервера | список таблиц в коде, read-only, `EXPLAIN`, потолок строк | `audit` |
-| `history_search` | код платформы | жёстко заданный `SELECT`, изоляция из идентичности транспорта | `data` |
+| `audit.run_script` | реестр `public.agent_predefined_scripts` | шаблон из реестра; вызывающий приносит имя и типизированные значения | `audit` |
+| `audit.generate_sql` | LLM внутри сервера | список таблиц в коде, read-only, `EXPLAIN`, потолок строк | `audit` |
+| `data.history_search` | код платформы | жёстко заданный `SELECT`, изоляция из идентичности транспорта | `data` |
 
 Capability `data` — инфраструктура, и операций в ней двенадцать: журнал
-(`log_events` — батч, `log_event` — одиночная, `purge_logs`,
-`upsert_question_run`), чтение (`history_search`, `schema_check`), очередь задач
-(`claim_task`, `update_task_status`, `unstick_tasks`) и сообщения
-(`append_assistant_message`, `delete_assistant_message`,
-`patch_message_metadata`). Запрос к данным живёт в `audit`, где лежит реестр
+(`data.log_events` — батч, `data.log_event` — одиночная, `data.purge_logs`,
+`data.upsert_question_run`), чтение (`data.history_search`, `data.schema_check`), очередь задач
+(`data.claim_task`, `data.update_task_status`, `data.unstick_tasks`) и сообщения
+(`data.append_assistant_message`, `data.delete_assistant_message`,
+`data.patch_message_metadata`). Запрос к данным живёт в `audit`, где лежит реестр
 скриптов.
 
 **Что это стоит, названо прямо.** Три операции вместо одного примитива — это
 работа: новый вопрос без подходящего скрипта идёт через LLM и стоит вызова
 провайдера, а не локального `SELECT`. Смягчение — few-shot из того же реестра
-скриптов, поэтому типовые вопросы чаще попадают в `run_script`.
+скриптов, поэтому типовые вопросы чаще попадают в `audit.run_script`.
 
 **AST-guard меняет роль, но не исчезает.** Он больше не охраняет вызов снаружи, а
 охраняет вывод LLM — который является недоверенным входом и при этом
@@ -476,21 +480,21 @@ nanobot, писатель — нет.
 
 | Операция | Тип | Зачем |
 |---|---|---|
-| `log_events` | write | **Батчевая** запись в журнал, неблокирующий путь |
-| `log_event` | write | **Одиночная** запись; та же таблица, другой вход |
-| `history_search` | read | Поиск по журналу с изоляцией |
-| `schema_check` | read | Наличие таблиц, объявленных платформой в `platform.json` |
-| `purge_logs` | write | Retention журнала и чистка пустых outbound |
-| `upsert_question_run` | write | Контекст оборота в таблице прогонов вопросов |
-| `claim_task` | read/write | Захват одной задачи очереди |
-| `update_task_status` | write | Смена статуса задачи с записью сообщения |
-| `unstick_tasks` | write | Возврат зависших задач в `pending` |
-| `append_assistant_message` | write | Вставка сообщения ассистента |
-| `delete_assistant_message` | write | Удаление сообщения |
-| `patch_message_metadata` | write | Слияние патча в `metadata` сообщения |
+| `data.log_events` | write | **Батчевая** запись в журнал, неблокирующий путь |
+| `data.log_event` | write | **Одиночная** запись; та же таблица, другой вход |
+| `data.history_search` | read | Поиск по журналу с изоляцией |
+| `data.schema_check` | read | Наличие таблиц, объявленных платформой в `platform.json` |
+| `data.purge_logs` | write | Retention журнала и чистка пустых outbound |
+| `data.upsert_question_run` | write | Контекст оборота в таблице прогонов вопросов |
+| `data.claim_task` | read/write | Захват одной задачи очереди |
+| `data.update_task_status` | write | Смена статуса задачи с записью сообщения |
+| `data.unstick_tasks` | write | Возврат зависших задач в `pending` |
+| `data.append_assistant_message` | write | Вставка сообщения ассистента |
+| `data.delete_assistant_message` | write | Удаление сообщения |
+| `data.patch_message_metadata` | write | Слияние патча в `metadata` сообщения |
 
 Двенадцать операций, а не три: журнал, чтение, очередь задач и работа с
-сообщениями. Из них модель получает только `history_search` и `schema_check` —
+сообщениями. Из них модель получает только `data.history_search` и `data.schema_check` —
 остальные помечены `AUDIENCE_RUNTIME` (см. §11: фильтрации при публикации в
 MCP пока нет).
 
@@ -504,11 +508,11 @@ capability `audit` — туда, где лежит реестр скриптов
 | `scripts/predefined/db_loader.py` | ~150 | Реестр `public.agent_predefined_scripts`. Переносится как есть, диалект снимка сохраняется — см. §1.1 |
 | `scripts/predefined/validator.py` | ~200 | Типы, обязательность, значения по умолчанию |
 | `scripts/predefined/builder.py` | ~230 | Сборка шаблона, параметризация, авто-`LIMIT` |
-| `scripts/predefined/mode.py` | ~200 | Конвейер `run_script` |
+| `scripts/predefined/mode.py` | ~200 | Конвейер `audit.run_script` |
 | `scripts/generated_sql_mode.py` | ~280 | Пайплайн генерации, `<NO_MATCH>`, `EXPLAIN` |
 | `scripts/llm.py`, `scripts/skill_config.py` | ~120 | Резолв LLM и таблиц — через `libs/llm` и `libs/enterprise_common` |
 
-Три операции: `list_scripts`, `run_script`, `generate_sql`. Ни одна не принимает
+Три операции: `audit.list_scripts`, `audit.run_script`, `audit.generate_sql`. Ни одна не принимает
 SQL от вызывающей стороны. Подробные контракты — `MCP-CONTRACTS.md` §4,
 формальная фиксация — `specs/data/audit/spec.md`.
 
@@ -655,7 +659,7 @@ chunk_overlap, metric).
 
 | Модуль | Строк | Решение |
 |---|---:|---|
-| `lib/services/llm_client.py` | 199 | → `mcp-platform/libs/llm/`, выставляется операцией `enterprise-mcp: complete`. **В агенте больше не используется** |
+| `lib/services/llm_client.py` | 199 | → `mcp-platform/libs/llm/`, выставляется операцией `enterprise-mcp: llm.complete`. **В агенте больше не используется** |
 | `lib/services/llm_config.py` | 88 | → конфиг `enterprise-mcp`. Провайдер, модель и ключ перестают читаться из `config.json` агента |
 | `lib/core/skill_config.py` | 325 | Теряет смысл: каждый домен читает **свой** конфиг из конфига платформы, а не из `config.json` агента |
 
@@ -684,7 +688,7 @@ enterprise-стек». Разбор — `design.md` §7.1.
 ```
 хук (в процессе агента)
   └─► локальный буфер, ограниченный размером
-        └─► батчевый flush ──► enterprise-mcp: log_events
+        └─► батчевый flush ──► enterprise-mcp: data.log_events
                                └─► agent_gateway_logs / agent_question_runs
 ```
 
@@ -697,14 +701,14 @@ enterprise-стек». Разбор — `design.md` §7.1.
    то, что сломалось.
 3. **Политика хранения одна.** Правило очистки журнала — платформенное: оно
    объявлено в `platform.json → data.log_retention_days` и
-   `data.log_purge_empty_outbound` и применяется операцией `purge_logs`. Агент
+   `data.log_purge_empty_outbound` и применяется операцией `data.purge_logs`. Агент
    свою копию журнала больше не ведёт, поэтому «сколько живёт запись»
    решает сервер, а не вызывающая сторона.
 
 **Четвёртое условие, добавленное позже: журнал не встаёт в очередь за дорогой
 работой.** Одна очередь означает, что медленное и быстрое конкурируют за одни и
-те же воркеры, а `generate_sql` занимает воркер надолго. Если бы запись журнала
-ждала ту же очередь, всплеск таких запросов глушил бы `log_events` — а потеря
+те же воркеры, а `audit.generate_sql` занимает воркер надолго. Если бы запись журнала
+ждала ту же очередь, всплеск таких запросов глушил бы `data.log_events` — а потеря
 события безвозвратна и не сопровождается ошибкой.
 
 Поэтому у сервиса-владельца пула **два входа**: `submit(job)` — блокирующий, для
@@ -723,7 +727,7 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | `gateway.vector.index.default_root` | **Удалить** — путь на диске |
 | `gateway.vector.index.enable` / `backend` / `storage_table` | Сохраняются, переезжают в конфиг `enterprise-mcp` |
 | `gateway.vector.index.indexes.*` | Сохраняются, переезжают в конфиг `enterprise-mcp` |
-| `skills.*.tables` | **Сохраняется** — описывает состав снимка, служит разрешённым списком таблиц для `generate_sql` и источником метки `scripts_registry` |
+| `skills.*.tables` | **Сохраняется** — описывает состав снимка, служит разрешённым списком таблиц для `audit.generate_sql` и источником метки `scripts_registry` |
 | `skills.*.vector_indexes` | **Сохраняется** — становится конфигурацией capability `vectors` |
 | `logging.db.*` | Переезжает в конфиг capability `data` |
 | `channels.postgres.pool.*` | Переезжает в конфиг capability `data` (размер пула — его ответственность) |
@@ -767,12 +771,12 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | 0 | Удалить сломанный мёртвый код (`structure_cache.py`, `extract_office_structure.py`, `table_utils.py`, `retry.py`) | Уже сломан или уже мёртв. Мешают инвентаризации, чинится за минуты |
 | 1 | Реестр: `ToolDefinition`, `ToolRegistry`, загрузчик `capabilities/*/tools/*.py`, fail-fast | Нужен раньше любой capability, иначе состав придётся перечислять вручную |
 | 2 | `libs/enterprise_data` ← `workspace/utils/db.py` + `sql_safety` + `jsonb` + `clean_text` | Модуль уже чист и покрыт тестами; это перенос, а не постройка |
-| 3 | capability `data`: журнал (`log_events` — батч, `log_event` — одиночная, `purge_logs`, `upsert_question_run`), чтение (`history_search`, `schema_check`), очередь задач (`claim_task`, `update_task_status`, `unstick_tasks`) и сообщения (`append_assistant_message`, `delete_assistant_message`, `patch_message_metadata`); два входа в очередь; предел стоимости запроса; запрет старта без `sqlglot`; архитектурный страж сервисов | Тонкий слой: схемы инструментов, маппинг ошибок |
+| 3 | capability `data`: журнал (`data.log_events` — батч, `data.log_event` — одиночная, `data.purge_logs`, `data.upsert_question_run`), чтение (`data.history_search`, `data.schema_check`), очередь задач (`data.claim_task`, `data.update_task_status`, `data.unstick_tasks`) и сообщения (`data.append_assistant_message`, `data.delete_assistant_message`, `data.patch_message_metadata`); два входа в очередь; предел стоимости запроса; запрет старта без `sqlglot`; архитектурный страж сервисов | Тонкий слой: схемы инструментов, маппинг ошибок |
 | 4 | **capability `vectors`**: сборка FAISS из снимка на старте сервера | Путь «снапшок → FAISS» сохраняется. Переносит `build_faiss_index`, `group_vector_hits`, `build_raw_items` и векторную половину `cache_provider_impl.py`. Инвариант: ленивых загрузок на горячем пути нет — `_prepare_capabilities` собирает все объявленные индексы до старта loop |
-| 5 | capability `llm`: `libs/llm` + операция `complete` | Убирает 287 строк LLM-клиента из агента |
+| 5 | capability `llm`: `libs/llm` + операция `llm.complete` | Убирает 287 строк LLM-клиента из агента |
 | 6 | **capability `audit`**: перенос конвейера с сохранением диалекта снимка; проверка списка таблиц в коде, потолок строк, без `context` от вызывающего | Реестр и шаблоны остаются в диалекте снимка (`?`, `main`) — переписывать их под `psycopg2` незачем. Требования безопасности поверхности сохраняются |
 | 7 | **Перенос кластера снимка** во владельца `libs/enterprise_data` одним коммитом | ~2 600 строк меняют место жительства: `duckdb_cache_store.py`, `cache_load_service.py`, `cache_provider.py`, исполнитель запросов из `duckdb_query.py`. Снимок остаётся (§1.1) |
-| 8 | Логирование через `enterprise-mcp: log_events` | Буфер в агенте, батчевый flush. `db_logging_bus.py` остаётся в агенте |
+| 8 | Логирование через `enterprise-mcp: data.log_events` | Буфер в агенте, батчевый flush. `db_logging_bus.py` остаётся в агенте |
 | 9 | Патчи → хуки и события | Патчей в коде **четыре**, не двенадцать: `exec_timeout_cap`, `assemble_outbound`, `subagent_logging`, `repeat_guard_block`. `exec_limits` и `tool_limits` сняты 2026-10-03: нативной конфигурации лимитов вывода в nanobot 0.3.5 нет, приняты дефолты библиотеки |
 | 10 | document-tool агента | Разблокирует шаг 9: порог длины текста уходит из патча в собственный код tool'а |
 | 13 | Перенос `legal_summarizer` — **последним** | Решение владельца: домен ничего не разблокирует для остальных фаз, ноль связности |
@@ -802,14 +806,14 @@ enterprise-стек». Разбор — `design.md` §7.1.
    read-only, проверка состава таблиц и потолок строк; ни одно не прерывает уже
    начавшееся исполнение. Нужен ли явный механизм прерывания, и если да, то чей:
    поток- watchdog в процессе или ограничение сверху. Владелец и срок не назначены.
-4. **Показывать ли SQL в ответе `run_script`** — по умолчанию убрано: для модели
+4. **Показывать ли SQL в ответе `audit.run_script`** — по умолчанию убрано: для модели
    это приглашение вернуть ручную правку. Оператору полезно, но оператора звать
    нельзя.
-5. **Нужен ли `describe_script`** или хватит `list_scripts` с фильтром.
+5. **Нужен ли `describe_script`** или хватит `audit.list_scripts` с фильтром.
 6. **Лимит попыток генерации** — сегодня `MAX_ATTEMPTS = 4` вызовов LLM на
    вопрос, стоимость ничем не ограничена.
-7. **Потолок `max_tokens` в `complete`** — модель может заказать `10**9`.
-8. **Что отдавать в `row` у `vector_search`** — полная строка источника может
+7. **Потолок `max_tokens` в `llm.complete`** — модель может заказать `10**9`.
+8. **Что отдавать в `row` у `vectors.vector_search`** — полная строка источника может
    быть большой; нужен потолок и признак усечения.
 
 Один технический факт ограничивает все эти вопросы: `SkillSettings` объявлен с
@@ -822,11 +826,11 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | Вопрос | Решение |
 |---|---|
 | Топология | **Один** процесс `enterprise-mcp`. Capability `data` / `audit` / `vectors` / `llm` / `legal_summarizer` — каталоги, а не процессы. Разбор цены разделения — `design.md` §2.1, §7.1 |
-| Поверхность доступа к данным | **Модель не пишет SQL.** Три входа: `run_script` (шаблон из реестра), `generate_sql` (LLM внутри сервера), `history_search` (код платформы). Запрос к данным живёт в capability `audit`, `data` — инфраструктура. Проверено: `validate_sql` смотрит на вид оператора, но не на имя таблицы, поэтому белый список сегодня существует только как текст промпта |
+| Поверхность доступа к данным | **Модель не пишет SQL.** Три входа: `audit.run_script` (шаблон из реестра), `audit.generate_sql` (LLM внутри сервера), `data.history_search` (код платформы). Запрос к данным живёт в capability `audit`, `data` — инфраструктура. Проверено: `validate_sql` смотрит на вид оператора, но не на имя таблицы, поэтому белый список сегодня существует только как текст промпта |
 | Владение ресурсами | Пул и очередь, векторные индексы и LLM-клиент — по одному владельцу. Capability получают сервис, обход запрещён архитектурным стражем. Разбор — §3.1 |
 | Индекс FAISS | Сотни тысяч векторов, сборка десятки секунд → **сборка на старте сервера, до старта loop** (`_prepare_capabilities` + `_warm_heavy_imports`), наблюдаемое состояние индекса в логе. Причина не только в удобстве: DuckDB лениво тянет `numpy`/`pandas` на первом `execute` с параметрами, а обработчики операций идут в воркерах AnyIO — такой импорт на Windows зависает намертво (проверено: >180 с вместо 0,2 с) |
 | Документы | Нативный tool агента. `office_files.py` не переезжает, офисные пакеты остаются в `requirements.txt` агента — сознательное исключение из цели «Nanobot не тянет enterprise-стек» |
-| LLM-выход | Операция `complete` в capability `llm`. `llm_client.py` и `llm_config.py` → `mcp-platform/libs/llm`, в агенте больше не используются |
+| LLM-выход | Операция `llm.complete` в capability `llm`. `llm_client.py` и `llm_config.py` → `mcp-platform/libs/llm`, в агенте больше не используются |
 | `media` и `_tool_audit` | События. Патч `assemble_outbound` удаляется целиком; хук публикует через `turn_context.events`, канал читает |
 
 **Закрыто ранее:** `agent_worker_claims`, `benchmarks/`, `streamlit`,

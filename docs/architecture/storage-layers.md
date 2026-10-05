@@ -166,7 +166,7 @@ PostgreSQL идёт операциями платформы (`OP_STATE` / `OP_MI
 `lib/`, ни в `mcp-platform/`. Несколько реплик на общей таблице не
 разрушаются, потому что запись арбитражна, а не сериализована: платформа
 выполняет чтение зеркала, решение и запись **одной транзакцией**
-(`mirror_session`, `capabilities/data/service/main.py`), а переход строки —
+(`data.mirror_session`, `capabilities/data/service/main.py`), а переход строки —
 условным `UPDATE`. Блокировки строки нет сознательно: на Greenplum 6.5
 `SELECT ... FOR UPDATE` взял бы блокировку уровня таблицы.
 

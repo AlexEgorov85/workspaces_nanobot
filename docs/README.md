@@ -24,7 +24,7 @@ reference** по своей подсистеме; README в корне — эт�
 | `storage/session-hybridization` | Гибридное хранение сессий (JSONL + PG mirror) |
 | `storage/session-recovery` | Восстановление сессий после потери метаданных |
 | `storage/usage-store` | LLM usage tracking (`LLMUsageStore`) |
-| `tools-history-search` | Tool `history_search` по журналу `agent_gateway_logs` |
+| `tools-history-search` | Tool `data.history_search` по журналу `agent_gateway_logs` |
 
 Разделение ответственности между OpenSpec, `docs/` и кодом описано в
 [`openspec/specs/architecture/component-model/spec.md`](../openspec/specs/architecture/component-model/spec.md)

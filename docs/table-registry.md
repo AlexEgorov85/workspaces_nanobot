@@ -37,7 +37,7 @@ skill'ы получили доступ к данным через операци
 | Объявление векторных индексов | `platform.json → vectors.indexes`; читает capability `vectors` |
 | Сборка векторов | `python -m servers.enterprise.build_index` (из `mcp-platform`) |
 | Путь файла снимка | `platform.json → data.snapshot_path` |
-| Доступ skill'а к данным | операции capability `audit` (`list_scripts`, `run_script`, `generate_sql`, `vector_search`) через tool агента |
+| Доступ skill'а к данным | операции capability `audit` и `vectors` (`audit.list_scripts`, `audit.run_script`, `audit.generate_sql`, `vectors.vector_search`) через tool агента |
 | Модель эмбеддинга | `platform.json → llm.embed_*`, владелец — capability `llm` |
 | Track-колонка | `platform.json → vectors.indexes.<name>.track_column` |
 
@@ -56,7 +56,7 @@ skill'ы получили доступ к данным через операци
 - *«Какие таблицы грузятся в снимок?»* — `mcp-platform/platform.json → audit.tables`
   и `data`.
 - *«Где взять SQL готового скрипта?»* — таблица реестра
-  `public.agent_predefined_scripts`, операция `list_scripts` / `run_script`
+  `public.agent_predefined_scripts`, операция `audit.list_scripts` / `audit.run_script`
   capability `audit`.
 - *«Как пересобрать векторы?»* — `cd mcp-platform && python -m
   servers.enterprise.build_index --index <name>`, затем перезагрузка снимка.

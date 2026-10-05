@@ -6,7 +6,7 @@
 
 ---
 
-## Незарелизованное (`master`, CHANGELOG → [Unreleased](../CHANGELOG.md)) — векторные индексы, изоляция `history_search`, снятие протокола аренды задач
+## Незарелизованное (`master`, CHANGELOG → [Unreleased](../CHANGELOG.md)) — векторные индексы, изоляция `data.history_search`, снятие протокола аренды задач
 
 ⚠️ **Breaking change** в подсистеме векторных индексов: persisted FAISS-кеш
 удалён, таблица-сигнатура и настройка `signature_table` больше не существуют.
@@ -50,11 +50,11 @@
   storage-таблицу объявляет платформа: `mcp-platform/platform.json` →
   `vectors.indexes` / `vectors.storage_table`.
 - Расхождение декларации и runtime проверяют операции capability `vectors`:
-  `list_indexes` (состояние всех индексов) и `index_stats` (метрики одного).
+  `vectors.list_indexes` (состояние всех индексов) и `vectors.index_stats` (метрики одного).
   Удалённые `--list-indexes` (CLI `audit_analyzer`) и `tools/check_indexes.py`
   смотрели на тот же снимок, но в агентском процессе; сейчас это делает
   платформа.
-- `history_search(session_scope="all")` изолирован по `user_id` (security):
+- `data.history_search(session_scope="all")` изолирован по `user_id` (security):
   колонка `agent_gateway_logs.user_id` + индекс `(user_id, "timestamp" DESC)`.
   Семантика `scope="all"` — «все сессии текущего пользователя», а не глобальная
   выборка; при отсутствии identity-store возвращается `missing_user_identity` /
@@ -93,14 +93,14 @@
    сносить» уже не вопрос: правится только `platform.json` (см.
    `VECTOR_INDEXES.md`).
 
-3. **Проверить согласованность декларации и runtime**: операция `list_indexes`
+3. **Проверить согласованность декларации и runtime**: операция `vectors.list_indexes`
    (состояние и `declared`/`vector_count` по каждому индексу) либо
-   `index_stats` для одного индекса. Прежний
+   `vectors.index_stats` для одного индекса. Прежний
    `python tools/check_indexes.py` с кодами возврата 0/1/2 удалён вместе с
    агентским кластером; разбор `missing`/`orphan`/`stale` живёт в
    `mcp-platform/libs/vectors/preload.py::compute_index_health`.
 
-4. **Аудит вызовов `history_search`**: агент, полагавшийся на глобальную выдачу
+4. **Аудит вызовов `data.history_search`**: агент, полагавшийся на глобальную выдачу
    по `session_scope="all"`, теперь получает события только своего пользователя
    либо `missing_user_identity`, если identity-store не заполнен.
 

@@ -775,7 +775,7 @@ test
 
 - **Single source of truth** — `gateway.error_messages.internal_error` в `config.json` (default `"Я не справился с вашим вопросом. Попробуйте, пожалуйста, переформулировать конкретнее — например, уточните ключевую часть или приведите пример."`); pydantic-валидация в `lib/core/project_settings.py::ErrorMessagesSettings`.
 - **Patch** — `RuntimePatcher.patch_turn_delivery_fail` (на уровне класса, не инстанса) подменяет `TurnDelivery.fail` обёрткой: формирует `OutboundMessage(content=internal_error, metadata={"_error_kind": "internal", "_final_turn": True})`, при `log_to_db=true` (default) пишет `event_type="turn_failed"` в `agent_gateway_logs` через `try_log_event`, затем вызывает оригинальный `fail` для финализации `turn_completed` event.
-- **No-leak boundary** — `OutboundMessage.content` НЕ содержит ни типа исключения, ни str(exc), ни пути к исходнику. Детали остаются только в БД (для `history_search`) и в `loguru`.
+- **No-leak boundary** — `OutboundMessage.content` НЕ содержит ни типа исключения, ни str(exc), ни пути к исходнику. Детали остаются только в БД (для `data.history_search`) и в `loguru`.
 - **No regression** — `asyncio.CancelledError`-ветка (`abort_stream` + `restore_runtime_checkpoint`) не задета; `turn_completed` event по-прежнему публикуется с `outcome="failed"` и `failure_kind="internal"`; каналы (`PostgresChannel`, `ConsoleLoop`) не меняются.
 - **Fail-open** — отсутствие `DbLoggingService` (юнит-тесты, профиль `test` без логирования) → fallback-сообщение всё равно уходит; отсутствие `settings` → default-текст.
 
