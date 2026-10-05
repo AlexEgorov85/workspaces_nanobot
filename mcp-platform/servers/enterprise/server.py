@@ -664,7 +664,12 @@ def build(
     )
     from_file = settings.file_backed()
     if from_file:
-        logger.info("настройки из platform.json: %s", ", ".join(from_file))
+        # Число, а не имена. Имен шестьдесят, строка с ними не помещается в
+        # терминал и не отвечает ни на один вопрос оператора: он и так видит
+        # действующие значения ниже (профиль, пороги, адреса). Перечень остаётся
+        # на DEBUG — там он и нужен: «что именно применилось из файла».
+        logger.info("настройки из platform.json: ключей=%d", len(from_file))
+        logger.debug("настройки из platform.json: %s", ", ".join(from_file))
     if profile:
         # Без этой строки не видно, в каком контуре пишет платформа: имена
         # таблиц одинаково выглядят в platform.json, а различаются только
@@ -685,9 +690,12 @@ def build(
         logger.info("подняты только capability: %s", ", ".join(sorted(wanted)))
     _log_llm_settings(container.get("llm"))
     _log_execution_settings(execution)
+    # Состав операций — одной строкой, имена на DEBUG. Перечень на INFO удваивал
+    # старт: загрузчик уже пишет каждую операцию при чтении
+    # (``loader.load_registry``, ``операция загружена``), и вторым перечнем он
+    # сообщал об одном и том же дважды, тридцатью четырьмя строками.
     logger.info("операций загружено: %d", len(registry))
-    for name in registry.names():
-        logger.info("  операция: %s", name)
+    logger.debug("операции: %s", ", ".join(registry.names()))
     return transport, registry, container
 
 
@@ -934,6 +942,29 @@ def _server_identity_name(profile: str | None) -> str:
     return f"enterprise-mcp:{profile}" if profile else "enterprise-mcp"
 
 
+def _configure_logging() -> None:
+    """Настроить вывод процесса: наши логгеры INFO, логгер ``mcp`` — WARNING.
+
+    Отдельная функция, а не две строки в ``main()``, потому что понижение
+    уровня стороннего логгера — это **правило отбора**, а правила отбора
+    должны быть проверяемы: ``main()`` не вызывается в тестах, а строка в
+    ней осталась бы непроверяемой и потому поехала бы обратно к INFO при
+    первом же рефакторинге.
+
+    Что убирается. ``mcp`` на INFO печатает на каждый запрос ``Processing
+    request of type CallToolRequest`` — тип запроса протокола без имени
+    операции, исхода и времени. Своя строка вызова у платформы есть
+    (``loader._log_call``), и она говорит о вызове то, чего эта не говорит.
+    WARNING у библиотеки остаётся: за ``mcp`` читают её сбои, а не
+    ``PingRequest``.
+
+    Идемпотентна: ``basicConfig`` сам по себе не добавляет второй обработчик
+    при повторном вызове, а уровень логгера ставится тем же значением.
+    """
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    logging.getLogger("mcp").setLevel(logging.WARNING)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Поднять сервер по stdio или streamable-http. Точка входа агента.
 
@@ -954,7 +985,7 @@ def main(argv: list[str] | None = None) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    _configure_logging()
     settings = Settings(
         profile=_profile_from_argv(argv),
         agent_settings_path=_agent_settings_path_from_argv(argv),

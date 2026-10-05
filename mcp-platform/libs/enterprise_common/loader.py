@@ -261,6 +261,7 @@ def build_server(
         try:
             definition = registry.get(tool_name)
         except EnterpriseError as exc:
+            _log_call(tool_name, "error", code=exc.code)
             return _error(exc.code, exc.message)
 
         # ``server.request_context.meta`` — разобранные метаданные запроса,
@@ -277,14 +278,62 @@ def build_server(
         try:
             outcome = await anyio.to_thread.run_sync(invoke)
         except Exception as exc:  # noqa: BLE001 - конвейер не должен ронять сервер
+            # Сбой конвейера — единственный исход, у которого нет ни исхода, ни
+            # длительности от ``PipelineResult``: их неоткуда взять, и выдуманное
+            # значение выглядело бы как замер. Поэтому ``duration_ms`` здесь
+            # отсутствует, а не равно нулю.
+            _log_call(tool_name, "error", code="internal_error")
             return _error("internal_error", f"{type(exc).__name__}: {exc}")
 
+        _log_call(
+            tool_name,
+            outcome.status,
+            code="" if not outcome.is_error else outcome.code,
+            duration_ms=outcome.duration_ms,
+        )
         return CallToolResult(
             content=[TextContent(type="text", text=outcome.text)],
             isError=bool(outcome.is_error),
         )
 
     return server
+
+
+def _log_call(
+    tool_name: str,
+    status: str,
+    *,
+    code: str = "",
+    duration_ms: int | None = None,
+) -> None:
+    """Одна строка stderr на вызов: имя операции, исход, длительность.
+
+    Зачем она, когда библиотека ``mcp`` уже пишет на каждый запрос
+    ``Processing request of type CallToolRequest``: та строка называет **тип
+    запроса протокола**, а не операцию, и не называет ни исхода, ни времени.
+    По ней нельзя ответить на вопрос «что вызывалось и чем кончилось», а
+    вызывающий в это время получил ``isError`` и ушёл. Отказ, не оставивший
+    следа в stderr, — тот же класс дефекта, что и отказ без строки в журнале
+    (см. ``execution/pipeline.py``, отказ до ``_logger.started``).
+
+    Формат объявлен здесь и вызывается из всех трёх выходов обработчика, чтобы
+    у вызова не появилось второго формата и второго места, где его пишут.
+
+    Args:
+        tool_name: имя операции, как она объявлена в реестре.
+        status: ``PipelineResult.status`` (``ok``/``error``/``timeout``).
+        code: код отказа конвейера; пусто на успехе.
+        duration_ms: длительность из результата конвейера; ``None`` — исходов,
+            до которых он не дошёл (операция не найдена, сбой конвейера), и
+            для них длительность **неизвестна**, а не нулевая.
+    """
+    detail = f"{status} {code}".strip()
+    duration = f" ({duration_ms}мс)" if duration_ms is not None else ""
+    line = f"вызов {tool_name} → {detail}{duration}"
+    if status == "ok":
+        logger.info(line)
+    else:
+        logger.warning(line)
 
 
 def _request_meta(server: Any) -> dict[str, Any] | None:
