@@ -26,7 +26,7 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 |---|---|---|
 | `data/cache-provider/spec.md` | capability `data` | `mcp-platform/libs/enterprise_data/snapshot/store.py` (`DuckDbSnapshotStore`) |
 | `data/vector-indexes/spec.md` | capability `vectors` | `mcp-platform/libs/vectors/`, объявления в `platform.json → vectors.indexes` |
-| `skills/legal-summarizer-query/spec.md` | capability `legal_summarizer` | `mcp-platform/libs/legal_summarizer/`; в агенте не осталось ничего — обёртка `workspace/tools/legal_summarizer_query.py` снята (change `2026-10-03-mcp-native-tools`, п. D6), модель зовёт операцию `mcp_enterprise_query_operation` |
+| `skills/legal-summarizer-query/spec.md` | capability `legal_summarizer` | `mcp-platform/libs/legal_summarizer/`; в агенте не осталось ничего — обёртка `workspace/tools/legal_summarizer_query.py` снята (change `2026-10-03-mcp-native-tools`, п. D6), модель зовёт операцию `mcp_enterprise_legal_summarizer_query_operation` |
 
 Спеки ниже не переезжали, а родились в платформе: предмета в агенте у них
 не было и не стало.
@@ -45,8 +45,8 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 |---|---|---|
 | `configuration/profiles/spec.md` | `profiles/test.jsonc`, `config.json` | `platform.json → profiles.test`, `PROFILE_OWNED_KEYS` |
 | `runtime/platform-settings/spec.md` | блок собирает `enterprise_mcp_client.py` | принимает `libs/enterprise_common/settings.py` (`owner=OWNER_AGENT`), разбирает `servers/enterprise/server.py` |
-| `logging-db/spec.md` | `lib/services/db_logging_service.py`, `log_transport.py` | операции `log_events`, `log_event`, `purge_logs` |
-| `tools-history-search/spec.md` | агентской обёртки не осталось: `workspace/tools/history_search_tool.py` снят (change `2026-10-03-mcp-native-tools`, п. D6), личность вызова подставляет `lib/hooks/mcp_identity_hook.py` | SQL и изоляция по `session_id`/`user_id` в `history_search` — берутся из контекста вызова, а не из аргументов модели |
+| `logging-db/spec.md` | `lib/services/db_logging_service.py`, `log_transport.py` | операции `data.log_events`, `data.log_event`, `data.purge_logs` |
+| `tools-history-search/spec.md` | агентской обёртки не осталось: `workspace/tools/history_search_tool.py` снят (change `2026-10-03-mcp-native-tools`, п. D6), личность вызова подставляет `lib/hooks/mcp_identity_hook.py` | SQL и изоляция по `session_id`/`user_id` в `data.history_search` — берутся из контекста вызова, а не из аргументов модели |
 | `testing/unified-test-contract/spec.md` | `tests/`, `pyproject.toml`, `.github/workflows/ci.yml` | `mcp-platform/tests/`, `mcp-platform/pyproject.toml` |
 
 ## `agent` — предмет реализован в агенте
@@ -88,7 +88,7 @@ grep -rl '`platform`' openspec/specs --include=spec.md
   код, но не переписывает контракт под новое место. Особенно заметно на
   `skills/legal-summarizer-query`: спека описывает subprocess-IPC со
   `scripts/cli_query.py`, которого в агенте уже нет, а фактический вызов идёт
-  через MCP-операцию `query_operation`.
+  через MCP-операцию `legal_summarizer.query_operation`.
 - **`COMPONENTS.md` всё ещё перечисляет `CacheProvider` и `VectorIndexService`
   как компоненты агента** и указывает файлы реализации, которых нет. Валидатор
   честно предупреждает об этом на каждом запуске (предупреждение, не ошибка:

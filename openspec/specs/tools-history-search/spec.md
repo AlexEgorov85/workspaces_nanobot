@@ -9,8 +9,8 @@ context compaction и остаётся основным источником д�
 Область поиска **не выбирается**: её задаёт вызывающая сторона, и модель не может
 её ни увидеть, ни ослабить. Кастомный tool агента с параметром
 `session_scope` снят (change `2026-10-03-mcp-native-tools`, п. D6); модель
-получает операцию `mcp_enterprise_history_search`, которая применяет предикаты по
-`session_id` и `user_id` из контекста вызова.
+получает операцию `mcp_enterprise_data_history_search`, которая
+применяет предикаты по `session_id` и `user_id` из контекста вызова.
 
 Изоляция данных — денормализация `user_id`, правило наследования, backfill,
 индексы — в этом описании не менялась и остаётся в силе.
@@ -23,7 +23,7 @@ context compaction и остаётся основным источником д�
 Реализация: `lib/hooks/mcp_identity_hook.py`,
 `mcp-platform/servers/enterprise/capabilities/data/tools/history_search.py`,
 `mcp-platform/servers/enterprise/capabilities/data/service/main.py`.
-Вызов: `mcp_enterprise_history_search`.
+Вызов: `mcp_enterprise_data_history_search`.
 
 ## Requirements
 
@@ -69,13 +69,13 @@ context compaction и остаётся основным источником д�
 
 #### Scenario: Выбор области вызовами невозможен
 
-- **WHEN** модель формирует аргументы `mcp_enterprise_history_search`
+- **WHEN** модель формирует аргументы `mcp_enterprise_data_history_search`
 - **THEN** в них SHALL NOT быть параметра, задающего область поиска
 - **AND** предикат по `session_id` SHALL применяться всегда
 
 ### Requirement: operation identity and scope
 
-Операция `history_search` SHALL читать таблицу журнала, имя и схема которой
+Операция `data.history_search` SHALL читать таблицу журнала, имя и схема которой
 задаются `platform.json`. Операция MUST NOT выполнять произвольный SQL,
 обращаться к другим таблицам или делать `INSERT`/`UPDATE`/`DELETE`. Все
 параметры запроса, включая текстовые, MUST передаваться позиционными
@@ -91,11 +91,11 @@ context compaction и остаётся основным источником д�
 
 #### Scenario: Агент SQL не строит
 
-- **WHEN** модель вызывает `mcp_enterprise_history_search`
+- **WHEN** модель вызывает `mcp_enterprise_data_history_search`
 - **THEN** агент SHALL NOT строить SQL
 - **AND** агент SHALL NOT обращаться к таблице журнала напрямую
 
-#### Scenario: history_search is read-only
+#### Scenario: data.history_search is read-only
 
 - **WHEN** операция исполняется
 - **THEN** её SQL SHALL содержать только `SELECT`
@@ -126,13 +126,13 @@ context compaction и остаётся основным источником д�
 
 #### Scenario: Поиск без области отвергнут сервисом
 
-- **WHEN** `history_search` вызван без `user_id` и без `session_id`
+- **WHEN** `data.history_search` вызван без `user_id` и без `session_id`
 - **THEN** сервис SHALL отказать `InvalidRequestError`
 - **AND** SQL к журналу SHALL NOT быть выполнен
 
 #### Scenario: Одной из двух частей области достаточно
 
-- **WHEN** `history_search` вызван с заданным `session_id` и пустым `user_id`
+- **WHEN** `data.history_search` вызван с заданным `session_id` и пустым `user_id`
 - **THEN** сервис SHALL построить предикат только по `session_id`
 - **AND** SHALL NOT построить unscoped условие
 
@@ -251,9 +251,9 @@ context compaction и остаётся основным источником д�
 
 #### Scenario: Фильтр по event_type + tool_name
 
-- **WHEN** вызвано `history_search(event_type="tool.started", tool_name="history_search", limit=3)`
+- **WHEN** вызвано `data.history_search(event_type="tool.started", tool_name="data.history_search", limit=3)`
 - **THEN** SHALL быть возвращено не более 3 событий, у которых
-  `event_type='tool.started'` И `name='history_search'`
+  `event_type='tool.started'` И `name='data.history_search'`
 - **AND** они SHALL быть отсортированы по `(timestamp DESC, id DESC)`
 
 #### Scenario: Неизвестный event_type даёт пустую выборку

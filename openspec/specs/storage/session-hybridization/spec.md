@@ -99,7 +99,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   `transaction()` оборачивает в BEGIN/COMMIT; на исключении —
   ROLLBACK автоматически. Атомарность per session_key
   гарантируется.
-- **AND** читатели (`PostgresChannel`, `history_search`)
+- **AND** читатели (`PostgresChannel`, `data.history_search`)
   используют READ COMMITTED (default в PG); они видят
   либо старую версию сообщений (до DELETE), либо новую
   (после INSERT), но НЕ промежуточное состояние (после
@@ -212,7 +212,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 > хеш-распределённой таблице ровно один `UNIQUE`/`PRIMARY KEY` и требует,
 > чтобы он включал все столбцы распределения. Такая таблица не создавалась
 > вовсе. Решение владельца: составной ключ объявлен единственным,
-> уникальность по нему держит писатель — `mirror_session` удаляет все
+> уникальность по нему держит писатель — `data.mirror_session` удаляет все
 > сообщения сессии и вставляет заново с `seq = 0…N-1`, поэтому дубль на
 > одну позицию невозможен по построению. `id` остался обычной колонкой:
 > он нужен для разбора неустойчивых позиций, потому что `seq` меняет
@@ -399,7 +399,7 @@ observability для диагностики сломанного sync.
 - **AND** `SessionMirror` НЕ подписывается на
   `set_delete_observer(...)`: требование снято, подписка не была
   реализована ни в одной версии, а удаление ловится diff-циклом —
-  сессия исчезает из `list_sessions()`, и операция `cleanup_session_mirror`
+  сессия исчезает из `list_sessions()`, и операция `data.cleanup_session_mirror`
   убирает её строки по своему `replica_id` после подтверждения
   (`missing_cycles_threshold`).
 - **AND** удаление НЕ блокирует hot path: оно происходит в своём цикле.
@@ -552,9 +552,9 @@ mirror для session messages — это **разные** persistence-моде�
 - **AND** `SessionMirror` НЕ трогает
   `agent_conversation_messages` — это не его concern.
 
-#### Scenario: history_search читает из agent_gateway_logs
+#### Scenario: data.history_search читает из agent_gateway_logs
 
-- **WHEN** агент вызывает tool `history_search`
+- **WHEN** агент вызывает операцию `data.history_search`
 - **THEN** поиск идёт по `agent_gateway_logs` согласно
   спеке `tools-history-search`. Mirror-таблицы сессий
   (`agent_session_meta` / `agent_session_messages`) НЕ

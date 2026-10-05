@@ -9,7 +9,8 @@
 Спека описывает поведение capability, а не способ вызова. Граница вызова
 (subprocess между tool'ом агента и CLI) снята вместе с агентской обёрткой
 (change `2026-10-03-mcp-native-tools`, п. D6): домен вызывается в том же
-процессе, модель получает операцию `mcp_enterprise_query_operation`, а
+процессе, модель получает операцию
+`mcp_enterprise_legal_summarizer_query_operation`, а
 `cli_query.py` остался оболочкой для ручного запуска.
 
 Общий контракт вызовов — личность, конверт `_execution`, коды отказа —
@@ -25,8 +26,8 @@
 Реализация: `mcp-platform/libs/legal_summarizer/`,
 `mcp-platform/servers/enterprise/capabilities/legal_summarizer/`.
 
-Вызов: операция `query_operation`, модели — как
-`mcp_enterprise_query_operation` (объявлена в
+Вызов: операция `legal_summarizer.query_operation`, модели — как
+`mcp_enterprise_legal_summarizer_query_operation` (объявлена в
 `config.json → tools.mcpServers.enterprise.enabled_tools`).
 
 ## Requirements
@@ -161,14 +162,14 @@ CLI-обёртки и вместе с ней ушли.
 
 #### Scenario: field=stats отдаёт метрики
 
-- **WHEN** вызвано `query_operation` с `field = "stats"` и manifest доступен
+- **WHEN** вызвано `legal_summarizer.query_operation` с `field = "stats"` и manifest доступен
 - **THEN** ответ SHALL содержать `status = "ok"` и `field = "stats"`
 - **AND** SHALL присутствовать `operation_id`, `article_count`, `chunks_total`,
   `sections_total`
 
 #### Scenario: field=chunks отдаёт физические файлы
 
-- **WHEN** вызвано `query_operation` с `field = "chunks"` и manifest доступен
+- **WHEN** вызвано `legal_summarizer.query_operation` с `field = "chunks"` и manifest доступен
 - **THEN** ответ SHALL содержать `status = "ok"`, `field = "chunks"` и `chunk_count`
 - **AND** каждый элемент `chunks` SHALL иметь `chunk_id`, `section_id`,
   `section_path`, `page_start`, `page_end`, `summary`
@@ -176,14 +177,14 @@ CLI-обёртки и вместе с ней ушли.
 
 #### Scenario: Каждое поле отвечает своей формой
 
-- **WHEN** вызвано `query_operation` с `field` из множества
+- **WHEN** вызвано `legal_summarizer.query_operation` с `field` из множества
   `articles` / `sections` / `tree` / `all`
 - **THEN** ответ SHALL содержать `status = "ok"` и `field` с запрошенным значением
 - **AND** тело SHALL иметь форму, соответствующую этому полю, а не общий JSON
 
 #### Scenario: Неизвестное поле отказывает, а не отдаёт manifest целиком
 
-- **WHEN** вызвано `query_operation` с `field`, не совпадающим ни с одним из шести
+- **WHEN** вызвано `legal_summarizer.query_operation` с `field`, не совпадающим ни с одним из шести
 - **THEN** SHALL быть возвращён доменный отказ `invalid_field`
 - **AND** код конверта SHALL быть `invalid_params`
 - **AND** сообщение SHALL содержать перечень допустимых полей

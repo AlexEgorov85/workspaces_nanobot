@@ -400,7 +400,7 @@ failure mode where the banner said `prod` but the runtime used
 - **WHEN** `python gateway.py --profile=prod` is invoked
 - **THEN** `SETTINGS["logging"]["db"]["table_name"]` SHALL equal
   `agent_gateway_logs`
-- **AND THEN** a `history_search` call against that table SHALL
+- **AND THEN** a `data.history_search` call against that table SHALL
   address `public.agent_gateway_logs` (not `*_test`)
 
 #### Scenario: test profile selects test-suffixed tables

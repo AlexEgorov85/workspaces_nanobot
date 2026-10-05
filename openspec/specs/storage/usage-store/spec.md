@@ -181,7 +181,7 @@ metadata-only LLM usage. `DbLoggingService` НЕ ДОЛЖЕН
 - `LLMUsageStore` — per-call metadata для UI-графиков и
   cost-tracking (SQLite WAL, content-free).
 - `DbLoggingService` — content-rich audit-trail для
-  `history_search` и observability (`agent_gateway_logs` в PG,
+  `data.history_search` и observability (`agent_gateway_logs` в PG,
   content-rich с payload).
 
 Параллельная запись в оба стора ЗАПРЕЩЕНА для одного и того

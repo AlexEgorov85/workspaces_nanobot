@@ -17,8 +17,7 @@ Vector Indexes отвечают за:
 - владение FAISS-индексами в памяти процесса платформы: сборка на старте
   сервера, состояние индекса, подпись индекса и её сверка с текущей
   конфигурацией процесса
-- предоставление vector search модели через операцию `vector_search` capability
-  `vectors`
+- предоставление vector search модели через операцию `vectors.vector_search`
 - подтягивание `content` / `search_text` / `row_data` найденных чанков из
   таблицы-источника, а не из метаданных индекса
 
@@ -30,7 +29,7 @@ Vector Indexes отвечают за:
   `mcp-platform/libs/vectors/`
 - подписью индекса и её сверкой с текущей конфигурацией процесса
   (`mcp-platform/libs/vectors/signature.py`)
-- предоставлением vector search модели через операцию `vector_search` capability `vectors`
+- предоставлением vector search модели через операцию `vectors.vector_search`
 
 ### Does Not Own
 - владением файлом снимка DuckDB: снимок принадлежит capability `data`
@@ -54,7 +53,7 @@ Vector Indexes отвечают за:
 
 ## Public Contract
 
-Векторный поиск модели предоставляет операция `vector_search` capability `vectors`
+Векторный поиск модели предоставляет операция `vectors.vector_search`
 (`mcp-platform/servers/enterprise/capabilities/vectors/tools/vector_search.py`):
 - параметры: `query`, `index_name`, `top_k`, `threshold`
 - ответ: `index_name`, `index_state`, `found`, `results[]` с `content`, `score`,
@@ -62,19 +61,19 @@ Vector Indexes отвечают за:
   `index_state` — состояние индекса на момент поиска (`missing` / `building` /
   `ready` / `error`)
 
-Каталог индексов модели отдаёт операция `list_indexes`
+Каталог индексов модели отдаёт операция `vectors.list_indexes`
 (`mcp-platform/servers/enterprise/capabilities/vectors/tools/list_indexes.py`),
 объявленная модели в `config.json → tools.mcpServers.enterprise.enabled_tools`:
 имена, состояние, число векторов и размерность — без поднятия FAISS. Навык
 (`workspace/skills/audit_analyzer/SKILL.md`) имена индексов **не перечисляет**:
-он берёт их из `list_indexes`, поэтому копии состава объявления в агенте нет и
+он берёт их из `vectors.list_indexes`, поэтому копии состава объявления в агенте нет и
 новый индекс в `platform.json` не требует правки агентных файлов.
 
-`index_stats` остаётся диагностической операцией capability: файлы есть, модели
-она не объявлена, а состояние индекса доступно через `list_indexes` (весь
-каталог) и через `index_state` в ответе `vector_search`.
+`vectors.index_stats` остаётся диагностической операцией capability: файлы есть,
+модели она не объявлена, а состояние индекса доступно через `vectors.list_indexes`
+(весь каталог) и через `index_state` в ответе `vectors.vector_search`.
 
-Маршрут поиска: навык → операция `vector_search` → `search_vector` хранилища
+Маршрут поиска: навык → операция `vectors.vector_search` → `search_vector` хранилища
 (`mcp-platform/libs/enterprise_data/snapshot/store.py`) → `mcp-platform/libs/vectors/`.
 Выход за `mcp-platform/libs/vectors/` на этом маршруте — обход владельца индексов.
 
@@ -235,8 +234,8 @@ Vector Indexes отвечают за:
   чанков, состояние
 - `mcp-platform/libs/enterprise_data/snapshot/store.py` — владелец снимка: `search_vector`,
   чтение векторов и payload чанка
-- `mcp-platform/servers/enterprise/capabilities/vectors/tools/` — операции `vector_search`,
-  `list_indexes`, `index_stats`
+- `mcp-platform/servers/enterprise/capabilities/vectors/tools/` — операции
+  `vectors.vector_search`, `vectors.list_indexes`, `vectors.index_stats`
 - `mcp-platform/servers/enterprise/build_index.py` — наполнение векторного хранилища
 - `mcp-platform/docs/MCP-CONTRACTS.md` — контракт операций capability
 - `mcp-platform/docs/TARGET-ARCHITECTURE.md` — архитектурные принципы платформы
@@ -332,7 +331,7 @@ chunk_size, chunk_overlap, metric, enabled}}`) — `servers/enterprise/server.py
    старте. Первичная сборка укладывается в ≤ 5 секунд на эталонной рабочей станции
    для индексов до 20 000 векторов × 1024; величина не изменилась, изменился момент
    её уплаты — старт платформы вместо первого пользовательского запроса
-4. **Поиск**: `vector_search` эмбедит запрос, сверяет подпись индекса с текущей
+4. **Поиск**: `vectors.vector_search` эмбедит запрос, сверяет подпись индекса с текущей
    конфигурацией процесса и ищет по FAISS; payload найденных чанков
    (`content` / `search_text` / `row_data`) подтягивается из таблицы-источника по
    ключу `(source, pk_value, chunk_index)`
@@ -362,7 +361,7 @@ FAISS-индекс, метаданные, время сборки и счётч�
 - Сборка индекса идёт на старте сервера, до event loop, и ровно одна на процесс
 - Payload (`content` / `search_text` / `row_data`) читается из таблицы-источника,
   а не из метаданных, сериализованных в индекс
-- Поиск идёт единственным маршрутом: операция `vector_search` → `search_vector`
+- Поиск идёт единственным маршрутом: операция `vectors.vector_search` → `search_vector`
   хранилища → `mcp-platform/libs/vectors/`
 - Расхождение подписи индекса с текущей конфигурацией — отказ, а не молчаливая
   деградация и не пустая выдача
@@ -387,13 +386,13 @@ FAISS-индекс, метаданные, время сборки и счётч�
 
 ## Consumers
 
-- Модель (навык) — операция `vector_search` capability `vectors`; в дереве агента
+- Модель (навык) — операция `vectors.vector_search`; в дереве агента
   её называет `workspace/skills/audit_analyzer/SKILL.md`
 - Владелец снимка — `search_vector`
   (`mcp-platform/libs/enterprise_data/snapshot/store.py`), делегирующий владельцу
   индексов
-- Оператор — диагностические операции `list_indexes` и `index_stats`, которые
-  отвечают, не поднимая индекс
+- Оператор — диагностические операции `vectors.list_indexes`
+  и `vectors.index_stats`, которые отвечают, не поднимая индекс
 
 ## Implementation
 
