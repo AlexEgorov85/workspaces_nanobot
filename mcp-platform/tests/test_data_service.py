@@ -616,3 +616,72 @@ class TestLogEvent:
         svc.log_event(TOOL_STARTED)
         svc._buffer.flush()
         assert db.audiences == [AUDIENCE_RUNTIME]  # type: ignore[union-attr]
+
+# --- двойные скобки в SQL (класс дефекта append_reasoning) ------------------
+
+#: Файл с операциями capability ``data`` - предмет ast-скана ниже.
+DATA_SERVICE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "servers" / "enterprise" / "capabilities" / "data" / "service" / "main.py"
+)
+
+
+class TestNoDoubleBracesInSql:
+    """SQL собирается склейкой, где f-строка может быть только одна.
+
+    ``{{}}`` в обычном фрагменте - не экранирование, а мусор: в базу уходит
+    именно ``{{}}``, и PostgreSQL отвечает ``неверный синтаксис для типа
+    json``. Операция помечена ``retryable``, поэтому отказ выглядел как
+    «платформа иногда не отвечает», а не как поломка SQL.
+    """
+
+    def _service_with_db(self):
+        db = _fake_db()
+        service = _service(
+            db=db,
+            expected_tables=(
+                "public.agent_gateway_logs",
+                "public.agent_conversation_messages",
+            ),
+            buffer_flush_interval=0.0,
+            task_table=("public", "agent_conversation_messages"),
+        )
+        return db, service
+
+    def test_append_reasoning_builds_a_valid_empty_jsonb(self) -> None:
+        db, service = self._service_with_db()
+        service.append_reasoning(
+            assistant_msg_id="00000000-0000-0000-0000-000000000000",
+            delta="мысль",
+            audience="runtime",
+        )
+        statements = db.conn.statements
+        updates = [text for text, _ in statements if "UPDATE" in text.upper()]
+        assert updates, "UPDATE не записан - тест невалиден"
+        sql = updates[-1]
+        assert "'{}'::jsonb" in sql, (
+            "пустой jsonb должен идти как '{}', иначе COALESCE отдаёт мусор: " + sql
+        )
+        assert "{{" not in sql and "}}" not in sql, (
+            "в SQL остались двойные скобки: " + sql
+        )
+
+    def test_no_sql_literal_in_the_module_keeps_double_braces(self) -> None:
+        # Тот же класс в любом другом месте файла. Сканируется ast, а не текст:
+        # комментарий со словом "{{" дефектом не является, а строковая
+        # константа с SQL - является, и отличить их иначе нельзя.
+        import ast
+
+        tree = ast.parse(DATA_SERVICE_PATH.read_text(encoding="utf-8"))
+        sql_words = ("SELECT", "UPDATE", "INSERT", "DELETE", "jsonb")
+        offenders = [
+            node.value[:100]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and any(word in node.value.upper() for word in sql_words)
+            and "{{" in node.value
+        ]
+        assert offenders == [], (
+            "строковые константы с SQL и двойными скобками: %r" % (offenders,)
+        )

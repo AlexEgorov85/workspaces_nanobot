@@ -2356,7 +2356,7 @@ class DataService:
         table = _qualified(task_table or self._require_task_table("append_reasoning"))
         sql = (
             f"UPDATE {table} SET metadata = jsonb_set("
-            "COALESCE(metadata, '{{}}'::jsonb), '{reasoning}', "
+            "COALESCE(metadata, '{}'::jsonb), '{reasoning}', "
             "to_jsonb(COALESCE(metadata ->> 'reasoning', '') || %s::text), "
             "true), updated_at = NOW() "
             "WHERE id = %s AND role = 'assistant' "
