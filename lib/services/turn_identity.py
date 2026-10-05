@@ -169,7 +169,21 @@ class TurnIdentityStore:
 
     Потокобезопасен: сессии обрабатываются конкурентно, а писателей и читателей
     минимум три — журнал, подписчик событий и хук подписи вызовов.
+
+    **Здесь намеренно нет ``__len__``.** Объект с ``__len__`` ложен, пока он
+    пуст, и любая проверка ``store or TurnIdentityStore()`` или ``if store:``
+    в будущем не отличит «хранилища не передали» от «хранинилище пусто» — и
+    создаст второе хранилище именно тогда, когда личность ещё не накопилась.
+    Так и вышло: ``DbLoggingService`` выбирал хранилище выражением
+    ``turn_identities or TurnIdentityStore()``, при пустом хранилище контекста
+    ``or`` срабатывал, журнал завёл второе — и подписчик читал из чужого
+    всегда пустого. Число записей доступно только явно, через ``count()``.
     """
+
+    def count(self) -> int:
+        """Сколько сессий сейчас в хранилище. Явно, а не через ``len``."""
+        with self._lock:
+            return len(self._by_session)
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -318,9 +332,6 @@ class TurnIdentityStore:
         with self._lock:
             self._by_session.clear()
 
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._by_session)
 
 
 def request_id_from(source: Any, session_key: str | None) -> str | None:
