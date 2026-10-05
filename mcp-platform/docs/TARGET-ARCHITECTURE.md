@@ -293,10 +293,10 @@ def create_tool(container):
         return service.history_search(query, limit)
 
     return ToolDefinition(
-        name="history_search",
+        name="data.history_search",
         description="Поиск по долговечному журналу agent_gateway_logs",
         handler=history_search,
-        category="data",
+        capability="data",
         version="1.0",
         enabled=True,
         tags=("logs", "read"),

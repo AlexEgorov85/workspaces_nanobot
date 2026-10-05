@@ -330,10 +330,10 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
         <span class="k">return</span> container.data.history_search(query, limit)
 
     <span class="k">return</span> ToolDefinition(
-        name=<span class="s">"history_search"</span>,
+        name=<span class="s">"data.history_search"</span>,
         description=<span class="s">"Поиск по журналу agent_gateway_logs"</span>,
         handler=history_search,
-        category=<span class="s">"read"</span>,
+        capability=<span class="s">"data"</span>,
     )</pre>
       </div>
       <p class="rule" style="margin-top:12px"><span>Превращать описание в MCP-инструмент умеет реестр. Именно это делает <code>server.py</code> нечувствительным к составу.</span></p>
@@ -346,7 +346,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
       <ul style="font-size:13.5px;line-height:1.65;color:var(--body);padding-left:18px">
         <li><strong>Автообнаружение — не доверие.</strong> Каталог <code>capabilities/</code> доверенный: туда попадает только код репозитория, и всё исполняется с правами процесса</li>
         <li><strong>Hot reload нет.</strong> Реестр иммутабелен в пределах процесса: добавил файл — перезапустил сервер. Горячая перерегистрация тянет смену схемы уже опубликованного инструмента и состояние прежнего handler'а</li>
-        <li><strong>Имена плоские и уникальные.</strong> Capability не входит в имя — MCP-клиент и так приклеивает префикс сервера, а вложенный namespace только затрудняет выбор моделью</li>
+        <li><strong>Имя объявляет capability.</strong> Форма — <code>&lt;capability&gt;.&lt;operation&gt;</code>, и префикс входит в имя обязательно: MCP-клиент заменяет точку на подчёркивание, поэтому capability различим и в имени инструмента. Три объявления принадлежности — каталог, поле <code>capability</code> и префикс — обязаны сходиться</li>
       </ul>
       <div class="note warn" style="margin-top:14px;font-size:13px">
         <strong>Следующее усложнение, когда инструментов станет много:</strong> манифест <code>tool.json</code> с полем <code>entrypoint</code> вместо угадывания точки входа. Он меняет загрузчик, а не реестр, и не требует переписывания операций.

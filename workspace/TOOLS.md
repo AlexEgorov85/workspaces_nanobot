@@ -35,14 +35,14 @@ This file documents non-obvious constraints and usage patterns.
 - Use `output_mode="count"` to size a search before reading full matches
 - Use `head_limit` and `offset` to page across results
 - Для поиска по коду и по журналу — `grep` по журналу не годится, см.
-  `mcp_enterprise_history_search` ниже
+  `data.history_search` ниже
 - Binary or oversized files may be skipped to keep results readable
 
 ## cron — Scheduled Reminders
 
 - Please refer to cron skill for usage.
 
-## mcp_enterprise_history_search — поиск по долговечному журналу агента
+## data.history_search — поиск по долговечному журналу агента
 
 Операция платформы, а не кастомный tool: прежняя обёртка
 `workspace/tools/history_search_tool.py` снята change'ом
@@ -111,12 +111,12 @@ This file documents non-obvious constraints and usage patterns.
 **Примеры:**
 
 - «Какие файлы я прикладывал?» →
-  `mcp_enterprise_history_search(event_type="tool_call", tool_name="read_file")`
+  `data.history_search(event_type="tool_call", tool_name="read_file")`
 - «Когда последний раз сжимался контекст?» →
-  `mcp_enterprise_history_search(event_type="context_compacted", session_scope="current")`
+  `data.history_search(event_type="context_compacted", session_scope="current")`
 - «Что я писал про договор аренды?» →
-  `mcp_enterprise_history_search(query="договор аренды", event_type="llm_call")`
-- Пагинация: первая страница → `mcp_enterprise_history_search(limit=20)` →
+  `data.history_search(query="договор аренды", event_type="llm_call")`
+- Пагинация: первая страница → `data.history_search(limit=20)` →
   если `has_more=true`, продолжить с `offset=next_offset` (НЕ `20`).
 
 **Замечания:**
@@ -125,7 +125,7 @@ This file documents non-obvious constraints and usage patterns.
   и пути), а НЕ выдуманные типы (`file_attached`, `file_created`,
   `document_summarized` — таких нет в журнале).
 - Если результат пустой — отвечай «не найдено в истории», не выдумывай.
-- `mcp_enterprise_history_search` **не выполняет глобальный поиск по всем пользователям**:
+- `data.history_search` **не выполняет глобальный поиск по всем пользователям**:
   `session_scope="all"` — это все сессии текущего пользователя, а не
   вся БД. Без identity-store запрос возвращает структурированную
   ошибку (`missing_user_identity`) и SQL не выполняется. Это
@@ -278,7 +278,7 @@ JSON-string. Изменение формы данных требует отде�
 сейчас отключено, `idleCompactAfterMinutes: 0`). `raw_dump` — был ли
 полный дамп сообщений в стороннее хранилище.
 
-## mcp_enterprise_query_operation — follow-up по уже проанализированному документу
+## legal_summarizer.query_operation — follow-up по уже проанализированному документу
 
 Операция capability `legal_summarizer`. Прежний кастомный tool
 `workspace/tools/legal_summarizer_query.py` снят change'ом
@@ -315,9 +315,9 @@ PDF**: читает manifest/result/chunks разбора из состояни�
 
 **Примеры:**
 
-- «Сколько статей в документе?» → `mcp_enterprise_query_operation(operation_id="<op_id>", field="articles")` → `{article_count: N}`
-- «Какие разделы?» → `mcp_enterprise_query_operation(operation_id="<op_id>", field="sections")`
-- «О чём чанк 12?» → `mcp_enterprise_query_operation(operation_id="<op_id>", field="chunks")` → массив с `chunk_id`, `summary`, `section_path`.
+- «Сколько статей в документе?» → `legal_summarizer.query_operation(operation_id="<op_id>", field="articles")` → `{article_count: N}`
+- «Какие разделы?» → `legal_summarizer.query_operation(operation_id="<op_id>", field="sections")`
+- «О чём чанк 12?» → `legal_summarizer.query_operation(operation_id="<op_id>", field="chunks")` → массив с `chunk_id`, `summary`, `section_path`.
 
 **Не делать:**
 
@@ -332,18 +332,18 @@ PDF**: читает manifest/result/chunks разбора из состояни�
 ## audit_analyzer — операции платформы
 
 Данные аудита читаются операциями capability `audit`, а не командами в
-консоли. Кликабельный вход — `mcp_enterprise_list_scripts`,
-`mcp_enterprise_run_script`, `mcp_enterprise_generate_sql` и
-`mcp_enterprise_vector_search`; доменный разбор — в навыке
+консоли. Кликабельный вход — `audit.list_scripts`,
+`audit.run_script`, `audit.generate_sql` и
+`vectors.vector_search`; доменный разбор — в навыке
 `workspace/skills/audit_analyzer/SKILL.md`, общий контракт вызовов — в
 навыке `workspace/skills/enterprise_mcp/SKILL.md`.
 
 | Операция | Назначение | Когда |
 |---|---|---|
-| `mcp_enterprise_generate_sql` | Ответ на вопрос по данным фразой | Числовые и структурные запросы |
-| `mcp_enterprise_run_script` | Точный расчёт готовым скриптом из каталога | Есть подходящий скрипт |
-| `mcp_enterprise_vector_search` | Семантический поиск по снимку | Похожие формулировки, «найди похожее» |
-| `mcp_enterprise_list_scripts` | Каталог доступных скриптов | Не знаешь, что можно спросить |
+| `audit.generate_sql` | Ответ на вопрос по данным фразой | Числовые и структурные запросы |
+| `audit.run_script` | Точный расчёт готовым скриптом из каталога | Есть подходящий скрипт |
+| `vectors.vector_search` | Семантический поиск по снимку | Похожие формулировки, «найди похожее» |
+| `audit.list_scripts` | Каталог доступных скриптов | Не знаешь, что можно спросить |
 
 **Не делать:** не искать обходной путь к данным аудита. Операции платформы
 — единственный доступный: командной строки в этом рантайме нет, а сама

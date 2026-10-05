@@ -43,7 +43,7 @@ metadata: {"nanobot":{"emoji":"🔌","always":true}}
 
 ```json
 {"...тело операции...",
- "_execution": {"request_id": "...", "tool": "run_script", "capability": "audit",
+ "_execution": {"request_id": "...", "tool": "audit.run_script", "capability": "audit",
                 "duration_ms": 812, "result_size": 40960,
                 "quality": {"ok": true, "flags": []}}}
 ```
@@ -61,7 +61,7 @@ metadata: {"nanobot":{"emoji":"🔌","always":true}}
 режется молча, а уезжает в файл: в теле появляется `_execution.artifact` с
 `uri` вида `session://results/...`, а может стоять `large_result: true`.
 
-Читать его — отдельным вызовом операции `read_result`: передай
+Читать его — отдельным вызовом операции `platform.read_result`: передай
 `uri` (или `artifact_id`) и, если нужно, постранично — `offset` и `limit`.
 Ответ вернёт следующую страницу по `next_offset`; на последней он `null`.
 

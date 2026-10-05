@@ -28,11 +28,11 @@
 
 ## 1. Общие соглашения
 
-**Имена.** Плоские и уникальные в пределах сервера. Capability в имя не
-входит: MCP-клиент Nanobot и так приклеивает префикс сервера, поэтому модель
-видит `mcp_enterprise_run_script`, а `mcp_enterprise_audit_run_script` только
-удлиняет имя без добавления смысла. Принадлежность к capability живёт в
-поле `category`.
+**Имена.** `<capability>.<operation>`: capability входит в имя, и обе половины
+непустые. Модель после проекции видит `mcp_enterprise_audit_run_script` —
+нанобот заменяет точку на подчёркивание, то есть префикс остаётся различимым
+в имени инструмента. Принадлежность объявляется трижды — каталогом файла,
+полем `capability` и префиксом имени, — и все три обязаны сходиться.
 
 **Синхронность.** Все операции — синхронные. Запрос к данным ждёт БД, `complete`
 ждёт провайдера, `vector_search` может ждать прогрева индекса. Асинхронность
@@ -59,7 +59,7 @@ capabilities/<name>/tools/*.py
 > {
 >   "jsonrpc": "2.0", "id": 42, "method": "tools/call",
 >   "params": {
->     "name": "history_search",
+>     "name": "data.history_search",
 >     "arguments": { "query": "...", "limit": 20 },
 >     "_meta": {
 >       "workspaces/request_id": "01J...",
@@ -260,7 +260,7 @@ HTTP-клиент. Это не стиль, а требование коррек�
 ```json
 { "hits": [], "next_offset": null,
   "_execution": {
-    "request_id": "…", "tool": "history_search", "capability": "data",
+    "request_id": "…", "tool": "data.history_search", "capability": "data",
     "duration_ms": 12, "result_size": 2048,
     "quality": { "policy": "vector_result", "ok": true, "flags": [], "checks": [ … ] }
   } }

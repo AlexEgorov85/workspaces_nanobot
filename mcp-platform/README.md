@@ -194,10 +194,10 @@ def create_tool(container):
         return service.history_search(query, limit)   # сервис, не соединение
 
     return ToolDefinition(
-        name="history_search",
+        name="data.history_search",
         description="Поиск по журналу agent_gateway_logs",
         handler=history_search,
-        category="data",          # имя capability, из которого пришёл файл
+        capability="data",     # имя capability, из которого пришёл файл
         version="1.0",
     )
 ```
@@ -208,9 +208,10 @@ def create_tool(container):
 обнаружилось бы на вызове вместо сборки. За это отвечает страж
 `test_operation_owns_its_service`.
 
-Имена инструментов плоские и уникальные в пределах сервера: MCP-клиент Nanobot
-и так приклеивает префикс `mcp_enterprise_`, а namespace внутри него только
-путает модель. Принадлежность к capability живёт в `category`.
+Имя операции — `<capability>.<operation>`, и capability входит в него: после
+проекции модель видит `mcp_enterprise_audit_run_script`. Принадлежность к
+capability объявляется трижды — каталогом файла, полем `capability` и префиксом
+имени.
 
 Порядок при старте: `capabilities/*/tools/*.py` → `create_tool(container)` →
 валидация → `registry.register()` → MCP. Валидатор проверяет импорт, наличие
