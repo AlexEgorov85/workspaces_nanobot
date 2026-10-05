@@ -97,8 +97,18 @@ description: >-
 ### Каноническая команда (Windows PowerShell)
 
 ```powershell
-python "C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.py" --file "<абсолютный_путь_к_pdf>" [--estimate-only | --length brief|detailed --confirm | --question "..." --confirm]
+python "<абсолютный_путь_к_репозиторию>\mcp-platform\libs\legal_summarizer\cli.py" --file "<абсолютный_путь_к_pdf>" [--estimate-only | --length brief|detailed --confirm | --question "..." --confirm]
 ```
+
+- Этот файл раньше называли
+  `C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.py`.
+  Такого пути **не существует и не существовало**: каталога
+  `workspace/skills/legal_summarizer/scripts/` в репозитории нет, а
+  `SkillsLoader` его и не читал бы. Фактический вход домена —
+  `mcp-platform/libs/legal_summarizer/cli.py`, он и лежит в репозитории
+  (см. строку bash-варианта ниже, где путь указан относительно корня).
+  Прежняя строка уводила в никуда: даже будь этот `SKILL.md` загружен, она
+  была бы безнадёжной.
 
 - **Один** аргумент с абсолютным путём к `cli.py` — без `cd ... &&`
   (PowerShell не поддерживает `&&`).
@@ -232,18 +242,28 @@ context вместе с chunk.text. Подробности — `references/archi
 обработан / mtime изменился / нет workspace_root) — fallthrough на обычный
 pipeline (новый map-reduce с полным LLM-анализом выбранных chunks).
 
-Для read-only агрегации manifest (без LLM) используй кастомный tool
-`legal_summarizer_query`:
+Для read-only агрегации manifest (без LLM) используй операцию платформы
+`query_operation`. Кастомный tool `legal_summarizer_query`, на который этот
+абзац ссылался раньше, снят и вызова не существует: под таким именем модель
+пыталась бы позвать инструмент, которого в наборе нет.
+
+Обе операции приходят модели как `mcp_enterprise_<capability>_<operation>`
+(change `2026-10-05-legal-summarizer-session-scope`): `query_operation`
+объявлена в `servers/enterprise/tools/` под именем `platform.query_operation`,
+а не внутри capability — у capability-операции нет `ctx`, то есть `session_id`,
+а чтение состояния есть работа с файлами сессии.
 
 ```python
-mcp_enterprise_query_operation(operation_id="<op_id>", field="stats")    # метрики + article_count
-mcp_enterprise_query_operation(operation_id="<op_id>", field="chunks")   # список chunks + summaries
-mcp_enterprise_query_operation(operation_id="<op_id>", field="sections")  # список sections
-mcp_enterprise_query_operation(operation_id="<op_id>", field="tree")      # иерархия sections
-mcp_enterprise_query_operation(operation_id="<op_id>", field="all")      # весь manifest.json
+mcp_enterprise_platform_query_operation(operation_id="<op_id>", field="stats")    # метрики + article_count
+mcp_enterprise_platform_query_operation(operation_id="<op_id>", field="chunks")   # список chunks + summaries
+mcp_enterprise_platform_query_operation(operation_id="<op_id>", field="sections")  # список sections
+mcp_enterprise_platform_query_operation(operation_id="<op_id>", field="tree")      # иерархия sections
+mcp_enterprise_platform_query_operation(operation_id="<op_id>", field="all")      # весь manifest.json
 ```
 
-Подробности — `workspace/TOOLS.md` раздел `mcp_enterprise_query_operation`.
+Подробности — `workspace/TOOLS.md` раздел `platform.query_operation`
+(и раздел `platform.analyze_document` рядом с ним — про запуск разбора
+и шаг подтверждения).
 
 ### Контракт отказа по операции `query_operation`
 
@@ -294,11 +314,11 @@ exit code, снято вместе с агентской обёрткой (chang
 Capability состоит из:
 
 * `servers/enterprise/capabilities/legal_summarizer/service/main.py` —
-  единственное место, где домен встречается с остальной платформой; отдаёт
-  операцию `query_operation`.
-* `servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py` —
-  сама операция: схема строится из сигнатуры обработчика, домен вызывается
-  в том же процессе.
+  единственное место, где домен встречается с остальной платформой; после
+  переноса операции чтения отдаёт только домен, а не реестр операций.
+* `servers/enterprise/tools/query_operation.py` — сама операция чтения:
+  схема строится из сигнатуры обработчика, домен вызывается в том же процессе,
+  корень состояния берётся у писателя `analyze_document.state_root`.
 * `../cli.py` — CLI-оболочка суммаризации, для ручного запуска.
 * `../cli_query.py` — оболочка над доменной `query_operation` для ручного
   запуска; в пути вызова модели не стоит.

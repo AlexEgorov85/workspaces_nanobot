@@ -219,7 +219,8 @@ def _manifest_error_message(reason: str, operation_id: str, diag: dict[str, Any]
         return (
             f"manifest.json для operation_id={operation_id!r} не найден "
             f"(ожидался по пути {actual}). "
-            "Возможно, прогон был удалён или operation_id указан неверно."
+            "Состояние убрано по истечении срока жизни либо operation_id "
+            "указан неверно — начните разбор заново."
         )
     if reason == "corrupted":
         return (
@@ -272,6 +273,62 @@ def _load_chunk_summaries(
             "summary": summary,
         })
     return out
+
+
+def _not_ready(
+    operation_id: str,
+    manifest: dict[str, Any],
+    workspace_root: Path,
+    field: str,
+) -> dict[str, Any] | None:
+    """Ответ по незавершённому состоянию, либо ``None`` — состояние готово.
+
+    Статус манифеста раньше не проверялся вовсе, поэтому выживающий начальный
+    манифест (``status="running"``) отдавался как ``{"status": "ok", …}`` из
+    полупустого манифеста, а по ``all`` — манифест без ``result``. Модель
+    читала это как завершённый разбор.
+
+    Готовность по общему правилу — статус ``completed``. Второе условие
+    добавляется там, где без него отдавать нечего: ``all`` — это манифест
+    целиком, и его читают как «разбор завершён», а результата может не быть.
+    Остальные поля берутся из самого манифеста, поэтому отсутствие
+    ``result.json`` их не обесценивает.
+    """
+    from libs.legal_summarizer.cache.manifest import read_result
+
+    status = str(manifest.get("status") or "unknown")
+    result_present = read_result(operation_id, workspace_root) is not None
+    if status == "completed" and (field != "all" or result_present):
+        return None
+
+    chunk_states = manifest.get("chunk_states") or {}
+    done = sum(
+        1
+        for state in chunk_states.values()
+        if isinstance(state, dict) and str(state.get("status")) == "completed"
+    ) or len(chunk_states)
+    total = int(manifest.get("chunks_total") or done)
+    payload: dict[str, Any] = {
+        "status": status,
+        "operation_id": operation_id,
+        "ready": False,
+        "progress_report": {
+            "done": done,
+            "remaining": max(0, total - done),
+            "continues": True,
+        },
+    }
+    if status == "completed" and not result_present:
+        payload["hint"] = (
+            "разбор помечен завершённым, но result.json отсутствует; "
+            "начните разбор заново"
+        )
+    else:
+        payload["hint"] = (
+            "разбор не завершён; продолжите его повторным вызовом "
+            "analyze_document с теми же document, length, focus и load_mode"
+        )
+    return payload
 
 
 def _build_sections_tree(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -339,7 +396,10 @@ def query_operation(
         max_chunk_summary_chars: обрезка текста summary чанка.
 
     Returns:
-        Словарь с ``status="ok"``.
+        Словарь с ``status="ok"`` — **только** для завершённого состояния.
+        Незавершённое состояние отдаёт собственный ``status`` и
+        ``progress_report`` с ``continues: true``: ``ok`` из полупустого
+        манифеста читался бы как завершённый разбор.
 
     Raises:
         LegalQueryError: manifest недоступен. ``payload`` - тот же
@@ -387,6 +447,10 @@ def query_operation(
             ),
         })
     manifest = normalized.to_dict()
+
+    not_ready = _not_ready(operation_id, manifest, root, field)
+    if not_ready is not None:
+        return not_ready
 
     if field == "stats":
         return {"status": "ok", "field": field, **_field_stats(manifest)}

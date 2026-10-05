@@ -1,54 +1,38 @@
-"""Capability ``legal_summarizer``: follow-up вопросы по разобранному документу.
+"""Capability ``legal_summarizer``: запасной корень состояния операции.
 
-Сервис — единственное место, где ``libs/legal_summarizer`` встречается с
-остальной платформой. Сама библиотека не знает ни про MCP, ни про контейнер:
-operation получает готовый ``operation_id`` и отвечает данными, а откуда они
-взялись, остаётся её делом.
+Capability больше не имеет операций. Обе — ``analyze_document`` и
+``query_operation`` — платформенные и живут в
+``servers/enterprise/tools/``: обе работают с файлами папки сессии, а ими
+владеет платформа, и страж ``tests/test_tool_execution_boundaries.py`` не пускает
+к ним capability. Читатель перенесён не ради единообразия, а потому что у
+capability нет ``ctx``: фабрика получает только контейнер, то есть
+``session_id`` был недоступен никак.
 
-**Одна операция, а не subprocess.** До переноса tool агента поднимал
-``cli_query.py`` отдельным процессом на каждый короткий вопрос («сколько
-статей?»), то есть платил за интерпретатор ради чтения JSON из уже
-разобранного документа. Теперь домен отдаёт :func:`query_operation` напрямую,
-а CLI остался оболочкой над ней для ручного запуска.
+Что осталось у capability и почему. Запасной корень состояния для вызовов
+**без сессии** и доменная конфигурация. Оба значения приходят одним
+источником — реестром платформы, — иначе на вопрос «где лежит состояние»
+появилось бы два ответа.
+
+Почему запасной путь, а не основной. Основной корень — папка сессии, и её
+даёт ручка из контекста вызова. ``cache_root`` живёт только там, где сессии
+нет; подставлять его вместо сессионного значило бы вернуть ровно ту поломку,
+которую перенос чинит: писец пишет в папку сессии, а читатель ищет в чужом
+каталоге, и цепочка «разобрали → спросили» не работает никогда.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
-
-from libs.enterprise_common.errors import EnterpriseError
 
 logger = logging.getLogger(__name__)
 
 #: Корень платформы. Относительный ``cache_root`` из ``platform.json``
 #: разрешается от него: абсолютный путь в общем конфиге был бы привязан к
-#: одной машине, а «вывести из расположения модуля» - значило бы вернуть
+#: одной машине, а «вывести из расположения модуля» — значило бы вернуть
 #: ошибку, из-за которой корень и вынесли в настройку.
 _PLATFORM_ROOT = Path(__file__).resolve().parents[5]
-
-#: Внутренний код домена -> код конверта.
-#:
-#: Разделение существенно по той же причине, что и в capability ``audit``:
-#: модели нужно знать, что делать дальше. ``operation_id`` не найден - это
-#: «проверь имя и спроси снова», повтор с тем же именем бесполезен;
-#: состояние на диске повреждено - это «это не твоя ошибка, попроси
-#: пересуммировать».
-_ERROR_CODES: dict[str, str] = {
-    # Ключи обязаны совпадать с ``cli_query._MANIFEST_ERROR_TYPES`` буквально:
-    # перевод идёт по строке ``error_type`` из конверта домена, поэтому
-    # «почти то же самое» имя не попадает в таблицу и молча уходит в
-    # ``internal`` (дефолт вызова). Источник имён - домен.
-    "manifest_not_found": "not_found",
-    "manifest_corrupted": "internal",
-    "manifest_unsupported_version": "upstream_unavailable",
-    # Отказ по аргументу, а не по состоянию: поле не из перечня. Без этой
-    # строки доменное имя ушло бы в ``internal`` (дефолт вызова), и модель
-    # получила бы «виновата платформа» вместо «повтори с одним из шести».
-    "invalid_field": "invalid_params",
-}
 
 
 def _resolve_root(value: str) -> str | None:
@@ -83,8 +67,7 @@ def _apply_domain_config(cache_root: str) -> None:
 
 
 class LegalSummarizerService:
-    """Ответы на follow-up вопросы по сохранённой операции суммаризации."""
-
+    """Запасной корень состояния разбора и доменная конфигурация."""
 
     def __init__(
         self,
@@ -94,7 +77,7 @@ class LegalSummarizerService:
     ) -> None:
         """Args:
         settings: реестр платформы. Значение ``ENTERPRISE_LEGAL_CACHE_ROOT``
-            приходит оттуда же, откуда у всех остальных настроек, - иначе у
+            приходит оттуда же, откуда у всех остальных настроек, — иначе у
             корня состояния было бы два независимых ответа на вопрос «где
             оно лежит».
         config: явное переопределение для тестов; важнее реестра.
@@ -104,48 +87,14 @@ class LegalSummarizerService:
         root = str(legal.get("cache_root") or "").strip()
         if not root and settings is not None:
             root = str(settings.get("ENTERPRISE_LEGAL_CACHE_ROOT") or "").strip()
-        # Пусто - «не объявлено»: домен возьмёт каталог данных платформы.
-        # Подставлять корень, выведенный из расположения модуля, нельзя -
+        # Пусто — «не объявлено»: домен возьмёт каталог данных платформы.
+        # Подставлять корень, выведенный из расположения модуля, нельзя —
         # после переноса это был каталог над репозиторием (п. 11.5).
         self._cache_root = _resolve_root(root)
         if self._cache_root is not None:
             _apply_domain_config(self._cache_root)
 
-    # -- операции ---------------------------------------------------------
-
-    def query_operation(
-        self,
-        *,
-        operation_id: str,
-        field: str = "stats",
-        max_chunk_summary_chars: int = 1500,
-    ) -> dict[str, Any]:
-        """Ответить follow-up вопросом по сохранённой операции.
-
-        Raises:
-            EnterpriseError: manifest недоступен или повреждён. Текст
-                доменной ошибки сохраняется, код переводится в код конверта.
-        """
-        from libs.legal_summarizer.cli_query import LegalQueryError, query_operation
-
-        try:
-            return query_operation(
-                operation_id,
-                field,
-                workspace_root=self._cache_root,
-                max_chunk_summary_chars=max_chunk_summary_chars,
-            )
-        except LegalQueryError as exc:
-            payload = exc.payload
-            code = _ERROR_CODES.get(
-                str(payload.get("error_type")), "internal"
-            )
-            raise EnterpriseError(
-                str(payload.get("message") or "запрос не выполнен"),
-                code=code,
-            ) from exc
-
-    @staticmethod
-    def dumps(payload: dict[str, Any]) -> str:
-        """Сериализация ответа операции."""
-        return json.dumps(payload, ensure_ascii=False, default=str)
+    @property
+    def cache_root(self) -> str | None:
+        """Запасной корень состояния: ``None`` — «не объявлено»."""
+        return self._cache_root

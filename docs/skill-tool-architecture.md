@@ -362,7 +362,7 @@ manifest-причин описывали протокол, которого бо
 
 | Было (Tool) | Стало (операция) |
 |---|---|
-| `legal_summarizer_query(operation_id, field, max_chunk_summary_chars)` | `mcp_enterprise_legal_summarizer_query_operation` с той же семантикой полей (`stats` / `articles` / `chunks` / `sections` / `tree` / `all`) |
+| `legal_summarizer_query(operation_id, field, max_chunk_summary_chars)` | `mcp_enterprise_platform_query_operation` (операция `platform.query_operation`) с той же семантикой полей (`stats` / `articles` / `chunks` / `sections` / `tree` / `all`) |
 | wrapper переводил ошибки CLI в свой JSON | сервер отдаёт закрытый конверт `_execution` / `{"error": {"code", ...}}`; модель читает его напрямую |
 | «область видимости» задавалась аргументом инструмента | область задаётся личностью вызова, модель её не выбирает |
 

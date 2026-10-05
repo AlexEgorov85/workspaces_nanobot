@@ -430,6 +430,117 @@ def _reduce_phase(
     )
 
 
+def _count_completed_units(
+    chunk_states: dict[str, dict[str, Any]],
+) -> int:
+    """Число выполненных единиц работы в состоянии операции.
+
+    Единица счёта — **запись состояния**, а не батч: пошаговое
+    состояние пер-чанковое, а батч в нём не помечен, поэтому подсчёт
+    по нему нельзя было бы ни проверить, ни воспроизвести.
+    """
+    return sum(
+        1 for state in chunk_states.values()
+        if state.get("status") == "completed"
+    )
+
+
+def _build_progress_report(
+    chunk_states: dict[str, dict[str, Any]],
+    expected_chunk_ids: list[str],
+) -> dict[str, bool | int]:
+    """``progress_report`` по текущему состоянию операции.
+
+    ``done`` — выполненные единицы, ``remaining`` — остаток, а не
+    полный объём, ``continues`` — доведёт ли работа до конца следующий
+    вызов с тем же ``operation_id``.
+
+    Имя поля запрещено заменять на ``progress``: в домене оно занято
+    вспомогательной функцией ``chunking/_text_helpers``.
+    """
+    done = _count_completed_units(chunk_states)
+    remaining = max(0, len(expected_chunk_ids) - done)
+    return {
+        "done": done,
+        "remaining": remaining,
+        "continues": remaining > 0,
+    }
+
+
+def _limited_step_payload(
+    *,
+    operation_id: str,
+    chunk_states: dict[str, dict[str, Any]],
+    expected_chunk_ids: list[str],
+    failed_batch_ids: list[str],
+    first_batch_error: dict[str, Any] | None,
+    ctx_batches: dict[str, dict[str, Any]],
+    map_calls: int,
+    total_llm_calls: int,
+    total_duration: float,
+    chars_in: int,
+    chunks_total: int,
+    batches_total: int,
+    article_count: int,
+    strategy: str,
+    deferred_batches: int,
+) -> dict:
+    """Ответ ограниченного шага: работа начата, но не закончена.
+
+    Статус — ``requires_continuation``: отказа здесь нет, провалов нет,
+    осталась работа. ``partial`` занят смыслом **частичного провала**,
+    а новый статус заводить нельзя, поэтому признак незавершённости —
+    отдельное поле ``progress_report``.
+
+    Батчи, попавшие в срез, но упавшие, сюда не возвращаются как
+    ``partial``: их чанки не записаны состоянием ``completed``, и
+    следующий вызов поставит их в очередь снова (см. ``_queued_batches``).
+    """
+    progress_report = _build_progress_report(chunk_states, expected_chunk_ids)
+    return {
+        "status": "requires_continuation",
+        "operation_id": operation_id,
+        "hint": (
+            f"Объём этого вызова ограничен {deferred_batches} батч(ей), "
+            f"которые не выполнялись. Продолжите разбор вызовом с тем же "
+            f"operation_id: уже выполненные батчи повторно не оплачиваются."
+        ),
+        "progress_report": progress_report,
+        "stats": {
+            "chars_in": chars_in,
+            "chunks_total": chunks_total,
+            "context_batches_total": batches_total,
+            "article_count": article_count,
+            "map_calls": map_calls,
+            "section_reduce_calls": 0,
+            "section_trim_calls": 0,
+            "document_reduce_calls": 0,
+            "reduce_calls": 0,
+            "total_llm_calls": total_llm_calls,
+            "retries": 0,
+            "failed_batches": list(failed_batch_ids),
+            "partial": False,
+            "duration_sec": total_duration,
+            "strategy": strategy,
+            "deferred_batches": deferred_batches,
+            "_internal": {
+                "chunk_states": chunk_states,
+                "ctx_batches": ctx_batches,
+                "failed_batch_ids": list(failed_batch_ids),
+                "first_batch_error": first_batch_error,
+                "total_llm_calls": total_llm_calls,
+                "total_duration": total_duration,
+                "strategy_label": strategy,
+                "section_summaries": {},
+                # ``application.execution_orchestration`` читает этот
+                # маркер, чтобы персистить незавершённое состояние
+                # вместо финального manifest.
+                "progress_persistable": True,
+            },
+        },
+    }
+
+
 def _build_initial_partials_from_cache(
     chunk_states: dict[str, dict[str, Any]],
     cached_partials: dict[str, str],
@@ -473,6 +584,7 @@ def run_map_reduce_execution(
     write_document_chunk_summary: WriteDocumentChunkSummaryFn = None,
     run_one_batch_async: RunOneBatchFn,
     load_cached_partials: LoadCachedPartialsFn,
+    batch_limit: int | None = None,
 ) -> dict:
     """Фактическая реализация map-reduce execution.
 
@@ -490,6 +602,16 @@ def run_map_reduce_execution(
     6. ``_reduce_phase`` — section/document reduce.
 
     Финальный manifest + write_result делает ``application.execution_orchestration``.
+
+    ``batch_limit`` — ограничение объёма работы на один вызов (число
+    батчей). ``None`` (по умолчанию) означает прежнее поведение:
+    выполняются все батчи. Заданное ограничение режет очередь;
+    невыполненный остаток возвращается как ``requires_continuation``
+    с ``progress_report`` — БЕЗ reduce-фазы, ``result.json`` и
+    финального manifest. Продолжение обеспечивают пошаговые файлы
+    чанков: ``load_cached_partials`` помечает их ``completed``, и
+    ``_queued_batches`` их больше не ставит в очередь, то есть уже
+    оплаченные батчи повторно не считаются.
 
     Диагностика (``LegalConfig.mr_trace``):
     печатает в stderr структурный trace каждой фазы (chunks, partials,
@@ -562,7 +684,19 @@ def run_map_reduce_execution(
     )
 
     total_start = _time.monotonic()
-    queued = _queued_batches(final_batches, chunk_states)
+    queued_all = _queued_batches(final_batches, chunk_states)
+
+    # Ограничение объёма работы на один вызов. ``None`` — прежнее
+    # поведение (полный разбор, этим пользуется ручной запуск из CLI).
+    # Срез идёт по ``queued_all``, а не по всем батчам: уже выполненные
+    # батчи в очередь не попадают, поэтому ограничение считает только
+    # действительно неоплаченную работу.
+    if batch_limit is None:
+        queued = queued_all
+        deferred_batches = 0
+    else:
+        queued = queued_all[:batch_limit]
+        deferred_batches = len(queued_all) - len(queued)
 
     _mr_trace(
         "map_queued",
@@ -571,6 +705,8 @@ def run_map_reduce_execution(
         cached_already_done=(
             len(expected_chunk_ids) - sum(len(pending) for _, pending, _ in queued)
         ),
+        batch_limit=batch_limit,
+        deferred_batches=deferred_batches,
     )
 
     map_calls = 0
@@ -605,6 +741,39 @@ def run_map_reduce_execution(
             failed_batches=len(failed_batch_ids),
             failed_ids=failed_batch_ids[:5],
             first_error=str(first_batch_error)[:200] if first_batch_error else None,
+        )
+
+    # ── Ограниченный шаг: работа начата, но не закончена ──
+    # Возврат ДО ``load_cached_partials`` и reduce-фазы — намеренно.
+    # Сводка по неполной выборке была бы ложью, а запись ``result.json``
+    # и финального manifest замёрзла бы усечённый результат навсегда:
+    # ``service.run`` короткозамыкается на ``status == "completed"``
+    # и больше бы не дошёл до домена. Состояние остаётся незавершённым,
+    # а возобновление обеспечивают пошаговые файлы чанков, записанные
+    # выше через ``write_chunk_result``.
+    if deferred_batches > 0:
+        _mr_trace(
+            "limited_step",
+            deferred_batches=deferred_batches,
+            done=_count_completed_units(chunk_states),
+            expected=len(expected_chunk_ids),
+        )
+        return _limited_step_payload(
+            operation_id=operation_id,
+            chunk_states=chunk_states,
+            expected_chunk_ids=expected_chunk_ids,
+            failed_batch_ids=failed_batch_ids,
+            first_batch_error=first_batch_error,
+            ctx_batches=ctx_batches,
+            map_calls=map_calls,
+            total_llm_calls=map_calls,
+            total_duration=round(_time.monotonic() - total_start, 1),
+            chars_in=chars_in,
+            chunks_total=len(chunks),
+            batches_total=len(final_batches),
+            article_count=article_count,
+            strategy=strategy,
+            deferred_batches=deferred_batches,
         )
 
     all_partials = load_cached_partials(
@@ -658,10 +827,14 @@ def run_map_reduce_execution(
     final_summary = strip_think_blocks(final_summary)
 
     if not final_summary or not final_summary.strip():
+        # ``progress_report`` обязателен там, где выполнена хотя бы одна
+        # единица работы; при нуле выполненных units поле не требуется.
+        report = _build_progress_report(chunk_states, expected_chunk_ids)
         return {
             "status": "failed",
             "operation_id": operation_id,
             "error": {"code": "REDUCE_INPUT_EMPTY", "message": "Document reduce вернул пустой summary"},
+            **({"progress_report": report} if report["done"] > 0 else {}),
         }
 
     total_duration = round(_time.monotonic() - total_start, 1)
@@ -693,6 +866,9 @@ def run_map_reduce_execution(
         "status": "partial" if is_partial else "completed",
         "operation_id": operation_id,
         "result": result,
+        "progress_report": _build_progress_report(
+            chunk_states, expected_chunk_ids,
+        ),
         "stats": {
             "chars_in": chars_in,
             "chunks_total": len(chunks),

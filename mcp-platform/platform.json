@@ -201,7 +201,7 @@
     }
   },
   "legal_summarizer": {
-    "_about": "capability legal_summarizer в servers/enterprise/capabilities/legal_summarizer/. Отвечает на follow-up вопросы по уже разобранному юридическому документу, по его operation_id: сколько статей, какие разделы, что в чанке N. Документ заново не разбирается. Домен перенесён из агента (change enterprise-mcp-platform, фаза 11). Ключа enable нет потому, что настройка не объявлена в реестре: capability всегда поднимается вместе с остальными.",
+    "_about": "capability legal_summarizer в servers/enterprise/capabilities/legal_summarizer/. Домен перенесён из агента (change enterprise-mcp-platform, фаза 11). Операций домена здесь нет: обе объявлены платформенно в servers/enterprise/tools/ под именами platform.analyze_document (запуск разбора: состояние пишется в artifacts/legal_summarizer/operations/<operation_id>/ сессии) и platform.query_operation (follow-up по operation_id: сколько статей, какие разделы, что в чанке N; документ заново не разбирается). Перенос не переименование: файлами сессии владеет платформа, а у операции внутри capability нет ctx вообще, то есть session_id ей недоступен (change 2026-10-05-legal-summarizer-session-scope). cache_root — запасной путь состояния для вызовов без сессии, ручной запуск из CLI; на живом контуре состояние лежит в папке сессии. Ключа enable нет потому, что настройка не объявлена в реестре: capability всегда поднимается вместе с остальными.",
     "cache_root": "var/legal_summarizer"
   }
 }

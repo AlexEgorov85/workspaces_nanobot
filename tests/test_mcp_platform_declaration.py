@@ -63,13 +63,28 @@ MAX_NAME_BUDGET_NOTE = "nanobot.agent.tools.mcp._MAX_TOOL_NAME_LENGTH"
 #: было позвать. ``vectors.index_stats`` в список не входит: состояние индекса
 #: модель получает в ответе ``vectors.vector_search`` (``index_state``) и в
 #: ``vectors.list_indexes``, отдельная операция ей ничего не добавляет.
+#:
+#: ``platform.analyze_document`` и ``platform.query_operation`` — пара одной
+#: capability ``legal_summarizer``, обе уехали из неё в
+#: ``servers/enterprise/tools/`` (change
+#: ``2026-10-05-legal-summarizer-session-scope``). Причина та же, что у
+#: ``platform.read_result``: у capability-операции нет доступа к ``ctx``, а
+#: разбор и чтение состояния разбора работают с файлами сессии, которые ведёт
+#: платформа. Все операции этого каталога объявляют ``capability="platform"``,
+#: поэтому на проводе имя стало ``platform.*`` — и объявление обязано называть
+#: именно его: ``legal_summarizer.query_operation`` сервер больше не отдаёт,
+#: и запись под старым именем не зарегистрировалась бы (проверяет
+#: ``test_every_enabled_tool_exists_on_the_wire``). Capability при этом не
+#: исчезла как место событий — она по-прежнему владеет доменом и его шагами
+#: (``legal_analysis_*`` в словаре событий).
 EXPECTED_TOOLS = {
     "audit.list_scripts",
     "audit.run_script",
     "audit.generate_sql",
     "vectors.vector_search",
     "vectors.list_indexes",
-    "legal_summarizer.query_operation",
+    "platform.analyze_document",
+    "platform.query_operation",
     "data.history_search",
     "platform.read_result",
 }
@@ -294,11 +309,14 @@ class TestServerDeclaration:
         операцию объявят, а объявление белым списком не защищено).
 
         **Измерение, а не порог:** на момент правки самое длинное имя —
-        ``mcp_enterprise_legal_summarizer_query_operation``, 47 символов из 64,
-        и оно таким и останется после любой следующей правки навыка. Утверждение
-        о 47 здесь быть не должно: смена потолка в наноботе не должна требовать
-        правки числа в этом файле, — вместо этого замер попадает в сообщение
-        отказа, где его видно ровно тогда, когда он нужен.
+        ``mcp_enterprise_data_delete_assistant_message``, 44 символа из 64,
+        и оно таким и останется после любой следующей правки навыка. Раньше
+        длиннее был ``mcp_enterprise_legal_summarizer_query_operation``: после
+        переезда операции в ``platform.query_operation`` это имя стало
+        короче. Утверждение о 44 здесь быть не должно — смена потолка в
+        наноботе не должна требовать правки числа в этом файле, — вместо этого
+        замер попадает в сообщение отказа, где его видно ровно тогда, когда он
+        нужен.
         """
         server = _server_name()
         budget = _nanobot_name_budget()

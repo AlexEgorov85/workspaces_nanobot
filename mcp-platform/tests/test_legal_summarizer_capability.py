@@ -1,33 +1,23 @@
-"""Capability ``legal_summarizer``: операция ``query_operation`` и её границы.
+"""Состояние разбора документа: платформенная операция ``platform.query_operation``.
 
-Capability читает состояние ранее выполненной суммаризации **с диска**: манифест
-лежит в ``<cache_root>/operations/<op>/``.
-Поэтому успешный путь проверяется по-настоящему — настоящим манифестом в
-``tmp_path``, без БД, без модели и без файла снимка. Всё, что нужно домену для
-follow-up'а, это один валидный JSON на диске.
+Чтение состояния переехало из capability в ``servers/enterprise/tools/``: файлами
+сессии владеет платформа, а у capability-операции нет ``ctx`` — то есть
+``session_id``. Поэтому читатель берёт корень у того же
+``analyze_document.state_root``, которым пишет ``platform.analyze_document``:
+пока корень разрешался из ``cache_root``, любой read отвечал бы
+``manifest_not_found`` на только что созданном состоянии.
 
-Что здесь защищается (каждый пункт — реальная асикция, а не «зелёная галочка»):
-
-* **регистрация** — операция находится загрузчиком, её дескриптор и схема,
-  построенная из сигнатуры обработчика, корректны;
-* **успех** — реальный вызов по проводу MCP отдаёт ожидаемую структуру
-  результата для нескольких ``field``;
-* **доменные отказы** — все три причины недоступности манифеста (нет файла,
-  битый JSON, чужой формат) дают доменный отказ с тем кодом конверта, который
-  заявлен за этим состоянием, а не необработанное исключение и не дефолтный
-  ``internal``;
-* **сборка без сервиса** — операция без сервиса в контейнере не собирается
-  вовсе, а не падает на первом обращении;
-* **идентичность** — вызов без ``params._meta`` отклоняется конвейером с
-  ``identity_missing`` ДО входа в домен (доказано тем, что при живом манифесте
-  вместо отказа пришёл бы успешный ответ), а корректный ``_meta`` извлекается в
-  контекст вызова и доезжает в метаданные ответа.
+Проверяется поведение на диске, а не константы: что состояние читается из папки
+сессии, что незавершённый разбор не выдаётся за ``status: "ok"``, что доменный
+``error_type`` доезжает до кода конверта, и что ограниченный шаг домена не
+замораживает усечённый результат. Сеть и LLM не нужны — LLM заглушен.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,110 +27,181 @@ PLATFORM_ROOT = Path(__file__).resolve().parent.parent
 if str(PLATFORM_ROOT) not in sys.path:
     sys.path.insert(0, str(PLATFORM_ROOT))
 
-from libs.enterprise_common.container import ToolContainer  # noqa: E402
-from libs.enterprise_common.errors import EnterpriseError  # noqa: E402
-from libs.enterprise_common.registry import ToolDefinition, build_input_schema  # noqa: E402
-from servers.enterprise.capabilities.legal_summarizer.service.main import (  # noqa: E402
-    _ERROR_CODES,
-    LegalSummarizerService,
+from libs.enterprise_common.errors import (  # noqa: E402
+    EnterpriseError,
+    InvalidRequestError,
 )
-from servers.enterprise.capabilities.legal_summarizer.tools import (  # noqa: E402
-    query_operation as query_tool,
+from libs.enterprise_common.execution.context import (  # noqa: E402
+    McpCallContext,
+    ToolExecutionContext,
 )
-
-CAPABILITY_DIR = (
-    PLATFORM_ROOT / "servers" / "enterprise" / "capabilities" / "legal_summarizer"
+from libs.enterprise_common.registry import ToolDefinition  # noqa: E402
+from libs.enterprise_common.session.workspace import SessionWorkspace  # noqa: E402
+from libs.legal_summarizer.cache.manifest import (  # noqa: E402
+    load_manifest,
+    manifest_path,
+    read_result,
 )
-TOOL_FILE = CAPABILITY_DIR / "tools" / "query_operation.py"
+from libs.legal_summarizer.cli_query import (  # noqa: E402
+    DOMAIN_ERROR_TYPES,
+    LegalQueryError,
+    query_operation,
+)
+from servers.enterprise.tools.analyze_document import (  # noqa: E402
+    BATCH_BUDGET_SHARE,
+    _batch_budget,
+    access_marker,
+    state_root,
+)
+from servers.enterprise.tools.analyze_document import (  # noqa: E402
+    create_tool as create_analyze_tool,
+)
+from servers.enterprise.tools.query_operation import create_tool  # noqa: E402
 
-#: Раскладка состояния операции внутри ``cache_root``. Именно её ждёт
-#: ``libs.legal_summarizer.cache.manifest.manifest_root``; путь собран вручную,
-#: чтобы тест не зависел от внутреннего устройства домена и падал с понятным
-#: сообщением, если раскладка изменится.
-MANIFEST_SUBPATH = Path("operations")
+OP = "op1"
+SESSION = "sess-1"
+
+#: Раскладка состояния операции внутри корня. Собрана руками, а не через
+#: ``cache.manifest.manifest_path``, чтобы тест падал с понятным сообщением, если
+#: раскладка изменится; совпадение с путём домена проверяется отдельно.
+OPERATIONS = Path("operations")
+
+#: «Результата нет» — такой фиктивный объект, чтобы отличать «не писать
+#: result.json» от «написать пустой».
+_NO_RESULT = object()
 
 
-@pytest.fixture(autouse=True)
-def _isolate_domain_config():
-    """Вернуть глобальную конфигурацию домена после каждого теста.
+def _chunk_duration_sec() -> float:
+    """Оценка стоимости батча, объявленная доменом."""
+    from libs.legal_summarizer.llm.config import get_execution_config
 
-    Конструктор сервиса с объявленным ``cache_root`` вызывает
-    ``_apply_domain_config`` и подменяет конфигурацию всего домена на время
-    процесса. Без восстановления тест, указавший корень в ``tmp_path``, оставил
-    бы этот ``tmp_path`` библиотечным тестам, идущим после него, — утечка
-    состояния через общий модуль.
-    """
-    from libs.legal_summarizer.llm import config as domain_config
-
-    saved = domain_config.current()
-    yield
-    domain_config.configure(saved)
+    return float(get_execution_config()["estimated_chunk_duration_sec"])
 
 
-def _service(cache_root: Path | None) -> LegalSummarizerService:
-    """Сервис с корнем состояния в ``cache_root`` (явный ``config=``)."""
-    if cache_root is None:
-        return LegalSummarizerService(config={})
-    return LegalSummarizerService(
-        config={"legal_summarizer": {"cache_root": str(cache_root)}}
+@pytest.fixture()
+def workspace(tmp_path: Path) -> SessionWorkspace:
+    """Папка сессий в ``tmp_path``: операция не должна писать наружу."""
+    return SessionWorkspace(tmp_path / "sessions")
+
+
+def _ctx(session_id: str, request_id: str = "req-1") -> ToolExecutionContext:
+    return ToolExecutionContext(
+        call=McpCallContext(
+            request_id=request_id, session_id=session_id, user_id="u-1"
+        ),
+        tool_name="platform.query_operation",
+        capability="platform",
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
 
-def _write_manifest(cache_root: Path, operation_id: str, **overrides: Any) -> Path:
-    """Положить валидный манифест v2 и вернуть его путь.
+def _session_state_root(workspace: SessionWorkspace, session_id: str = SESSION) -> Path:
+    """Корень состояния сессии — тот же, что у писателя ``analyze_document``."""
+    return state_root(workspace.handle(session_id, create=True))
 
-    ``version=2`` обязателен: домен читает только второй формат, и подмена
-    формата — это уже другой тест (см. отказ по версии).
+
+def _chunk_states(chunks_total: int, done: int) -> dict[str, dict[str, Any]]:
+    return {
+        f"chunk_{index}": {
+            "status": "completed" if index < done else "pending",
+            "section_path": "Глава 1",
+            "result_path": f"chunks/chunk_{index}.json",
+        }
+        for index in range(chunks_total)
+    }
+
+
+def _write_state(
+    root: Path,
+    operation_id: str,
+    *,
+    status: str = "completed",
+    chunks_total: int = 7,
+    done: int | None = None,
+    article_count: int = 42,
+    result: Any = _NO_RESULT,
+    version: int = 2,
+    raw_text: str | None = None,
+) -> Path:
+    """Положить состояние операции на диск и вернуть путь манифеста.
+
+    ``done=None`` — все чанки выполнены; для незавершённого состояния тест
+    задаёт выполненную часть явно, иначе прогресс в ответе был бы выдуманным.
     """
-    payload: dict[str, Any] = {
-        "version": 2,
+    operation_dir = root / OPERATIONS / operation_id
+    operation_dir.mkdir(parents=True, exist_ok=True)
+
+    if done is None:
+        done = chunks_total if status == "completed" else 0
+    manifest: dict[str, Any] = {
+        "version": version,
         "operation_id": operation_id,
-        "status": "completed",
+        "status": status,
+        "document_path": "files/contract.docx",
         "chars_in": 12345,
-        "chunks_total": 7,
+        "length": "detailed",
+        "chunks_total": chunks_total,
         "context_batches_total": 3,
-        "article_count": 42,
+        "article_count": article_count,
         "sections": {
             "ROOT": {"section_path": "", "heading": None, "block_count": 0},
-            "s1": {"section_path": "Глава 1", "heading": "Глава 1", "block_count": 5},
+            "s1": {
+                "section_path": "Глава 1",
+                "heading": "Глава 1",
+                "block_count": 5,
+            },
         },
+        "chunk_states": _chunk_states(chunks_total, done),
+        "context_batches": {},
+        "section_summaries": {},
         "batches_done": ["b1"],
         "batches_failed": [],
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "completed_at": (
+            "2026-01-01T00:05:00+00:00" if status == "completed" else None
+        ),
+        "duration_sec": 300.0,
     }
-    payload.update(overrides)
-    path = cache_root / MANIFEST_SUBPATH / operation_id / "manifest.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    path = operation_dir / "manifest.json"
+    payload = raw_text if raw_text is not None else json.dumps(manifest, ensure_ascii=False)
+    path.write_text(payload, encoding="utf-8")
+
+    if result is _NO_RESULT:
+        result = {"summary": "Разбор завершён", "article_count": article_count}
+    if result is not None:
+        (operation_dir / "result.json").write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8"
+        )
     return path
 
 
-def _domain_error_type(cache_root: Path, operation_id: str) -> str:
-    """Доменный ``error_type`` из конверта, без участия сервиса.
-
-    Вызывается ДО проверки кода конверта и специально: показывает, какое
-    имя домен реально кладёт в конверт для данного состояния на диске. Иначе
-    тест закреплял бы только код сервиса и молчал бы, если переименуют
-    доменную сторону.
-    """
-    from libs.legal_summarizer.cli_query import LegalQueryError, query_operation
-
-    with pytest.raises(LegalQueryError) as excinfo:
-        query_operation(operation_id, "stats", workspace_root=cache_root)
-    return str(excinfo.value.payload["error_type"])
-
-
-def _registry(service: LegalSummarizerService) -> Any:
-    """Реестр ровно из одной операции capability (как это делает загрузчик)."""
-    from libs.enterprise_common.loader import load_definition
-    from libs.enterprise_common.registry import ToolRegistry
-
-    return ToolRegistry(
-        [
-            load_definition(
-                TOOL_FILE, ToolContainer(services={"legal_summarizer": service}), PLATFORM_ROOT
-            )
-        ]
+def _query(
+    workspace: SessionWorkspace,
+    ctx: ToolExecutionContext,
+    *,
+    fallback_cache_root: Path | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Вызов ручки операции — без конвейера, чтобы видеть доменный отказ."""
+    definition = create_tool(
+        workspace,
+        fallback_cache_root=None if fallback_cache_root is None else str(fallback_cache_root),
     )
+    return json.loads(definition.handler(ctx, **kwargs))
+
+
+def _domain_error_type(root: Path, field: str = "stats") -> str:
+    """Доменный ``error_type`` из конверта, без участия операции.
+
+    Вызывается ДО проверки кода конверта и специально: показывает, какое имя
+    домен реально кладёт в конверт для данного состояния на диске. Иначе тест
+    закреплял бы только код операции и молчал бы, если переименуют доменную
+    сторону.
+    """
+    with pytest.raises(LegalQueryError) as excinfo:
+        query_operation(OP, field, workspace_root=root)
+    return str(excinfo.value.payload["error_type"])
 
 
 def _wire(transport: Any, name: str, arguments: dict[str, Any], meta: Any = None) -> Any:
@@ -151,291 +212,667 @@ def _wire(transport: Any, name: str, arguments: dict[str, Any], meta: Any = None
     return anyio.run(call_tool, transport, name, arguments, meta)
 
 
-class TestOperationContract:
-    """Операция зарегистрирована, а её дескриптор и схема корректны."""
+def _transport(workspace: SessionWorkspace) -> Any:
+    """Провод с одной операцией: конвейер настоящий, идентичность настоящая."""
+    from libs.enterprise_common.loader import build_server
+    from libs.enterprise_common.registry import ToolRegistry
 
-    def test_definition_metadata(self, tmp_path: Path) -> None:
-        definition = query_tool.create_tool(
-            ToolContainer(services={"legal_summarizer": _service(tmp_path)})
+    from conftest import make_layer
+
+    registry = ToolRegistry([create_tool(workspace)])
+    return build_server(
+        registry,
+        name="enterprise-mcp",
+        pipeline=make_layer(workspace.root).pipeline,
+    )
+
+
+def _install_llm_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Заглушки LLM: сеть не нужна, домен считает свои состояния сам."""
+    import libs.legal_summarizer.llm.calls as llm_calls
+
+    def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
+        return {chunk.chunk_id: f"сводка {chunk.chunk_id}" for chunk in chunks}
+
+    def _fake_section(section_path, section_heading, joined_text, *, length, question=None):
+        return f"сводка раздела {section_path}"
+
+    def _fake_doc(joined_text, *, length, focus, structure, question=None):
+        return "итоговая сводка"
+
+    monkeypatch.setattr(llm_calls, "llm_batch", _fake_batch)
+    monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
+    monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
+
+
+def _build_doc(sections: int = 6, repeats: int = 300) -> str:
+    """Документ заметно больше ``direct_threshold_tokens``: нужен map_reduce.
+
+    На ветке ``direct`` ограничение батчей не действует, и ограниченного шага не
+    было бы вовсе — тест прошёл бы, ничего не проверив.
+    """
+    parts = []
+    for index in range(1, sections + 1):
+        parts.append(
+            f"{index}. Раздел {index}\n\n" + ("Текст. " * 50) * repeats + "\n\n"
         )
+    return "".join(parts)
+
+
+# -- объявление операции -------------------------------------------------------
+
+
+class TestOperationDeclaration:
+    """Операция опубликована как платформенная, а не как операция capability."""
+
+    def test_declares_itself_on_the_platform_capability(self, workspace: SessionWorkspace) -> None:
+        definition = create_tool(workspace)
+
         assert isinstance(definition, ToolDefinition)
-        assert definition.name == "legal_summarizer.query_operation"
-        assert definition.capability == "legal_summarizer"
-        assert definition.description.strip()
-        # Не «runtime-only»: операция объявлена модели в config.json, и метка
-        # внутренней операции на ней врала. Согласованность объявления и метки
-        # проверяет страж агента tests/test_mcp_operation_audience.py.
-        assert "runtime-only" not in definition.tags
-        assert definition.permissions == ("legal_summarizer:query_operation",)
+        assert definition.name == "platform.query_operation"
+        assert definition.capability == "platform"
+        assert "legal_summarizer" in definition.tags
+        assert definition.description
 
-    def test_schema_is_built_from_handler_signature(self, tmp_path: Path) -> None:
-        """Схема обязана требовать ``operation_id`` и не требовать опциональных.
+    def test_schema_takes_the_session_from_meta_not_from_arguments(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """``session_id`` в аргументах обошёл бы подмену идентичности из ``_meta``.
 
-        ``operation_id`` без значения бессмысленна (вопрос — к конкретной
-        операции), а ``field``/``max_chunk_summary_chars`` имеют дефолты.
+        Корень состояния выводится из сессии, поэтому объявленный ``session_id``
+        был бы вторым путём к чужой папке — ровно то, что переезд и устранил.
         """
-        definition = query_tool.create_tool(
-            ToolContainer(services={"legal_summarizer": _service(tmp_path)})
-        )
-        schema = build_input_schema(definition.handler)
+        schema = create_tool(workspace).input_schema
+
+        assert "session_id" not in schema["properties"]
         assert schema["required"] == ["operation_id"]
-        assert schema["properties"]["operation_id"] == {"type": "string"}
-        assert schema["properties"]["field"] == {"type": "string"}
-        assert schema["properties"]["max_chunk_summary_chars"] == {"type": "integer"}
+        assert set(schema["properties"]) == {
+            "operation_id",
+            "field",
+            "max_chunk_summary_chars",
+        }
 
-    def test_operation_file_is_discovered(self) -> None:
-        from libs.enterprise_common.loader import discover_tool_files
 
-        names = {p.name for p in discover_tool_files(CAPABILITY_DIR.parent)}
-        assert "query_operation.py" in names
+# -- чтение состояния из папки сессии ------------------------------------------
 
-    def test_missing_service_is_refused_at_assembly(self) -> None:
-        """Без сервиса операция не собирается — полусобранный сервер хуже пустого.
 
-        Отказ приходит на загрузке, а не первым вызовом: иначе сервер поднялся
-        бы, опубликовал операцию и отвечал бы отказом уже в проде.
+class TestSessionStateRead:
+    """Состояние читается там же, где его пишет ``analyze_document``."""
+
+    def test_reads_the_state_of_its_own_session(self, workspace: SessionWorkspace) -> None:
+        root = _session_state_root(workspace)
+        _write_state(root, OP)
+
+        body = _query(workspace, _ctx(SESSION), operation_id=OP, field="stats")
+
+        assert body["status"] == "ok"
+        assert body["field"] == "stats"
+        assert body["operation_id"] == OP
+        assert body["article_count"] == 42
+        assert body["chunks_total"] == 7
+        assert body["sections_total"] == 1
+
+    def test_state_layout_is_the_one_the_domain_reads(self, workspace: SessionWorkspace) -> None:
+        """Путь на диске совпадает с ``manifest_path`` домена.
+
+        Рукописная раскладка в помощниках ловила бы её переезд, но не того, что
+        писатель и читатель разошлись в имени каталога, — а это и был исходный
+        дефект.
         """
-        from libs.enterprise_common.loader import load_definition
-        from libs.enterprise_common.registry import ToolLoadError
+        root = _session_state_root(workspace)
+        written = _write_state(root, OP)
 
-        with pytest.raises(ToolLoadError) as excinfo:
-            load_definition(TOOL_FILE, ToolContainer(), PLATFORM_ROOT)
-        assert "legal_summarizer" in str(excinfo.value)
-
-
-class TestServiceQuery:
-    """Сервис поверх настоящего манифеста: успех и доменные отказы."""
-
-    def test_stats_returns_operation_metrics(self, tmp_path: Path) -> None:
-        _write_manifest(tmp_path, "op1")
-        result = _service(tmp_path).query_operation(operation_id="op1", field="stats")
-        assert result["status"] == "ok"
-        assert result["field"] == "stats"
-        assert result["article_count"] == 42
-        assert result["chunks_total"] == 7
-        # sections_total не считает служебный ROOT.
-        assert result["sections_total"] == 1
+        assert written == manifest_path(OP, root)
 
     @pytest.mark.parametrize(
-        ("field", "check"),
+        ("field", "payload_key"),
         [
-            ("articles", lambda b: b["article_count"] == 42),
-            # ``sections`` отдаёт плоский список, отсортированный по
-            # ``section_path``, и служебный ROOT в нём остаётся: фильтрует его
-            # только счётчик ``sections_total`` в stats. Закрепляю фактическое
-            # поведение домона (ROOT идёт первым, у него пустой путь).
-            (
-                "sections",
-                lambda b: [s["section_id"] for s in b["sections"]] == ["ROOT", "s1"],
-            ),
-            ("tree", lambda b: any(s["heading"] == "Глава 1" for s in b["sections"])),
-            ("all", lambda b: b["manifest"]["operation_id"] == "op1"),
+            ("stats", "article_count"),
+            ("articles", "article_count"),
+            ("sections", "sections"),
+            ("tree", "sections"),
+            ("chunks", "chunks"),
+            ("all", "manifest"),
         ],
-        ids=["articles", "sections", "tree", "all"],
     )
     def test_each_field_returns_its_own_shape(
-        self, tmp_path: Path, field: str, check: Any
+        self, workspace: SessionWorkspace, field: str, payload_key: str
     ) -> None:
-        """Каждое допустимое поле отвечает своей формой, а не общим JSON."""
-        _write_manifest(tmp_path, "op1")
-        body = _service(tmp_path).query_operation(operation_id="op1", field=field)
+        root = _session_state_root(workspace)
+        _write_state(root, OP)
+
+        body = _query(workspace, _ctx(SESSION), operation_id=OP, field=field)
+
         assert body["status"] == "ok"
         assert body["field"] == field
-        assert check(body), body
+        assert payload_key in body
 
-    def test_missing_manifest_is_not_found(self, tmp_path: Path) -> None:
-        """Нет манифеста → ``not_found``, а не «внутренняя ошибка платформы».
+    def test_access_marker_lands_in_the_session_folder(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """Отметка обращения — по ней уборка знает возраст состояния.
 
-        Это различает «проверь имя и спроси снова» (повтор с тем же именем
-        бесполезен) от сбоя сервера. Проверяется настоящий доменный путь:
-        файла действительно нет.
+        Заодно это проверка корня: если бы читатель искал состояние вне папки
+        сессии, отметка уехала бы туда же.
         """
-        assert _domain_error_type(tmp_path, "missing") == "manifest_not_found"
+        root = _session_state_root(workspace)
+        _write_state(root, OP)
+
+        _query(workspace, _ctx(SESSION), operation_id=OP)
+
+        marker = root.parent / access_marker(OP)  # ``access_marker`` — от ``artifacts/``
+        assert marker.is_file()
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        assert payload["operation_id"] == OP
+        assert payload["status"] == "completed"
+
+    def test_state_of_another_session_is_not_visible(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """Сессия из ``_meta`` решает, чьё состояние читается.
+
+        Папка второй сессии создана: иначе проверка отличалась бы от проверки
+        несуществующей папки и ничего не говорила бы об изоляции.
+        """
+        _write_state(_session_state_root(workspace, SESSION), OP)
+        _session_state_root(workspace, "sess-2")
+
         with pytest.raises(EnterpriseError) as excinfo:
-            _service(tmp_path).query_operation(operation_id="missing", field="stats")
+            _query(workspace, _ctx("sess-2"), operation_id=OP)
+
         assert excinfo.value.code == "not_found"
 
-    def test_corrupted_manifest_is_internal(self, tmp_path: Path) -> None:
-        """Битый JSON на диске — состояние на диске повреждено, а не «не найдено».
 
-        ``internal`` здесь осознанный и таким останется: повреждённый файл
-        чинит владелец состояния, ни «проверь имя», ни «повтори» модели не
-        помогают. Закрепляется вместе с доменным именем, чтобы правка таблицы
-        не «улучшила» этот код молча.
+# -- незавершённое состояние ---------------------------------------------------
+
+
+class TestUnfinishedStateIsNotOk:
+    """``status: "ok"`` из полупустого манифеста читался как завершённый разбор."""
+
+    @pytest.mark.parametrize(
+        "status",
+        ["running", "confirmation_required", "requires_continuation"],
+    )
+    def test_status_is_reported_as_is(self, workspace: SessionWorkspace, status: str) -> None:
+        root = _session_state_root(workspace)
+        _write_state(root, OP, status=status, done=3)
+
+        body = _query(workspace, _ctx(SESSION), operation_id=OP, field="stats")
+
+        assert body["status"] == status
+        assert body["ready"] is False
+        assert body["progress_report"] == {
+            "done": 3,
+            "remaining": 4,
+            "continues": True,
+        }
+        # Ни метрик, ни манифеста: содержимого завершённого разбора здесь нет.
+        assert "article_count" not in body
+        assert "manifest" not in body
+
+    @pytest.mark.parametrize(
+        ("status", "has_result", "ready"),
+        [
+            ("completed", True, True),
+            ("completed", False, False),
+            ("running", True, False),
+            ("requires_continuation", True, False),
+        ],
+    )
+    def test_field_all_needs_completed_state_and_result(
+        self,
+        workspace: SessionWorkspace,
+        status: str,
+        has_result: bool,
+        ready: bool,
+    ) -> None:
+        """``all`` — это манифест целиком, и его читают как «разбор завершён».
+
+        Поэтому одного статуса мало: у завершённого состояния может не быть
+        ``result.json``, и отдавать манифест значило бы выдать отсутствие
+        результата за результат.
         """
-        path = tmp_path / MANIFEST_SUBPATH / "op1" / "manifest.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{это не json", encoding="utf-8")
-        assert _domain_error_type(tmp_path, "op1") == "manifest_corrupted"
+        root = _session_state_root(workspace)
+        _write_state(root, OP, status=status, result={} if has_result else None)
+
+        body = _query(workspace, _ctx(SESSION), operation_id=OP, field="all")
+
+        if ready:
+            assert body["status"] == "ok"
+            assert body["manifest"]["status"] == "completed"
+        else:
+            assert body["status"] != "ok"
+            assert body["ready"] is False
+            assert "manifest" not in body
+
+    def test_completed_without_result_says_what_is_missing(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """Отказ по готовности обязан называть, чего именно не хватило."""
+        root = _session_state_root(workspace)
+        _write_state(root, OP, status="completed", result=None)
+
+        body = _query(workspace, _ctx(SESSION), operation_id=OP, field="all")
+
+        assert body["status"] == "completed"
+        assert body["ready"] is False
+        assert "result.json" in body["hint"]
+
+    def test_other_fields_do_not_require_result_json(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """Остальные поля берутся из самого манифеста и остаются годными.
+
+        Иначе домен, у которого результат не пишется вовсе, отдавал бы вечно
+        незавершённое состояние.
+        """
+        root = _session_state_root(workspace)
+        _write_state(root, OP, status="completed", result=None)
+
+        body = _query(workspace, _ctx(SESSION), operation_id=OP, field="stats")
+
+        assert body["status"] == "ok"
+        assert body["article_count"] == 42
+
+
+# -- отказы по состоянию и по аргументам --------------------------------------
+
+
+def _state_missing(root: Path, operation_id: str) -> None:
+    """Состояния нет вовсе."""
+
+
+def _state_corrupted(root: Path, operation_id: str) -> None:
+    _write_state(root, operation_id, raw_text="{ это не json")
+
+
+def _state_unsupported_version(root: Path, operation_id: str) -> None:
+    _write_state(root, operation_id, version=1)
+
+
+def _state_completed(root: Path, operation_id: str) -> None:
+    _write_state(root, operation_id)
+
+
+#: Состояние на диске -> код конверта. Заменяет сверку с удалённой таблицей
+#: `_ERROR_CODES` capability'а: перевод проверяется тем, что операция отдаёт на
+#: настоящем состоянии, а не тем, какие строки есть в словаре. Иначе доменный
+#: ``error_type``, которому не досталось строки в таблице, молча уходил бы в
+#: ``internal`` — то есть в неотличимый от падения домена отказ.
+_ERROR_STATES: dict[str, tuple[Any, str, str]] = {
+    # error_type -> (подготовка состояния, поле вызова, код конверта)
+    "manifest_not_found": (_state_missing, "stats", "not_found"),
+    "manifest_corrupted": (_state_corrupted, "stats", "internal"),
+    "manifest_unsupported_version": (_state_unsupported_version, "stats", "upstream_unavailable"),
+    "invalid_field": (_state_completed, "unknown", "invalid_params"),
+}
+
+
+class TestErrorTranslation:
+    """Доменный конверт переводится в код конверта платформы."""
+
+    @pytest.mark.parametrize("error_type", sorted(_ERROR_STATES))
+    def test_domain_error_type_reaches_the_envelope_code(
+        self, workspace: SessionWorkspace, error_type: str
+    ) -> None:
+        prepare, field, expected_code = _ERROR_STATES[error_type]
+        root = _session_state_root(workspace)
+        prepare(root, OP)
+
+        # Доменная сторона названа ровно так, как объявляет ``cli_query``...
+        assert _domain_error_type(root, field) == error_type
+        # ...и операция переводит это имя в код конверта.
         with pytest.raises(EnterpriseError) as excinfo:
-            _service(tmp_path).query_operation(operation_id="op1", field="stats")
-        assert excinfo.value.code == "internal"
+            _query(workspace, _ctx(SESSION), operation_id=OP, field=field)
 
-    def test_unsupported_version_is_upstream_unavailable(self, tmp_path: Path) -> None:
-        """Манифест чужого формата → ``upstream_unavailable``.
+        assert excinfo.value.code == expected_code
+        assert excinfo.value.message
 
-        Код конверта обязан быть ровно таким, как заявлен в таблице
-        ``_ERROR_CODES``, а таблица — по доменным именам из
-        ``cli_query._MANIFEST_ERROR_TYPES``. Домен отдаёт
-        ``manifest_unsupported_version``; с ключом в обратном порядке слов
-        словарь молча промахивался, и случай уходил с дефолтным
-        ``internal`` - агент получал «сбой платформы» вместо «состояние
-        записано другим форматом».
+    def test_every_domain_error_type_is_covered_here(self) -> None:
+        """Новый ``error_type`` обязан получить решение, а не молчаливый ``internal``.
+
+        Пока файл перечисляет все четыре, сверка с доменной константой не нужна:
+        несовпадение само себя показывает.
         """
-        _write_manifest(tmp_path, "op1", version=1)
-        assert (
-            _domain_error_type(tmp_path, "op1") == "manifest_unsupported_version"
+        assert set(_ERROR_STATES) == set(DOMAIN_ERROR_TYPES)
+
+    def test_missing_state_is_reported_as_not_found(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """Отсутствие состояния — ``not_found``, а не пустой успешный ответ."""
+        _session_state_root(workspace)
+
+        with pytest.raises(EnterpriseError) as excinfo:
+            _query(workspace, _ctx(SESSION), operation_id="absent")
+
+        assert excinfo.value.code == "not_found"
+        assert "absent" in excinfo.value.message
+
+    def test_missing_state_of_a_session_without_folder(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """Папки сессии может не быть вовсе — это не должно ломать отказ.
+
+        Отметка обращения пишется в несуществующий каталог; молчаливый отказ от
+        неё обязателен, иначе состояние сессии, ещё ни разу не записанное,
+        читалось бы как сломанное.
+        """
+        with pytest.raises(EnterpriseError) as excinfo:
+            _query(workspace, _ctx("sess-never-used"), operation_id=OP)
+
+        assert excinfo.value.code == "not_found"
+
+    def test_unknown_field_is_refused_without_reading_state(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        """Отказ по аргументу не зависит от того, существует ли операция.
+
+        Иначе модель на неверном поле получила бы «состояние не найдено» и
+        решила бы, что ошиблась в имени, а не в поле.
+        """
+        root = _session_state_root(workspace)
+        _write_state(root, OP)
+
+        with pytest.raises(EnterpriseError) as excinfo:
+            _query(workspace, _ctx(SESSION), operation_id=OP, field="section")
+
+        assert excinfo.value.code == "invalid_params"
+        # Отказ перечисляет доступные поля и не выкладывает манифест.
+        assert "stats" in excinfo.value.message
+        assert "Глава 1" not in excinfo.value.message
+
+    @pytest.mark.parametrize(
+        ("kwargs", "hint"),
+        [
+            ({"operation_id": "  "}, "operation_id"),
+            ({"operation_id": OP, "field": ""}, "field"),
+            ({"operation_id": OP, "max_chunk_summary_chars": 0}, "max_chunk_summary_chars"),
+        ],
+    )
+    def test_empty_arguments_are_refused_before_any_read(
+        self, workspace: SessionWorkspace, kwargs: dict[str, Any], hint: str
+    ) -> None:
+        """Пустой аргумент — негоден сам вызов, а не «состояния нет»."""
+        with pytest.raises(InvalidRequestError) as excinfo:
+            _query(workspace, _ctx(SESSION), **kwargs)
+
+        assert excinfo.value.code == "invalid_params"
+        assert hint in excinfo.value.message
+
+
+# -- запасной корень для вызовов без сессии ------------------------------------
+
+
+class TestFallbackRoot:
+    """Папки сессии нет — состояние ищется по объявленному владельцем корню."""
+
+    def test_fallback_root_is_used_without_a_session(
+        self, workspace: SessionWorkspace, tmp_path: Path
+    ) -> None:
+        fallback = tmp_path / "legacy-cache"
+        _write_state(fallback, OP)
+
+        body = _query(
+            workspace,
+            _ctx(""),
+            fallback_cache_root=fallback,
+            operation_id=OP,
+            field="stats",
         )
-        with pytest.raises(EnterpriseError) as excinfo:
-            _service(tmp_path).query_operation(operation_id="op1", field="stats")
-        assert excinfo.value.code == "upstream_unavailable"
-        # Сообщение остаётся доменным и называет наблюдаемую версию.
-        assert "version" in str(excinfo.value).lower()
 
+        assert body["status"] == "ok"
+        assert body["article_count"] == 42
 
-class TestErrorCodeTable:
-    """Таблица перевода обязана совпадать с доменом, а не «почти совпадать»."""
+    def test_without_session_and_without_fallback_it_is_refused(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        with pytest.raises(InvalidRequestError) as excinfo:
+            _query(workspace, _ctx(""), operation_id=OP)
 
-    def test_table_keys_are_exactly_the_domain_error_types(self) -> None:
-        """Ключи ``_ERROR_CODES`` = все ``error_type``, которые присылает домен.
+        assert excinfo.value.code == "invalid_params"
+        assert "сесси" in excinfo.value.message
 
-        Сверка идёт с обоими источниками: лишний ключ означал бы код, который
-        домен никогда не пришлёт, а недостающий - молчаливый откат на
-        ``internal`` (именно этим был баг с ``unsupported_manifest_version``).
-        Проверка без диска и без моков: чистое следствие двух объявлений.
+    def test_session_state_wins_over_the_fallback_root(
+        self, workspace: SessionWorkspace, tmp_path: Path
+    ) -> None:
+        """При сессии запасной корень не используется вовсе.
 
-        Сверяется с ``DOMAIN_ERROR_TYPES``, а не с ``_MANIFEST_ERROR_TYPES``:
-        манифестная половина - не весь домен. Отказ по аргументу
-        (``invalid_field``) тоже обязан иметь код, иначе модель получала бы
-        «виновата платформа» вместо «повтори с одним из шести».
+        Иначе читатель искал бы состояние не там, где его пишет
+        ``analyze_document``, — это и был исходный дефект до переезда.
         """
-        from libs.legal_summarizer.cli_query import DOMAIN_ERROR_TYPES
+        fallback = tmp_path / "legacy-cache"
+        _write_state(fallback, OP, article_count=42, result=None)
+        _write_state(_session_state_root(workspace), OP, article_count=7)
 
-        assert set(_ERROR_CODES) == set(DOMAIN_ERROR_TYPES)
+        body = _query(
+            workspace,
+            _ctx(SESSION),
+            fallback_cache_root=fallback,
+            operation_id=OP,
+            field="stats",
+        )
+
+        assert body["article_count"] == 7
+
+
+# -- ограниченный шаг домена ---------------------------------------------------
+
+
+class TestLimitedStepDoesNotFreezeResult:
+    """Ограниченный шаг не замораживает усечённый результат.
+
+    Финальный manifest со статусом ``completed`` заставил бы ``run``
+    короткозамыкаться навсегда: следующий вызов не дошёл бы до домена, и
+    разбор остался бы навсегда обрезанным.
+    """
+
+    def test_bounded_step_keeps_state_unfinished(
+        self, workspace: SessionWorkspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import libs.legal_summarizer.application.service as summarizer
+        from libs.legal_summarizer.llm import config as llm_config
+
+        _install_llm_stubs(monkeypatch)
+        # Порог подтверждения — в потолок, выборка — в потолок: проверяется
+        # ограниченный шаг, а не отказ по объёму.
+        monkeypatch.setattr(
+            llm_config,
+            "get_execution_config",
+            lambda: {
+                "confirmation_threshold_sec": 999999,
+                "estimated_chunk_duration_sec": 0.001,
+                "max_chunks_for_execution": 1000,
+                "context_batching": {
+                    "system_prompt_tokens": 0,
+                    "instruction_tokens_per_map": 0,
+                    "chars_per_token": 3.5,
+                    "safety_margin": 0.85,
+                },
+            },
+        )
+
+        document = tmp_path / "contract.txt"
+        document.write_text(_build_doc(), encoding="utf-8")
+        root = _session_state_root(workspace)
+
+        outcome = summarizer.run(
+            document.read_text(encoding="utf-8"),
+            length="detailed",
+            document_path=str(document),
+            workspace_root=root,
+            confirmed=True,
+            batch_limit=1,
+        )
+        operation_id = str(outcome["operation_id"])
+
+        assert outcome["status"] == "requires_continuation"
+        report = outcome["progress_report"]
+        # Ограничение обязано действительно резать очередь, иначе тест прошёл бы
+        # вхолостую по полному разбору.
+        assert report["done"] >= 1
+        assert report["remaining"] > 0
+        assert report["continues"] is True
+
+        # Заморозки нет: результата на диске нет, состояние осталось незавершённым.
+        assert read_result(operation_id, root) is None
+        assert (root / OPERATIONS / operation_id / "result.json").exists() is False
+        assert load_manifest(operation_id, root).status == "running"
+
+        # И читатель то же самое видит: это состояние, а не завершённый разбор.
+        body = _query(workspace, _ctx(SESSION), operation_id=operation_id, field="all")
+        assert body["status"] == "running"
+        assert body["ready"] is False
+        assert body["progress_report"]["remaining"] > 0
+        assert "manifest" not in body
+
+
+# -- провод -------------------------------------------------------------------
 
 
 class TestWire:
-    """Операция работает по протоколу MCP: успех, отказ и идентичность."""
+    """Имя на проводе и идентичность вызова."""
 
-    def test_wire_call_returns_result(self, tmp_path: Path) -> None:
-        """Успешный вызов по проводу отдаёт разобранный JSON с метаданными."""
-        from conftest import make_layer
-        from libs.enterprise_common.loader import build_server
+    def test_call_by_the_platform_name_returns_the_state(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        from conftest import call_meta
 
-        _write_manifest(tmp_path, "op1")
-        service = _service(tmp_path)
-        transport = build_server(
-            _registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
+        _write_state(_session_state_root(workspace), OP)
+
+        result = _wire(
+            _transport(workspace),
+            "platform.query_operation",
+            {"operation_id": OP, "field": "articles"},
+            call_meta(),
         )
-        result = _wire(transport, "legal_summarizer.query_operation", {"operation_id": "op1"})
+
         assert result.isError is False
         body = json.loads(result.content[0].text)
         assert body["status"] == "ok"
         assert body["article_count"] == 42
 
-    def test_wire_domain_error_carries_envelope_code(self, tmp_path: Path) -> None:
-        """Доменный отказ доходит конвертом с кодом, без трассировки.
-
-        Агент читает код, а не разбирает текст; ``Traceback`` в ответе означал
-        бы, что отказ не нормализован.
-        """
-        from conftest import make_layer
-        from libs.enterprise_common.loader import build_server
-
-        # Манифест намеренно отсутствует — домен вернёт not_found.
-        service = _service(tmp_path)
-        transport = build_server(
-            _registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
-        )
-        result = _wire(transport, "legal_summarizer.query_operation", {"operation_id": "absent"})
-        assert result.isError is True
-        assert json.loads(result.content[0].text)["error"]["code"] == "not_found"
-        assert "Traceback" not in result.content[0].text
-
-    def test_wire_unknown_field_is_refused_and_manifest_is_not_dumped(
-        self, tmp_path: Path
+    def test_session_of_the_call_meta_picks_the_state(
+        self, workspace: SessionWorkspace
     ) -> None:
-        """Поле не из перечня — отказ, даже когда манифест читается.
+        """Сессия приходит из ``params._meta``, а не из аргументов операции."""
+        from conftest import call_meta
 
-        Манифест здесь заведомо валиден. Это и есть условие, при котором
-        поломка была незаметна: на несуществующем ``operation_id`` домен и так
-        отказывал, и отказ по полю не отличить от отказа по состоянию. С
-        живым манифестом старое поведение отдавало ``status = "ok"`` и
-        ``manifest`` целиком, то есть опечатка в имени поля стоила модели
-        целого документа и не давала ни отказа, ни намёка на ошибку.
-        """
-        from conftest import make_layer
-        from libs.enterprise_common.loader import build_server
+        _write_state(_session_state_root(workspace, "sess-own"), OP)
 
-        _write_manifest(tmp_path, "op1")
-        transport = build_server(
-            _registry(_service(tmp_path)),
-            name="enterprise-mcp",
-            pipeline=make_layer(tmp_path).pipeline,
-        )
         result = _wire(
-            transport,
-            "legal_summarizer.query_operation",
-            {"operation_id": "op1", "field": "section"},
+            _transport(workspace),
+            "platform.query_operation",
+            {"operation_id": OP},
+            call_meta(session_id="sess-own"),
         )
-        assert result.isError is True
-        text = result.content[0].text
-        assert json.loads(text)["error"]["code"] == "invalid_params"
-        # Перечень обязателен: иначе модель не знает, что повторить.
-        for field in ("stats", "articles", "chunks", "sections", "tree", "all"):
-            assert field in text, f"в отказе не назван допустимый перечень: {field}"
-        # Главное: содержимое манифеста утекать не должно.
-        assert "chunk_states" not in text, "отказ по полю выдал manifest целиком"
-        assert "Traceback" not in text
 
-    def test_call_without_meta_is_refused_before_domain(self, tmp_path: Path) -> None:
-        """Без ``params._meta`` вызов не доходит до домена.
+        assert result.isError is False
+        assert json.loads(result.content[0].text)["status"] == "ok"
 
-        Доказательство «домен не запускался» — само присутствие валидного
-        манифеста: будь вызов дошёл до сервиса, в ответ пришёл бы успешный
-        ``status=ok``. Приходит ``identity_missing`` — значит конвейер отклонил
-        вызов на шаге идентичности, до ``_call_domain``.
-        """
-        from conftest import make_layer
-        from libs.enterprise_common.loader import build_server
+    def test_missing_state_comes_back_as_a_typed_refusal(
+        self, workspace: SessionWorkspace
+    ) -> None:
+        from conftest import call_meta
 
-        _write_manifest(tmp_path, "op1")
-        service = _service(tmp_path)
-        transport = build_server(
-            _registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
+        result = _wire(
+            _transport(workspace),
+            "platform.query_operation",
+            {"operation_id": "absent"},
+            call_meta(),
         )
-        result = _wire(transport, "legal_summarizer.query_operation", {"operation_id": "op1"}, {})
+
         assert result.isError is True
         body = json.loads(result.content[0].text)
-        assert body["error"]["code"] == "identity_missing"
-        assert "article_count" not in result.content[0].text, (
-            "домен не должен запускаться без идентичности"
+        assert body["error"]["code"] == "not_found"
+        # Трассировка внутрь не утекает: у отказа есть код и сообщение.
+        assert "traceback" not in result.content[0].text.lower()
+
+
+class TestLaunchStepIsBounded:
+    """Ограничение шага приходит от операции, а не остаётся ``None``.
+
+    ``None`` — это «выполнить весь разбор», то есть ровно то поведение, из-за
+    которого не уложившийся в потолок вызов терял оплаченную работу целиком:
+    домен выполняет батчи подряд, поток не прерывается, его возврат
+    отбрасывается. Потолок читает вызывающая сторона — домен о нём не знает по
+    условию задачи, — поэтому проверить можно только здесь.
+    """
+
+    def test_budget_is_never_zero(self) -> None:
+        assert _batch_budget(120) >= 1
+        # Ноль означал бы «шаг не поместился», и домен отличал бы его от «шаг не
+        # начат» — один и тот же отказ с двумя разными причинами.
+        for ceiling in (120, 60, 30, 10, 1, 0):
+            assert _batch_budget(ceiling) >= 1, ceiling
+
+    def test_budget_leaves_room_inside_the_ceiling(self) -> None:
+        budget = _batch_budget(120)
+        assert budget >= 1
+        # Батчи не заполняют потолок целиком: загрузка документа, сбор контекста
+        # исполнения, reduce-фаза и запись состояния идут внутри него тоже.
+        assert budget <= 120 * BATCH_BUDGET_SHARE / _chunk_duration_sec()
+
+    def test_budget_follows_the_domain_estimate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import inspect
+
+        from libs.legal_summarizer.llm import config as llm_config
+
+        # Оценка домена читается ДО подмены: хелпер, читающий объявленную
+        # стоимость, после подмены звал бы сам себя.
+        base = _chunk_duration_sec()
+        real = llm_config.get_execution_config
+        default_budget = _batch_budget(120)
+
+        def four_times_slower() -> dict[str, Any]:
+            cfg = dict(real())
+            cfg["estimated_chunk_duration_sec"] = base * 4
+            return cfg
+
+        monkeypatch.setattr(llm_config, "get_execution_config", four_times_slower)
+        slower = _batch_budget(120)
+
+        # Бюджет обязан быть производной от оценки домена, а не константой:
+        # константа прошла бы любой потолок и однажды перестала бы помещаться.
+        assert slower < default_budget
+        assert slower >= 1
+        assert inspect.isfunction(four_times_slower)
+
+    def test_operation_passes_a_limit_to_the_domain(
+        self, workspace: SessionWorkspace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import inspect
+
+        from libs.legal_summarizer.application import service as domain
+
+        handle = workspace.handle(SESSION, create=True)
+        (handle.subdir("files") / "doc.txt").write_text(
+            "Статья 1. Договор. Статья 2. Предмет. Статья 3. Цена.", encoding="utf-8"
         )
 
-    def test_identity_is_extracted_from_call_context(self, tmp_path: Path) -> None:
-        """Корректный ``_meta`` извлекается и доезжает в метаданные ответа.
+        captured: dict[str, Any] = {}
+        real_run = domain.run
 
-        Проверяется конкретный ``request_id``: он пришёл в ``params._meta``,
-        конвейер его разобрал, и то же значение появилось в блоке ``_execution``
-        ответа. Это и есть «идентичность операции корректно извлекается из
-        контекста вызова» — наблюдаемое, а не декларативное.
-        """
-        from conftest import call_meta, make_layer
-        from libs.enterprise_common.loader import build_server
+        def fake_run(text: str, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {"status": "confirmation_required", "estimate": {}, "summary": {}}
 
-        _write_manifest(tmp_path, "op1")
-        service = _service(tmp_path)
-        transport = build_server(
-            _registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
+        # Операция отбирает именованные аргументы по подписи того, что стоит в
+        # ``domain.run``. Подмена без подписи оставила бы её пустой, и проверка
+        # прошла бы вхолостую, не увидев ни одного аргумента.
+        fake_run.__signature__ = inspect.signature(real_run)  # type: ignore[attr-defined]
+        monkeypatch.setattr(domain, "run", fake_run)
+
+        tool = create_analyze_tool(workspace, execution_timeout_sec=120)
+        tool.handler(
+            _ctx(SESSION),
+            document="session://files/doc.txt",
+            load_mode="full",
         )
-        result = _wire(
-            transport,
-            "legal_summarizer.query_operation",
-            {"operation_id": "op1"},
-            call_meta(request_id="req-legal-42", session_id="sess-legal-7"),
+
+        assert "batch_limit" in captured, (
+            "домен не получил ограничения шага: вызов выполнит весь разбор, "
+            "и не уложившийся в потолок результат будет отброшен"
         )
-        assert result.isError is False
-        execution = json.loads(result.content[0].text)["_execution"]
-        assert execution["request_id"] == "req-legal-42"
-        assert execution["tool"] == "legal_summarizer.query_operation"
-        assert execution["capability"] == "legal_summarizer"
+        assert captured["batch_limit"] >= 1

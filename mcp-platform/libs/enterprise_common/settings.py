@@ -1038,9 +1038,14 @@ CAPABILITIES: tuple[CapabilitySettings, ...] = (
     CapabilitySettings(
         name="legal_summarizer",
         service="servers/enterprise/capabilities/legal_summarizer/service/main.py",
-        tools=("legal_summarizer.query_operation",),
+        # Операций нет: обе — ``platform.analyze_document`` и
+        # ``platform.query_operation`` — платформенные, потому что работают с
+        # файлами папки сессии, а ими владеет платформа. Capability остаётся
+        # ради одного — запасного корня состояния для вызовов без сессии и
+        # доменной конфигурации, поэтому имя её и ключ настройки остаются.
+        tools=(),
         settings=("ENTERPRISE_LEGAL_CACHE_ROOT",),
-        summary="follow-up вопросы по уже разобранному юридическому документу",
+        summary="запасной корень состояния разбора для вызовов без сессии",
     ),
 )
 

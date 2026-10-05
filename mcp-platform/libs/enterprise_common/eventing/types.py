@@ -62,6 +62,26 @@ ARTIFACT_READ = "artifact.read"
 #: Проверки качества.
 QUALITY_CHECK = "quality.check"
 
+#: Шаги разбора юридического документа (операция ``analyze_document``).
+#: Пять имён, а не одно с полем ``phase``: журнал читают по имени события, и
+#: один конвейерный шаг с признаком внутри не отличить от другого по выборке
+#: имён. Набор — по фактам, которые между собой не сводимы: начало, явное
+#: подтверждение, частичное завершение, финальное завершение, отказ. Отказ по
+#: потолку вызова (``ExecutionTimeout``) конвейер пишет сам своим
+#: ``tool.failed`` с ``status: "timeout"``, поэтому отдельного имени для него
+#: здесь нет и не требуется — это требование распространяется на шаги самой
+#: операции, а не заменяет журнал конвейера.
+#:
+#: Объявлены **до** первой записи: политика неизвестных имён на живом контуре —
+#: ``strict`` (``platform.json → data.log_unknown_event_type_policy``), то есть
+#: необъявленное имя отказывает вызов, а не пишется втихую. Объявлять по факту
+#: первой записи поздно: запись уже отказала, и объявление её не воскресит.
+LEGAL_ANALYSIS_STARTED = "legal_analysis_step"
+LEGAL_ANALYSIS_CONFIRMED = "legal_analysis_confirmation"
+LEGAL_ANALYSIS_COMPLETED = "legal_analysis_completed"
+LEGAL_ANALYSIS_PARTIAL = "legal_analysis_partial"
+LEGAL_ANALYSIS_REFUSED = "legal_analysis_refused"
+
 #: Полный словарь. Порядок — по источнику ответственности, не по алфавиту.
 EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -85,6 +105,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         ARTIFACT_CREATED,
         ARTIFACT_READ,
         QUALITY_CHECK,
+        LEGAL_ANALYSIS_STARTED,
+        LEGAL_ANALYSIS_CONFIRMED,
+        LEGAL_ANALYSIS_COMPLETED,
+        LEGAL_ANALYSIS_PARTIAL,
+        LEGAL_ANALYSIS_REFUSED,
     }
 )
 

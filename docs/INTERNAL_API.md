@@ -287,7 +287,7 @@ foo, bar, baz; skipped: qux (disabled by config)"`.
 |---|---|---|---|
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (config.json) |
 | ~~`history_search`~~ | ~~`workspace/tools/history_search_tool.py`~~ | **удалён** (change `2026-10-03-mcp-native-tools`, п. D6): то же доступно модели как `mcp_enterprise_data_history_search`; область видимости задаёт личность вызова, а не аргумент | — |
-| ~~`legal_summarizer_query`~~ | ~~`workspace/tools/legal_summarizer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_legal_summarizer_query_operation` | — |
+| ~~`legal_summarizer_query`~~ | ~~`workspace/tools/legal_summarizer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_platform_query_operation` | — |
 | ~~`audit_analyzer_query`~~ | ~~`workspace/tools/audit_analyzer_query.py`~~ | **удалён** (там же): доступно как `mcp_enterprise_{audit_list_scripts,audit_run_script,audit_generate_sql,vectors_vector_search}` | — |
 | `document_read` | `workspace/tools/document_read.py` | извлечение текста из офисных документов | `tools.document_read.*` (config.json) |
 

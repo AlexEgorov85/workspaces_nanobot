@@ -873,7 +873,8 @@
           "audit.generate_sql",
           "vectors.vector_search",
           "vectors.list_indexes",
-          "legal_summarizer.query_operation",
+          "platform.analyze_document",
+          "platform.query_operation",
           "data.history_search",
           "platform.read_result"
         ]

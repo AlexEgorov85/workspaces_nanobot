@@ -98,8 +98,24 @@ def run_direct(
     article_count: int,
     existing_manifest: NormalizedManifest | None,
     session_key: str = "default",
+    batch_limit: int | None = None,
+    confirmed: bool = False,
 ) -> dict:
-    """Canonical direct execution: single llm_document_reduce call."""
+    """Canonical direct execution: single llm_document_reduce call.
+
+    Ветка ``direct`` — неделимый шаг: цикла батчей здесь нет, поэтому
+    ограничение объёма не режет работу, а только позволяет вызывающей
+    стороне отказать сама (``legal_budget_unreachable``), если такой
+    шаг не помещается в потолок вызова. Домен выполняет шаг целиком и
+    возвращает ``completed`` с ``progress_report``
+    (``done: 1``, ``remaining: 0``, ``continues: false``): обещания
+    продолжения следующим вызовом эта ветка не даёт.
+
+    Единица счёта ``done`` — запись состояния со ``status:
+    "completed"``, а не батч. ``chunk_states`` на этой ветке не
+    ведётся, поэтому единственный шаг записывается в состояние как
+    одна выполненная единица, и ``done`` считается по тому же правилу.
+    """
     total_start = _time.monotonic()
     retries = 0
     ordered = list(chunks)
@@ -179,6 +195,16 @@ def run_direct(
         "cb_000": {"chunk_ids": [c.chunk_id for c in ordered], "status": "completed"},
     }
     manifest.batches_done = ["cb_000"]
+    # Единственный неделимый шаг ветки записывается в состояние как
+    # одна выполненная единица — по общему правилу подсчёта ``done``.
+    manifest.chunk_states = {
+        f"cb_000": {
+            "status": "completed",
+            "context_batch_id": "cb_000",
+            "result_path": "result.json",
+            "duration_sec": duration,
+        },
+    }
     # ``document_id`` в ``manifest.raw`` для reverse-lookup
     # ``operation_id → document_id`` (вопрос через document cache).
     document_id_direct = (
@@ -187,6 +213,10 @@ def run_direct(
         else None
     )
     manifest.raw["document_id"] = document_id_direct
+    # Факт подтверждения — часть состояния операции: гейт проходится
+    # на следующих шагах без повторного подтверждения.
+    if confirmed:
+        manifest.raw["confirmed"] = True
     save_manifest(manifest, workspace_root=workspace_root)
 
     sections_total = count_sections(analysis.structure if analysis else None)
@@ -199,6 +229,11 @@ def run_direct(
         "status": "completed",
         "operation_id": operation_id,
         "result": result,
+        "progress_report": {
+            "done": 1,
+            "remaining": 0,
+            "continues": False,
+        },
         "stats": {
             "chars_in": chars_in,
             "chunks_total": len(ordered),
@@ -239,6 +274,8 @@ def run_map_reduce(
     article_count: int,
     existing_manifest: NormalizedManifest | None,
     session_key: str = "default",
+    batch_limit: int | None = None,
+    confirmed: bool = False,
 ) -> dict:
     """Canonical map_reduce: coordinator.
 
@@ -250,6 +287,11 @@ def run_map_reduce(
     Cache boundary: ``execution.map_reduce`` НЕ пишет в cache —
     ``write_chunk_result`` и ``load_cached_partials`` инжектируются
     callback'ами сюда.
+
+    ``batch_limit`` ограничивает число батчей на один вызов; ``None``
+    означает полный разбор. Ограниченный шаг возвращается как
+    ``requires_continuation`` и НЕ персистится финальным манифестом:
+    состояние остаётся незавершённым, ``result.json`` не пишется.
     """
     if plan is None:
         raise RuntimeError(
@@ -285,6 +327,10 @@ def run_map_reduce(
         article_count=article_count,
         now_iso=now_iso,
     )
+    if confirmed:
+        # Подтверждение — факт состояния операции, а не параметр
+        # вызова: на следующих шагах гейт проходится без повтора.
+        initial_manifest.raw["confirmed"] = True
     if existing_manifest is None:
         save_manifest(initial_manifest, workspace_root=workspace_root)
 
@@ -350,12 +396,35 @@ def run_map_reduce(
         write_document_chunk_summary=_persist_doc_chunk_summary,
         run_one_batch_async=_run_one_batch_async,
         load_cached_partials=_load_cached_partials,
+        batch_limit=batch_limit,
     )
 
     # Cache persistence — application-level responsibility.
     # ``execution.map_reduce`` returns ``_internal`` artifacts for us to
     # persist (chunk_states, ctx_batches, batch failure tracking).
-    if payload.get("status") in ("completed", "partial") and "_internal" in payload.get("stats", {}):
+    #
+    # ``_internal.progress_persistable`` — маркер ограниченного шага:
+    # персистить надо НЕ финальный manifest (он замёрзил бы усечённый
+    # результат), а незавершённое состояние с уже оплаченными
+    # чанками, чтобы следующий вызов продолжил с них.
+    if payload.get("stats", {}).get("_internal", {}).get("progress_persistable"):
+        _persist_progress_manifest(
+            payload=payload,
+            document_path=document_path,
+            structure=structure,
+            analysis=analysis,
+            chars_in=chars_in,
+            length=length,
+            chunks=chunks,
+            estimated_llm_calls=estimated_llm_calls,
+            sections_payload=sections_payload,
+            existing_manifest=existing_manifest,
+            article_count=article_count,
+            workspace_root=workspace_root,
+            now_iso=now_iso,
+            confirmed=confirmed,
+        )
+    elif payload.get("status") in ("completed", "partial") and "_internal" in payload.get("stats", {}):
         _persist_final_manifest(
             payload=payload,
             document_path=document_path,
@@ -372,6 +441,7 @@ def run_map_reduce(
             now_iso=now_iso,
             question=question,
             session_key=session_key,
+            confirmed=confirmed,
         )
 
     # Удалить ``_internal`` из payload перед возвратом.
@@ -379,6 +449,92 @@ def run_map_reduce(
         del payload["stats"]["_internal"]
 
     return payload
+
+
+def _persist_progress_manifest(
+    *,
+    payload: dict,
+    document_path: str | None,
+    structure: DocumentStructure | None,
+    analysis: DocumentAnalysis | None,
+    chars_in: int,
+    length: str,
+    chunks: list,
+    estimated_llm_calls: int,
+    sections_payload: dict[str, dict[str, Any]],
+    existing_manifest: NormalizedManifest | None,
+    article_count: int,
+    workspace_root: Path | str | None,
+    now_iso,
+    confirmed: bool = False,
+) -> None:
+    """Сохранить состояние **незавершённого** разбора.
+
+    Вызывается ограниченным шагом: батчи выполнены, остаток — нет.
+    Manifest остаётся в статусе ``running``, ``write_result`` НЕ
+    вызывается. Это и есть защита от заморозки усечённого результата:
+    финальный manifest со статусом ``completed`` заставил бы
+    ``service.run`` короткозамыкаться навсегда, и следующий вызов
+    никогда бы не дошёл до домена.
+    """
+    from libs.legal_summarizer.cache.manifest import (
+        NormalizedManifest,
+        save_manifest,
+    )
+
+    internal = payload["stats"]["_internal"]
+    chunk_states = internal["chunk_states"]
+    ctx_batches = internal["ctx_batches"]
+
+    confirmed_in_state = bool(
+        confirmed
+        or (
+            existing_manifest is not None
+            and (existing_manifest.raw or {}).get("confirmed")
+        )
+    )
+
+    progress_manifest = NormalizedManifest(
+        operation_id=payload["operation_id"],
+        status="running",
+        version=2,
+        document_path=document_path,
+        structure_title=(
+            analysis.structure.title.value
+            if analysis is not None and analysis.structure.title is not None
+            else None
+        ),
+        chars_in=chars_in,
+        length=length,
+        chunks_total=len(chunks),
+        context_batches_total=len(ctx_batches),
+        estimated_llm_calls=estimated_llm_calls,
+        actual_llm_calls=internal["total_llm_calls"],
+        sections=sections_payload,
+        chunk_states=chunk_states,
+        context_batches=ctx_batches,
+        section_summaries=internal.get("section_summaries", {}),
+        batches_done=[
+            bid for bid, state in ctx_batches.items()
+            if state.get("status") == "completed"
+        ],
+        batches_failed=list(internal["failed_batch_ids"]),
+        last_error=internal["first_batch_error"],
+        started_at=existing_manifest.started_at if existing_manifest else now_iso(),
+        completed_at=None,
+        duration_sec=internal["total_duration"],
+        article_count=article_count,
+        raw={
+            "strategy": internal["strategy_label"],
+            "document_id": (
+                analysis.identity.document_id
+                if analysis is not None and getattr(analysis, "identity", None) is not None
+                else None
+            ),
+            "confirmed": confirmed_in_state,
+        },
+    )
+    save_manifest(progress_manifest, workspace_root=workspace_root)
 
 
 def _persist_final_manifest(
@@ -398,6 +554,7 @@ def _persist_final_manifest(
     now_iso,
     question: str | None = None,
     session_key: str = "default",
+    confirmed: bool = False,
 ) -> None:
     """Сохранить финальный manifest на диск.
 
@@ -457,6 +614,15 @@ def _persist_final_manifest(
                 analysis.identity.document_id
                 if analysis is not None and getattr(analysis, "identity", None) is not None
                 else None
+            ),
+            # Подтверждение переживает и финальную запись: иначе
+            # повторный разбор того же документа снова спросил бы его.
+            "confirmed": bool(
+                confirmed
+                or (
+                    existing_manifest is not None
+                    and (existing_manifest.raw or {}).get("confirmed")
+                )
             ),
         },
     )

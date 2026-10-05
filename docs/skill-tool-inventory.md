@@ -26,7 +26,7 @@ generic-инструментов для произвольного SQL и век
 | `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` | Skill (domain) | — | выбор операции и чтение её ответа | — | active |
 | `McpIdentityHook` | `lib/hooks/mcp_identity_hook.py` | framework-хук | — | подставляет личность оборота в аргументы `mcp_enterprise_*` | `runtime_inventory` (required) | active |
 | `audit_analyzer` operations | `config.json → tools.mcpServers.enterprise.enabled_tools` | Операции capability `audit` | `audit_analyzer` | `audit.list_scripts` / `audit.run_script` / `audit.generate_sql` / `vectors.vector_search` / `vectors.list_indexes` | capability `audit` платформы; `vectors.vector_search` и `vectors.list_indexes` — capability `vectors` | active |
-| документ follow-up | `mcp-platform/servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py` | Платформенная операция | — | follow-up-вопрос по сохранённому `operation_id`, без повторного парсинга | — | active (выдаётся как `mcp_enterprise_legal_summarizer_query_operation`) |
+| документ follow-up (`platform.query_operation`) | `mcp-platform/servers/enterprise/tools/query_operation.py` | Платформенная операция вне capability `legal_summarizer` (файлы сессии принадлежат платформе) | — | follow-up-вопрос по сохранённому `operation_id`, без повторного парсинга | — | active (выдаётся как `mcp_enterprise_platform_query_operation`) |
 | `data.history_search` operation | `mcp-platform/servers/enterprise/capabilities/data/tools/history_search.py` | Платформенная операция | — | поиск по журналу в пределах личности вызова | — | active (выдаётся как `mcp_enterprise_data_history_search`) |
 | `platform.read_result` operation | `mcp-platform/servers/enterprise/tools/read_result.py` | Платформенная операция | — | чтение результата, сохранённого по порогу, по ссылке `session://results/...` | `SessionWorkspace` / `ArtifactStore` (владелец — платформа, capability доступа не имеют) | active |
 | `compact_context` tool | `workspace/tools/compact_context.py` | Tool | — | — | `lib/services/context_compaction.py` | active |
@@ -49,7 +49,7 @@ generic-инструментов для произвольного SQL и век
 | component | бывший путь | замена |
 |---|---|---|
 | `audit_analyzer_query` tool | `workspace/tools/audit_analyzer_query.py` | `mcp_enterprise_{audit_list_scripts,audit_run_script,audit_generate_sql,vectors_vector_search}` — с настоящими схемами операций |
-| `legal_summarizer_query` tool | `workspace/tools/legal_summarizer_query.py` | `mcp_enterprise_legal_summarizer_query_operation` |
+| `legal_summarizer_query` tool | `workspace/tools/legal_summarizer_query.py` | `mcp_enterprise_platform_query_operation` |
 | `history_search` tool | `workspace/tools/history_search_tool.py` | `mcp_enterprise_data_history_search`; область видимости задаёт личность вызова, а не аргумент модели |
 | `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | `mcp_enterprise_audit_run_script` (произвольного SQL у агента нет) |
 | `vector_search` tool | `workspace/tools/vector_search_tool.py` | `mcp_enterprise_vectors_vector_search` |

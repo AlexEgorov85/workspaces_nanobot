@@ -27,10 +27,13 @@ from __future__ import annotations
 
 import ast
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from libs.enterprise_common.execution.context import ToolExecutionContext
 
 PLATFORM_ROOT = Path(__file__).resolve().parent.parent
 SELF = Path(__file__).resolve()
@@ -76,6 +79,17 @@ FORBIDDEN: tuple[tuple[str, str], ...] = (
         "SessionWorkspace",
         "файлы сессии пишет платформа; собственный workspace — второй каталог "
         "результатов одной сессии",
+    ),
+    (
+        "SessionHandle",
+        "узкое представление сессии выдаёт платформа по контексту вызова; в "
+        "capability оно оказалось бы второй формой того же доступа к файлам",
+    ),
+    (
+        "session_handle",
+        "то же в написании поля: и имя класса, и имя поля контекста или "
+        "контейнера запрещены, потому что запрет на форму доступа, а не на "
+        "объявление",
     ),
     (
         "ArtifactStore",
@@ -590,6 +604,29 @@ VIOLATIONS: tuple[tuple[str, str], ...] = (
         "from datetime import datetime\ndef f(fn):\n    started = datetime.now()\n"
         "    return fn(), datetime.now() - started\n",
     ),
+    # -- узкое представление сессии не достаётся capability ------------------
+    # Четыре формы обхода: импорт типа, поле контекста, поле контейнера и
+    # обращение по имени строкой. Импорт ловится и словом запрета, и модулем;
+    # остальные три — только словом, то есть ровно те, ради которых в таблице
+    # появилась вторая строка ``session_handle``.
+    (
+        "ручка сессии импортом",
+        "from libs.enterprise_common.session.workspace import SessionHandle\n"
+        "def f(ctx, workspace):\n"
+        "    return SessionHandle(workspace, ctx.session_id).subdir('artifacts')\n",
+    ),
+    (
+        "ручка сессии полем контекста",
+        "def f(ctx):\n    return ctx.session_handle().subdir('artifacts')\n",
+    ),
+    (
+        "ручка сессии полем контейнера",
+        "def f(container):\n    return container.session_handle\n",
+    ),
+    (
+        "ручка сессии по имени строкой",
+        "def f(ctx):\n    return getattr(ctx, 'session_handle')\n",
+    ),
 )
 
 #: Формы, которые выглядят нарушением, но им не являются.
@@ -638,6 +675,13 @@ ALLOWED: tuple[tuple[str, str], ...] = (
         "from libs.enterprise_common.registry import ToolDefinition\n"
         "def f(container: ToolContainer) -> ToolDefinition:\n"
         "    return json.dumps({'ok': True})\n",
+    ),
+    (
+        "идентичность сессии из контекста, а не из аргументов",
+        # Законная форма рядом с запретом ручки: сессия читается из ``ctx``, и
+        # слово ``session_id`` — не запрещённое (запрещено ``session_handle``).
+        "def f(ctx, rows):\n"
+        "    return {'session_id': ctx.session_id, 'rows': rows}\n",
     ),
 )
 
@@ -960,3 +1004,261 @@ def test_operation_cannot_be_assembled_without_its_service() -> None:
         "ни одна операция не потребовала сервиса при сборке — проверка выродилась "
         "в «всё собирается» и перестала что-либо значить"
     )
+
+
+# -- узкое представление сессии: сужение держится типом, а не соглашением ----
+
+#: Тип сервиса в проверке сужения. Строка, а не импорт: та же проверка обязана
+#: работать и на синтетических формах, объявленных прямо в этом файле.
+SESSION_SERVICE_TYPE = "SessionWorkspace"
+
+#: Имя поля, через которое ручка вела к сервису до сужения.
+HANDLE_SERVICE_FIELD = "workspace"
+
+#: Строки, добавленные в ``FORBIDDEN``: запрет на саму форму доступа к узкому
+#: представлению. Написание класса и написание поля — две строки, потому что
+#: ловятся они разными правилами: первая — именем и импортом, вторая — именем
+#: поля (``ctx.session_handle()`` не содержит ``SessionHandle``).
+SESSION_HANDLE_ROWS: tuple[str, ...] = ("SessionHandle", "session_handle")
+
+
+def _narrowing_offenders(cls: type, *, service_type: str = SESSION_SERVICE_TYPE) -> list[str]:
+    """Нарушения сужения ручки. Пустой список — ручка узкая.
+
+    Обе половины обязательны, и вторая не дублирует первую:
+
+    * первая ловит снятое поле — ``'workspace' in __slots__``;
+    * вторая ловит то же самое под другим именем — аннотацию типа сервиса на
+      любом поле ручки.
+
+    Проверка в форме «строки ``SessionWorkspace`` в ``__slots__`` нет» ничего не
+    меряет: ручка объявлена ``slots=True``, а в слотах лежат **имена** полей, а
+    не строки типов, поэтому такая проверка зеленеет и на незафиксенном коде.
+    Проверка «``handle.workspace`` даёт ``AttributeError``» тоже ничего не
+    меряет: приватное поле ``_workspace`` её удовлетворяет, оставляя тот же
+    обход. Поэтому вторая половина написана по ``__annotations__``.
+    """
+    offenders: list[str] = []
+    if HANDLE_SERVICE_FIELD in tuple(getattr(cls, "__slots__", ())):
+        offenders.append(
+            f"{cls.__name__}: поле {HANDLE_SERVICE_FIELD!r} в __slots__ — ручка ведёт к сервису"
+        )
+    for name, annotation in dict(getattr(cls, "__annotations__", {})).items():
+        if service_type in str(annotation):
+            offenders.append(
+                f"{cls.__name__}: поле {name!r} аннотировано {annotation!r} — сервис "
+                "достаётся под другим именем, узость снова держится соглашением"
+            )
+    return offenders
+
+
+def test_session_handle_does_not_lead_to_the_service() -> None:
+    """Через ручку нельзя выбрать чужую сессию.
+
+    Проверяются обе половины сразу: снятое поле ``workspace`` и любая аннотация
+    ``SessionWorkspace`` на поле ручки. Иммутабельность дата-класса тут ни при
+    чём — она и раньше была, а обход ``handle.workspace.subdir(чужой_идентификатор)``
+    содержал ни одного запрещённого имени, то есть страж по коду capability его
+    не увидел бы.
+    """
+    from libs.enterprise_common.session.workspace import SessionHandle
+
+    offenders = _narrowing_offenders(SessionHandle)
+    assert not offenders, (
+        "узкое представление сессии всё ещё ведёт к сервису:\n" + "\n".join(offenders)
+    )
+
+
+def test_handle_narrowing_checks_are_not_vacuous() -> None:
+    """Каждая половина проверки обязана краснеть на форме, которую ловит.
+
+    Зелёный прогон на пустом множестве не доказывает ничего — доказывает красный.
+    Формы объявлены здесь же: держать в проекте три класса только ради пробы
+    незачем, а проверять надо ровно ту границу, за которой сужение перестало бы
+    быть сужением.
+    """
+    from libs.enterprise_common.session.workspace import SessionWorkspace
+
+    @dataclass(frozen=True, slots=True)
+    class PublicField:  # форма до сужения: сервис обычным полем
+        workspace: SessionWorkspace
+        session_id: str
+        create: bool = True
+
+    @dataclass(frozen=True, slots=True)
+    class PrivateField:  # тот же обход под другим именем
+        _workspace: SessionWorkspace
+        session_id: str
+        create: bool = True
+
+    @dataclass(frozen=True, slots=True)
+    class Narrow:
+        session_id: str
+        create: bool = True
+        _resolve_subdir: Any = None
+
+    # Первая половина ловит снятое поле...
+    assert _narrowing_offenders(PublicField), "поле 'workspace' не замечено"
+    # ...а форма «строки SessionWorkspace в слотах нет» на нём зеленеет: вот
+    # почему по одному слоту проверять нельзя.
+    assert SESSION_SERVICE_TYPE not in PublicField.__slots__
+    # Вторая половина ловит приватное поле, на котором первая зеленеет.
+    assert HANDLE_SERVICE_FIELD not in PrivateField.__slots__
+    assert _narrowing_offenders(PrivateField), "приватное поле с типом сервиса не замечено"
+    # Суженная форма проходит обе половины — иначе проверка запрещала бы и
+    # правильный код.
+    assert _narrowing_offenders(Narrow) == []
+
+
+def test_no_handle_method_returns_the_service(tmp_path: Path) -> None:
+    """Ни один метод ручки сервис не отдаёт — путь перекрыт целиком.
+
+    Проверяются обе стороны: типы фактического возврата и аннотации ``return`` в
+    объявлении. Одна аннотация без прогона зеленела бы на методе, который тип
+    нарушает, а прогон без перечня методов — на ручке, у которой метод опустили.
+    """
+    from libs.enterprise_common.session.workspace import SessionWorkspace
+
+    handle = SessionWorkspace(tmp_path / "sessions").handle("s1")
+    handle.write_text("a.txt", "текст", subdir="responses")
+    handle.write_bytes("b.bin", b"payload", subdir="results")
+
+    returned = {
+        "write_text": handle.write_text("c.txt", "текст", subdir="responses"),
+        "write_json": handle.write_json("d.json", {"a": 1}, subdir="responses"),
+        "write_bytes": handle.write_bytes("e.bin", b"payload", subdir="results"),
+        "read_text": handle.read_text("a.txt", subdir="responses"),
+        "read_bytes": handle.read_bytes("b.bin", subdir="results"),
+        "exists": handle.exists("a.txt", subdir="responses"),
+        "list_files": handle.list_files(subdir="results"),
+        "remove": handle.remove("c.txt", subdir="responses"),
+        "subdir": handle.subdir("artifacts"),
+    }
+    allowed = (Path, list, str, bytes, bool)
+    declared = {
+        name for name, member in vars(type(handle)).items() if callable(member) and not name.startswith("_")
+    }
+    assert set(returned) == declared, (
+        "перечень методов ручки разошёлся с объявлением: "
+        f"проверено {sorted(returned)}, объявлено {sorted(declared)}"
+    )
+    for name, value in returned.items():
+        assert isinstance(value, allowed), f"{name}() вернул {type(value).__name__}"
+        assert not isinstance(value, SessionWorkspace), f"{name}() вернул сервис"
+    for name, member in vars(type(handle)).items():
+        annotation = getattr(member, "__annotations__", {}).get("return", "")
+        assert SESSION_SERVICE_TYPE not in str(annotation), (
+            f"{name}() обещает вернуть {SESSION_SERVICE_TYPE}"
+        )
+
+
+def test_session_handle_is_forbidden_as_a_form_of_access() -> None:
+    """Ручка запрещена именно в ``FORBIDDEN``, и перечень не уменьшился.
+
+    Таблиц четыре, а не две: ``FORBIDDEN_MODULES`` — модули слоя исполнения,
+    ``FORBIDDEN_CALLS_BY_ROOT`` — вызовы по корню обращения, ``FILE_WRITE_METHODS``
+    — запись содержимого. Ручка относится к первой: запрет на форму доступа, а
+    не на запись, и комментарий над ``FILE_WRITE_METHODS`` говорит об этом прямо.
+    """
+    tokens = {token for token, _ in FORBIDDEN}
+    missing = [token for token in SESSION_HANDLE_ROWS if token not in tokens]
+    assert not missing, f"в FORBIDDEN нет строк {missing}"
+
+    for token in SESSION_HANDLE_ROWS:
+        assert token not in FILE_WRITE_METHODS, f"{token!r} попал в FILE_WRITE_METHODS"
+        assert not any(token in module for module, _ in FORBIDDEN_MODULES)
+        assert not any(
+            token in root or token in names
+            for root, names, _ in FORBIDDEN_CALLS_BY_ROOT
+        )
+
+    # Ни одна таблица не теряет пунктов: убыль в любой из четырёх означает
+    # ослабление, даже если запрещённое имя нигде не встретилось.
+    assert len(FORBIDDEN) >= 19, f"FORBIDDEN сжался до {len(FORBIDDEN)} строк"
+    assert len(FORBIDDEN_MODULES) >= 9, f"FORBIDDEN_MODULES сжался до {len(FORBIDDEN_MODULES)}"
+    assert len(FORBIDDEN_CALLS_BY_ROOT) >= 4, f"FORBIDDEN_CALLS_BY_ROOT сжался до {len(FORBIDDEN_CALLS_BY_ROOT)}"
+    assert len(FILE_WRITE_METHODS) >= 3, f"FILE_WRITE_METHODS сжался до {len(FILE_WRITE_METHODS)}"
+
+
+@pytest.mark.parametrize("token", SESSION_HANDLE_ROWS)
+def test_new_forbidden_row_catches_a_violation(token: str) -> None:
+    """Строка запрета, не поймавшая ни одной пробы, — мёртвая строка.
+
+    Ищется та форма среди синтетических нарушений, которую ловит именно этот
+    токен: страж, который на пустом множестве молчит, от стража, который молчит
+    всегда, неотличим.
+    """
+    caught = [
+        label
+        for label, source in VIOLATIONS
+        if any(
+            f"{token!r}" in offender
+            for offender in _scan(source, "servers/enterprise/capabilities/x/tools/x.py")
+        )
+    ]
+    assert caught, f"строка запрета {token!r} не поймала ни одной синтетической пробы"
+
+
+def test_capability_cannot_get_the_handle_from_the_context() -> None:
+    """Ни импортом, ни полем контекста: обе формы обязаны быть пойманы.
+
+    Проверяется не «есть ли запрет», а что он срабатывает на конкретных формах и
+    не срабатывает на законном чтении идентичности из того же контекста: иначе
+    новые строки запрета легли бы и на ``ctx.session_id``, то есть на контракт
+    вызова.
+    """
+    forms = {
+        "импорт типа": (
+            "from libs.enterprise_common.session.workspace import SessionHandle\n"
+            "def f(ctx, workspace):\n"
+            "    return SessionHandle(workspace, ctx.session_id).subdir('artifacts')\n"
+        ),
+        "поле контекста": "def f(ctx):\n    return ctx.session_handle()\n",
+        "поле контейнера": "def f(container):\n    return container.session_handle\n",
+        "имя строкой": "def f(ctx):\n    return getattr(ctx, 'session_handle')\n",
+    }
+    for label, source in forms.items():
+        offenders = _scan(source, "servers/enterprise/capabilities/x/tools/x.py")
+        assert offenders, f"Capability получил ручку ({label}), а страж молчал"
+
+    legal = "def f(ctx, rows):\n    return {'session_id': ctx.session_id, 'rows': rows}\n"
+    assert not _scan(legal, "servers/enterprise/capabilities/x/tools/x.py"), (
+        "страж запретил чтение идентичности из контекста — это контракт вызова"
+    )
+
+
+def test_session_is_not_taken_from_operation_arguments() -> None:
+    """Идентичность операции приходит из вызова, а не из её аргументов.
+
+    Механизм отказа — ``registry.py`` (``IDENTITY_PARAMS`` и ``validate_handler``),
+    то есть подпись отвергается на загрузке, а не на первом вызове в проде.
+    Законная форма проверяется в том же тесте: отказ, который отвергает всё
+    подряд, ничего не запрещает.
+
+    ``ToolExecutionContext`` импортирован на уровне модуля не по удобству:
+    ``validate_handler`` разрешает аннотации через ``get_type_hints``, то есть
+    ищет имя в глобалах модуля обработчика, и локальный импорт внутри теста дал
+    бы отказ «не удалось разрешить аннотации» — то есть отказ по другой причине.
+    """
+    from libs.enterprise_common.registry import ToolLoadError, validate_handler
+
+    def legal(ctx: ToolExecutionContext, document: str = "") -> str:
+        return f"{ctx.session_id}:{document}"
+
+    def by_session(ctx: ToolExecutionContext, session_id: str = "") -> str:  # noqa: ARG001
+        return session_id
+
+    def by_user(ctx: ToolExecutionContext, user_id: str = "") -> str:  # noqa: ARG001
+        return user_id
+
+    def by_request(ctx: ToolExecutionContext, request_id: str = "") -> str:  # noqa: ARG001
+        return request_id
+
+    validate_handler(legal, name="probe")
+
+    for handler in (by_session, by_user, by_request):
+        with pytest.raises(ToolLoadError) as excinfo:
+            validate_handler(handler, name="probe")
+        message = str(excinfo.value)
+        assert handler.__name__[3:] in message, f"{handler.__name__}: отказ не называет параметр"
+        assert "params._meta" in message, f"{handler.__name__}: отказ не называет источник"

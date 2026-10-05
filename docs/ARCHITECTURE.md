@@ -1876,11 +1876,11 @@ Python-пакет, CLI-обёртки `cli.py` / `cli_query.py`, слои `domai
 | Что | Где |
 |---|---|
 | capability `legal_summarizer` | `mcp-platform/libs/legal_summarizer/` (домен), регистрация — `mcp-platform/platform.json` → `legal_summarizer` |
-| Операция follow-up по разобранному документу | `mcp-platform/servers/enterprise/capabilities/legal_summarizer/tools/query_operation.py`, модели — как `mcp_enterprise_legal_summarizer_query_operation` |
+| Операция follow-up по разобранному документу | `mcp-platform/servers/enterprise/tools/query_operation.py` — платформенная, вне capability: у capability-операции нет `ctx`, а чтение состояния есть работа с файлами сессии; модели — как `mcp_enterprise_platform_query_operation` |
 | Что именно модели видно | `config.json` → `tools.mcpServers.enterprise.enabled_tools` |
 | Контракт вызова | `workspace/skills/enterprise_mcp/SKILL.md` |
 
-Операция `legal_summarizer.query_operation(operation_id, field, max_chunk_summary_chars)` несёт
+Операция `platform.query_operation(operation_id, field, max_chunk_summary_chars)` несёт
 ту же семантику полей, что снятый tool: `stats` / `articles` / `chunks` /
 `sections` / `tree` / `all`. Документ заново не разбирается — ответ берётся из
 сохранённого состояния операции, а область видимости задаётся личностью

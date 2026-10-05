@@ -78,6 +78,73 @@ from libs.legal_summarizer.planning.strategy import (
 )
 
 
+def _remaining_batches(ctx, chunk_states: dict) -> int:
+    """Число батчей, в которых осталась неоплаченная работа.
+
+    Работа считается по состоянию операции, а не по всему плану:
+    ``chunk_states`` — это то, что уже записано, и повторно это
+    считать нельзя. Правило совпадает с ``_queued_batches``
+    (``execution/map_reduce.py``): батч выполнен, когда все его
+    чанки помечены ``completed``.
+    """
+    if ctx.plan is None:
+        # ``direct`` — неделимый шаг: он либо уже выполнен (тогда
+        # состояние непустое), либо впереди.
+        return 0 if chunk_states else 1
+    return sum(
+        1
+        for batch in ctx.plan.batches
+        if any(
+            (chunk_states.get(cid) or {}).get("status") != "completed"
+            for cid in batch.chunk_ids
+        )
+    )
+
+
+def _estimate_for_remaining(est: Estimate, remaining_batches: int) -> Estimate:
+    """Оценка по оставшейся работе, а не по всему документу заново.
+
+    Иначе подтверждение, данное на первом шаге, не помогало бы: на
+    втором шаге верхняя оценка снова считалась бы от начала и гейт
+    снова потребовал бы подтверждения — при нуле платной работы.
+
+    ``estimated_llm_calls`` остаётся верхней границей и для остатка:
+    reduce-фаза (последний вызов) не исчезает, поэтому её часть
+    сохраняется, а батчевая уменьшается до остатка.
+    """
+    if remaining_batches >= est.context_batches:
+        return est
+    chunk_dur = float(
+        _llm_config_mod.get_execution_config()["estimated_chunk_duration_sec"]
+    )
+    avg = remaining_batches * chunk_dur
+    reduce_calls = max(0, est.estimated_llm_calls - est.context_batches)
+    return Estimate(
+        chunks_count=est.chunks_count,
+        context_batches=remaining_batches,
+        estimated_llm_calls=remaining_batches + reduce_calls,
+        estimated_duration_min_sec=round(avg * 0.8, 1),
+        estimated_duration_max_sec=round(avg * 1.2, 1),
+        confirmation_threshold_sec=est.confirmation_threshold_sec,
+    )
+
+
+def _progress_report_from_manifest(manifest) -> dict:
+    """``progress_report`` по уже готовому состоянию операции.
+
+    ``done`` считается по тому же правилу, что и в остальных ответах:
+    число записей состояния со ``status: "completed"``, а не батчей.
+    Готовое состояние означает законченный разбор, поэтому остаток
+    пуст, а продолжение не обещается.
+    """
+    chunk_states = getattr(manifest, "chunk_states", None) or {}
+    done = sum(
+        1 for state in chunk_states.values()
+        if (state or {}).get("status") == "completed"
+    )
+    return {"done": done, "remaining": 0, "continues": False}
+
+
 def _try_question_via_document_cache(
     *,
     question: str,
@@ -306,16 +373,37 @@ def run(
     document_path: str | None = None,
     workspace_root: Path | str | None = None,
     session_key: str = "default",
+    batch_limit: int | None = None,
 ) -> dict:
     """Canonical execution path.
 
     Порядок:
 
-    1. ``resolve operation_id`` (детерминированно из text+length+path+question);
+    1. ``resolve operation_id`` (детерминированно из text+length+path+focus+question);
     2. ``check completed manifest`` — если completed и не legacy → return cached;
     3. ``inspect()`` — один canonical pipeline (document-level);
     4. ``build_execution_context()`` — selected chunks + strategy + plan (run-level);
     5. confirmation / requires_continuation / execute.
+
+    ``batch_limit`` ограничивает объём работы на один вызов (число
+    батчей). ``None`` (по умолчанию) сохраняет прежнее поведение —
+    полный разбор; этим пользуется ручной запуск из CLI. Заданное
+    ограничение применяется к обеим веткам:
+
+    * ``map_reduce`` — выполняется срез очереди батчей, остаток
+      возвращается как ``requires_continuation`` с ``progress_report``
+      и БЕЗ reduce-фазы, ``result.json`` и финального manifest;
+    * ``direct`` — цикла батчей нет, поэтому ограничение не режет
+      работу: выполняется единственный неделимый шаг и возвращается
+      ``completed`` без обещания продолжения. Отказать по
+      неделимости (``legal_budget_unreachable``) — дело вызывающей
+      стороны, которая знает потолок вызова; домен этот потолок не
+      читает.
+
+    ``focus`` входит в ``operation_id`` (``make_operation_id``): это
+    инструкция LLM, меняющая текст сводки, и без него повторный разбор
+    того же документа с другим фокусом молча вернул бы прежнюю
+    сводку из idempotency-кэша.
     """
     text = (text or "").strip()
     if not text:
@@ -325,10 +413,27 @@ def run(
             "operation_id": operation_id,
         }
 
-    length = length if length in LENGTH_INSTRUCTIONS else "brief"
+    # ``length`` нормализовать молча нельзя: опечатка давала бы успешный
+    # ответ на 150-250 слов вместо запрошенного формата. Отказ — до
+    # платной работы, допустимые значения названы прямо.
+    if length not in LENGTH_INSTRUCTIONS:
+        return {
+            "status": "failed",
+            "operation_id": operation_id,
+            "error": {
+                "code": "INVALID_LENGTH",
+                "message": (
+                    f"Неизвестный length={length!r}; допустимые значения: "
+                    f"{', '.join(sorted(LENGTH_INSTRUCTIONS))}"
+                ),
+            },
+        }
 
     operation_id = operation_id or make_operation_id(
-        text, length, document_path=document_path, question=question,
+        text, length,
+        document_path=document_path,
+        question=question,
+        focus=focus,
     )
 
     existing_manifest = load_manifest(operation_id, workspace_root)
@@ -344,6 +449,14 @@ def run(
                 "status": "completed",
                 "operation_id": operation_id,
                 "result": cached_result,
+                # Явный признак попадания в готовое состояние: работа
+                # в этом вызове не начиналась, платы за неё не было, а
+                # результат готов. Без этого поля модель не отличила бы
+                # короткозамыкание от шага, который отработал и закончил.
+                "from_ready_state": True,
+                "progress_report": _progress_report_from_manifest(
+                    existing_manifest,
+                ),
                 "stats": {
                     "chars_in": cached_result.get("chars_in"),
                     "chunks": cached_result.get("chunks"),
@@ -403,13 +516,31 @@ def run(
 
     existing_manifest = load_manifest(operation_id, workspace_root)
 
-    if needs_confirmation(run_estimate) and not confirmed:
+    # Факт подтверждения живёт в состоянии операции (``raw["confirmed"]``).
+    # Без этого продолжение без ``confirmed`` снова получило бы
+    # ``confirmation_required`` — с нулём сделанных LLM-вызовов.
+    confirmed_in_state = bool(
+        existing_manifest is not None
+        and (existing_manifest.raw or {}).get("confirmed")
+    )
+    if not confirmed and confirmed_in_state:
+        confirmed = True
+
+    # Оценка идёт по остатку работы: уже оплаченные батчи не входят.
+    done_chunk_states = (
+        dict(existing_manifest.chunk_states) if existing_manifest else {}
+    )
+    gate_estimate = _estimate_for_remaining(
+        run_estimate, _remaining_batches(ctx, done_chunk_states),
+    )
+
+    if needs_confirmation(gate_estimate) and not confirmed:
         from libs.legal_summarizer.chunking._text_helpers import progress
         progress(
             f"confirmation_required: chunks={len(ctx.chunks)}, "
-            f"batches={run_estimate.context_batches}, "
-            f"est_duration={run_estimate.estimated_duration_min_sec:.0f}-"
-            f"{run_estimate.estimated_duration_max_sec:.0f}s"
+            f"batches={gate_estimate.context_batches}, "
+            f"est_duration={gate_estimate.estimated_duration_min_sec:.0f}-"
+            f"{gate_estimate.estimated_duration_max_sec:.0f}s"
         )
         title = (
             insp.analysis.structure.title.value
@@ -427,17 +558,25 @@ def run(
                 "chars_in": insp.chars_in,
                 "chunks_total": len(insp.chunks),
                 "chunks_selected": len(ctx.chunks),
-                "context_batches_total": run_estimate.context_batches,
-                "estimated_llm_calls": run_estimate.estimated_llm_calls,
+                "context_batches_total": gate_estimate.context_batches,
+                "estimated_llm_calls": gate_estimate.estimated_llm_calls,
                 "strategy": ctx.strategy,
                 "title": title,
             },
             "estimate": {
-                "min_seconds": run_estimate.estimated_duration_min_sec,
-                "max_seconds": run_estimate.estimated_duration_max_sec,
-                "confirmation_threshold_sec": run_estimate.confirmation_threshold_sec,
+                "min_seconds": gate_estimate.estimated_duration_min_sec,
+                "max_seconds": gate_estimate.estimated_duration_max_sec,
+                "confirmation_threshold_sec": gate_estimate.confirmation_threshold_sec,
             },
-            "hint": "Передайте --confirm для запуска полной обработки.",
+            "progress_report": {
+                "done": 0,
+                "remaining": gate_estimate.context_batches,
+                "continues": True,
+            },
+            "hint": (
+                "Подтвердите запуск разбора явно (параметр confirmed "
+                "операции запуска). Суммаризация не начата."
+            ),
         }
 
     if len(ctx.chunks) > max_chunks_for_execution:
@@ -460,11 +599,20 @@ def run(
                 "estimated_llm_calls": run_estimate.estimated_llm_calls,
                 "title": title,
             },
+            "progress_report": {
+                "done": 0,
+                "remaining": run_estimate.context_batches,
+                # Работы с этим operation_id не существует: домен
+                # отказывает, а не урезает выборку. Отличать этот отказ
+                # от усечённого шага (continues: true) — по этому полю.
+                "continues": False,
+            },
             "hint": (
                 f"Выбранная выборка ({len(ctx.chunks)} chunks) превышает "
                 f"max_chunks_for_execution={max_chunks_for_execution}. "
                 f"Уменьшите max_chunks_per_question / question_fallback_max_chunks "
-                f"или передайте --confirm для принудительного продолжения."
+                f"либо подтвердите запуск явно (параметр confirmed операции "
+                f"запуска)."
             ),
         }
 
@@ -484,6 +632,8 @@ def run(
         article_count=article_count,
         existing_manifest=existing_manifest,
         session_key=session_key,
+        batch_limit=batch_limit,
+        confirmed=confirmed,
     )
 
     if ctx.strategy == "direct":

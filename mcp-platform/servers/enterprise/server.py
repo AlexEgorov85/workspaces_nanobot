@@ -649,6 +649,40 @@ def build(
         from servers.enterprise.tools.session_files import create_tool as _session_files
 
         registry.register(_session_files(execution.workspace))
+        # Обе операции разбора — платформенные, по той же причине, что и
+        # ``read_result``/``session_files`` выше: состояние операции лежит в
+        # папке сессии, а файлами сессии владеет платформа. Ручка выводится из
+        # ``SessionWorkspace``, а не из ``ArtifactStore``: ``ArtifactStore`` не
+        # используется ни в одном методе этих операций, и требовать его —
+        # требовать зависимости, которой нет и быть не должно.
+        #
+        # Условие то же составное, что у ``session_files``:
+        # ``_needs_data(wanted) and execution.workspace is not None``. Сервер
+        # для скиллов (``--capabilities llm``) сессии не имеет, и разбор в ней
+        # адресовать нечем.
+        from servers.enterprise.tools.analyze_document import (
+            create_tool as _analyze_document,
+        )
+        from servers.enterprise.tools.query_operation import (
+            create_tool as _query_operation,
+        )
+
+        registry.register(
+            _analyze_document(
+                execution.workspace,
+                execution_timeout_sec=execution.policy.execution_timeout_sec,
+                writer=execution.writer,
+            )
+        )
+        # Запасной корень — только для вызовов без сессии. При сессии он не
+        # используется: иначе читатель искал бы состояние не там, где его
+        # пишет ``analyze_document``.
+        registry.register(
+            _query_operation(
+                execution.workspace,
+                fallback_cache_root=container.get("legal_summarizer").cache_root,
+            )
+        )
     transport = build_server(
         registry,
         # Имя несёт контур: по адресу может отвечать чужой процесс, и
