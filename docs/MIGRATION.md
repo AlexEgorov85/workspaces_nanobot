@@ -43,8 +43,11 @@
 - Сборку векторов выполняет `python -m servers.enterprise.build_index` (из
   `mcp-platform`): он пишет векторы в `storage_table`. Агентский
   `tools/build_vectors.py`, который дополнительно пересобирал FAISS в памяти,
-  снят 2026-10-01. Настройки `gateway.vector.index.signature_table` и
-  `config_table` удалены из `VectorIndexSettings`.
+  снят 2026-10-01. Секция `gateway.vector.index.*` снята целиком вместе с
+  моделью `VectorIndexSettings`, поэтому её настройки `signature_table` и
+  `config_table` не «переехали» внутрь себя, а исчезли с ней. Состав индексов и
+  storage-таблицу объявляет платформа: `mcp-platform/platform.json` →
+  `vectors.indexes` / `vectors.storage_table`.
 - Расхождение декларации и runtime проверяют операции capability `vectors`:
   `list_indexes` (состояние всех индексов) и `index_stats` (метрики одного).
   Удалённые `--list-indexes` (CLI `audit_analyzer`) и `tools/check_indexes.py`
@@ -83,9 +86,11 @@
    пишет в PostgreSQL, а поиск читает из снимка.
 
    ⚠️ Объявление индексов берётся из `mcp-platform/platform.json →
-   vectors.indexes`. В `config.json → gateway.vector.index` оно пока
-   продублировано, и правка одного файла без другого ничего не даст — какой из
-   двух объявлений сносить, решает владелец (см. `VECTOR_INDEXES.md`).
+   vectors.indexes`, и это единственное объявление. Дубликат в
+   `config.json → gateway.vector.index`, который на момент этого релиза ещё
+   существовал, снят вместе с секцией, поэтому «какой из двух объявлений
+   сносить» уже не вопрос: правится только `platform.json` (см.
+   `VECTOR_INDEXES.md`).
 
 3. **Проверить согласованность декларации и runtime**: операция `list_indexes`
    (состояние и `declared`/`vector_count` по каждому индексу) либо
@@ -260,8 +265,8 @@ LLM-вызовы в production):
 | `gateway.print_llm_calls` | `false` | Токены LLM в терминал gateway (CLI — всегда вкл.) |
 | `gateway.print_worker_activity` | `false` | Активность воркеров в терминал |
 | `gateway.print_db_activity` | `false` | Активность db-job'ов в терминал |
-| `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Единая PG-таблица-хранилище сырых эмбеддингов. Регистрируется через `TableRegistry.register_infra("vector.storage", ...)` |
-| `gateway.vector.index.indexes.*` | `{}` | Конфиг vector-индексов (`VectorIndexConfig` per name; см. CHANGELOG → Resource Model Refactoring). PG-реестр `public.agent_vector_index_config` больше не читается кодом. |
+| ~~`gateway.vector.index.storage_table`~~ | `oarb.audit_vectors` | Единая PG-таблица-хранилище сырых эмбеддингов. Регистрировалась через `TableRegistry.register_infra("vector.storage", ...)`, который снят вместе с реестром. **Снято:** сегодня эту таблицу объявляет платформа — `mcp-platform/platform.json` → `vectors.storage_table` |
+| ~~`gateway.vector.index.indexes.*`~~ | `{}` | **Снято:** ключ появился в этом релизе и был снят позже, вместе с моделями `VectorIndexConfig`/`VectorIndexSettings`. Состав и параметры индексов объявляет `mcp-platform/platform.json` → `vectors.indexes`; PG-реестр `public.agent_vector_index_config` кодом не читается |
 | `cli.show_context_window` | `true` | Метка занятости контекстного окна в CLI |
 
 **Удалённые ключи**:
@@ -271,8 +276,13 @@ LLM-вызовы в production):
   — единая общая storage-таблица для runtime'а. Если у вас был список с одной
   таблицей (`["oarb.audit_vectors"]`), замените на строку (`"oarb.audit_vectors"`).
 - `gateway.vector_index.*` (legacy) → `gateway.vector.index.*`
-  — секция переименована. Обратной совместимости нет (fail-fast через
-  runtime-проверку в `register_vector_storage`).
+  — секция была переименована, и этим переименованием адресат был исчерпан:
+  `gateway.vector.index.*` снята позже целиком. Конечный адрес значений —
+  `mcp-platform/platform.json` → `vectors.indexes` / `vectors.storage_table`.
+  Указанный здесь fail-fast жил в runtime-проверке `register_vector_storage` и
+  снят вместе с ней; чем отвергается старый ключ в `config.json` теперь —
+  открытое решение (change `2026-10-05-vector-indexes-canon-gap`, п. 3.9),
+  поэтому конкретный код отказа здесь не называется.
 - `gateway.vector.embedding` — удалена целиком. Параметры эмбеддера
   (`api_base`, `path`, `model`, `dimension`, `timeout`, `key`) объявлены в
   `mcp-platform/platform.json → llm.embed_*` и принадлежат capability `llm`.
@@ -282,10 +292,14 @@ LLM-вызовы в production):
   `${EMBED_TOKEN}`, разворачивается из `mcp-platform/.secrets.env` или окружения
   процесса.
 - `skills.<name>.embedding` — удалена; embedding больше не параметризован по skill'у.
-- `skills.<name>.vector_indexes[].source` — поле `source` больше не нужно.
-  Source-таблица (`table`/`pk`/`content_columns`/`embedding_columns`/`track_column`/
-  `chunk_size`/`chunk_overlap`/`metric`/`enabled`) для каждого индекса — в
-  `gateway.vector.index.indexes.<name>` (`VectorIndexConfig`, `extra="forbid"`).
+- `skills.<name>.vector_indexes[].source` — поле `source` больше не нужно, а
+  позже снято всё объявление: `skills.<name>.vector_indexes` больше не
+  существует, и остаток ключа отвергается на старте (`SkillSettings` —
+  `extra="forbid"`, `ConfigurationError`). Source-таблица (`table`/`pk`/
+  `content_columns`/`embedding_columns`/`track_column`/`chunk_size`/
+  `chunk_overlap`/`metric`/`enabled`) для каждого индекса объявляется в
+  `mcp-platform/platform.json` → `vectors.indexes.<name>` (модель
+  `VectorIndexConfig` из дерева агента удалена).
   PG-реестр `public.agent_vector_index_config` остаётся как legacy-артефакт
   (SQL-артефакты в `sql/vectors/create_vector_index_config.sql`,
   `sql/migrations/V002__vector_chunk_params.sql`,
@@ -324,10 +338,14 @@ LLM-вызовы в production):
   `python tools/migrate.py --apply`.
 - **⚠️ После этого релиза код `public.agent_vector_index_config` НЕ читает.**
   Таблица остаётся в репозитории как legacy-артефакт (для старых миграций
-  и исторических ссылок), но новый конфиг — в `config.json`.
-  При первоначальной настройке проекта перенесите seed-данные из
-  `sql/audit_analyzer/seed_default_indexes.sql` в секцию
-  `gateway.vector.index.indexes` (формат см. `VectorIndexConfig`).
+  и исторических ссылок). Конфиг индексов жил в `config.json` — на момент
+  этого релиза это была секция `gateway.vector.index.indexes`; **сегодня и её
+  нет**: состав и параметры индексов объявляет
+  `mcp-platform/platform.json` → `vectors.indexes`. При первоначальной
+  настройке проекта перенесите seed-данные из
+  `sql/audit_analyzer/seed_default_indexes.sql` в `vectors.indexes`
+  (`platform.json`) — описывать их больше нечем: модель `VectorIndexConfig`
+  из дерева агента удалена.
 
 ## v2.3.0 → v2.3.1
 
@@ -340,7 +358,10 @@ LLM-вызовы в production):
 **breaking changes v2.0.0**:
 
 - Конфигурация векторных индексов переехала из файлов `.faiss` и `project.json`
-  в таблицу `public.agent_vector_index_config` (управление через SQL).
+  в таблицу `public.agent_vector_index_config` (управление через SQL). Это был
+  адрес на момент v2.0.0: таблица с тех пор — legacy-артефакт, который код не
+  читает, а состав индексов объявляет `mcp-platform/platform.json` →
+  `vectors.indexes`.
 - DSN задаётся единым `channels.postgres.dsn` (обычно `"${DATABASE_URL}"` из `.secrets.env`, резолвится через `utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`user`/`dbname` не поддерживаются.
 - Все таблицы логов и сессий получили префикс `agent_` (`agent_gateway_logs`,
   `agent_conversation_messages`, `agent_worker_claims`).
@@ -367,7 +388,7 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 |-----------|----------|
 | `.env` → `config.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `gateway` в `config.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
 | Провайдерские ключи больше не через `export` | Секция `# providers: llm` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически (env-переменная — каноническая `LLM_API_KEY`) |
-| `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `public.agent_vector_index_config` (см. [docs/VECTOR_INDEXES.md](VECTOR_INDEXES.md)) |
+| `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; на момент v2.0.0 — в `public.agent_vector_index_config` (см. [docs/VECTOR_INDEXES.md](VECTOR_INDEXES.md)), сегодня состав индексов объявляет `mcp-platform/platform.json` → `vectors.indexes` |
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
 | `data-analyzer`, `html_presentation_generator` | Удалены. Убрать из импортов и `config.json` |
 | `pg_agent_worker.py` | Удалён. Использовать `PostgresChannel`, поднимаемый из `gateway.py` / `cli_agent.py` |
@@ -386,9 +407,10 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 > Имена таблиц ниже — значения текущей инсталляции, настраиваемые в `config.json`
 > (`channels.postgres.table_name`/`messages_table`/`meta_table`/`claims_table`,
-> `logging.db.table_name`/`question_runs_table`, `benchmark.runs_table`/`results_table`,
-> `gateway.vector.index.storage_table`/`config_table`/`signature_table`). В других
-> развёртываниях они могут отличаться.
+> `logging.db.table_name`/`question_runs_table`, `benchmark.runs_table`/`results_table`).
+> В других развёртываниях они могут отличаться. `gateway.vector.index.*` из
+> прежнего перечня сняты целиком: storage-таблицу и состав индексов объявляет
+> `mcp-platform/platform.json` (`vectors.storage_table`, `vectors.indexes`).
 
 - **Сессии** (`public.agent_session_meta`, `public.agent_session_messages`) —
   схема та же. DDL: `sql/session/create_public_agent_session_meta.sql`,
@@ -398,7 +420,9 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 - **DuckDB-снимок** — gateway пересоздаст автоматически (in-memory → новый snapshot); путь вычисляется через единый `resolve_publish_path()` (`lib/core/application_context.py`) — default `~/.cache/nanobot/duckdb/cache.duckdb`, override через `gateway.cache.local_path`. Legacy `<workspace>/data_store/duckdb/cache.duckdb` больше не выбирается ни через какой knob (escape hatch `use_workspace_path` удалён в v2.5.2).
 - **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`,
   `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД);
-  DDL в `sql/audit_analyzer/`.
+  DDL в `sql/audit_analyzer/`. Это PG-таблицы той миграции, а не актуальный
+  адрес настройки: сегодня состав индексов и storage-таблица объявлены в
+  `mcp-platform/platform.json` (`vectors.indexes` / `vectors.storage_table`).
 - **Бенчмарки** (`public.agent_benchmark_runs`, `public.agent_benchmark_results`) — без миграции;
   DDL в `sql/benchmarks/`.
 - **`agent_gateway_logs` / `agent_question_runs`** — новые таблицы:

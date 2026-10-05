@@ -303,15 +303,18 @@ audit платформы — каталог готовых скриптов, и�
 > **Сначала прочитайте врезку, иначе правильный текст будет прочитан неправильно.**
 > Секция объявления **жива** (модели в `lib/core/project_settings.py`, ключи в
 > `config.json` есть), но **регистрирующего потребителя у неё больше нет**:
-> `_auto_register_skills` и реестр ресурсов сняты (§5, §6). Никто не читает
-> `tables[]`/`vector_indexes[]`, чтобы что-то построить. Это декларация, а не
-> механизм.
+> `_auto_register_skills` и реестр ресурсов сняты (§5, §6). Это декларация, а не
+> механизм. Состав таблиц и индексов секция навыка не объявляет и объявить не
+> может: полей `tables`/`vector_indexes` в ней больше нет.
 >
 > **Авторитетные объявления живут на платформе:**
 > состав доступных таблиц — `mcp-platform/platform.json` → `audit`,
 > векторных индексов — `platform.json` → `vectors.indexes`,
-> параметров эмбеддера — `platform.json` → `llm`. Расхождение между секцией в
-> `config.json` и платформой не проверяется — держите их синхронными руками.
+> параметров эмбеддера — `platform.json` → `llm`. Правило «держать секции
+> синхронными руками» отменено вместе с полями — дублировать больше нечего.
+> Объявить состав в `config.json` повторно нельзя: `SkillSettings` —
+> `extra="forbid"` (`lib/core/project_settings.py:500`), и остаток ключа
+> поднимает `ConfigurationError` на старте gateway.
 
 ### 4.1 Секция `gateway.agent.skills.<name>` — форма
 
@@ -321,8 +324,6 @@ audit платформы — каталог готовых скриптов, и�
     "skills": {
       "<skill_name>": {
         "enabled": true,                          // OPTIONAL, default true
-        "tables": [ ... ],                        // OPTIONAL — §4.2
-        "vector_indexes": [ ... ],                // OPTIONAL — §4.3
         "cli": { ... },                           // OPTIONAL — §4.4
         "llm": { "max_tokens": 8192, "temperature": 0.1 },   // OPTIONAL
         "chunking": { ... },                      // OPTIONAL — §4.4
@@ -335,58 +336,68 @@ audit платформы — каталог готовых скриптов, и�
 ```
 
 Форму описывают pydantic-модели `lib/core/project_settings.py`: `SkillSettings`
-(строки 606-650, `model_config = ConfigDict(extra="forbid")`), контейнер
-`SkillsSettings` (653-710).
+(`457-507`, `model_config = ConfigDict(extra="forbid")` на `:500`), контейнер
+`SkillsSettings` (`510-568`).
 
-**Оговорка про fail-fast.** Строгая валидация `SkillSettings` применяется к
-верхнеуровневой секции `skills`, а объявление в `config.json` лежит по пути
-`gateway.agent.skills`, который `GatewaySettings` не моделирует (там
-`extra="allow"`). Опечатка в этой секции на старте **не упадёт** — проверяйте
-её сами. Валидация вызывается при старте в
-`lib/core/application_context.py:262-265` (`validate_project_settings`).
+**Fail-fast на этой секции действует.** Путь в `config.json` —
+`gateway.agent.skills.<name>`, и это не обходит валидацию: `config.py` поднимает
+`gateway.agent.{project,cli,skills,logging,enterprise_mcp}` в корень **до**
+остальных шагов merge (`_lift_agent_sections`, `config.py:452-487`, вызов на
+`:907`), поэтому `validate_project_settings` видит секцию как верхнеуровневую
+`skills`, а `SkillsSettings._validate_skill_sections`
+(`project_settings.py:529-568`) прогоняет каждую вложенную секцию через
+`SkillSettings.model_validate`. Опечатка (`defualt_mode`) и остаток снятого поля
+(`tables`, `vector_indexes`, `embedding`, `cache`) поднимают
+`ConfigurationError` на старте gateway — проверять секцию руками не нужно.
+Валидация вызывается при старте в `lib/core/application_context.py:323-325`
+(`validate_project_settings`).
 
-### 4.2 Секция `tables`
+### 4.2 Секция `tables` — снята
 
-`TableEntry` (`lib/core/project_settings.py:397-426`), в списке допускается
-`str | TableEntry`:
+Состав таблиц в `skills.<name>` **не объявляется**: поля `tables` и модель
+`TableEntry` удалены из `lib/core/project_settings.py` вместе с реестром
+ресурсов, который их принимал. Искать описание формы в дереве агента
+бессмысленно — описывать состав таблиц навыку больше нечем.
 
-| Поле | Тип | Описание |
-|---|---|---|
-| `name` | str (required) | Формат `"schema.table"`; голые имена не имеют смысла — таблица должна быть адресуема на платформе. |
-| `label` | str \| null | opaque-метка. Смысл был в том, чтобы отделить метаданные от доменных таблиц (так помечается реестр скриптов capability `audit`). Потребителя в агенте нет. |
-| `tracking_column` | str \| null | Колонка инкрементального обновления. Синхронизации в агенте нет: снимок наполняет capability `data`. |
+**Где объявляется теперь:** `mcp-platform/platform.json` → `audit.tables`.
+Список читает capability `audit` (по нему проверяется сгенерированный запрос) и
+оттуда же capability `data` наполняет снимок.
 
-**Объектная форма:**
+Бывшие поля навыка и их сегодняшний адрес:
 
-```jsonc
-"tables": [
-  {"name": "oarb.audits"},
-  {"name": "oarb.violations"}
-]
-```
+| Поле (снято) | Где живёт теперь |
+|---|---|
+| `name` | `audit.tables[*].name` — формат `"schema.table"` |
+| `label` (opaque-метка, отсекавшая реестры метаданных вроде `public.agent_predefined_scripts` от доменных таблиц) | `audit.tables[*]`; в агенте метку не читал никто |
+| `tracking_column` (колонка инкрементального обновления) | платформенное понятие; в агенте его не читал никто |
 
-**Строковая форма (минимум):** `"oarb.audits"` ≡ `{"name": "oarb.audits"}`.
+**Повторное объявление отвергается.** `SkillSettings` — `extra="forbid"`
+(`project_settings.py:500`), поэтому остаток `tables` в секции навыка
+поднимает `ConfigurationError` на старте, а не игнорируется. Снятие полей
+ужесточило контракт: пока их описывала модель, `forbid` их типизировал, теперь —
+отвергает.
 
-**Неизвестные ключи запрещены** (`extra="forbid"`, `project_settings.py:420`) —
-но см. оговорку про путь секции в §4.1.
+### 4.3 Секция `vector_indexes` — снята
 
-### 4.3 Секция `vector_indexes`
+Имена и параметры векторных индексов в `skills.<name>` **не объявляются**:
+поле `vector_indexes` и модель `VectorIndexEntry` удалены. Агент своего списка
+индексов не держит ни в `gateway.*`, ни в `skills.*` (требование «Агент не
+объявляет состав индексов», `openspec/specs/data/vector-indexes`).
 
-`VectorIndexEntry` (`project_settings.py:428-458`). Минимальный контракт: **только `name`**:
+**Где объявляется теперь:** `mcp-platform/platform.json` → `vectors.indexes`
+(состав и параметры каждого индекса: `table`, `pk`, `source_table`,
+`content_columns`, `embedding_columns`, `track_column`, `chunk_size` /
+`chunk_overlap`, `metric`, `enabled`) и `platform.json` → `vectors.storage_table`
+(таблица сырых эмбеддингов). Модель узнаёт имена индексов операцией
+`list_indexes`, а не из `config.json`. Прежнее `gateway.vector.index.*` снято
+целиком.
 
-```jsonc
-"vector_indexes": [
-  {"name": "audits_index"}
-]
-```
+**Чего в `skills.<name>` быть не должно** (всё это — платформенные понятия, и
+`extra="forbid"` завернёт любое из них в `ConfigurationError`):
 
-`model_config = ConfigDict(extra="forbid")` — `source`/`embedding` и прочие
-legacy-поля не пройдут валидацию.
-
-**Что НЕ должно быть в `vector_indexes[]`**:
-- `source` — объявление индекса целиком живёт на платформе,
-  `platform.json` → `vectors.indexes.<name>`;
-- `embedding` — параметры эмбеддера объявлены там же, в секции `llm`:
+- `source` и прочие поля объявления индекса — `platform.json` →
+  `vectors.indexes.<name>`;
+- `embedding` и параметры эмбеддера — `platform.json` → секция `llm`:
   `embed_api_base`, `embed_path`, `embed_model`, `embed_dimension`,
   `embed_timeout`, `embed_key` (`${EMBED_TOKEN}`). Захардкоженных констант
   `_EMBED_*` в коде агента нет.
@@ -409,7 +420,9 @@ capability `llm` платформы (`platform.json` → `llm`). `skills.<name>.
 > `SkillLlmSettings`, `SkillChunkingSettings`, `SkillBriefContextSettings`,
 > `SkillExecutionSettings`) наследуют `_StrictOptional(extra='allow')`, поэтому
 > skill-специфичные поля проходят валидацию. Однако **собственные** поля
-> `SkillSettings` (включая `tables`, `vector_indexes`) — `extra="forbid"`.
+> `SkillSettings` — `enabled`, `cli`, `llm`, `chunking`, `brief_context`,
+> `execution` — `extra="forbid"`: это и fail-fast на опечатках, и запрет
+> вернуться к снятым `tables`/`vector_indexes`/`embedding`/`cache`.
 > Это намеренная асимметрия: жёсткий контракт на уровне декларации, мягкое
 > расширение внутри каждой подсекции.
 
@@ -420,7 +433,8 @@ capability `llm` платформы (`platform.json` → `llm`). `skills.<name>.
 | `embedding.*` | → платформа, `platform.json` → `llm.embed_*` |
 | `cache.*` (был мёртвым) | — (удалён; снимком владеет capability `data`) |
 | `sync.*` | — (удалена: синхронизации в агенте нет) |
-| `vector_index.*` (секция, не массив) | → `gateway.vector.index.*` |
+| `tables[*]` | → платформа, `platform.json` → `audit.tables` (§4.2) |
+| `vector_index.*` (секция, не массив) | → платформа, `platform.json` → `vectors.indexes` / `vectors.storage_table` (§4.3) |
 | `vector_indexes[].source` | → платформа, `platform.json` → `vectors.indexes.<name>` |
 
 Обратной совместимости нет — legacy-ключи ловит
@@ -627,7 +641,7 @@ agent-facing критерии (§1); образец — `workspace/tools/documen
 |---|---|
 | **Документ skill'а** | `tests/test_audit_analyzer_skill_doc.py` — четыре операции названы с обязательными аргументами, индексы совпадают с `platform.json` в обе стороны, физических имён (таблиц, снимка, движков) нет |
 | **Объявление операций** | `tests/test_mcp_platform_declaration.py` — состав `enabled_tools`, минимальный env, флаг `require_call_meta`, равенство имён ключей идентичности файлу платформы |
-| **Подстановка личности** | `tests/test_mcp_identity_hook.py` — инъекция, перебитие присланного моделью, отказ при неполной личности |
+| **Подстановка личности** | `tests/test_mcp_identity_hook.py` — инъекция трёх ключей, перебитие присланного моделью (в т.ч. частичной подмены), досылка `request_id`, когда у оборота его нет, и отказ хука `McpIdentityRefused`, когда нет `session_id`/`user_id` — то есть вызов идёт вне оборота вообще; «неполной личности» как отдельного случая нет |
 | **Tool** | `tests/test_tools_project_loader.py` — регистрация и баннер инвентаря |
 | **Architecture** | `tests/test_skill_tool_independence.py`, `tests/test_architecture_tool_domain_free.py`, `tests/test_core_infrastructure_independence.py` |
 | **Конфиг и инвентарь** | `tests/test_project_settings.py`, `tests/test_runtime_inventory.py` |
@@ -792,8 +806,9 @@ skill'а — `mcp-platform/libs/enterprise_client/llm.py`.
 
 ### Минимальный skill
 
-9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/}` создан (без
-`tables[]`/`vector_indexes[]`, если их нет).
+9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/}` создан (секция в
+`config.json` объявляет только домен skill'а — состав таблиц и индексов не
+переносите в неё, §4.2–§4.3).
 10'. ☐ В `config.json` есть `gateway.agent.skills.<name>` с `llm`/`chunking`/`cli`
     (по необходимости).
 11'. ☐ Если скрипт ходит к модели — только через
@@ -895,7 +910,9 @@ python cli_agent.py          # smoke
   (операции `mcp_enterprise_*`).
 - `lib/hooks/mcp_identity_hook.py` — подстановка личности оборота в вызов операции.
 - `workspace/tools/document_read.py` — чтение текста офисных документов.
-- `lib/core/project_settings.py` — формы секции `skills.<name>` (`SkillSettings`, `TableEntry`, `VectorIndexEntry`).
+- `lib/core/project_settings.py` — форма секции `skills.<name>` (`SkillSettings`,
+  `extra="forbid"`; контейнер — `SkillsSettings`). Состава таблиц и индексов
+  эта модель больше не описывает.
 - `lib/services/enterprise_mcp_client.py` — клиент агента к платформе для фоновых
   служб (вне оборота модели).
 

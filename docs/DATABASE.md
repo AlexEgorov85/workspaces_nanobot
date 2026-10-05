@@ -47,8 +47,10 @@
 интерфейса, а то, что нужно и реализации, и потребителям конфигурации):
 
 - `get_embedding()` (Ollama `/api/embed`), `read_embedding_config()`,
-  `read_embedding_defaults()`, `read_vector_index_config()` (конфиг индексов —
-  из `config.json::gateway.vector.index.indexes`, PG-реестр не читается),
+  `read_embedding_defaults()`, `read_vector_index_config()` (конфиг индексов он
+  брал из `config.json::gateway.vector.index.indexes` — секции, которой больше
+  нет: состав и параметры индексов объявляет `mcp-platform/platform.json` →
+  `vectors.indexes`; PG-реестр не читался и сейчас не читается),
   `list_runtime_vector_indexes(provider=...)` — читает состав runtime-индексов
   **через интерфейс** провайдера и сама файл кэша не открывает.
 - Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pyarrow`, `httpx`)
@@ -179,25 +181,30 @@
 | Ключ | Назначение | Значение / по умолчанию |
 |------|-----------|-------------|
 | `skills.audit_analyzer.enabled` | Вкл/выкл навыка | `true` |
-| `skills.audit_analyzer.tables[*].name` | Таблицы домена, доступные агенту (`{name, tracking_column?, label?}`) | `oarb.audit_reports`, `oarb.audits`, `oarb.report_items`, `oarb.violations` — **примеры текущей инсталляции; имена настраиваются здесь** |
-| `skills.audit_analyzer.tables[*].label` | Opaque-метка для `resources_by_label` (напр. реестр скриптов) | `public.agent_predefined_scripts` → `label: "scripts_registry"` |
-| `skills.audit_analyzer.vector_indexes[*].name` | Имена FAISS-индексов (`index_name` в операции `vector_search`; persisted-файлов нет — индексы живут в памяти процесса) | `audits_index`, `violations_index`, `audit_reports_index` — **примеры текущей инсталляции** |
+| ~~`skills.audit_analyzer.tables[*].name`~~ | — | **удалено**: состав таблиц аудита объявляет платформа — `mcp-platform/platform.json` → `audit.tables` (именно по этому списку capability `audit` проверяет сгенерированный запрос, и отсюда capability `data` наполняет снимок). Секция навыка не ослабла: `SkillSettings` — `extra="forbid"` (`lib/core/project_settings.py:500`), остаток ключа поднимает `ConfigurationError` на старте |
+| ~~`skills.audit_analyzer.tables[*].label`~~ | — | **удалено** вместе с полем: `label` — платформенное понятие (`audit.tables[*]`, например `public.agent_predefined_scripts` → `scripts_registry`); в агенте его не читал никто |
+| ~~`skills.audit_analyzer.vector_indexes[*].name`~~ | — | **удалено**: имена и параметры индексов объявляет capability `vectors` — `mcp-platform/platform.json` → `vectors.indexes`; модель узнаёт их операцией `list_indexes` (FAISS в памяти процесса, persisted-файлов нет) |
 | ~~`skills.audit_analyzer.llm.*`~~ | — | **удалено (9.6)**: выбор модели принадлежит capability `llm`. `max_tokens` / `temperature` объявляет платформа — `mcp-platform/platform.json` → `llm.max_tokens` / `llm.temperature` |
 | ~~`skills.audit_analyzer.cli.*`~~ | — | **удалено вместе с CLI навыка (фаза 9)**: `default_mode` / `max_retries` / `timeout_sec` больше не существуют, режим выбирает модель, а не флаг командной строки |
-| `gateway.vector.index.storage_table` | Таблица сырых эмбеддингов. Регистрация через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` **снята (фаза 5)**: индексы объявляет платформа, `mcp-platform/platform.json` → `vectors.storage_table` | `oarb.audit_vectors` |
-| `gateway.vector.index.default_root` | Каталог FAISS-индексов (в runtime не персистится — FAISS в памяти) | `data_store/vectors` |
-| `gateway.vector.index.indexes.<name>` | Декларативный конфиг индексов (`table`, `pk`, `source_table`, `content_columns`, `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`, `enabled`) — единственный источник; PG-реестр не читается | `audits_index`, `violations_index`, `audit_reports_index` |
+| ~~`gateway.vector.index.storage_table`~~ | Таблица сырых эмбеддингов. Регистрация через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` **снята (фаза 5)**: индексы объявляет платформа, `mcp-platform/platform.json` → `vectors.storage_table` | `oarb.audit_vectors` |
+| ~~`gateway.vector.index.default_root`~~ | — | **удалено вместе с секцией**: каталог FAISS-индексов в конфигурации агента не объявляется, индексы живут в памяти процесса платформы | `data_store/vectors` |
+| ~~`gateway.vector.index.indexes.<name>`~~ | — | **секция `gateway.vector.*` снята целиком** (поля `vector` у `GatewaySettings` больше нет). Декларативный конфиг индексов (`table`, `pk`, `source_table`, `content_columns`, `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`, `enabled`) объявляет capability `vectors` — `mcp-platform/platform.json` → `vectors.indexes`; PG-реестр не читается | `audits_index`, `violations_index`, `audit_reports_index` |
 | `gateway.sync.*` | **удалена** — поллинга и пересинхронизации больше нет | — |
 | `gateway.cache.local_path` | **Убран в фазе 5 (п. 5.7).** Тип `CacheSettings` и поле `GatewaySettings.cache` сняты: агент больше не открывает файл, а путь снимка объявляет платформа — `mcp-platform/platform.json` → `data.snapshot_path`. Ключ в `config.json` и раньше не был объявлен | — |
 
-> **Дубликат объявлений, который пока живёт.** `skills.audit_analyzer.tables[*]`
-> и `skills.audit_analyzer.vector_indexes[*]` нужны агенту для загрузки снимка
-> и сборки индексов — и те же значения объявлены ещё раз в
+> **Дубликата больше нет.** Раньше `skills.audit_analyzer.tables[*]` и
+> `skills.audit_analyzer.vector_indexes[*]` повторяли то, что объявлено ещё раз в
 > `mcp-platform/platform.json` (секции `audit.tables`, `vectors.indexes`),
 > потому что capability `audit` не должна получать знание о проекте из чужого
-> окружения. Схлопывается вместе с уходом снимка из агента. До тех пор при
-> расхождении доверять платформенному объявлению: запросы к данным идут через
-> него, и только агент читает своё.
+> окружения, и при расхождении доверять надо было платформенному объявлению.
+> Снятие этих полей закрыло вопрос: единственное объявление состава таблиц и
+> индексов — платформенное (`audit.tables`, `vectors.indexes` /
+> `vectors.storage_table`), а правило «держать секции синхронными руками»
+> отменено вместе с ними. Контракт секции навыка при этом не ослаб, а
+> наоборот: `SkillSettings` — `extra="forbid"`
+> (`lib/core/project_settings.py:500`), поэтому остаток `tables` или
+> `vector_indexes` в `config.json` поднимает `ConfigurationError` на старте
+> gateway, а не проходит тихо.
 
 Декларация — единый источник истины. Регистрация навыков в реестре снята
 (фаза 5, 2026-10-01): `ApplicationContext._auto_register_skills` больше нет,
@@ -346,7 +353,9 @@ writer; поскольку writer'ом является только загру�
    реестром, фаза 5) больше нет — снимок наполняет capability `data` платформы.
 2. **Стадия 1 — запись.** `open_cache_provider(mode=READ_WRITE)`;
    `CacheLoadService.load()` (снят) синхронно тянул прежние зарегистрированные
-   таблицы (таблицы скиллов + `gateway.vector.index.storage_table`); в
+   таблицы (таблицы скиллов + `gateway.vector.index.storage_table` — секция
+   снята, сегодня storage-таблицу объявляет `platform.json` →
+   `vectors.storage_table`); в
    `finally` файл закрывался. Слоты пула освобождались сразу после возврата.
 3. **Стадия 2 — чтение.** `open_cache_provider(mode=READ_ONLY)` возвращает
    провайдера, который держит в памяти прогретые FAISS-индексы, но не держит
@@ -365,15 +374,19 @@ writer; поскольку writer'ом является только загру�
 capability `data`. С `loaded_at` сверяются, чтобы не выдать устаревший снимок за
 «текущие» данные.
 
-#### Управляющие ключи (`gateway.vector.index` / `gateway.cache` в `config.json`)
+#### Управляющие ключи загрузки (что настраивается сегодня)
 
-> Имена таблиц/индексов не зашиты: они берутся из `skills.audit_analyzer.tables[*].name`,
-> `skills.audit_analyzer.vector_indexes[*].name` и `gateway.vector.index.*`.
+> В прежней сборке имена таблиц/индексов не зашиты: их задавал `config.json`
+> (`skills.audit_analyzer.tables[*].name`,
+> `skills.audit_analyzer.vector_indexes[*].name`, `gateway.vector.index.*`).
+> Сегодня этих ключей в `config.json` нет: состав таблиц аудита объявляет
+> `mcp-platform/platform.json` → `audit.tables`, состав и параметры индексов и
+> storage-таблица — `platform.json` → `vectors.indexes` / `vectors.storage_table`.
 
 | Ключ | По умолч. | Эффект |
 |------|-----------|--------|
-| `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Таблица векторов, включается в загрузку и прогревается в FAISS (имя настраивается) |
-| `gateway.vector.index.indexes` | `{}` | Декларация индексов (`<name>` → `VectorIndexConfig`); единственный источник конфигурации индексов (реестр `agent_vector_index_config` не читается) |
+| ~~`gateway.vector.index.storage_table`~~ | `oarb.audit_vectors` | **Удалено**: таблица векторов объявляется платформой, `platform.json` → `vectors.storage_table` |
+| ~~`gateway.vector.index.indexes`~~ | `{}` | **Удалено**: декларация индексов (`<name>` → параметры индекса) живёт в `platform.json` → `vectors.indexes`; реестр `agent_vector_index_config` не читается |
 | `gateway.cache.local_path` | — | **Снято в фазе 5 (п. 5.7)**, см. таблицу `config.json` выше. Путь снимка объявляет платформа: `platform.json` → `data.snapshot_path` |
 | `channels.postgres.pool.max_conn` | `4` | Число слотов пула; оно же ограничивает число потоков загрузки |
 
@@ -393,13 +406,14 @@ capability `data`. С `loaded_at` сверяются, чтобы не выдат
 #### Практические сценарии
 
 - **Обновить данные в PostgreSQL**: перезапустить процесс. Ничего другого нет.
-- **Добавить таблицу в анализ**: добавить её в **оба** места — `audit.tables`
+- **Добавить таблицу в анализ**: добавить её в **одно** место — `audit.tables`
   в `mcp-platform/platform.json` (этим пользуется capability `audit` и именно
-  по этому списку проверяется сгенерированный запрос) и
-  `skills.audit_analyzer.tables` в `config.json` (этим наполняется снимок
-  агента), затем перезапустить процесс. Правка только в `config.json` даст
-  таблицу в снимке, но не в ответах, потому что запросы к данным больше не
-  идут через агента.
+  по этому списку проверяется сгенерированный запрос; отсюда же снимок
+  наполняет capability `data`), затем перезапустить процесс. В `config.json`
+  таблица больше не объявляется: ключ `skills.audit_analyzer.tables` снят, а
+  остаток в секции навыка поднимет `ConfigurationError` на старте, так что
+  «правка только в `config.json`» больше не даёт ни таблицы в снимке, ни
+  таблицы в ответах.
 - **Сомнение в свежести кэша**: сверить `loaded_at` в `cache_load_done` с
   временем последней правки данных в PostgreSQL.
 
