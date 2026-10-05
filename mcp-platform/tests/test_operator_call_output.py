@@ -122,7 +122,13 @@ def _call_lines(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 def test_call_line_names_operation_outcome_and_duration(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Успешный вызов даёт строку с именем операции, исходом и длительностью."""
+    """Успешный вызов даёт строку с именем операции, исходом и длительностью.
+
+    Уровень — ``DEBUG``, и это часть контракта, а не деталь реализации: успех
+    рутинной операции на ``INFO`` превращал лог в поток «→ ok» (цикл опроса
+    очереди даёт 24 строки в минуту), а полная история вызовов и так лежит в
+    журнале. Отказ проверяется отдельно и обязан быть виден при любой глубине.
+    """
     from libs.enterprise_common.loader import build_server
 
     def handler(query: str = "") -> str:
@@ -134,7 +140,7 @@ def test_call_line_names_operation_outcome_and_duration(
         pipeline=_layer(tmp_path).pipeline,
     )
 
-    with caplog.at_level(logging.INFO, logger=LOADER_LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=LOADER_LOGGER):
         result = _call(transport, "probe", {"query": "проверка"})
 
     assert result.isError is False
@@ -143,7 +149,36 @@ def test_call_line_names_operation_outcome_and_duration(
     message = lines[0].getMessage()
     assert message.startswith("вызов probe → ok (")
     assert message.endswith("мс)")
-    assert lines[0].levelno == logging.INFO
+    assert lines[0].levelno == logging.DEBUG
+
+
+def test_success_is_not_printed_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """На ``INFO`` успешного вызова в логе нет — иначе он его заполняет.
+
+    Проверяется порог, а не текст: поднимем логгер до ``INFO`` и убедимся, что
+    строка вызова в него не попала. Именно это и превращало ``logs/enterprise-mcp.log``
+    в поток ``→ ok`` — 24 строки в минуту на цикл опроса очереди.
+    """
+    from libs.enterprise_common.loader import build_server
+
+    def handler(query: str = "") -> str:
+        return "ок"
+
+    transport = build_server(
+        _Registry(_definition(handler)),
+        name="probe-server",
+        pipeline=_layer(tmp_path).pipeline,
+    )
+
+    with caplog.at_level(logging.INFO, logger=LOADER_LOGGER):
+        _call(transport, "probe", {"query": "проверка"})
+
+    assert _call_lines(caplog) == [], (
+        "строка успешного вызова попала на INFO: "
+        f"{[r.getMessage() for r in _call_lines(caplog)]}"
+    )
 
 
 def test_refusal_line_names_the_operation_and_the_code(
