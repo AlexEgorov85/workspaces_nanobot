@@ -187,6 +187,72 @@ class TestValidationPoints:
         assert "уже зарегистрировано" in str(excinfo.value)
 
 
+class TestCategoryMatchesCapabilityDirectory:
+    """``category`` — имя capability, и оно сверяется с каталогом.
+
+    Сторон у расхождения две: имя capability из пути и объявленная категория.
+    Обе обязаны быть в сообщении — иначе непонятно, что чинить: каталог или
+    объявление. Проверяются оба исхода, а не только успешный: страж, который
+    ни разу не срабатывал, неотличим от стража, который ничего не проверяет.
+    """
+
+    def test_matching_category_loads(self, root: Path, container: ToolContainer) -> None:
+        path = _write(root, "audit", "op", GOOD_TOOL.format(name="op", category="audit"))
+        assert load_definition(path, container, root).category == "audit"
+
+    def test_foreign_category_rejected(self, root: Path, container: ToolContainer) -> None:
+        path = _write(root, "data", "op", GOOD_TOOL.format(name="op", category="audit"))
+        with pytest.raises(ToolLoadError) as excinfo:
+            load_definition(path, container, root)
+        message = str(excinfo.value)
+        assert "не совпадает с capability" in message
+        assert "категория 'audit'" in message, message
+        assert "capability 'data'" in message, message
+        assert path.name in message
+
+    def test_foreign_category_stops_the_registry(
+        self, root: Path, container: ToolContainer
+    ) -> None:
+        """В реестр операция не попадает: загрузка прерывается целиком.
+
+        Проверяется на целом реестре, а не на одной операции, потому что
+        «не зарегистрировалась» и «зарегистрировалась под чужой capability» —
+        разные исходы, и второй без сверки выглядел бы как успех.
+        """
+        _write(root, "data", "good", GOOD_TOOL.format(name="good", category="data"))
+        _write(root, "data", "zz_foreign", GOOD_TOOL.format(name="zz_foreign", category="audit"))
+        with pytest.raises(ToolLoadError, match="не совпадает с capability"):
+            load_registry(root, container, root=root)
+
+    def test_foreign_category_rejected_under_capability_filter(
+        self, root: Path, container: ToolContainer
+    ) -> None:
+        """Фильтр ``--capabilities`` не обходит сверку.
+
+        Имя для сравнения берётся из пути, поэтому файл из ``data/tools`` с
+        ``category="audit"`` отвергается и при ``capabilities=["data"]``: если
+        бы сверка смотрела на объявление, файл прошёл бы как «свой» и расхождение
+        уехало бы в реестр под чужой capability.
+        """
+        _write(root, "data", "op", GOOD_TOOL.format(name="op", category="audit"))
+        _write(root, "audit", "other", GOOD_TOOL.format(name="other", category="audit"))
+        with pytest.raises(ToolLoadError, match="не совпадает с capability"):
+            load_registry(root, container, root=root, capabilities=["data"])
+
+    def test_empty_category_is_not_a_mismatch(
+        self, root: Path, container: ToolContainer
+    ) -> None:
+        """Пустая категория и чужая — разные отказы.
+
+        Сверка с каталогом не подменяет проверку непустоты: «не сказано» и
+        «сказано не то» чинятся разными правками, и второй отказ не должен
+        приходить на место первого.
+        """
+        _write(root, "data", "op", GOOD_TOOL.format(name="op", category=""))
+        with pytest.raises(ToolLoadError, match=r"категория \(capability\) не должна быть пустой"):
+            load_registry(root, container, root=root)
+
+
 class TestFailFast:
     def test_one_bad_file_fails_whole_registry(self, root: Path, container: ToolContainer) -> None:
         """Частично загруженный сервер хуже незагруженного.

@@ -17,6 +17,11 @@
 Добавление файла не должно требовать правок в ``server.py`` — иначе через
 месяц ни одна новая операция не добавится.
 
+``category`` — **имя capability**, то есть имя каталога, в котором лежит файл.
+Свободной классификации здесь нет: по этому значению выбираются политика,
+журнал и артефакты вызова, поэтому объявление сверяется с каталогом, и
+расхождение останавливает загрузку.
+
 **Fail-fast — обязателен.** Ошибка одного файла валит старт сервера целиком.
 Частично загруженный сервер хуже не загруженного: он принимает соединение,
 а половина операций отсутствует, и это обнаруживается в проде на конкретном
@@ -49,6 +54,13 @@ logger = logging.getLogger(__name__)
 #: Имя точки входа в файле операции. Фиксировано, чтобы поиск не превратился
 #: в соглашение: ровно одно имя, ровно одно место.
 ENTRY_POINT = "create_tool"
+
+#: Каталог файлов операции внутри capability: ``capabilities/<имя>/tools/``.
+#: Имя capability выводится из пути перед ним — тем же приёмом, что и
+#: ``discover_tool_files`` (``parts[0]`` от каталога capabilities), и по тому
+#: же корню ``root``, что и ``_module_name``. Второй разбор пути в этом модуле
+#: был бы источником расхождения между фильтрацией и сверкой объявления.
+TOOLS_DIR = "tools"
 
 
 def discover_tool_files(
@@ -84,6 +96,22 @@ def _module_name(path: Path, root: Path) -> str:
     """
     relative = path.relative_to(root).with_suffix("")
     return ".".join(relative.parts)
+
+
+def _capability_from_path(path: Path, root: Path) -> str:
+    """Имя capability из пути к файлу операции; ``""``, если каталога в пути нет.
+
+    Форма файла операции — ``<...>/<capability>/tools/<name>.py``, ровно та,
+    которую обходит ``discover_tool_files``. Пустой результат означает
+    «файл лежит не в capability-каталоге» (пробный файл прямо в
+    ``tmp_path``, как их пишут тесты), и сверять тогда нечего: правило про
+    каталог, а каталога нет.
+    """
+    parts = path.relative_to(root).parts
+    if TOOLS_DIR not in parts:
+        return ""
+    index = parts.index(TOOLS_DIR)
+    return parts[index - 1] if index else ""
 
 
 def _import_module(path: Path, root: Path) -> ModuleType:
@@ -129,6 +157,30 @@ def load_definition(path: Path, container: ToolContainer, root: Path) -> ToolDef
         raise ToolLoadError("описание операции не должно быть пустым", path=str(path), name=name)
     if not callable(definition.handler):
         raise ToolLoadError("handler обязан быть вызываемым", path=str(path), name=name)
+
+    # ``category`` — это имя capability, а не свободная классификация: по нему
+    # берутся политика, журнал и артефакты вызова (``execution/policy.py``,
+    # ``execution/pipeline.py``), и им же реестр группирует операции. Поэтому
+    # объявление обязано совпадать с каталогом, из которого загружен файл:
+    # файл в ``capabilities/data/tools/``, объявивший ``category="audit"``,
+    # уводил бы журнал, артефакты и переопределение политики в чужую capability
+    # молча, и следом оставался бы только «неправильный» журнал.
+    #
+    # Имя для сверки берётся **из пути**, а не из объявления, — тем же
+    # приёмом, что и фильтрация ``discover_tool_files``: сверяя объявление с
+    # самим собой, расхождение прошло бы как «файл вне фильтра».
+    #
+    # Пустую категорию эта проверка **не** отменяет: непустоту объявляет
+    # ``ToolRegistry.register``, и отказы должны остаться разными — «не
+    # сказано» и «сказано не то» чинятся разными правками.
+    capability = _capability_from_path(path, root)
+    if capability and definition.category.strip() and definition.category != capability:
+        raise ToolLoadError(
+            f"категория {definition.category!r} не совпадает с capability "
+            f"{capability!r} из каталога файла",
+            path=str(path),
+            name=name,
+        )
 
     # Форма обработчика проверяется до схемы: объявление параметра идентичности —
     # нарушение контракта вызова, и сообщение о нём должно называть параметр, а

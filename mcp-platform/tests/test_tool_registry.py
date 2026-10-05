@@ -14,7 +14,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from libs.enterprise_common.container import ToolContainer  # noqa: E402
 from libs.enterprise_common.errors import EnterpriseError  # noqa: E402
+from libs.enterprise_common.loader import load_registry  # noqa: E402
 from libs.enterprise_common.registry import (  # noqa: E402
     ToolDefinition,
     ToolLoadError,
@@ -37,6 +39,28 @@ def _definition(**kwargs: object) -> ToolDefinition:
     }
     base.update(kwargs)
     return ToolDefinition(**base)  # type: ignore[arg-type]
+
+
+#: Операция пишется файлом и грузится загрузчиком: группировку имеет смысл
+#: сверять с каталогом только там, где файл действительно прошёл сверку
+#: категории с каталогом.
+OPERATION_FILE = '''
+from libs.enterprise_common.registry import ToolDefinition
+
+
+def handle(text: str) -> str:
+    """Обработчик."""
+    return text
+
+
+def create_tool(container) -> ToolDefinition:
+    return ToolDefinition(
+        name="{name}",
+        description="Операция {name}.",
+        handler=handle,
+        category="{category}",
+    )
+'''
 
 
 class TestSchemaBuilding:
@@ -221,6 +245,63 @@ class TestRegistryValidation:
         grouped = registry.by_category()
         assert set(grouped) == {"audit", "data"}
         assert [d.name for d in grouped["data"]] == ["a"]
+
+
+class TestCategoryGrouping:
+    """Регрессия: сверка ``category`` с каталогом не развела группировку.
+
+    Обоснование прогона — **сверка категории с каталогом**, а не переименования:
+    переименований полей в этом change нет. После сверки ключ
+    ``by_category()`` это ровно имя каталога capability, из которого файл
+    загружен, и группировка разойтись с каталогом уже не может молча.
+    """
+
+    @staticmethod
+    def _write(root: Path, capability: str, name: str, category: str) -> Path:
+        tools = root / capability / "tools"
+        tools.mkdir(parents=True, exist_ok=True)
+        path = tools / f"{name}.py"
+        path.write_text(
+            OPERATION_FILE.format(name=name, category=category), encoding="utf-8"
+        )
+        return path
+
+    def test_group_keys_are_capability_directories(self, tmp_path: Path) -> None:
+        self._write(tmp_path, "data", "op_a", "data")
+        self._write(tmp_path, "audit", "op_b", "audit")
+        registry = load_registry(tmp_path, ToolContainer(), root=tmp_path)
+        grouped = registry.by_category()
+        assert set(grouped) == {"audit", "data"}
+        assert {d.name for d in grouped["data"]} == {"op_a"}
+        assert {d.name for d in grouped["audit"]} == {"op_b"}
+
+    def test_every_group_matches_the_directory_its_files_came_from(
+        self, tmp_path: Path
+    ) -> None:
+        """Не «в группе что-то есть», а совпадение поимённо с каталогом.
+
+        Расхождение на одну операцию — и есть тот случай, ради которого
+        группировку и сверку связаны: одна операция под чужой capability
+        переставила бы ключ, а набор ключей остался бы прежним.
+        """
+        self._write(tmp_path, "data", "op_a", "data")
+        self._write(tmp_path, "data", "op_b", "data")
+        self._write(tmp_path, "audit", "op_c", "audit")
+        registry = load_registry(tmp_path, ToolContainer(), root=tmp_path)
+        expected: dict[str, set[str]] = {"data": {"op_a", "op_b"}, "audit": {"op_c"}}
+        assert {k: {d.name for d in v} for k, v in registry.by_category().items()} == expected
+
+    def test_foreign_category_stops_the_registry(self, tmp_path: Path) -> None:
+        """Файл из ``data``, объявивший ``audit``, обязан остановить загрузку.
+
+        Без сверки он занял бы группу ``audit``, и ``by_category`` продолжал бы
+        выглядеть правдой — расхождение с каталогом осталось бы невидимым
+        именно там, где оно опаснее всего, в разбиении по capability.
+        """
+        self._write(tmp_path, "data", "op", "data")
+        self._write(tmp_path, "data", "impostor", "audit")
+        with pytest.raises(ToolLoadError, match="не совпадает с capability"):
+            load_registry(tmp_path, ToolContainer(), root=tmp_path)
 
 
 class TestToolLoadErrorMessage:
