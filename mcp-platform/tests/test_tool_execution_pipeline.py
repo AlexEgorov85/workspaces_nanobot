@@ -220,7 +220,7 @@ def test_policy_resolution_order() -> None:
     overrides = {
         "execution": {"max_inline_result_bytes": 200},
         "audit.execution": {"max_inline_result_bytes": 300},
-        "run_script.execution": {"max_inline_result_bytes": 400},
+        "audit.run_script.execution": {"max_inline_result_bytes": 400},
     }
     assert resolve_policy(base, overrides=overrides).max_inline_result_bytes == 200
     assert (
@@ -229,7 +229,7 @@ def test_policy_resolution_order() -> None:
     )
     assert (
         resolve_policy(
-            base, capability="audit", tool="run_script", overrides=overrides
+            base, capability="audit", tool="audit.run_script", overrides=overrides
         ).max_inline_result_bytes
         == 400
     )

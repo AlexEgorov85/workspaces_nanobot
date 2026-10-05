@@ -48,7 +48,7 @@ def _spill(
     session_id: str,
     payload: Any,
     request_id: str = "req-1",
-    tool_name: str = "run_script",
+    tool_name: str = "audit.run_script",
 ) -> str:
     """Записать крупный результат ровно так, как пишет конвейер.
 
@@ -202,7 +202,7 @@ def test_non_text_result_is_reported_not_decoded(store: ArtifactStore) -> None:
         "s1",
         name="result.parquet",
         content=b"\x00\x01\xff\xfe",
-        tool_name="run_script",
+        tool_name="audit.run_script",
         request_id="req-1",
         subdir=RESULTS_SUBDIR,
         folder="req-1",

@@ -57,7 +57,7 @@ async def _run(
     hook: McpIdentityHook,
     params,
     *,
-    tool_name: str = f"{MCP_TOOL_PREFIX}run_script",
+    tool_name: str = f"{MCP_TOOL_PREFIX}audit_run_script",
     context=None,
 ):
     await hook.before_execute_tool(
@@ -132,11 +132,11 @@ def _guarded_call():
 class TestIdentityInjection:
     def test_injects_full_identity_into_mcp_params(self):
         hook = McpIdentityHook(_service())
-        params: dict = {"operation": "run_script"}
+        params: dict = {"operation": "audit.run_script"}
         with _with_sender(SENDER_ID):
             asyncio.run(_run(hook, params))
         assert params == {
-            "operation": "run_script",
+            "operation": "audit.run_script",
             "session_id": SESSION_KEY,
             "user_id": SENDER_ID,
             "request_id": REQUEST_ID,
@@ -230,7 +230,7 @@ class TestScope:
                 hook.before_execute_tool(
                     _context(),
                     SimpleNamespace(name=""),
-                    SimpleNamespace(name=f"{MCP_TOOL_PREFIX}vector_search"),
+                    SimpleNamespace(name=f"{MCP_TOOL_PREFIX}vectors_vector_search"),
                     params,
                 )
             )
@@ -426,14 +426,14 @@ class TestRefusal:
         отказ не подставляет.
         """
         hook = McpIdentityHook(_service())
-        params: dict = {"operation": "run_script"}
+        params: dict = {"operation": "audit.run_script"}
         with _with_sender(None), pytest.raises(McpIdentityRefused) as caught:
             asyncio.run(_run(hook, params))
         exc = caught.value
-        assert exc.tool_call.name == f"{MCP_TOOL_PREFIX}run_script"
+        assert exc.tool_call.name == f"{MCP_TOOL_PREFIX}audit_run_script"
         assert exc.params is params
         assert exc.context is not None
-        assert params == {"operation": "run_script"}
+        assert params == {"operation": "audit.run_script"}
 
     def test_reason_names_missing_identity_and_forbids_retry(self):
         """Причину читает модель, поэтому она обязана быть внятной.
@@ -482,7 +482,7 @@ class TestRefusal:
             registry = _CountingRegistry()
             tool_call = ToolCallRequest(
                 id="tc-1",
-                name=f"{MCP_TOOL_PREFIX}run_script",
+                name=f"{MCP_TOOL_PREFIX}audit_run_script",
                 arguments={"script_id": "s-1"},
             )
             with _with_sender(None):

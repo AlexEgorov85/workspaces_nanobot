@@ -433,7 +433,9 @@ class TestPublishedSchemaMatchesHandler:
         frame = {
             "id": "0f1d1f2c-0000-4000-8000-000000000001",
             "event_type": "agent.degraded",
-            "name": "claim_task",
+            # `name` кадра — это `event_type`, а не имя операции: так его пишет
+            # `lib/channels/postgres_channel.py::_journal_event` (`:524`).
+            "name": "agent.degraded",
             "level": "WARN",
             "summary": "поллинг не удался",
             "payload": {"phase": "poll_inbound"},

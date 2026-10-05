@@ -27,6 +27,7 @@ capability: каталога нет и фильтром ``--capabilities`` не 
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -486,6 +487,93 @@ class TestCapabilityMatchesItsDirectory:
             "платформенные операции переехали в capabilities/platform/tools/ — "
             "это второй путь к файлам сессии, его охраняет "
             "test_tool_execution_boundaries.py"
+        )
+
+
+# -- общее правило: расположение файла определяет capability ----------------------
+
+
+def _declared_pair(path: Path) -> tuple[str, str]:
+    """Прочитать ``name=`` и ``capability=`` из объявления разбором AST.
+
+    Разбором, а не регуляркой: регулярка молчит на незнакомой форме объявления
+    и превращает страж в вакуумно-истинный — проходит на пустом совпадении.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if called != "ToolDefinition":
+            continue
+        values: dict[str, str] = {}
+        for keyword in node.keywords:
+            if keyword.arg in ("name", "capability") and isinstance(keyword.value, ast.Constant):
+                values[keyword.arg] = str(keyword.value.value)
+        if "name" in values and "capability" in values:
+            return values["name"], values["capability"]
+    raise AssertionError(f"{path}: объявление ToolDefinition не разобрано — страж молчит")
+
+
+def _capability_by_layout(path: Path) -> str:
+    """Capability, которую объявление обязано нести по расположению файла."""
+    parts = path.relative_to(PLATFORM_ROOT / "servers").parts
+    if "capabilities" in parts:
+        return parts[parts.index("capabilities") + 1]
+    return PLATFORM_CAPABILITY
+
+
+class TestFileLayoutDecidesCapability:
+    """Пункт 6.1 в общем виде: правило без перечисления файлов.
+
+    Проверка «файл вне каталога capability объявляет ``platform``» до сих пор жила
+    двумя точечными тестами на двух конкретных файлах. Она краснела на первом
+    же переезде, но не краснела на **новом** платформенном файле: правило, у
+    которого есть только два примера, это два примера, а не правило.
+    """
+
+    def test_every_operation_file_declares_capability_of_its_layout(self) -> None:
+        roots = PLATFORM_ROOT / "servers"
+        files = sorted(
+            p
+            for pattern in ("*/capabilities/*/tools/*.py", "*/tools/*.py")
+            for p in roots.glob(pattern)
+            if p.name != "__init__.py"
+        )
+        by_capability = [p for p in files if _capability_by_layout(p) != PLATFORM_CAPABILITY]
+        by_platform = [p for p in files if _capability_by_layout(p) == PLATFORM_CAPABILITY]
+
+        assert by_capability, "обход не нашёл ни одной операции в каталогах capability"
+        assert by_platform, "обход не нашёл ни одной платформенной операции"
+
+        for path in files:
+            name, capability = _declared_pair(path)
+            expected = _capability_by_layout(path)
+            assert capability == expected, (
+                f"{path.relative_to(roots)}: объявлено capability={capability!r}, "
+                f"расположение файла даёт {expected!r}"
+            )
+            assert name.startswith(f"{expected}."), (
+                f"{path.relative_to(roots)}: имя {name!r} не объявляет capability "
+                f"{expected!r} префиксом"
+            )
+
+    def test_platform_operations_are_exactly_files_outside_capability_dirs(self) -> None:
+        """Перекрёстная сверка: обе категории непусты и не пересекаются."""
+        roots = PLATFORM_ROOT / "servers"
+        files = sorted(
+            p
+            for pattern in ("*/capabilities/*/tools/*.py", "*/tools/*.py")
+            for p in roots.glob(pattern)
+            if p.name != "__init__.py"
+        )
+        by_layout = {_capability_by_layout(p) for p in files}
+        by_declaration = {_declared_pair(p)[1] for p in files}
+
+        assert PLATFORM_CAPABILITY in by_layout, "платформенных файлов не найдено"
+        assert by_layout == by_declaration, (
+            "перечень capability по расположению не совпал с перечнем по объявлению: "
+            f"{sorted(by_layout)} против {sorted(by_declaration)}"
         )
 
 
