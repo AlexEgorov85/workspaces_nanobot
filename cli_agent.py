@@ -431,9 +431,9 @@ async def _verify_platform_tables(ctx, client) -> None:
     ``2``, чтобы расхождение оверлея не выглядело как «платформа не
     отвечает».
 
-    Отличие от gateway — одна проба ``schema_check`` вместо трёх по
+    Отличие от gateway — одна проба ``data.schema_check`` вместо трёх по
     capability. Сводка «индексы/скрипты» перед REPL в интерактивной консоли
-    — шум, а список таблиц отдаёт ровно ``schema_check``, то есть ровно та
+    — шум, а список таблиц отдаёт ровно ``data.schema_check``, то есть ровно та
     проба, ради которой она и делается.
 
     Правило сверки НЕ копируется, а импортируется у владельца контракта
@@ -454,7 +454,7 @@ async def _verify_platform_tables(ctx, client) -> None:
     platform_tables: list[str] | None = None
     try:
         raw = await asyncio.wait_for(
-            client.call("schema_check", arguments={}, identity=identity),
+            client.call("data.schema_check", arguments={}, identity=identity),
             timeout=20.0,
         )
         payload = json.loads(raw)

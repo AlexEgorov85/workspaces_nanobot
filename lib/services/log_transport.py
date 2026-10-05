@@ -69,11 +69,11 @@ from lib.services.enterprise_mcp_client import (
 logger = logging.getLogger(__name__)
 
 #: Операция батчевой записи событий журнала.
-OP_LOG_EVENTS = "log_events"
+OP_LOG_EVENTS = "data.log_events"
 #: Операция записи контекста вопроса.
-OP_UPSERT_QUESTION_RUN = "upsert_question_run"
+OP_UPSERT_QUESTION_RUN = "data.upsert_question_run"
 #: Операция очистки журнала. Имя совпадает с ``data/tools/purge_logs.py``.
-OP_PURGE_LOGS = "purge_logs"
+OP_PURGE_LOGS = "data.purge_logs"
 
 
 class LogWriteUnavailable(RuntimeError):

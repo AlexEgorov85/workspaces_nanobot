@@ -359,9 +359,9 @@ async def _report_enterprise_mcp_health(ctx, client) -> None:
     ).with_request_id("startup-enterprise-mcp-health")
 
     probes = (
-        ("vectors", "list_indexes", lambda d: _indexes_line(d)),
-        ("data", "schema_check", lambda d: _schema_line(d)),
-        ("audit", "list_scripts", lambda d: _scripts_line(d)),
+        ("vectors", "vectors.list_indexes", lambda d: _indexes_line(d)),
+        ("data", "data.schema_check", lambda d: _schema_line(d)),
+        ("audit", "audit.list_scripts", lambda d: _scripts_line(d)),
     )
 
     platform_tables: list[str] | None = None
@@ -374,10 +374,10 @@ async def _report_enterprise_mcp_health(ctx, client) -> None:
             )
             payload = json.loads(raw)
             line = render_line(payload)
-            if operation == "schema_check":
+            if operation == "data.schema_check":
                 platform_tables = list(payload.get("tables") or [])
                 healthy = bool(payload.get("ok"))
-            elif operation == "list_indexes":
+            elif operation == "vectors.list_indexes":
                 indexes = payload.get("indexes") or []
                 # Готовность судится по индексам, которые ПЛАТФОРМА ОБЯЗАНА
                 # прогреть на старте: объявленным и не отключённым. Источник,
@@ -403,7 +403,7 @@ async def _report_enterprise_mcp_health(ctx, client) -> None:
                         f"({names}) — в прогреве они не участвуют"
                     )
                     healthy = False
-            elif operation == "list_scripts":
+            elif operation == "audit.list_scripts":
                 count = payload.get("count")
                 if count is None:
                     count = len(payload.get("scripts") or [])

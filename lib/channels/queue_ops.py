@@ -12,11 +12,12 @@
 не появляется сам.
 
 **Идентичность вызова.** Сервер требует ``params._meta`` на каждом вызове.
-Для операций оборота (``finalize_turn``, ``fail_task``,
-``merge_tool_delivery``) личность настоящая — сессия и пользователь задачи
-известны. Для служебных (``claim_task``, ``queue_stats``, ``unstick_tasks``,
-``release_claimed_tasks``) оборота ещё нет, и подставлять сессию пользователя
-значило бы выдать служебный вызов за пользовательский.
+Для операций оборота (``data.finalize_turn``, ``data.fail_task``,
+``data.merge_tool_delivery``) личность настоящая — сессия и пользователь задачи
+известны. Для служебных (``data.claim_task``, ``data.queue_stats``,
+``data.unstick_tasks``, ``data.release_claimed_tasks``) оборота ещё нет, и
+подставлять сессию пользователя значило бы выдать служебный вызов за
+пользовательский.
 
 **Разделение этих двух случаев.** Служебный вызов подписывается личностью
 воркера: ``session_id`` вида ``task-worker:<id>``, ``user_id`` — ``gateway``.
@@ -79,7 +80,7 @@ class QueueOpsError(RuntimeError):
 class ClaimedBatch:
     """Выдача захвата: задачи пачки и курсор продолжения.
 
-    ``next_cursor`` заполнен только по полному батчу (``claim_task`` на
+    ``next_cursor`` заполнен только по полному батчу (``data.claim_task`` на
     платформе, ``capabilities/data/service/main.py::ClaimedBatch``) — то есть
     это сигнал «есть ещё». ``None`` на неполном батче означает «очередь дошла
     до конца, следующий опрос начинай с головы».
@@ -187,11 +188,11 @@ class QueueOps:
         никаких имён нет (см. модульную строку).
         """
         payload = await self._invoke(
-            "claim_task",
+            "data.claim_task",
             {
                 "error_retry_delay_sec": error_retry_delay_sec,
                 # null — «без фильтра по содержимому», и схема
-                # ``claim_task`` его принимает: поле объявлено как
+                # ``data.claim_task`` его принимает: поле объявлено как
                 # ``["array", "null"]``. Отправлять здесь ``[]`` нельзя:
                 # платформа добавит ``AND content = ANY(%s)``, и отбор не
                 # найдёт ничего, то есть очередь молча покажется пустой.
@@ -273,7 +274,7 @@ class QueueOps:
     async def release_claimed_tasks(self, task_ids: list[str]) -> dict[str, Any]:
         """Вернуть незавершённые задачи в очередь при остановке."""
         return await self._invoke(
-            "release_claimed_tasks",
+            "data.release_claimed_tasks",
             {"task_ids": list(task_ids)},
             identity=self._service_identity(),
         )
@@ -283,7 +284,7 @@ class QueueOps:
     ) -> list[str]:
         """Вернуть зависшие задачи в обработку. Счётчик растёт — они падали."""
         payload = await self._invoke(
-            "unstick_tasks",
+            "data.unstick_tasks",
             {
                 "processing_timeout_sec": processing_timeout_sec,
                 "max_stuck_retries": max_stuck_retries,
@@ -317,7 +318,7 @@ class QueueOps:
         убрать из журнала, кто именно её тронул.
         """
         return await self._invoke(
-            "update_task_status",
+            "data.update_task_status",
             {"task_id": task_id, "status": status, "role": role},
             identity=self._turn_identity(
                 session_id or f"task:{task_id}", user_id or SERVICE_USER
@@ -340,10 +341,10 @@ class QueueOps:
         (``unexpected keyword argument 'metadata_patch'``) — и заодно вскрылся
         тот самый случай «дефект, скрытый мёртвой подсистемой». Патчить метаданные
         заглушки нечего: она создаётся пустой, а содержимое и метаданные пишутся
-        позже через ``update_task_status``, где ``metadata_patch`` законен.
+        позже через ``data.update_task_status``, где ``metadata_patch`` законен.
         """
         payload = await self._invoke(
-            "append_assistant_message",
+            "data.append_assistant_message",
             {
                 "chat_id": chat_id,
                 "reply_to": reply_to,
@@ -368,7 +369,7 @@ class QueueOps:
     ) -> dict[str, Any]:
         """Слить ``patch`` в ``metadata`` сообщения."""
         return await self._invoke(
-            "patch_message_metadata",
+            "data.patch_message_metadata",
             {"task_id": task_id, "patch": patch, "role": role},
             identity=self._turn_identity(
                 session_id or f"task:{task_id}", user_id or SERVICE_USER
@@ -388,7 +389,7 @@ class QueueOps:
     ) -> dict[str, Any]:
         """Дописать промежуточную доставку, не закрывая ответ."""
         return await self._invoke(
-            "merge_tool_delivery",
+            "data.merge_tool_delivery",
             {
                 "assistant_msg_id": assistant_msg_id,
                 "content": content,
@@ -416,7 +417,7 @@ class QueueOps:
     ) -> dict[str, Any]:
         """Закрыть оборот. ``outcome`` различает запись и отмену."""
         return await self._invoke(
-            "finalize_turn",
+            "data.finalize_turn",
             {
                 "user_msg_id": user_msg_id,
                 "assistant_msg_id": assistant_msg_id,
@@ -442,7 +443,7 @@ class QueueOps:
     ) -> dict[str, Any]:
         """Пометить оборот ошибочным, увеличив счётчик попыток."""
         return await self._invoke(
-            "fail_task",
+            "data.fail_task",
             {
                 "user_msg_id": user_msg_id,
                 "assistant_msg_id": assistant_msg_id,
@@ -469,7 +470,7 @@ class QueueOps:
         в агенте потребовал бы блокировки, то есть признания гонки.
         """
         return await self._invoke(
-            "append_reasoning",
+            "data.append_reasoning",
             {"assistant_msg_id": assistant_msg_id, "delta": delta},
             identity=self._turn_identity(
                 session_id or f"assistant:{assistant_msg_id}",
@@ -480,7 +481,7 @@ class QueueOps:
     async def get_message(self, task_id: str) -> dict[str, Any] | None:
         """Прочитать строку очереди. ``None`` — строки нет."""
         payload = await self._invoke(
-            "get_message",
+            "data.get_message",
             {"task_id": task_id},
             identity=self._service_identity(),
         )
@@ -490,7 +491,7 @@ class QueueOps:
     async def queue_stats(self) -> dict[str, int]:
         """Размер очереди для вывода активности."""
         payload = await self._invoke(
-            "queue_stats", {}, identity=self._service_identity()
+            "data.queue_stats", {}, identity=self._service_identity()
         )
         return {
             "pending": int(payload.get("pending") or 0),

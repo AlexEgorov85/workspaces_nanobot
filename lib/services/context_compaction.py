@@ -575,7 +575,7 @@ class ContextCompactionService:
         text = self.format_report(report)
         try:
             await client.call(
-                "append_history_notice",
+                "data.append_history_notice",
                 {
                     "chat_id": chat_id,
                     "text": text,

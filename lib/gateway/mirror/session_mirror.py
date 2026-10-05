@@ -74,9 +74,9 @@ if TYPE_CHECKING:
 #: в коде, но отсутствует в реестре — вызов проходит чтение кода, компиляцию и
 #: все тесты с подставным клиентом, а падает в рантайме на каждом цикле.
 #: Проверка: ``tests/test_session_mirror_wire.py``.
-OP_MIRROR = "mirror_session"
-OP_CLEANUP = "cleanup_session_mirror"
-OP_STATE = "session_mirror_state"
+OP_MIRROR = "data.mirror_session"
+OP_CLEANUP = "data.cleanup_session_mirror"
+OP_STATE = "data.session_mirror_state"
 MIRROR_OPERATIONS = (OP_MIRROR, OP_CLEANUP, OP_STATE)
 
 
