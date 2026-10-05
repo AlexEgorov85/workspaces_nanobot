@@ -39,11 +39,21 @@ PLATFORM_JSON = PLATFORM / "platform.json"
 #: самописными обёртками ``audit_analyzer_query`` / ``legal_summarizer_query``
 #: / ``history_search_tool``, плюс ``read_result``: без него крупный результат,
 #: сохранённый платформой под ссылкой ``session://results/...``, нечем прочесть.
+#:
+#: ``list_indexes`` добавлена тем, что с неё модель берёт имена индексов для
+#: ``vector_search``. Пока её не было в списке, имена приходилось держать
+#: таблицей в ``workspace/skills/audit_analyzer/SKILL.md`` — копией объявления
+#: ``mcp-platform/platform.json → vectors.indexes``, которая протухает молча:
+#: новый индекс в платформе не появлялся в навыке, и ``vector_search`` по нему
+#: нельзя было позвать. ``index_stats`` в список не входит: состояние индекса
+#: модель получает в ответе ``vector_search`` (``index_state``) и в
+#: ``list_indexes``, отдельная операция ей ничего не добавляет.
 EXPECTED_TOOLS = {
     "list_scripts",
     "run_script",
     "generate_sql",
     "vector_search",
+    "list_indexes",
     "query_operation",
     "history_search",
     "read_result",

@@ -563,6 +563,7 @@ Skill пишет инструкции в терминах capability, не Pytho
 | `mcp_enterprise_run_script` | `{script, params}` → `{status, columns, rows, ...}` | там же |
 | `mcp_enterprise_generate_sql` | `{query}` → SQL и результат | там же |
 | `mcp_enterprise_vector_search` | `{query, index_name}` → результаты поиска | `mcp-platform/platform.json → vectors.indexes` |
+| `mcp_enterprise_list_indexes` | — → имена и состояние векторных индексов | `mcp-platform/platform.json → vectors.indexes` |
 | `compact_context` tool | `{session_key, force}` | `config.json → gateway.compact.*` |
 
 Skill-side CLI (`scripts/cli.py` с `--mode predefined|vector|generated_sql`)

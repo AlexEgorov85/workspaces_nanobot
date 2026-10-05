@@ -25,13 +25,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SKILL_MD = REPO_ROOT / "workspace" / "skills" / "audit_analyzer" / "SKILL.md"
 PLATFORM_JSON = REPO_ROOT / "mcp-platform" / "platform.json"
+CONFIG = REPO_ROOT / "config.json"
 
-#: Операции домена аудита. Держится в паре с белым списком модели
-#: ``config.json → tools.mcpServers.enterprise.enabled_tools``: навык, называющий
-#: операцию вне списка, уводит модель в вызов, которого у неё нет.
-#: Проверку связи с объявлением делает ``tests/test_mcp_platform_declaration.py``;
+#: Операции, которые навык объясняет модели. Держится в паре с белым списком
+#: модели ``config.json → tools.mcpServers.enterprise.enabled_tools``: навык,
+#: называющий операцию вне списка, уводит модель в вызов, которого у неё нет.
+#: Проверку равенства объявлению делает ``tests/test_mcp_platform_declaration.py``;
 #: здесь список нужен как «какие строки таблицы обязаны быть».
-ROUTED_OPERATIONS = ("list_scripts", "run_script", "generate_sql", "vector_search")
+#:
+#: ``vector_search`` и ``list_indexes`` — операции capability ``vectors``, а не
+#: ``audit``, и это не оговорка: смысловой поиск по нарушениям и есть ответ на
+#: вопрос про нарушения. ``list_indexes`` добавлена вместе с выдачей её модели
+#: (см. ``TestSkillDocIndexCatalog``) — до этого навык держал имена индексов
+#: таблицей у себя.
+ROUTED_OPERATIONS = (
+    "list_scripts",
+    "run_script",
+    "generate_sql",
+    "vector_search",
+    "list_indexes",
+)
 
 #: Обязательные аргументы каждой операции — в том виде, в каком они должны
 #: стоять в колонке «Обязательные аргументы» таблицы выбора.
@@ -43,11 +56,13 @@ ROUTED_OPERATIONS = ("list_scripts", "run_script", "generate_sql", "vector_searc
 #: необязателен — но цена его отсутствия несимметрична: платформа подставит
 #: индекс по умолчанию, которого в объявлении нет, и поиск вернёт пустую
 #: выдачу ВМЕСТО ошибки. Поэтому навык обязан требовать оба.
+#: ``list_indexes`` аргументов не имеет — это каталог, а не запрос.
 REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
     "list_scripts": (),
     "run_script": ("script",),
     "generate_sql": ("query",),
     "vector_search": ("query", "index_name"),
+    "list_indexes": (),
 }
 
 #: Строка таблицы операций: ``| `имя` | описание | обязательные аргументы |``.
@@ -83,8 +98,11 @@ FORBIDDEN_SUBSTRINGS = {
 _INDEX_IN_BACKTICKS = re.compile(r"`([a-z][a-z0-9_]*_index)`")
 
 #: Платформенное имя индекса по умолчанию. Оно **не объявлено** в разделе
-#: ``vectors`` — поэтому в навыке оно упоминается как предупреждение, а не как
-#: каталог, и в пересечение с объявленными не попадает.
+#: ``vectors``, поэтому называть его в навыке можно только как предупреждение
+#: («без ``index_name`` платформа подставит индекс по умолчанию»), но не как
+#: элемент каталога. Проверка «навык не перечисляет имена индексов» его
+#: поэтому не считает нарушением — иначе запрет запрещал бы само
+#: предупреждение.
 PLATFORM_DEFAULT_INDEX = "default_index"
 
 
@@ -95,6 +113,16 @@ def _skill_text() -> str:
 def _declared_indexes() -> set[str]:
     payload = json.loads(PLATFORM_JSON.read_text(encoding="utf-8"))
     return set(payload["vectors"]["indexes"])
+
+
+def _declared_to_model() -> set[str]:
+    """Операции, объявленные модели, — читаются из ``config.json``.
+
+    Отдельный источник, а не ``ROUTED_OPERATIONS``: навык и объявление —
+    разные решения, и их расхождение и есть то, что ловят проверки ниже.
+    """
+    payload = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
+    return set(payload["tools"]["mcpServers"]["enterprise"]["enabled_tools"])
 
 
 def _mentioned_indexes(text: str) -> set[str]:
@@ -174,46 +202,87 @@ class TestSkillDocDescribesOperations:
             f"{sorted(expected)}"
         )
 
-    def test_no_unrouted_operation_is_promised(self) -> None:
-        """Операция вне роутера — обещание, которого инструмент не выполнит.
+    def test_documented_operations_are_declared_to_the_model(self) -> None:
+        """Строка таблицы обязана быть операцией, которая у модели есть.
 
-        ``list_indexes`` и ``index_stats`` существуют на платформе, но
-        ``audit_analyzer_query`` их не маршрутизирует. Навык, обещавший их
-        модели, отправил бы её в вызов, который tool отсекает как
-        ``invalid_operation``.
+        Проверяется объявление, а не наличие файла операции на платформе:
+        ``index_stats`` файл имеет, но модели не объявлена, поэтому навык,
+        назвавший её, обещал бы вызов, которого не будет.
+        """
+        unknown = set(_operation_rows(_skill_text())) - _declared_to_model()
+        assert not unknown, (
+            f"навык объясняет операции, не объявленные модели: {sorted(unknown)} — "
+            "в config.json → tools.mcpServers.enterprise.enabled_tools их нет"
+        )
+
+    def test_no_unrouted_operation_is_promised(self) -> None:
+        """Операция вне ``enabled_tools`` — обещание без инструмента.
+
+        ``index_stats`` существует на платформе, но модели не объявлена: имя
+        индекса и состояние приходят из ``list_indexes``, а состояние
+        конкретного поиска — из ``vector_search``. Навык, обещавший её модели,
+        отправил бы её в вызов, которого у модели нет.
+
+        Раньше в этом перечне стояла и ``list_indexes`` — она объявлена модели
+        теперь, и именно с неё берутся имена индексов.
         """
         text = _skill_text()
-        for operation in ("list_indexes", "index_stats"):
+        for operation in ("index_stats",):
             assert f"`{operation}`" not in text, (
-                f"{operation!r} не маршрутизируется инструментом — упоминать его "
-                "как доступную операцию нельзя"
+                f"{operation!r} не объявлена модели — упоминать её как доступную "
+                "операцию нельзя"
             )
 
 
 class TestSkillDocIndexCatalog:
-    def test_every_declared_index_is_documented(self) -> None:
-        """Объявленный на платформе индекс обязан быть описан.
+    def test_skill_does_not_hardcode_index_names(self) -> None:
+        """Навык не перечисляет имена индексов — их отдаёт платформа.
 
-        Индексы не выводятся через discovery (в отличие от скриптов), поэтому
-        навык — единственное место, где модель узнаёт их имена. Новый индекс в
-        ``platform.json`` без строки в ``SKILL.md`` = молчаливо
-        недоступный поиск.
+        Правило обратное прежнему. Навык держал таблицу из трёх имён, и это был
+        единственный способ узнать новый индекс: whoever правит
+        ``mcp-platform/platform.json → vectors.indexes`` обязан был пойти
+        отредактировать ``SKILL.md``. Расхождение ловили два стража этого
+        файла, но они ловили его **после** того, как кто-то уже завёл навык в
+        согласие с платформой, — то есть заставляли повторять копирование, а
+        не отменяли его.
+
+        Теперь имена приходят из ``list_indexes`` (объявлена модели в
+        ``config.json → tools.mcpServers.enterprise.enabled_tools``), поэтому
+        перечисление в навыке — копия, которая протухает молча: новый индекс
+        в платформе появится, а модель о нём не узнает, пока не спросит.
         """
-        declared = _declared_indexes()
-        mentioned = _mentioned_indexes(_skill_text()) - {PLATFORM_DEFAULT_INDEX}
-        missing = declared - mentioned
-        assert not missing, (
-            f"индексы объявлены на платформе, но не описаны в SKILL.md: "
-            f"{sorted(missing)} — vector_search их не найдёт"
+        hardcoded = _mentioned_indexes(_skill_text()) - {PLATFORM_DEFAULT_INDEX}
+        assert not hardcoded, (
+            f"навык перечисляет имена индексов: {sorted(hardcoded)} — они "
+            "объявляет платформа, модель берёт их из list_indexes"
         )
 
-    def test_no_phantom_index_is_documented(self) -> None:
-        """Обратная сторона: описанный индекс обязан существовать."""
+    def test_index_names_reach_the_model_from_the_platform(self) -> None:
+        """То, что навык перестал перечислять, обязано приходить откуда-то.
+
+        Проверка на объявление, а не на наличие файла операции: стража выше
+        зелёная и при снятом из ``enabled_tools`` ``list_indexes``, то есть
+        когда у модели не осталось бы ни одного способа узнать имя индекса.
+        """
+        assert "list_indexes" in _declared_to_model(), (
+            "без list_indexes в enabled_tools имена индексов недоступны модели: "
+            "навык их не перечисляет, а объявлять состав индексов агент не должен"
+        )
+
+    def test_the_platform_still_declares_indexes(self) -> None:
+        """Спрашивать нечего — значит спрашивать не надо.
+
+        Дыра, которую открывает отказ от перечисления в навыке: со всех сторон
+        зелёная проверка при пустом ``platform.json → vectors.indexes``, где
+        ``list_indexes`` отдаёт пустой каталог и навык советует модели спросить
+        имена индексов, которых нет. Прежняя пара стража такой случай не ловила
+        по построению: пустое объявление означало и пустое перечисление.
+        """
         declared = _declared_indexes()
-        phantom = _mentioned_indexes(_skill_text()) - declared - {PLATFORM_DEFAULT_INDEX}
-        assert not phantom, (
-            f"SKILL.md упоминает индексы, не объявленные в platform.json: "
-            f"{sorted(phantom)} — vector_search вернёт ошибку"
+        assert declared, (
+            "platform.json → vectors.indexes пуст: list_indexes отдаст пустой "
+            "каталог, а навык больше не перечисляет имена индексов — модели "
+            "неоткуда взять index_name"
         )
 
 

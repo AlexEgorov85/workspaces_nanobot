@@ -30,15 +30,20 @@ capability `vectors` («агент индексы не строит и не хр
 `mcp-platform/libs/vectors/`, объявление состава — `mcp-platform/platform.json →
 vectors.indexes`.
 
-Операция, доступная **модели**, ровно одна — `vector_search`: она объявлена в
-`config.json → tools.mcpServers.enterprise.enabled_tools` вместе с
+Операции, доступные **модели**, ровно две — `vector_search` и `list_indexes`:
+обе объявлены в `config.json → tools.mcpServers.enterprise.enabled_tools` вместе с
 `list_scripts`, `run_script`, `generate_sql`, `query_operation`, `history_search`,
-`read_result`, и она же единственная упомянута в
-`workspace/skills/audit_analyzer/SKILL.md`. `list_indexes` и `index_stats`
-(`mcp-platform/servers/enterprise/capabilities/vectors/tools/`) существуют как
-**диагностические операции capability**: файлы операций есть, но модели они не
-объявлены и в дереве агента не упоминаются, поэтому описывать их как операции
-модели нельзя — иначе спека обещает то, чего агент не умеет вызвать.
+`read_result`, и обе упомянуты в `workspace/skills/audit_analyzer/SKILL.md`.
+`list_indexes` выдана модели затем, что **имена индексов нужны ей для
+`vector_search`, а навык их не перечисляет**: перечень в навыке был копией
+объявления `platform.json → vectors.indexes`, и новый индекс появлялся в
+модельной поверхности только если кто-то отредактирует `SKILL.md` — то есть
+состав объявления тиражировался вручную. `index_stats`
+(`mcp-platform/servers/enterprise/capabilities/vectors/tools/`) остаётся
+**диагностической операцией capability**: файлы операций есть, но модели она не
+объявлена, и описывать её как операцию модели нельзя — состояние индекса
+модель получает в `list_indexes` (весь каталог) и в `vector_search`
+(`index_state` конкретного поиска).
 
 В агенте индексами не владеет никто: `VectorInfrastructureSettings`
 (`lib/core/project_settings.py:186`) и `VectorIndexConfig` (`:481`) объявлены, но в
@@ -320,6 +325,30 @@ SHALL NOT читать эти поля из метаданных, сериали
   обещает: `tools/validate_component_specs.py` (`:277-318`) проверяет только
   наличие `### Requirement:`, наличие `#### Scenario:` и маркер WHEN/THEN
   (`:106-110`), по содержимому требований не смотрит
+
+#### Scenario: Имена индексов приходят от платформы, а не из навыка
+
+Состав индексов объявляет `platform.json → vectors.indexes`, и этот факт должен
+быть виден модели, иначе объявление остаётся вещью для чтения людьми: она не
+сможет ни спросить, что есть, ни позвать поиск по имени, которого не знает.
+
+- **WHEN** модели нужен `index_name` для `vector_search`
+- **THEN** имя ДОЛЖНО приходить из операции `list_indexes`, объявленной модели в
+  `config.json → tools.mcpServers.enterprise.enabled_tools`
+- **AND** навык ДОЛЖЕН NOT перечислять имена индексов: перечисление — копия
+  объявления, и оно расходится с платформой молча, пока кто-то не отредактирует
+  навык руками
+- **AND** `index_stats` ДОЛЖНА остаться не объявленной модели: состояние индекса
+  доступно через `list_indexes` и через `index_state` в ответе `vector_search`,
+  поэтому отдельная операция модели ничего не добавляет
+
+#### Scenario: Смена состава индексов не требует правки агента
+
+- **WHEN** в `mcp-platform/platform.json → vectors.indexes` добавлен индекс
+- **THEN** модель ДОЛЖНА увидеть его в ответе `list_indexes` без изменения
+  `config.json`, кода навыка и кода спецификации
+- **AND** ДОЛЖЕН NOT требовать пересборки агента: перечисление имён в навыке
+  запрещено предыдущим сценарием, поэтому копировать нечего
 
 #### Scenario: Стоимость первичной постройки
 

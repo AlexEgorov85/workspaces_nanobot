@@ -872,6 +872,7 @@
           "run_script",
           "generate_sql",
           "vector_search",
+          "list_indexes",
           "query_operation",
           "history_search",
           "read_result"

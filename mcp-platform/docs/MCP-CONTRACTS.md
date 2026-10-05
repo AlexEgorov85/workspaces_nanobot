@@ -1519,7 +1519,7 @@ than …»), то есть модель о нём знает, но границ�
 
 Однако граница доступа модели существует уже сегодня и находится не в
 платформе. Её держит белый список `config.json →
-tools.mcpServers.enterprise.enabled_tools` (7 операций), и он **работает**:
+tools.mcpServers.enterprise.enabled_tools` (8 операций), и он **работает**:
 нанобот отбрасывает всё, чего нет в списке, ещё до регистрации обёртки
 (`nanobot/agent/tools/mcp.py:1141-1159` — `continue` на строке 1159,
 `registry.register(wrapper)` на 1161). Поэтому `permissions` — объявленный, но

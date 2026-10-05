@@ -61,9 +61,17 @@ Vector Indexes отвечают за:
   `index_state` — состояние индекса на момент поиска (`missing` / `building` /
   `ready` / `error`)
 
-Диагностические операции capability — `list_indexes` и `index_stats`
-(`mcp-platform/servers/enterprise/capabilities/vectors/tools/`). Они не поднимают
-индекс и модели не объявлены.
+Каталог индексов модели отдаёт операция `list_indexes`
+(`mcp-platform/servers/enterprise/capabilities/vectors/tools/list_indexes.py`),
+объявленная модели в `config.json → tools.mcpServers.enterprise.enabled_tools`:
+имена, состояние, число векторов и размерность — без поднятия FAISS. Навык
+(`workspace/skills/audit_analyzer/SKILL.md`) имена индексов **не перечисляет**:
+он берёт их из `list_indexes`, поэтому копии состава объявления в агенте нет и
+новый индекс в `platform.json` не требует правки агентных файлов.
+
+`index_stats` остаётся диагностической операцией capability: файлы есть, модели
+она не объявлена, а состояние индекса доступно через `list_indexes` (весь
+каталог) и через `index_state` в ответе `vector_search`.
 
 Маршрут поиска: навык → операция `vector_search` → `search_vector` хранилища
 (`mcp-platform/libs/enterprise_data/snapshot/store.py`) → `mcp-platform/libs/vectors/`.
