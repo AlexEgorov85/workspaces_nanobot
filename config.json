@@ -232,6 +232,7 @@
       "table_name": "agent_conversation_messages",
       "poll_interval": 10.0,
       "flush_interval": 5.0,
+      "queue_report_interval": 30.0,
       "max_concurrent": 2,
       "processing_timeout": 600,
       "unstick_interval": 120.0,

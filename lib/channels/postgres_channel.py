@@ -26,6 +26,7 @@ import asyncio
 import json
 import os
 import socket
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -166,6 +167,12 @@ class PostgresChannel(BaseChannel):
         self._msg_ctx_max_size: int = int(_get("msg_ctx_max_size", 100))
         # как часто сбрасывать буферы reasoning в БД (сек)
         self._flush_interval: float = float(_get("flush_interval", 2.0))
+        # как часто спрашивать платформу о размере очереди (сек). Отдельно от
+        # poll_interval: очередь меняется в человеческом масштабе, а poll_loop
+        # идёт каждые poll_interval секунд и зовёт отчёт дважды за цикл, то
+        # есть на простое это был бы вызов раз в 5 секунд ради числа, которое
+        # обычно не изменилось. 0 — спрашивать каждый раз (тесты, отладка).
+        self._queue_report_interval: float = float(_get("queue_report_interval", 30.0))
 
         # ---- мульти-машинный пул воркеров (аренда задач через claims) ----
         # ---- идентификация воркера (только для логов и вывода активности) ----
@@ -211,6 +218,10 @@ class PostgresChannel(BaseChannel):
             self._print_worker_activity = bool(_declared_activity)
         # последний напечатанный (pending, error) — чтобы не спамить строку очереди
         self._last_queue_summary: tuple[int, int] | None = None
+        # когда последний раз реально спрашивали платформу о размере очереди.
+        # ``None`` — ещё ни разу, и первый отчёт обязан пройти: иначе троттлинг
+        # молча отменил бы факт «воркер поднялся, очередь пуста».
+        self._last_queue_report_at: float | None = None
 
         # ---- параллельность ----
         self._max_concurrent: int = int(_get("max_concurrent", 1))
@@ -526,15 +537,45 @@ class PostgresChannel(BaseChannel):
         return text if len(text) <= limit else text[: limit - 1] + "…"
 
     async def _report_queue(self) -> None:
-        """Одноразовая (по изменению) печать размера очереди задач.
+        """Печать размера очереди задач: не чаще, чем раз в интервал, и по изменению.
 
         Считает по ``agent_conversation_messages`` число ожидающих
         (``pending``) и повторяемых (``error``) user-задач. Печатает строку
         только когда суммарное значение изменилось с прошлого опроса.
+
+        **Зачем интервал, если строка и так печатается по изменению.** Проверку
+        «изменилось ли» нельзя поставить перед вызовом: чисел ещё нет. Поэтому
+        единственный способ не ходить к платформы на каждом опросе — спросить
+        реже. Раньше отчёт звался дважды за цикл опроса, то есть раз в 5
+        секунд на объявленном ``poll_interval: 10``, и каждая из этих секунд
+        стоила поход в базу ради числа, которое обычно не менялось. Хуже того,
+        при недоступной платформе каждый такой вызов блокируется на секунды
+        (здесь это 15.4 с на отказ), то есть опрос очереди превращал заминку
+        платформы в подвисание канала.
+
+        Интервал объявлен ключом ``channels.postgres.queue_report_interval`` и
+        НЕ выводится из ``poll_interval``: очередь живёт в человеческом
+        масштабе, а опрос — в масштабе доставки. Смешивать их — значит
+        неявно решить за оператора, как часто ему видеть размер очереди.
+
+        **Что этот счётчик не видит.** Считаются только ``pending`` и
+        ``error``, а задача, оставшаяся в ``processing`` после смерти воркера,
+        в них не попадает: строка скажет «idle», хотя оборот завис. Полный
+        словарь счётчиков — задача change ``2026-10-04-queue-as-anchor-identity``;
+        пока она не применена, частота опроса снижена, а сам счётчик остаётся
+        неполным, и это осознанно: кэшировать неправильное число реже — не
+        исправление.
         """
         try:
             if not self._print_worker_activity:
                 return
+            now = time.monotonic()
+            if (
+                self._last_queue_report_at is not None
+                and now - self._last_queue_report_at < self._queue_report_interval
+            ):
+                return
+            self._last_queue_report_at = now
             stats = await self._ops.queue_stats()
             pending = stats.get("pending", 0)
             error = stats.get("error", 0)

@@ -51,6 +51,7 @@ def _required_keys():
     return [
         # channels.postgres
         ("channels.postgres.poll_interval", 10.0),
+        ("channels.postgres.queue_report_interval", 30.0),
         ("channels.postgres.flush_interval", 5.0),
         ("channels.postgres.processing_timeout", 600),
         ("channels.postgres.unstick_interval", 120.0),

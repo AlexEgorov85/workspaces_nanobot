@@ -830,9 +830,9 @@ class TestPostgresChannelWorkerActivity:
     (gateway передаёт его из ``gateway.print_worker_activity``).
     """
 
-    async def _channel(self, ch_cls, mock_db, enabled: bool):
+    async def _channel(self, ch_cls, mock_db, enabled: bool, **config):
         ch = _make_channel(
-            (ch_cls, None, mock_db), print_worker_activity=enabled
+            (ch_cls, None, mock_db), print_worker_activity=enabled, **config
         )
         return ch
 
@@ -882,9 +882,16 @@ class TestPostgresChannelWorkerActivity:
         Тот же размер — не событие: иначе консоль повторяла бы
         неизменившееся состояние, и строка перестала бы значить
         «что-то произошло».
+
+        ``queue_report_interval=0`` — троттлинг вынесен в отдельную проверку
+        (:meth:`test_report_queue_asks_platform_no_often_than_declared`): здесь
+        проверяется печать по изменению, и лишняя переменная смотрела бы на него
+        из чужого требования.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        ch = await self._channel(PostgresChannel, mock_db, enabled=True)
+        ch = await self._channel(
+            PostgresChannel, mock_db, enabled=True, queue_report_interval=0.0
+        )
         mock_db.responses["queue_stats"] = {"pending": 3, "error": 1}
         with patch("lib.services.operator_console.emit") as emit:
             await ch._report_queue()
@@ -898,6 +905,55 @@ class TestPostgresChannelWorkerActivity:
             mock_db.responses["queue_stats"] = {"pending": 4, "error": 0}
             await ch._report_queue()
             assert emit.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_report_queue_asks_platform_no_often_than_declared(
+        self, mock_db_and_psycopg
+    ):
+        """Отчёт о размере очереди не ходит к платформе чаще объявленного.
+
+        Проверку «изменилось ли» поставить перед вызовом нельзя: чисел ещё нет.
+        Поэтому частота опроса объявлена отдельно от ``poll_interval`` — иначе
+        цикл опроса тащил бы поход в базу каждые 5 секунд ради числа, которое
+        обычно не менялось, а при недоступной платформе ещё и блокировал бы
+        канал на секунды на каждом из этих походов.
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(
+            PostgresChannel, mock_db, enabled=True, queue_report_interval=30.0
+        )
+        mock_db.responses["queue_stats"] = {"pending": 3, "error": 1}
+        with patch("lib.services.operator_console.emit"):
+            await ch._report_queue()
+            assert len(mock_db.calls_to("queue_stats")) == 1
+            # Цикл опроса зовёт отчёт дважды за итерацию: интервал держит
+            for _ in range(5):
+                await ch._report_queue()
+            assert len(mock_db.calls_to("queue_stats")) == 1
+            # Время прошло — следующий отчёт снова спрашивает платформу
+            ch._last_queue_report_at -= 31.0
+            mock_db.responses["queue_stats"] = {"pending": 4, "error": 0}
+            await ch._report_queue()
+            assert len(mock_db.calls_to("queue_stats")) == 2
+
+    @pytest.mark.asyncio
+    async def test_first_report_always_happens(self, mock_db_and_psycopg):
+        """Первый отчёт проходит при любом интервале.
+
+        Иначе троттлинг, посаженный на «когда последний раз спрашивали» без
+        начального значения, молча отменил бы факт «воркер поднялся, очередь
+        пуста» — и пустой стартовый лог выглядел бы как «никто не смотрит».
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(
+            PostgresChannel, mock_db, enabled=True, queue_report_interval=3600.0
+        )
+        mock_db.responses["queue_stats"] = {"pending": 0, "error": 0}
+        with patch("lib.services.operator_console.emit") as emit:
+            await ch._report_queue()
+        assert len(mock_db.calls_to("queue_stats")) == 1
+        emit.assert_called_once()
+        assert "phase=idle" in emit.call_args.args[0].detail
 
     @pytest.mark.asyncio
     async def test_report_queue_disabled_skips_query(self, mock_db_and_psycopg):
