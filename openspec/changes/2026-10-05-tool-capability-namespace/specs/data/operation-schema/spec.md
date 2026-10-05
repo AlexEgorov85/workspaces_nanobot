@@ -223,16 +223,20 @@ tools.mcpServers.enterprise.enabled_tools`) и охраняются
 одним значением в общем коде допустима.
 
 Выборку берёт сервер, а не библиотека: `load_registry` уже принимает набор выбранных
-capability — `capabilities=`, `loader.py:235-240`, передача в обход
-`loader.py:250`, — а при отсутствии выбора собирает всё, что находит в собственном
-`capabilities_dir` (`discover_tool_files`, `loader.py:66-88`, где
+capability — `capabilities=`, `loader.py:276-280`, передача в обход
+`loader.py:297`, — а при отсутствии выбора собирает всё, что находит в собственном
+`capabilities_dir` (`discover_tool_files`, `loader.py:88-112`, где
 `capabilities=None` — «все»). Множество доходит до `register` вместе с реестром:
-`ToolRegistry()` создаётся в `load_registry` (`loader.py:249`), зовётся там же
-(`loader.py:253`), а платформенные операции регистрируются напрямую из сервера
+`ToolRegistry()` создаётся в `load_registry` (`loader.py:298`), зовётся там же
+(`loader.py:304`), а платформенные операции регистрируются напрямую из сервера
 (`server.py:638`, `:651`).
 
-**Объединение выполняется при построении множества, то есть в `load_registry`
-(`loader.py:249`), и не раньше — это единственное назначенное место.** К этому
+**Объединение выполняется при построении множества, то есть в
+`ToolRegistry.__init__` (`registry.py:420`), и не раньше — это единственное
+назначенное место.** Объединение живёт в конструкторе, а не в `load_registry`
+(`loader.py:298-300`), потому что набор идёт аргументом: если бы объединение
+стояло в загрузчике, пришлось бы либо выводить объединение там же, либо тащить его
+в конструктор вторым набором. К этому
 моменту выборка уже нормализована сервером: `_selected` он зовёт сам
 (`server.py:597`) и передаёт в `load_registry` её результат
 (`server.py:609-611`). `platform` в эту выборку не входит, и добавить его раньше
@@ -273,10 +277,12 @@ capability — `capabilities=`, `loader.py:235-240`, передача в обх�
 Прецедент задаёт **форма** проверки, а не источник перечня: замкнутое множество,
 отказ на регистрации, а не в вызове, и сообщение, называющее объявленное значение
 и допустимые, — как у `definition.quality_policy not in POLICY_NAMES`
-(`registry.py:334-339`). Проверяется это в `ToolRegistry.register`.
+(`registry.py:450-453`, сам перечень импортирован из
+`execution/quality.py:POLICY_NAMES`, `registry.py:27`). Проверяется это в
+`ToolRegistry.register`.
 
 **Граница правила названа прямо, потому что правило переписано под неё.**
-`ToolRegistry.register` (`registry.py:320` — `def register(self, definition:
+`ToolRegistry.register` (`registry.py:426` — `def register(self, definition:
 ToolDefinition) -> None:`) получает только объявление: ни пути к файлу, ни
 признака происхождения в сигнатуре нет. Поэтому строгое отношение «операция,
 объявленная вне `capabilities/<capability>/tools/`, ⇒ `platform`» **не является
@@ -293,18 +299,20 @@ capability, объявившая настоящую capability, `register` пр�
 поймает только страж. Пропускать это молча нельзя: иначе у загрузки появился бы
 видимый дефект, который на деле ловится двумя разными механизмами.
 
-Обе платформенные операции сегодня объявляют `category="session"`
-(`servers/enterprise/tools/read_result.py:181`, `.../session_files.py:95`), и
-`session` не является capability: каталога нет, в `_ALL_CAPABILITIES` его нет,
+Обе платформенные операции **до правки** объявляли `category="session"`
+(`servers/enterprise/tools/read_result.py:173` и `:181`, `.../session_files.py:87`
+и `:95` — сегодня там `platform.read_result` и `platform.session_files` с
+`capability="platform"`), и `session` не является capability: каталога нет, в
+`_ALL_CAPABILITIES` его нет,
 `--capabilities session` отвергается как опечатка (`server.py:418-428`). То есть
-поле держит две разные работы — имя capability и имя группы, — и правило формы
+поле держало две разные работы — имя capability и имя группы, — и правило формы
 имени, применённое буквально, выдумало бы capability, которой нет. Замкнутое
 множество ловит это значение без оговорок про «похожее на capability»: перечень
 закрыт, значит похожее имя допустимым не становится.
 
 Имя capability из пути к файлу MUST NOT использоваться там, где каталога
 capability нет. `_capability_from_path` возвращает часть каталога перед первым
-компонентом `tools` (`loader.py:101-108`), и для файлов платформенных операций
+компонентом `tools` (`loader.py:123-150`), и для файлов платформенных операций
 возвращает `enterprise`, а не `""`, как обещает его докстринг: проверено на
 `servers/enterprise/tools/read_result.py` и `.../session_files.py`. Сегодня это
 безвредно — обе операции регистрируются напрямую и через `load_definition` не
