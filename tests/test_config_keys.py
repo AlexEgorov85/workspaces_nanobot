@@ -174,17 +174,19 @@ def _required_keys():
         ("logging.db.connect_backoff_sec", 1.0),
         ("logging.db.connect_backoff_max_sec", 60.0),
         ("logging.db.summary_max_chars", 200),
-        # enterprise_mcp — объявление ЕДИНСТВЕННОГО MCP-процесса платформы.
-        # Секция ``tools.mcpServers`` в config.json намеренно пуста: вторая
-        # копия процесса = второй владелец пула PostgreSQL, а штатный
-        # провайдер MCP не умеет передавать ``_meta``
-        # (ENTERPRISE_EXEC_REQUIRE_CALL_META). Пути конкретной машины нет —
-        # только подстановки из os.environ (_export_runtime_env).
+        # enterprise_mcp — объявление фоновой ноги к операциям платформы.
+        # Второе объявление, ``tools.mcpServers.enterprise``, живёт в файле
+        # рядом: процессов платформы два, и это объявлено, а не вышло
+        # случайно. Причины, которыми секция ``tools.mcpServers`` когда-то
+        # оставляли пустой, были ложны — ``ENTERPRISE_EXEC_REQUIRE_CALL_META``
+        # это флаг с дефолтом ``False``, а не требование, и ``list_tools``
+        # внутри вполне обычный ``session.list_tools()``. Пути конкретной
+        # машины нет — только подстановки из os.environ (_export_runtime_env).
         ("enterprise_mcp.enabled", True),
         ("enterprise_mcp.command", "${NANOBOT_PYTHON}"),
         ("enterprise_mcp.args", ["-m", "servers.enterprise.server"]),
         ("enterprise_mcp.cwd", "${NANOBOT_PROJECT_ROOT}/mcp-platform"),
-        ("enterprise_mcp.tool_timeout_sec", 120.0),
+        ("enterprise_mcp.tool_timeout_sec", 180.0),
     ]
 
 

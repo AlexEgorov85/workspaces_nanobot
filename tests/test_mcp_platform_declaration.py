@@ -8,6 +8,13 @@
   * ``LEGACY_IDENTITY_KEYS`` в конвейере платформы — какие именно ключи
     сервер считает идентичностью и вырезает из аргументов.
 
+Плюс четвёртая связь, того же рода: у агента **две** ноги доступа к операциям
+платформы, у каждой свой потолок ожидания, и обе обязаны быть строго длиннее
+платформенного бюджета ``platform.json → execution.execution_timeout_sec``.
+Раньше правило «клиент не короче платформы» было, но охраняло только фоновую
+ногу — а модельная, отказ которой уходит в контекст модели, не проверялась
+ничем.
+
 Расхождение в любой из трёх не падает само: вызов либо уйдёт без
 идентичности (``identity_missing``), либо с чужой. Поэтому сверка идёт с
 ФАЙЛОМ платформы, а не с ожиданием, продублированным здесь: повторённое
@@ -47,13 +54,23 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _declared_server() -> dict | None:
+    """Объявление платформы для модели; ``None``, если его нет в конфигурации.
+
+    Отсутствие — законное состояние: ``tools.mcpServers`` не обязан быть
+    объявлен, и тогда ноги модели у агента просто нет.
+    """
+    servers = _load_json(REPO / "config.json").get("tools", {}).get("mcpServers") or {}
+    return servers.get("enterprise")
+
+
 def _server() -> dict:
-    servers = _load_json(REPO / "config.json")["tools"]["mcpServers"]
-    assert "enterprise" in servers, (
+    spec = _declared_server()
+    assert spec is not None, (
         "платформа не объявлена в tools.mcpServers — нанобот не поднимет "
         "операции, и модель не получит mcp_enterprise_*"
     )
-    return servers["enterprise"]
+    return spec
 
 
 def _client_settings() -> dict:
@@ -64,6 +81,62 @@ def _client_settings() -> dict:
 def _platform_settings() -> dict:
     """``platform.json`` платформы — объявления её собственных порогов."""
     return _load_json(REPO / "mcp-platform" / "platform.json")
+
+
+def _declared_legs() -> dict[str, float]:
+    """Потолок ожидания каждой **объявленной** ноги доступа к операциям.
+
+    Ключ — путь к настройке в ``config.json``, значение — её бюджет в секундах.
+    Ключ, а не позиция в списке: сообщение об отказе обязано называть ногу по
+    имени, иначе добавление третьей ноги переставит строки и отказ станет
+    безымянным.
+
+    Необъявленная нога в словарь не попадает. ``tools.mcpServers.enterprise``
+    может отсутствовать — это состояние без ошибки, и требовать значения,
+    которого в конфигурации нет, значило бы проверять отсутствие.
+    """
+    legs: dict[str, float] = {}
+    server = _declared_server()
+    if server is not None:
+        legs["tools.mcpServers.enterprise.tool_timeout"] = float(
+            server["tool_timeout"]
+        )
+    client = _client_settings()
+    assert "tool_timeout_sec" in client, (
+        "у фонового клиента агента нет tool_timeout_sec — сравнивать нечего, "
+        "а отказ по несуществующей настройке вводит в заблуждение"
+    )
+    legs["gateway.agent.enterprise_mcp.tool_timeout_sec"] = float(
+        client["tool_timeout_sec"]
+    )
+    return legs
+
+
+def _require_strict_margin(path: str, budget: float, platform_budget: float) -> None:
+    """Бюджет одной ноги обязан быть строго больше платформенного.
+
+    Равные бюджеты отвергаются ОТДЕЛЬНО от более коротких: сообщение обязано
+    называть равенство, а не разницу, иначе читатель ищет несуществующую
+    разницу в числе, которого нет.
+
+    Raises:
+        AssertionError: инвариант нарушен — названы обе стороны и зазор.
+    """
+    if budget == platform_budget:
+        raise AssertionError(
+            f"бюджеты равны: {path}={budget:g} с и "
+            f"platform.json → execution.execution_timeout_sec={platform_budget:g} с. "
+            "Клиент истечёт в тот же момент, когда платформа закончила, и модель "
+            "получит отказ вместо результата: зазор должен быть строго "
+            "положительным, а не нулевым"
+        )
+    if budget < platform_budget:
+        raise AssertionError(
+            f"{path}={budget:g} с короче платформенного бюджета "
+            f"platform.json → execution.execution_timeout_sec={platform_budget:g} с "
+            f"на {platform_budget - budget:g} с: вызов будет сорван на работающей "
+            "стороне, её работа пропадёт вместе с отказом"
+        )
 
 
 def _legacy_identity_keys() -> tuple[str, ...]:
@@ -93,12 +166,29 @@ class TestServerDeclaration:
         assert set(_server()["enabled_tools"]) == EXPECTED_TOOLS
 
     def test_call_timeout_does_not_expire_before_the_platform_stops(self):
-        """Клиент обязан ждать дольше, чем платформа готова работать.
+        """Каждая объявленная нога ждёт строго дольше, чем платформа работает.
 
-        Бюджета времени два, и они живут в разных файлах: ``execution_timeout_sec``
-        в ``platform.json`` — сколько сервер готов выполнять вызов,
-        ``tool_timeout_sec`` в ``config.json`` — сколько агент готов его ждать.
-        Зазор нужен в обе стороны.
+        Бюджет работы один — ``platform.json → execution.execution_timeout_sec``,
+        сколько сервер готов выполнять вызов, — а потолков ожидания два, и оба
+        живут в ``config.json``:
+
+        * ``tools.mcpServers.enterprise.tool_timeout`` — модельная нога; её
+          применяет штатный MCP-провайдер нанобота
+          (``nanobot/agent/tools/mcp.py``: ``asyncio.wait_for(..., timeout=...)``,
+          отказ уходит модели как ``ToolResult.error``);
+        * ``gateway.agent.enterprise_mcp.tool_timeout_sec`` — фоновый клиент
+          (``lib/services/enterprise_mcp_client.py``), которым ходят службы вне
+          оборота.
+
+        Ног две, а правило было одно и охраняло только фоновую: модельная —
+        та, где отказ уходит в контекст модели и где пользователь видит ложное
+        «операция не удалась», — не проверялась ничем.
+
+        Сравнение строгое, а не «не меньше». Равенство пропускает ровно то
+        состояние, от которого правило защищает: клиент истекает в тот же
+        момент, когда платформа закончила, и модель получает отказ вместо
+        результата. Зазор нужен на то, чтобы дождаться ответа по уже
+        работающему вызову, — на равенстве его нет вовсе.
 
         Случай «клиент короче» вреден по-тихому: клиент срывает вызов, рапортует
         модели об отказе, а сервер продолжает работу — жжёт слот пула и время LLM
@@ -107,18 +197,58 @@ class TestServerDeclaration:
         вызов занимал 11.4 с при потолке 30 с, и запас кончался раньше, чем
         заканчивалась плата за уже начатую работу.
 
-        Случай «клиент длиннее» — просто ожидание: модель смотрит в потолок
-        вызова, а отказ приходит оттуда, кто действительно решил сдаться.
+        Про число 11.4 с честно: замеров этого прогона в репозитории нет — ни
+        логов, ни артефактов, ни иных измерений. Единственный источник
+        длительности — эта самая цитата, поэтому величина запаса из данных не
+        выводится и остаётся объявленным решением, а не измеренной
+        величиной. Сам страж чисел о запасе не знает и не закрепляет: он читает
+        обе стороны из конфигурации и сравнивает, поэтому подъём бюджета
+        платформы требует правки ``config.json``, а не правки теста.
+
+        Необъявленная нога не проверяется: без ``tools.mcpServers.enterprise``
+        модель к платформе не ходит, и падать на отсутствии значения было бы
+        проверкой отсутствия, а не инварианта.
         """
         platform_budget = float(
             _platform_settings()["execution"]["execution_timeout_sec"]
         )
-        client_budget = float(_client_settings()["tool_timeout_sec"])
-        assert client_budget >= platform_budget, (
-            f"клиент сдаётся через {client_budget} с, а платформа работает до "
-            f"{platform_budget} с: вызов будет сорван на работающей стороне, и "
-            "её работа пропадёт вместе с отказом"
+        legs = _declared_legs()
+        assert legs, (
+            "ни одна нога доступа к операциям платформы не объявлена — "
+            "сравнивать нечего, и инвариант молча ничего не охраняет"
         )
+        for path, budget in legs.items():
+            _require_strict_margin(path, budget, platform_budget)
+
+    def test_call_timeout_guard_actually_goes_red(self):
+        """Ломка стража: и равенство, и более короткий бюджет должны падать.
+
+        Проверка, которая зелена на объявленных значениях, ничего не говорит о
+        том, что она ловит. Поэтому те же сравнения прогоняются на заведомо
+        негодных бюджетах: четверть платформенного бюджета — это ровно то
+        состояние, в котором страж был зелёным (30 с против 120 с), а
+        равенство — состояние, которое прежнее «не меньше» пропускало.
+
+        Числа берутся от объявленного бюджета платформы, а не зашиты: иначе
+        страж начал бы краснеть на правке ``execution_timeout_sec`` вместо
+        сути инварианта.
+        """
+        platform_budget = float(
+            _platform_settings()["execution"]["execution_timeout_sec"]
+        )
+        path = "tools.mcpServers.enterprise.tool_timeout"
+
+        with pytest.raises(AssertionError) as shorter:
+            _require_strict_margin(path, platform_budget / 4, platform_budget)
+        assert "короче" in str(shorter.value)
+        assert f"на {platform_budget - platform_budget / 4:g} с" in str(shorter.value)
+
+        with pytest.raises(AssertionError) as equality:
+            _require_strict_margin(path, platform_budget, platform_budget)
+        assert "равны" in str(equality.value)
+        # При равенстве разницы в числе не существует, и называть её — выдумка;
+        # «короче» тут просто неверно, бюджеты-то равны.
+        assert "короче" not in str(equality.value)
 
     def test_env_is_minimal_and_declares_workspace(self):
         """Окружение дочернего процесса собирает MCP SDK, а не агент.
