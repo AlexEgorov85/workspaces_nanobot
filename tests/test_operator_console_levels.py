@@ -343,6 +343,68 @@ def test_trace_shows_per_call_facts():
     assert "tool.completed" in stream.getvalue()
 
 
+class _Ctx:
+    """Минимальный контекст оборота для настоящего ``TerminalToolPrintHook``."""
+
+    def __init__(self, *, status: str, detail: str = "") -> None:
+        self.session_key = "postgres:chat-1"
+        call = type("Call", (), {"name": "list_dir", "arguments": {"path": "."}})()
+        self.tool_calls = [call]
+        self.tool_events = [{"status": status, "detail": detail}]
+        self.tool_results = ["каталог"] if status != "error" else []
+
+
+def _run_hook(status: str, *, level: str, detail: str = "") -> str:
+    """Прогнать хук и вернуть то, что реально попало в консоль на глубине ``level``."""
+    import anyio
+
+    from lib.hooks.terminal_tool_print_hook import TerminalToolPrintHook
+
+    hook = TerminalToolPrintHook()
+    ctx = _Ctx(status=status, detail=detail)
+    with _lines(level) as stream:
+        anyio.run(hook.before_execute_tools, ctx)
+        anyio.run(hook.after_iteration, ctx)
+    return stream.getvalue()
+
+
+def test_tool_call_is_visible_at_the_declared_default_level():
+    """Вызов инструмента виден при объявленном по умолчанию ``turn``.
+
+    Хук объявлял глубину ``trace`` для обоих исходов, поэтому при
+    ``gateway.console_level: turn`` в терминале не было видно **ни** успеха,
+    **ни** отказа: ``required_depth`` для ``tool.completed`` объявляет trace, а
+    trace на turn скрыт. Проверяется настоящий хук через боевой фильтр
+    консоли — свой перехватчик видел бы и то, что консоль скрывает.
+    """
+    out = _run_hook("success", level=oc.CONSOLE_LEVEL_TURN)
+    assert "list_dir" in out, "успешный вызов tool'а не виден на turn"
+    assert "tool.completed" in out
+
+
+def test_tool_failure_is_visible_at_every_level():
+    """Отказ tool'а виден и на ``turn``, и на ``quiet``.
+
+    Отказ — то, ради чего оператор смотрит в терминал; прятать его за глубиной
+    значит оставлять его только в журнале, который в момент инцидента может
+    быть не сбатчен.
+    """
+    for level in (oc.CONSOLE_LEVEL_TURN, oc.CONSOLE_LEVEL_QUIET, oc.CONSOLE_LEVEL_TRACE):
+        out = _run_hook("error", level=level, detail="PermissionError: отказано")
+        assert "list_dir" in out, f"отказ tool'а не виден на {level}"
+        assert "PermissionError" in out, f"текст отказа потерян на {level}"
+
+
+def test_tool_call_is_hidden_at_quiet_when_successful():
+    """Успех скрыт на ``quiet``: этот уровень — только про проблемы.
+
+    Иначе ``quiet`` перестал бы быть «тишиной», а объявленная глубина потеряла
+    бы смысл: в режиме ожидания успешные вызовы модели шли бы непрерывной строкой.
+    """
+    out = _run_hook("success", level=oc.CONSOLE_LEVEL_QUIET)
+    assert "list_dir" not in out
+
+
 def test_errors_are_visible_at_every_level():
     """Ошибка видна на любой глубине: проглоченный отказ хуже тишины."""
     fact = oc.ConsoleFact(

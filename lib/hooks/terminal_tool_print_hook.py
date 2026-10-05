@@ -20,6 +20,17 @@
 полем ``who``, а НЕ ``bind(channel="tools")``: ключ ``channel`` занят
 транспортом — в loguru у нанобота (``nanobot/channels/base.py``) и в журнале
 (``LogEvent.channel``) — и одна колонка не может значить и то и другое.
+
+**Глубина вывода следует за исходом, а не назначена хуком.** Отказ объявляется
+на ``CONSOLE_LEVEL_QUIET``, то есть виден при любой объявленной глубине, включая
+``quiet``: отказ tool'а — это ровно то, ради чего оператор смотрит в терминал, и
+прятать его за ``turn`` значило бы оставлять его в журнале, который в момент
+инцидента может быть не сбатчен. Успех объявляется на ``CONSOLE_LEVEL_TURN``:
+вызовы модели — это и есть работа агента, их объём измеряется оборотами, а не
+временем (десятки за оборот), тогда как ``trace`` оставлен деталям уровня вызова
+— по одному факту на обращение к модели. Раньше обе строки были на ``trace``, и
+при объявленном ``gateway.console_level: turn`` не был виден ни один вызов
+tool'а — ни успех, ни отказ.
 Имя строки (``tool.completed``) взято из словаря журнала, поэтому ``grep`` в
 терминале равен SQL в базе по тому же факту.
 
@@ -134,7 +145,8 @@ class TerminalToolPrintHook(AgentHook):
     async def after_iteration(self, ctx: Any) -> None:
         from lib.services.db_logging_service import CONSOLE_WHO_TOOLS
         from lib.services.operator_console import (
-            CONSOLE_LEVEL_TRACE,
+            CONSOLE_LEVEL_QUIET,
+            CONSOLE_LEVEL_TURN,
             ConsoleFact,
             emit,
         )
@@ -187,6 +199,13 @@ class TerminalToolPrintHook(AgentHook):
                 detail=f"{message} ({dur_ms}ms)",
                 who=CONSOLE_WHO_TOOLS,
                 task=task,
-                depth=CONSOLE_LEVEL_TRACE,
+                # Глубина — по исходу, а не одна на хук: отказ виден всегда,
+                # успех — на объявленном по умолчанию ``turn``. Обоснование в
+                # модульной строке.
+                depth=(
+                    CONSOLE_LEVEL_QUIET
+                    if level == "ERROR"
+                    else CONSOLE_LEVEL_TURN
+                ),
                 event_level=level,
             ))
