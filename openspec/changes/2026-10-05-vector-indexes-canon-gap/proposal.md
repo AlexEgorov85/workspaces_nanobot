@@ -33,9 +33,15 @@
 * **Требует прогрева ДО сигнала `READY`**, запрет запроса без прогрева и публикацию
   сводки в `stderr` и журнал `agent_gateway_logs`. Сводка посчитана
   (`mcp-platform/libs/vectors/preload.py:22,57`) и экспортирована
-  (`libs/vectors/__init__.py:47,66`), но **производственного вызова нет ни одного** —
-  только `mcp-platform/tests/test_vectors_index_health.py`. Порог «более 30% с
-  устаревшими индексами» в журнале не пишет никто.
+  (`libs/vectors/__init__.py:47`; в `__all__` — `compute_index_health` на `:66`
+  и `format_index_health_lines` на `:68`), но **производственного вызова нет ни
+  одного** — только `mcp-platform/tests/test_vectors_index_health.py`. Порога
+  устаревания в требовании **нет**: в `openspec/specs/data/vector-indexes/spec.md`
+  на доли устаревших 0 совпадений, в `mcp-platform/libs/vectors/` — 0 совпадений по
+  `0.3` / `stale_ratio`; единственный близкий пункт канона — «оператор SHALL увидеть
+  `level=WARN` (вместо `INFO`)» при неполном прогреве (`:172`), без числа. Числовой
+  порог, если он нужен, — отдельное требование с владельцем, а не свойство снятой
+  спеки.
 * **Требует `default_root` и `storage_table` как владельца FAISS-хранилища** и
   связывает их с блоком агента. Снимком владеет capability `data`, а состав
   индексов объявляет capability `vectors` (`platform.json → vectors.indexes`).
@@ -49,7 +55,14 @@
 
 * `VectorInfrastructureSettings` объявлена в `lib/core/project_settings.py:186`, но
   в `lib/` её никто не читает — grep даёт только объявления и docstring-комментарии;
-* `skills.audit_analyzer.*` читает только `tests/test_config_keys.py:88-97`;
+* `VectorIndexSettings` (`:141`) — модель, которая реально держит `storage_table`
+  (`:182`) и `indexes: dict[str, VectorIndexConfig]` (`:183`) и docstring со
+  ссылками на `gateway.vector.index.*` (`:151,158`; `:152` — это legacy-путь
+  `gateway.vector_index.*` **без точки**, а `:162` — строка вовсе без ссылки на
+  путь, поэтому в перечень ссылок на `gateway.vector.index.*` они не входят);
+  вне этого своего docstring'а и объявления она тоже не используется, поэтому
+  удаляется целиком вместе с остальными моделями;
+* `skills.audit_analyzer.*` читает только `tests/test_config_keys.py:90-101`;
 * `VectorIndexConfig` при этом называет свою секцию «единственным источником деталей
   построения индекса» (`project_settings.py:484`).
 
@@ -67,8 +80,26 @@
 `embedding_columns`, `track_column`, `chunk_size`, `chunk_overlap`, `metric`,
 `enabled`. То есть пример неверен и по владельцу, и по схеме.
 
-Удаление сломает `tests/test_config_keys.py` — и это правильно: тест должен падать,
+Удаление ломает **два** тестовых файла — и это правильно: тесты должны падать,
 показывая, что миграция не завершена, а не подтверждать мёртвое значение.
+
+* `tests/test_config_keys.py` — ассерты на значения удаляемых секций. Диапазоны
+  по фактическим блокам — `:90-101` и `:146-159`; взятые по началу, они короче
+  блоков: `:88-97` обрывается **внутри** `vector_indexes` и не покрывает `:98-101`,
+  а `:146-150` покрывает 5 ассертов из 14 по `gateway.vector.index.*`. Плюс
+  комментарий `:114-118` — 15-е совпадение в том же файле, вне обоих диапазонов:
+  «Индексы декларируются в `gateway.vector.index.indexes`». Ассертов он не
+  утверждает, но это то же живое утверждение об удаляемой секции, поэтому
+  вычищается вместе с ними.
+* `tests/test_project_settings.py` — тяжелее: `TableEntry` импортируется на
+  уровне модуля (`:9-13`), поэтому удаление класса даёт `ImportError` при
+  collection и валит **весь файл**, а не один тест. Под нож попадают
+  `TestTableEntry` (`:121`), `TestVectorIndexEntryNoSource` (`:389`, локальный
+  импорт `VectorIndexEntry` на `:401,412,420`), `TestGatewayVectorIndexConfig`
+  (`:446`, валидирует `gateway.vector.index.indexes` и читает
+  `result.gateway.vector.index.indexes["audits_index"]` на `:479`) и
+  `TestTableEntryTypeLiteral` (`:597`); `:533` упоминает
+  `VectorInfrastructureSettings`.
 
 ## What this change does
 
@@ -82,9 +113,24 @@
 * Удаляет мёртвые секции из `config.json` (`gateway.vector.index`,
   `skills.audit_analyzer.tables`, `skills.audit_analyzer.vector_indexes`), их модели
   из `lib/core/project_settings.py` и ассерты из `tests/test_config_keys.py`.
-* Запирает результат стражем: `gateway.vector.index` и `skills.*.vector_indexes`
-  больше не проходят валидацию `config.json` (`extra="forbid"`), и `tests/test_config_keys.py`
-  утверждает их отсутствие.
+* Запирает результат стражем, причём страж работает на разных механизмах для
+  двух секций — различать их обязательно, иначе спека обещает то, чего кода нет:
+  * `skills.*.vector_indexes` (и `skills.*.tables`) отвергается **только после
+    удаления полей** `SkillSettings.tables`
+    (`lib/core/project_settings.py:666`) и `SkillSettings.vector_indexes`
+    (`:667`) — сегодня это **объявленные** поля модели, поэтому
+    `extra="forbid"` (`:663`) их типизирует, а не отвергает, и обе секции
+    сегодня валидируются (`config.json:817,835`). Удаление объявлено в
+    `tasks.md` п. 3.3;
+  * `gateway.vector.index` отвергается **только после реализации этого change**.
+    Сейчас этого механизма нет: `_StrictOptional` — это `extra="allow"`
+    (`:55-58`), `GatewaySettings` (`:237`) и `ProjectSettings` (`:759`) своего
+    `model_config` не имеют, а единственный отвергатель в ветке `gateway.*` —
+    валидатор `_reject_legacy_renamed_sections` (`:253-261`) поверх
+    `_LEGACY_GATEWAY_KEYS` (`:782-784`), и он знает только legacy-путь
+    `gateway.vector_index` **без точки**. Без явного решения секция будет принята
+    как лишний ключ, то есть вернётся ровно тот дефект, который change закрывает.
+  * `tests/test_config_keys.py` утверждает отсутствие обеих секций.
 
 ## Граница
 
@@ -102,4 +148,11 @@
 * **Не публикуем сводку здоровья индексов этим change.** Требование снимается как
   невыполнимое в текущем виде, но сам расчёт в `libs/vectors/preload.py` остаётся и
   не должен быть удалён вместе со спецификацией: возвращать его публикацию —
-  отдельное решение, с владельцем и адресатом.
+  отдельное решение, с владельцем и адресатом. Отдельно: то же событие требует
+  **второй канон** — `openspec/specs/logging-db/spec.md:689-704` (сценарий
+  «preload health-summary через DbLoggingService») предписывает `LogEvent` с
+  `event_type="vector_index_preload_health"` и payload `declared` / `loaded` /
+  `missing` / `orphan` / `stale`, ссылаясь на реализацию
+  `PreloadService.compute_index_health`; `PreloadService` удалён, файла нет. Возврат
+  публикации обязан переписать оба канона разом, иначе после архивации два
+  документа будут требовать невыполнимое и ни один не скажет, что оно неактуально.

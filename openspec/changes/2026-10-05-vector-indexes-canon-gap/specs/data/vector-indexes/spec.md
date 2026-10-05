@@ -28,15 +28,28 @@ capability `vectors` («агент индексы не строит и не хр
 
 `platform` — владение векторными индексами принадлежит capability `vectors`:
 `mcp-platform/libs/vectors/`, объявление состава — `mcp-platform/platform.json →
-vectors.indexes`, операции модели — `vector_search`, `list_indexes`, `index_stats`
-(`mcp-platform/servers/enterprise/capabilities/vectors/tools/`).
+vectors.indexes`.
+
+Операция, доступная **модели**, ровно одна — `vector_search`: она объявлена в
+`config.json → tools.mcpServers.enterprise.enabled_tools` вместе с
+`list_scripts`, `run_script`, `generate_sql`, `query_operation`, `history_search`,
+`read_result`, и она же единственная упомянута в
+`workspace/skills/audit_analyzer/SKILL.md`. `list_indexes` и `index_stats`
+(`mcp-platform/servers/enterprise/capabilities/vectors/tools/`) существуют как
+**диагностические операции capability**: файлы операций есть, но модели они не
+объявлены и в дереве агента не упоминаются, поэтому описывать их как операции
+модели нельзя — иначе спека обещает то, чего агент не умеет вызвать.
 
 В агенте индексами не владеет никто: `VectorInfrastructureSettings`
 (`lib/core/project_settings.py:186`) и `VectorIndexConfig` (`:481`) объявлены, но в
 `lib/` не читаются ни разу; `tools/build_vectors.py` в дереве отсутствует (есть
 только в `.worktrees/fork-…`); секции `gateway.vector.index` и
-`skills.audit_analyzer.vector_indexes` в `config.json` не имеют потребителей, кроме
-`tests/test_config_keys.py:88-97`.
+`skills.audit_analyzer.vector_indexes` в `config.json` не имеют потребителей,
+кроме двух тестовых файлов: `tests/test_config_keys.py:90-101, :146-159` и
+`tests/test_project_settings.py` (импорт моделей на уровне модуля `:9-13`,
+`TestGatewayVectorIndexConfig` `:446` с чтением
+`result.gateway.vector.index.indexes["audits_index"]` на `:479`, секция
+`skills.*.vector_indexes` на `:260,289`).
 
 Владение снимком DuckDB — capability `data`, и оно описано в
 `openspec/specs/data/cache-provider/spec.md`, который закрывает активный change
@@ -76,9 +89,20 @@ vectors.indexes`, операции модели — `vector_search`, `list_index
 известный как неработоспособный. Ключи конфигурации не читаются, файлов нет,
 локального кэша в дереве агента нет.
 
-Сохранённое намерение (ленивая постройка из источника) переезжает в
-`MODIFIED Requirement: Единый источник конфигурации` и
-`ADDED Requirement: Агент не объявляет состав индексов`.
+Требование содержало **два** намерения, и оба переезжают, а не теряются вместе
+с ним:
+
+- ленивая постройка из источника → `MODIFIED Requirement: Единый источник
+  конфигурации` и `ADDED Requirement: Агент не объявляет состав индексов`;
+- бюджет первичной постройки ≤ 5 секунд (сценарий «Стоимость холодного старта»,
+  `openspec/specs/data/vector-indexes/spec.md:106-109`) → отдельный сценарий
+  «Стоимость первичной постройки» в `ADDED Requirement: Агент не объявляет
+  состав индексов`. Ленивость меняет исполнителя, а не пользовательский
+  контракт: первый поиск по-прежнему платит за постройку.
+
+Единственное намерение, которое снимается целиком, — привязка источника к
+`gateway.vector.index.storage_table`: объявление состава теперь принадлежит
+capability `vectors`, а не блоку агента.
 
 ### Requirement: Прогрев индексов при старте
 
@@ -96,12 +120,27 @@ vectors.indexes`, операции модели — `vector_search`, `list_index
 ### Requirement: Preload health-summary виден оператору и логируется
 
 **Reason**: Расчёт есть
-(`mcp-platform/libs/vectors/preload.py:22,57`, экспорт — `libs/vectors/__init__.py:47,66`),
+(`mcp-platform/libs/vectors/preload.py:22,57`, экспорт обеих функций —
+`libs/vectors/__init__.py:47`, в `__all__` — `compute_index_health` на `:66`
+и `format_index_health_lines` на `:68`),
 но **производственного вызова нет ни одного** — только
 `mcp-platform/tests/test_vectors_index_health.py`. Публикация в `stderr` и событие
-`vector_index_preload_health` в `agent_gateway_logs` не происходят ни разу, а порог
-«более 30% устаревших» не проверяет никто. Требование описывало `PreloadService`
+`vector_index_preload_health` в `agent_gateway_logs` не происходят ни разу.
+Требование описывало `PreloadService`
 (`lib/services/preload_service.py:229`) — файла нет.
+
+**Второй канон, требующий это же событие.** Требование снимается не потому, что
+событие не нужно, а потому что его требует ещё один нормативный документ:
+`openspec/specs/logging-db/spec.md:689-704` (сценарий «preload health-summary через
+DbLoggingService») предписывает записать ровно один `LogEvent` с
+`event_type="vector_index_preload_health"` и payload `declared` / `loaded` /
+`missing` / `orphan` / `stale` — со ссылкой на «snapshot текущей реализации
+`PreloadService.compute_index_health`». `PreloadService` удалён, файла нет, писать
+событие некому. Если снять требование здесь и не тронуть `logging-db`, после
+архивации два канона будут требовать то, что не реализовано, и ни один не
+указывать, что это неактуально. Именно поэтому ниже, в `tasks.md`, это заведено
+как открытое решение с владельцем: возврат публикации — отдельный change, который
+обязан переписать оба канона разом.
 
 ## MODIFIED Requirements
 
@@ -127,12 +166,51 @@ vectors.indexes`, операции модели — `vector_search`, `list_index
 - **AND** агент ДОЛЖЕН NOT объявлять его ни в `gateway.vector.index.indexes.*`,
   ни в `skills.<name>.vector_indexes`
 
+#### Scenario: Смена состава индексов без релиза
+
+- **WHEN** оператор меняет состав или параметры объявления в
+  `mcp-platform/platform.json → vectors.indexes`
+- **THEN** система SHALL использовать новое объявление без изменений в коде
+  спецификации или runtime-коде, требующих релизов
+- **AND** ДОЛЖЕН NOT требовать пересборки агента: смена состава — операция
+  контура платформы, а не агента
+
 #### Scenario: Агентский список индексов отвергается
 
-- **WHEN** в `config.json` присутствует `gateway.vector.index` или
-  `skills.<name>.vector_indexes`
-- **THEN** валидация конфигурации ДОЛЖНА отвергнуть секцию как неизвестный ключ
-  (`extra="forbid"`), а не молча проигнорировать её
+Две половины проверяются разными механизмами, и различать их обязательно: обе
+возникают **только после реализации этого change**, но путём разным.
+
+- **WHEN** в `config.json` присутствует `skills.<name>.vector_indexes`
+  (или `skills.<name>.tables`)
+- **THEN** валидация конфигурации ДОЛЖНА отвергнуть секцию как неизвестный
+  ключ
+- **AND** отказ ДОЛЖЕН быть вызван `extra="forbid"` модели `SkillSettings`
+  (`lib/core/project_settings.py:663`), но сработать он сможет **только после
+  удаления полей** `SkillSettings.tables` (`:666`) и
+  `SkillSettings.vector_indexes` (`:667`): сегодня это **объявленные** поля
+  модели, а `extra="forbid"` типизирует объявленное поле, а не отвергает его, —
+  обе секции валидируются (`config.json:817,835`). Удаление объявлено в
+  `tasks.md` п. 3.3
+
+- **WHEN** в `config.json` присутствует `gateway.vector.index`
+- **THEN** валидация конфигурации ДОЛЖНА отвергнуть секцию явно, а не принять
+  её молча как лишний ключ
+- **AND** отказ ДОЛЖЕН быть наблюдаемым: `ConfigurationError` на старте, а не
+  «всё стартануло, но объявление нигде не читается»
+
+> **Маршрут реализации — решение этого change, а не уже работающий механизм.**
+> В ветке `gateway.*` отвержения нет: `_StrictOptional` объявлен как
+> `extra="allow"` (`lib/core/project_settings.py:55-58`), `GatewaySettings`
+> (`:237`) своего `model_config` не имеет, а `ProjectSettings` (`:759`) —
+> тоже. Единственный действующий отвергатель в этой ветке —
+> валидатор `_reject_legacy_renamed_sections` (`:253-261`) поверх списка
+> `_LEGACY_GATEWAY_KEYS` (`:782-784`), и он знает ровно одну секцию —
+> `gateway.vector_index` **без точки** (legacy-путь, а не текущий
+> `gateway.vector.index`). Поэтому требование отвержения `gateway.vector.index`
+> невыполнимо в текущем виде: без явного решения (добавить путь в
+> legacy-guard как fail-fast либо запретить секцию иначе) ключ будет принят
+> как лишний. Реализация зафиксирована в `tasks.md` п. 3.9 (выбор механизма),
+> 3.3 (удаление моделей) и 3.6 (тест, утверждающий отказ).
 
 #### Scenario: Расхождение двух списков невозможно выразить
 
@@ -163,12 +241,21 @@ Skill, которому был нужен vector search, тоже уехал в 
 
 #### Scenario: Обход владельца
 
+Маршрут поиска, объявленный соседним каноном
+(`openspec/specs/data/cache-provider/spec.md`, дельта
+`2026-10-04-close-cache-provider-canon-gap/specs/data/cache-provider/spec.md:504-506`),
+таков и здесь: навык → операция `vector_search` → `search_vector` хранилища
+(`mcp-platform/libs/enterprise_data/snapshot/store.py`) → `mcp-platform/libs/vectors/`.
+Обход — любой выход за `libs/vectors/` на этом маршруте.
+
 - **WHEN** код capability или библиотеки обращается к FAISS в обход
   `mcp-platform/libs/vectors/`
 - **THEN** такой доступ ДОЛЖЕН считаться нарушением контракта владения, даже
   если технически работает
+- **AND** на стороне платформы поиск MUST идти через `search_vector` хранилища,
+  делегирующий владельцу индексов, а не через прямой `import faiss` в хранилище
 
-### Requirement: Hydrated payload берётся из источника, а не из индекса
+### Requirement: Hydrated payload берётся из DuckDB-снапшота
 
 Система SHALL подтягивать `content` / `search_text` / `row_data` для каждого
 FAISS-hit'а из таблицы-источника по ключу `(source, pk_value, chunk_index)`; она
@@ -177,6 +264,12 @@ SHALL NOT читать эти поля из метаданных, сериали
 Прежняя редакция привязывала источник к `gateway.vector.index.storage_table`.
 Ключ удалён; источник теперь определяется объявлением
 `platform.json → vectors.indexes`.
+
+> Заголовок требования оставлен дословно как в каноне
+> (`openspec/specs/data/vector-indexes/spec.md:116`): OpenSpec сопоставляет
+> требования по имени, и переименование заголовка превратило бы `MODIFIED` в
+> новое требование — канонное осталось бы жить и требовало бы читать
+> `gateway.vector.index.storage_table`. Меняется тело, не имя.
 
 #### Scenario: Подтягивание payload
 
@@ -200,6 +293,11 @@ SHALL NOT читать эти поля из метаданных, сериали
 владельцем: её значения печатаются как ожидаемые в `tests/test_config_keys.py`, а
 `VectorIndexConfig` называет себя единственным источником деталей построения.
 
+Агент, не объявляющий состав индексов, не строит их и не прогревает: ленивая
+постройка принадлежит capability `vectors`. Именно поэтому латентность первого
+поиска — такой же пользовательский контракт, каким был при прогреве, и бюджет
+из снятого требования переезжает сюда, а не исчезает вместе с ним.
+
 #### Scenario: Секция удалена, тест это утверждает
 
 - **WHEN** `gateway.vector.index` или `skills.<name>.vector_indexes` удалены из
@@ -216,5 +314,24 @@ SHALL NOT читать эти поля из метаданных, сериали
 
 - **WHEN** нормативный текст упоминает `gateway.vector.index.indexes` как
   источник состава индексов
-- **THEN** такое упоминание SHALL считаться расхождением и проверяться
-  `tools/validate_component_specs.py` либо правкой спеки
+- **THEN** такое упоминание SHALL считаться расхождением, и это расхождение
+  SHALL выявляться grep-проверкой из `tasks.md` п. 4.6 либо правкой спеки
+- **AND** автоматического guard'а, который бы ловил такое упоминание, спека не
+  обещает: `tools/validate_component_specs.py` (`:277-318`) проверяет только
+  наличие `### Requirement:`, наличие `#### Scenario:` и маркер WHEN/THEN
+  (`:106-110`), по содержимому требований не смотрит
+
+#### Scenario: Стоимость первичной постройки
+
+Перенесено дословно из снятого требования
+«FAISS собирается в памяти из DuckDB-снапшота», сценарий «Стоимость холодного
+старта» (`openspec/specs/data/vector-indexes/spec.md:106-109`): ленивая постройка
+не отменяет его, а меняет только то, кто её выполняет.
+
+- **WHEN** первый `vector_search` для `index_name` вызван до того, как индекс
+  этого `index_name` собран
+- **THEN** первичная постройка SHALL завершаться за ≤ 5 секунд на эталонной
+  рабочей станции для индексов до 20 000 векторов × 1024
+- **AND** отказ от прогрева ДОЛЖЕН NOT поднимать этот порог до отведённого
+  пользовательского таймаута: холодный поиск — штатный путь, и его стоимость
+  обязана быть видна в измеримом пороге, а не в снятом требовании
