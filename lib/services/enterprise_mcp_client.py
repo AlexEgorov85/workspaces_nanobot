@@ -74,7 +74,6 @@ import re
 import subprocess
 import sys
 import time
-import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,7 +90,11 @@ from lib.services.enterprise_mcp_stderr import (
 from config import ConfigurationError
 from lib.services.service_identity import SERVICE_IDENTITIES
 from lib.services.session_files import SESSION_FILES_OPERATION
-from lib.services.turn_identity import read_turn_context, request_id_from
+from lib.services.turn_identity import (
+    new_envelope_request_id,
+    read_turn_context,
+    request_id_from,
+)
 
 DEFAULT_TOOL_TIMEOUT_SEC = 30.0
 
@@ -115,30 +118,6 @@ NOTIFY_READ_TIMEOUT_SEC = 180.0
 #: числа; всё длиннее — не адрес, и читать дальше незачем.
 NOTIFY_MAX_LINE = 4096
 
-
-def _new_request_id() -> str:
-    """``request_id`` для вызова, у которого нет оборота.
-
-    **Здесь подстановка обязательна, и она НЕ противоречит запрету выдумывать
-    идентификатор в журнале.** Это два разных контракта одного имени поля:
-    в конверте MCP-вызова ``request_id`` обязателен всегда, и сервер не
-    генерирует его никогда (``mcp-platform/docs/MCP-CONTRACTS.md:146-150``), а
-    в журнале (``agent_gateway_logs.request_id``) он заполнен только когда есть
-    оборот, и выдуманное значение там запрещено (change
-    2026-10-04-queue-as-anchor-identity, Ф0). Этот идентификатор в
-    ``agent_gateway_logs`` не попадает: он живёт внутри ``params._meta``
-    конверта, а не в колонке журнала.
-
-    Именно агент создаёт это значение: сервер не придумывает его по двум
-    причинам: во-первых, он не знает, к какому обороту вызов относится,
-    во-вторых, выдуманный на сервере ключ выглядел бы в журнале как
-    существующий оборот.
-
-    Отдельная префиксная форма платформы (``local-``) тут не нужна: она
-    помечает локальные вызовы самой платформы, а этот ``request_id`` держит
-    агент.
-    """
-    return str(uuid.uuid4())
 
 #: ``[code] message`` — формат доменной ошибки операции (см. build_server).
 _ERROR_PREFIX = re.compile(r"^\[([a-z_]+)\]\s*(.*)$", re.DOTALL)
@@ -1097,7 +1076,7 @@ class EnterpriseMcpClient:
         if identity is None:
             return None
         if not identity.request_id:
-            generated = _new_request_id()
+            generated = new_envelope_request_id()
             self._generated_request_ids += 1
             # Служебный вызов и оборот — разные вещи, и подставленный
             # ``request_id`` означает для них разное.

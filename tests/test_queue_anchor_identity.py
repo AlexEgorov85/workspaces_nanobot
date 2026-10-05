@@ -445,11 +445,13 @@ class TestMcpEnvelopeIsNotTheJournal:
         ``mcp-platform/docs/MCP-CONTRACTS.md:146-150``: сервер не генерирует
         его никогда. Запрет выдумывать касается поля ЖУРНАЛА, и снятие
         подстановки в ``db_logging_bus``/хуке не имеет права задеть это место.
+        Правило досылки объявлено ОДИН раз — в ``lib/services/turn_identity.py``,
+        оттуда его берут и хук, и клиент фоновых служб.
         """
-        from lib.services.enterprise_mcp_client import _new_request_id
+        from lib.services.turn_identity import new_envelope_request_id
 
-        assert _new_request_id()
-        assert _new_request_id() != _new_request_id()
+        assert new_envelope_request_id()
+        assert new_envelope_request_id() != new_envelope_request_id()
 
     def test_journal_field_stays_empty_for_background_call(self):
         """Контроль: в журнале это же место осталось пустым."""

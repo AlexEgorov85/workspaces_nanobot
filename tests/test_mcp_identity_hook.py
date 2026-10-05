@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import uuid
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -176,17 +178,41 @@ class TestScope:
 
 
 class TestIncompleteIdentity:
-    def test_no_injection_without_request_id(self):
-        """Нет оборота — нет связи с agent_question_runs, и подставлять нечего.
+    def test_injects_when_turn_has_no_request_id(self):
+        """Неочередной канал: вопроса в обороте нет, а вызов отправлять надо.
 
-        Вызов уйдёт без личности и будет отвергнут платформой с
-        ``identity_missing``: это внятнее выдуманной сессии.
+        Очередь — единственный канал, который кладёт идентификатор вопроса в
+        метаданные входящего сообщения; на webUI и в CLI его просто не
+        существует, и прежний отказ здесь делал MCP неработающим на этих
+        каналах целиком (платформа отвечала ``identity_missing``).
+
+        Досылка не имеет права выглядеть как оборот: значение из журнала не
+        берётся, оно и было пустым.
         """
         hook = McpIdentityHook(_service(request_id=None))
         params: dict = {}
         with _with_sender(SENDER_ID):
             asyncio.run(_run(hook, params))
-        assert params == {}
+        assert set(params) == set(IDENTITY_KEYS)
+        assert params["session_id"] == SESSION_KEY
+        assert params["user_id"] == SENDER_ID
+        assert params["request_id"] != REQUEST_ID
+        assert uuid.UUID(params["request_id"]).version == 4
+
+    def test_generated_request_id_is_unique_per_call(self):
+        """Повторное значение связало бы разные вызовы одного оборота.
+
+        Один инстанс хука обслуживает все обороты, поэтому «последний
+        досыланный» в его состоянии был бы общим для всего процесса.
+        """
+        hook = McpIdentityHook(_service(request_id=None))
+        first: dict = {}
+        second: dict = {}
+        with _with_sender(SENDER_ID):
+            asyncio.run(_run(hook, first))
+            asyncio.run(_run(hook, second))
+        assert first["request_id"] and second["request_id"]
+        assert first["request_id"] != second["request_id"]
 
     def test_no_injection_without_sender(self):
         hook = McpIdentityHook(_service())
@@ -202,16 +228,29 @@ class TestIncompleteIdentity:
             asyncio.run(_run(hook, params, context=_context(session_key=None)))
         assert params == {}
 
-    def test_no_injection_without_logging_service(self):
-        """Без журнала request_id взять неоткуда — вызов без личности."""
+    def test_injects_without_logging_service(self):
+        """MCP обязан работать и без журнала — ``request_id`` досылается.
+
+        Носителя оборота может не быть вовсе (журнал не подключён, фоновая
+        служба вне оборота), и отказ по этой причине снова отправил бы все
+        такие вызовы в ``identity_missing``.
+        """
         hook = McpIdentityHook(None)
         params: dict = {}
         with _with_sender(SENDER_ID):
             asyncio.run(_run(hook, params))
-        assert params == {}
+        assert set(params) == set(IDENTITY_KEYS)
+        assert params["session_id"] == SESSION_KEY
+        assert params["user_id"] == SENDER_ID
+        assert params["request_id"]
 
     def test_broken_journal_does_not_break_turn(self):
-        """Индекс журнала — не граница изоляции: его поломка не роняет оборот."""
+        """Индекс журнала — не граница изоляции: его поломка не роняет оборот.
+
+        Отказ носителя — это отсутствие вопроса, то есть ровно тот случай, в
+        котором вопрос по контракту и не бывает: досылка даёт вызову полную
+        личность.
+        """
         service = SimpleNamespace(
             get_request_id=Mock(side_effect=RuntimeError("pool closed"))
         )
@@ -219,7 +258,10 @@ class TestIncompleteIdentity:
         params: dict = {}
         with _with_sender(SENDER_ID):
             asyncio.run(_run(hook, params))
-        assert params == {}
+        assert set(params) == set(IDENTITY_KEYS)
+        assert params["session_id"] == SESSION_KEY
+        assert params["user_id"] == SENDER_ID
+        assert params["request_id"]
 
     def test_session_key_from_contextvar_when_context_is_empty(self):
         """Запасной путь: вне итерации у хука контекст без session_key."""
@@ -236,12 +278,70 @@ class TestIncompleteIdentity:
         assert params["session_id"] == "postgres:из-контекста"
 
 
+class TestGeneratedRequestId:
+    """Досылка обязана быть видна и не имеет права попасть в колонку журнала."""
+
+    def test_journal_service_is_only_ever_read(self):
+        """Журнал у хука — только читатель, и только через ``get_request_id``.
+
+        Два поля с одним именем — два разных контракта. Любая запись в журнал
+        означала бы, что выдуманный идентификатор попал в
+        ``agent_gateway_logs.request_id``, где заполняется он исключительно
+        существующим оборотом (change 2026-10-04-queue-as-anchor-identity,
+        Ф0). То есть «досылаемо в конверт вызова» и «выдумываемо в журнале» —
+        разные вещи, и страж держит первую.
+        """
+        service = Mock()
+        service.get_request_id.return_value = None
+        hook = McpIdentityHook(service)
+        params: dict = {}
+        with _with_sender(SENDER_ID):
+            asyncio.run(_run(hook, params))
+        assert params["request_id"]
+        assert [entry[0] for entry in service.method_calls] == ["get_request_id"]
+
+    def test_first_generation_announced_once_per_process(self, caplog):
+        """Одна строка ``info`` за процесс, дальше — счётчиком на ``debug``.
+
+        «Вызов уехал с личностью» и «вызов уехал без неё» по журналу
+        неразличимы, а различать пришлось бы читателю постфактум, по
+        отсутствующим строкам итогов.
+        """
+        hook = McpIdentityHook(_service(request_id=None))
+        with caplog.at_level("INFO"), _with_sender(SENDER_ID):
+            asyncio.run(_run(hook, {}))
+            after_first = [r for r in caplog.records if r.levelno == logging.INFO]
+            asyncio.run(_run(hook, {}))
+            after_second = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(after_first) == 1
+        assert "request_id" in after_first[0].message
+        assert len(after_second) == len(after_first)
+
+
 class TestWarnings:
     def test_warns_once_per_hook(self, caplog):
-        """Иначе каждый вызов оборота добавил бы одинаковую строку в журнал."""
-        hook = McpIdentityHook(_service(request_id=None))
+        """Иначе каждый вызов оборота добавил бы одинаковую строку в журнал.
+
+        Отказ остался только для вызова ВНЕ оборота: нет ни отправителя, ни
+        сессии — подставлять нечего, и внятный отказ лучше выдуманной личности.
+        """
+        hook = McpIdentityHook(_service())
         params: dict = {}
-        with caplog.at_level("WARNING"), _with_sender(SENDER_ID):
+        with caplog.at_level("WARNING"), _with_sender(None):
             for _ in range(3):
                 asyncio.run(_run(hook, params))
         assert sum("McpIdentityHook" in r.message for r in caplog.records) == 1
+
+    def test_generated_path_does_not_warn(self, caplog):
+        """Досылка — не авария: предупреждений она не даёт.
+
+        Иначе канал без вопроса (webUI, CLI) писал бы в журнал то же
+        предупреждение на каждом вызове, и «вызов отвергнут» нельзя было бы
+        отличить от «вызов дослан».
+        """
+        hook = McpIdentityHook(_service(request_id=None))
+        with caplog.at_level("DEBUG"), _with_sender(SENDER_ID):
+            for _ in range(3):
+                asyncio.run(_run(hook, {}))
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert [r for r in caplog.records if r.levelno == logging.INFO]
