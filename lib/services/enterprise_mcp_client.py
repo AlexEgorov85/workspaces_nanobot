@@ -90,6 +90,7 @@ from lib.services.enterprise_mcp_stderr import (
 )
 from config import ConfigurationError
 from lib.services.session_files import SESSION_FILES_OPERATION
+from lib.services.turn_identity import read_turn_context, request_id_from
 
 DEFAULT_TOOL_TIMEOUT_SEC = 30.0
 
@@ -952,45 +953,23 @@ class EnterpriseMcpClient:
         значения здесь нельзя - подставленная сессия выглядела бы в журнале
         как настоящая.
         """
-        try:
-            from nanobot.agent.tools.context import (
-                current_request_context,
-                current_request_session_key,
-            )
-        except Exception:
-            return None
-        try:
-            turn = current_request_context()
-        except Exception:
-            return None
+        turn = read_turn_context()
         if turn is None:
             return None
-
-        try:
-            session_id = current_request_session_key()
-        except Exception:
-            session_id = None
-        if not session_id:
+        session_id = turn.session_key
+        user_id = turn.user_id
+        if not session_id or not user_id:
             return None
 
-        sender_id = getattr(turn, "sender_id", None)
-        user_id = sender_id if isinstance(sender_id, str) and sender_id else None
-        if not user_id:
-            return None
-
-        request_id = None
-        logging_service = self._db_logging_service
-        if logging_service is not None:
-            try:
-                request_id = logging_service.get_request_id(str(session_id))
-            except Exception:
-                # Журнал недоступен - это не повод отказывать в вызове.
-                # Идентификатор оборота при этом остаётся пустым, и
-                # вызов уйдёт без связи с agent_question_runs.
-                request_id = None
+        # ``request_id`` — привязка живого вопроса, и владелец у неё один:
+        # журнал отвечает из того же хранилища, что и подписчик событий.
+        # Отказ хранилища - не повод отказывать в вызове: идентификатор
+        # оборота остаётся пустым, и вызов уходит без связи с
+        # agent_question_runs.
+        request_id = request_id_from(self._db_logging_service, session_id)
 
         return CallIdentity(
-            session_id=str(session_id),
+            session_id=session_id,
             user_id=user_id,
             request_id=request_id,
         )

@@ -17,6 +17,8 @@ loop, чтобы тесты были детерминированными и б�
 
 from __future__ import annotations
 
+import dataclasses
+
 from io import open as io_open
 
 from typing import Any
@@ -73,24 +75,17 @@ class FakeDbLoggingService:
     Подписчик передаёт реальный ``LogEvent`` (dataclass), проверяем
     через ``dataclasses.fields``.
 
-    ``current_turn_identity`` — та же личность ВХОДА, которую журнал отдаёт
-    владельцу. Журнал не выводит её для события сам (правило против утечки
-    между сессиями), поэтому подписчик спрашивает напрямую у того, кому
-    личность принадлежит.
+    Личность ВХОДА подписчик берёт НЕ здесь, а у её владельца
+    (``turn_identities=``): журнал её для события сам не выводит — это
+    правило против утечки между сессиями. У двойника остаётся только
+    ``get_request_id`` — фасад журнала над тем же хранилищем.
     """
 
     def __init__(self) -> None:
         self.events: list[Any] = []
-        self.turn_identities: dict[str, dict[str, Any]] = {}
 
     def log_event(self, event: Any) -> None:
         self.events.append(event)
-
-    def current_turn_identity(self, session_key: str | None) -> dict[str, Any] | None:
-        # Читатель, а не ``take``: снимок одноразовый, и следующий за
-        # подписчиком agent.delivered должен получить свою подпись.
-        found = self.turn_identities.get(session_key or "")
-        return dict(found) if found else None
 
     def get_request_id(self, session_key: str | None) -> str | None:
         return None
@@ -369,7 +364,9 @@ def _store_with(session_key: str, user_id: str, request_id: str) -> Any:
     from lib.services.turn_identity import TurnIdentityStore
 
     store = TurnIdentityStore()
-    store.record(session_key, {"user_id": user_id, "request_id": request_id, "at_seq": 0})
+    store.start_turn(
+        session_key, user_id=user_id, request_id=request_id, at_seq=0,
+    )
     return store
 
 
@@ -486,12 +483,33 @@ def test_store_is_the_single_owner_across_both_consumers() -> None:
             "%s не знает о хранилище личности" % module.__name__
         )
 
+    # Второй носитель в журнале означал бы ровно то расхождение, которое
+    # требование и закрывает: индекс вопросов и снимок входа живут в разных
+    # словарях под разными замками, и пара «индекс + снимок» не атомарна.
+    journal_source = io_open(journal_module.__file__, encoding="utf-8").read()
+    assert "_request_index" not in journal_source, (
+        "у журнала появился второй носитель личности оборота"
+    )
+    assert "_turn_identity_snapshot" not in journal_source, (
+        "форму записи личности собирает её владелец, а не журнал"
+    )
+
     store = TurnIdentityStore()
     assert store.current("telegram:1") is None
-    store.record("telegram:1", {"user_id": "alice", "request_id": "r", "at_seq": 1})
-    copied = store.current("telegram:1")
-    assert copied is not None and copied["user_id"] == "alice"
-    copied["user_id"] = "mallory"
-    assert store.current("telegram:1")["user_id"] == "alice", (
+    store.start_turn(
+        "telegram:1", user_id="alice", request_id="r", at_seq=1,
+    )
+    read = store.current("telegram:1")
+    assert read is not None and read.user_id == "alice"
+
+    # Запись неизменяема: подписать чужое событие чужим отправителем нельзя
+    # даже по ошибке вызывающего, а не только по недосмотру.
+    try:
+        read.user_id = "mallory"  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError("запись личности изменяема - это не запись, а снимок")
+    assert store.current("telegram:1").user_id == "alice", (
         "читатель сумел изменить снимок - это не копия"
     )

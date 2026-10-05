@@ -147,7 +147,9 @@ class TestNonBlocking:
         assert call.request_id == "m1" and call.name == "read"
         assert result.request_id == "m1" and result.name == "read"
 
-    def test_request_index_lifecycle(self):
+    def test_question_binding_lifecycle(self):
+        """Жизненный цикл привязки вопроса: снятие убирает ``request_id``,
+        но НЕ снимок входа (финальный ответ приходит после этого вызова)."""
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.get_request_id("cli:1") is None
         svc.register_request(
@@ -854,24 +856,29 @@ class TestUserIdPropagation:
     def test_register_request_updates_pair_atomically(self):
         """Атомарность пары ``{request_id, user_id}``: параллельный
         reader во время ``register_request`` видит либо полностью старое
-        состояние, либо полностью новое — не смесь."""
+        состояние, либо полностью новое — не смесь.
+
+        Пара приходит ОДНИМ чтением записи под её собственным замком. Раньше
+        читатель брал словарь индекса под замком службы, а снимок входа лежал
+        в другом словаре под другим, и пара «индекс + снимок» не была
+        атомарной — оба читателя сверялись сами. Теперь сверять нечего.
+        """
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.register_request(
             "cli:1", "req-A", user_id="alice", chat_id="c1",
         )
         # Запускаем register_request(req-B, user_id=bob) параллельно с
-        # reader'ом, который читает индекс 100 раз через lock.
+        # reader'ом, который читает запись личности по кругу.
         errors: list[str] = []
         stop = threading.Event()
 
         def reader():
             while not stop.is_set():
-                with svc._request_index_lock:
-                    entry = svc._request_index.get("cli:1")
-                if not isinstance(entry, dict):
+                entry = svc.turn_identities.question_of("cli:1")
+                if entry is None:
                     continue
-                rid = entry.get("request_id")
-                uid = entry.get("user_id")
+                rid = entry.request_id
+                uid = entry.user_id
                 if rid == "req-A" and uid != "alice":
                     errors.append(
                         f"A mismatch: rid={rid} uid={uid}"

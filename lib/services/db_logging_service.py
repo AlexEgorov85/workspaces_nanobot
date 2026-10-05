@@ -389,41 +389,6 @@ def _event_seq(value: Any) -> int | None:
         return None
 
 
-def _turn_identity_snapshot(
-    request_id: str | None, user_id: str | None
-) -> dict[str, Any]:
-    """Снимок личности ВХОДА: ``{request_id, user_id, at_seq}``.
-
-    ``request_id`` здесь может быть ``None``, и это нормальное состояние:
-    вход без ``message_id`` взятой строки очереди — это вызов, у которого
-    вопроса не было, а не сломанный вопрос. Снимок существует ради второй
-    компоненты (``user_id``), поэтому он не зависит от наличия вопроса.
-
-    ``at_seq`` — момент появления снимка по шкале ``next_event_seq``. Он
-    нужен читателю, чтобы отличить «событие пришло после этого входа» от
-    «событие пришло раньше и было отложено»: во втором случае личность
-    принадлежит другому входу, и выдавать её — утечка (см.
-    ``_resolve_event_user_id_without_request``).
-
-    Снимок кладётся в хранилище (``TurnIdentityStore``), у которого свой
-    замок, а индекс вопроса остаётся под замком службы. Значит пара «индекс +
-    снимок» пишется НЕ атомарно, и читатель может увидеть новый снимок при
-    старом индексе. Это безопасно, и оба читателя это проверяют сами:
-
-    * ветка по индексу сверяет ``request_id`` — при старом индексе сверка не
-      сойдётся, и событие останется неподписанным;
-    * ветка по снимку сверяет ``at_seq`` с моментом события — при новом
-      снимке сверка не сойдётся, и событие останется неподписанным.
-
-    Худший исход в обоих случаях один: подписи нет. Утечки личности нет ни
-    в одном.
-    """
-    return {
-        "request_id": request_id,
-        "user_id": user_id,
-        "at_seq": next_event_seq(),
-    }
-
 
 def event_time_columns(metadata: Any) -> tuple[int, str]:
     """Разобрать момент события и ключ порядка события в значения колонок.
@@ -816,40 +781,24 @@ class DbLoggingService:
         self._reported_probe_events: set[str] = set()
         self._reported_rejected_levels: set[str] = set()
 
-        # Индекс «текущий вопрос»: session_key -> контекст вопроса.
-        # Парная запись {request_id, user_id} — обе поля обновляются
-        # атомарно под _request_index_lock в register_request. Позволяет
-        # пронести request_id/user_id/chat_id/parent_request_id
-        # на все события вопроса (tool.started/agent.responded/agent.delivered),
-        # даже если сами события не несут этих полей.
-        # В рамках сессии прогоны последовательны, разные сессии имеют
-        # разные ключи — коллизий нет.
+        # Личность оборота — ЕДИН носитель, и живёт он в хранилище рантайма,
+        # а не в словаре службы. Раньше их было два: индекс «текущий вопрос»
+        # здесь и снимок входа в ``TurnIdentityStore``; оба писались в одной
+        # строке ``register_request``, но под разными замками, и пара «индекс +
+        # снимок» не была атомарной. Теперь запись одна, замок один, и вопрос
+        # со снимком — две части одной записи с разными сроками жизни.
+        #
         # ``user_id`` денормализован для security boundary в
         # ``history_search(session_scope="all")``. ``get_request_user_id``
-        # НЕ вводится публично — и индекс, и снимок личности читаются ТОЛЬКО
-        # внутри резолва ``_enqueue``, чтобы ни один компонент не получил бы
-        # способ резолвить чужой identity по session_key. Публичного читателя
+        # НЕ вводится публично — и привязка вопроса, и снимок входа читаются
+        # ТОЛЬКО внутри резолва ``_enqueue``, чтобы ни один компонент не получил
+        # бы способ резолвить чужой identity по session_key. Публичного читателя
         # «кто сейчас владеет сессией» по-прежнему не существует, и добавлять
         # его нельзя: в режиме ``cli`` сессия общая.
-        self._request_index: dict[str, dict[str, str | None]] = {}
-        # Снимок личности ВХОДА оборота. Живёт отдельно от индекса вопросов и
-        # переживает ``clear_request``: финальный ответ оборота публикуется уже
-        # после конца оборота, когда индекс пуст, а подписать событие без
-        # ``session_id``+``user_id`` транспорт не может (см.
-        # ``_take_turn_identity``). Кладёт ``register_request`` — в том числе
-        # когда вопроса не было (``request_id=None``): личность входа нужна и
-        # фоновому вызову, иначе его события ушли бы в fallback-файл (см.
-        # ``_resolve_event_user_id_without_request``). Помимо пары полей несёт
-        # ``at_seq`` — момент появления, чтобы отложенное событие не унаследовало
-        # личность следующего входа. Тип значений — ``Any``, а не ``str|None``,
-        # именно из-за ``at_seq``.
-        # Личность оборота лежит в хранилище рантайма, а не в словаре
-        # службы: читают её двое - подписчик событий и сам журнал на
-        # пути финальной доставки, и владелец у них общий. Без переданного
-        # хранилища (сборка без composition root, тесты) служба берёт
-        # своё - тогда читателей у личности ровно один.
+        #
+        # Без переданного хранилища (сборка без composition root, тесты)
+        # служба берёт своё — тогда читателей у личности ровно один.
         self.turn_identities = turn_identities or TurnIdentityStore()
-        self._request_index_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -938,8 +887,7 @@ class DbLoggingService:
             self._thread = None
         # Снимки личности входа относятся к оборотам этого процесса: после
         # остановки подписчик не должен отдать их следующему start().
-        with self._request_index_lock:
-            self.turn_identities.clear()
+        self.turn_identities.clear()
         self._abandon_deferred_batches()
         if not self._stats_reported:
             self._stats_reported = True
@@ -1134,15 +1082,16 @@ class DbLoggingService:
     ) -> bool:
         """Зарегистрировать контекст вопроса (upsert в agent_question_runs).
 
-        Также сохраняет session_key → {request_id, user_id} в индексе,
-        чтобы последующие tool/run/outbound-события знали request_id
-        текущего вопроса и могли получить ``user_id`` через request_id
-        matching в ``_enqueue`` (для security boundary
+        Также кладёт личность ВХОДА сессии в её единственный носитель
+        (``TurnIdentityStore``), чтобы последующие tool/run/outbound-события
+        знали request_id текущего вопроса и могли получить ``user_id`` через
+        request_id matching в ``_enqueue`` (для security boundary
         ``history_search(session_scope="all")``).
 
-        Пара ``{request_id, user_id}`` обновляется атомарно под
-        ``_request_index_lock`` — параллельный reader видит либо
-        полностью старое состояние, либо полностью новое.
+        Запись пишется целиком под одним замком, поэтому параллельный reader
+        видит либо полностью старое состояние, либо полностью новое. Раньше
+        для этого требовались два носителя — индекс вопросов и снимок входа —
+        и два замка, и пара «индекс + снимок» между ними атомарной не была.
 
         Returns:
             ``True`` — строка прогона поставлена в очередь; ``False`` —
@@ -1161,32 +1110,25 @@ class DbLoggingService:
         ``_resolve_event_user_id_without_request``).
         """
         if not request_id:
-            # ``_request_index`` здесь НЕ трогаем: у вызова без вопроса нет
-            # активного оборота, и подставлять его ``session_key`` в индекс
-            # вопросов значило бы выдумать запись, которой нет. Снимок
-            # личности — другое дело, он про отправителя, а не про вопрос.
-            if session_key:
-                with self._request_index_lock:
-                    self.turn_identities.record(session_key, _turn_identity_snapshot(
-                        None, user_id,
-                    ))
+            # Привязку вопроса НЕ трогаем: у вызова без вопроса нет активного
+            # оборота, и сбрасывать чужой вопрос значило бы стереть тот, который
+            # ещё идёт. Личность ВХОДА — другое дело, она про отправителя, а не
+            # про вопрос, и нужна фоновому вызову даже без вопроса.
+            self.turn_identities.note_caller(
+                session_key, user_id=user_id, at_seq=next_event_seq(),
+            )
             with self._state_lock:
                 self._stats["registration_skipped"] += 1
             return False
-        if session_key:
-            with self._request_index_lock:
-                self._request_index[session_key] = {
-                    "request_id": request_id,
-                    "user_id": user_id,
-                }
-                # Снимок личности ВХОДА: ``sender_id`` известен только здесь и
-                # больше нигде в обороте. Кладём рядом с индексом, той же
-                # блокировкой — читатель снимка увидит либо старую, либо новую
-                # пару целиком. ``clear_request`` его НЕ трогает: финальный
-                # ответ приходит после конца оборота (см. ``_take_turn_identity``).
-                self.turn_identities.record(session_key, _turn_identity_snapshot(
-                    request_id, user_id,
-                ))
+        # ``sender_id`` известен только здесь и больше нигде в обороте, поэтому
+        # запись кладётся на входе и переживает ``clear_request``: финальный
+        # ответ приходит после конца оборота (см. ``_take_turn_identity``).
+        self.turn_identities.start_turn(
+            session_key,
+            user_id=user_id,
+            request_id=request_id,
+            at_seq=next_event_seq(),
+        )
         return self._enqueue(_QuestionRunRecord(
             request_id=request_id,
             session_id=session_key,
@@ -1204,22 +1146,22 @@ class DbLoggingService:
         ))
 
     def get_request_id(self, session_key: str | None) -> str | None:
-        """Получить request_id текущего вопроса для сессии."""
-        if not session_key:
-            return None
-        with self._request_index_lock:
-            entry = self._request_index.get(session_key)
-            if not isinstance(entry, dict):
-                return None
-            value = entry.get("request_id")
-            return value if isinstance(value, str) else None
+        """Получить request_id текущего вопроса для сессии.
+
+        Фасад над владельцем записи, а не своё хранилище: метод остаётся
+        публичным, потому что им пользуются хуки оборота и шина журнала, но
+        источник ответа у них один. Прямого доступа к привязке вопроса у
+        службы больше нет.
+        """
+        return self.turn_identities.get_request_id(session_key)
 
     def clear_request(self, session_key: str | None) -> None:
-        """Снять привязку вопроса по завершении прогона."""
-        if not session_key:
-            return
-        with self._request_index_lock:
-            self._request_index.pop(session_key, None)
+        """Снять привязку вопроса по завершении прогона.
+
+        Снимается только привязка: личность ВХОДА остаётся, иначе финальный
+        ответ оборота ушёл бы неподписанным (см. ``_take_turn_identity``).
+        """
+        self.turn_identities.release_question(session_key)
 
     def finish_request(
         self,
@@ -1271,27 +1213,22 @@ class DbLoggingService:
         между входящим и финальным ответом успеет зарегистрироваться НОВЫЙ
         вопрос той же сессии, снимок будет взят у него.
         """
-        if not session_key:
-            return None
-        with self._request_index_lock:
-            return self.turn_identities.take(session_key)
+        return self.turn_identities.take(session_key)
 
     def _identity_of_request(self, request_id: str) -> tuple[str | None, str | None]:
         """Найти ``(session_id, user_id)`` вопроса по его ``request_id``.
 
-        Читается тот же индекс, что и в ``_enqueue``, и по тому же правилу:
-        личность берётся только из записи, заведённой ``register_request`` для
-        этого же ``request_id``. Чужая не подставляется, отсутствующая не
-        выдумывается — тогда вызывающий получит неподписанную запись и
-        посчитает её пропущенной.
+        Ходит в ту же запись, что и ``_enqueue``, и по тому же правилу: личность
+        берётся только из записи, заведённой ``register_request`` для этого же
+        ``request_id`` и ещё не снятой ``clear_request``. Чужая не
+        подставляется, отсутствующая не выдумывается — тогда вызывающий
+        получит неподписанную запись и посчитает её пропущенной.
         """
-        with self._request_index_lock:
-            for session_key, entry in self._request_index.items():
-                if entry.get("request_id") != request_id:
-                    continue
-                user_id = entry.get("user_id")
-                return session_key, user_id if isinstance(user_id, str) else None
-        return None, None
+        found = self.turn_identities.identity_of_request(request_id)
+        if found is None:
+            return None, None
+        session_key, user_id = found
+        return session_key, user_id
 
     def log_inbound(
         self,
@@ -1370,9 +1307,9 @@ class DbLoggingService:
         effective_request_id = request_id
         snapshot = self._take_turn_identity(session_id)
         if snapshot:
-            user_id = snapshot.get("user_id")
+            user_id = snapshot.user_id
             if not effective_request_id:
-                effective_request_id = snapshot.get("request_id")
+                effective_request_id = snapshot.request_id
         return self.log_event(LogEvent(
             event_type="agent.delivered",
             level=level,
@@ -1812,13 +1749,12 @@ class DbLoggingService:
         if event.request_id is None:
             self._resolve_event_user_id_without_request(event)
             return
-        with self._request_index_lock:
-            entry = self._request_index.get(event.session_id)
-        if not isinstance(entry, dict):
+        entry = self.turn_identities.question_of(event.session_id)
+        if entry is None:
             return
-        if entry.get("request_id") != event.request_id:
+        if entry.request_id != event.request_id:
             return
-        resolved = entry.get("user_id")
+        resolved = entry.user_id
         if isinstance(resolved, str):
             event.user_id = resolved
 
@@ -1862,18 +1798,17 @@ class DbLoggingService:
             # Момент события неизвестен — значит, сравнить не с чем, а
             # подписывать по сессии без сверки запрещено.
             return
-        with self._request_index_lock:
-            snapshot = self.turn_identities.current(event.session_id)
-        if not isinstance(snapshot, dict):
+        snapshot = self.turn_identities.current(event.session_id)
+        if snapshot is None:
             return
-        if snapshot.get("request_id") is not None:
+        if snapshot.request_id is not None:
             # Сессия сейчас в обороте с вопросом: этот снимок — про тот
             # вопрос, и событие без ``request_id`` ему не принадлежит.
             return
-        snapshot_seq = snapshot.get("at_seq")
-        if not isinstance(snapshot_seq, int) or snapshot_seq > event_seq:
+        snapshot_seq = snapshot.at_seq
+        if snapshot_seq > event_seq:
             return
-        resolved = snapshot.get("user_id")
+        resolved = snapshot.user_id
         if isinstance(resolved, str) and resolved:
             event.user_id = resolved
 

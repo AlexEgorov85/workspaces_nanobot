@@ -42,6 +42,13 @@ from typing import Any
 
 from nanobot.agent import AgentHook
 
+from lib.services.turn_identity import (
+    IDENTITY_KEYS,  # noqa: F401 - реэкспорт: контракт сверяют тесты платформы
+    call_identity,
+    read_turn_context,
+    request_id_from,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Префикс имён операций платформы в реестре нанобота: сервер объявлен в
@@ -50,11 +57,11 @@ logger = logging.getLogger(__name__)
 #: MCP-серверы агента не обязаны знать про ``LEGACY_IDENTITY_KEYS``.
 MCP_TOOL_PREFIX = "mcp_enterprise_"
 
-#: Плоские ключи идентичности. Имена обязаны совпадать с
-#: ``LEGACY_IDENTITY_KEYS`` в ``mcp-platform/libs/enterprise_common/
-#: execution/pipeline.py:71`` — сервер читает ровно эти три и вырезает их из
-#: аргументов. Расхождение имён не падает, а молча ломает изоляцию.
-IDENTITY_KEYS = ("session_id", "user_id", "request_id")
+#: ``IDENTITY_KEYS`` приходит из ``lib/services/turn_identity.py`` — рядом с
+#: той сборкой, которая из него делает словарь. Отдельное объявление здесь
+#: было бы второй копией контракта, и страж
+#: ``tests/test_mcp_platform_declaration.py`` сверял бы с платформой ту
+#: копию, которая перестала быть используемой.
 
 
 class McpIdentityHook(AgentHook):
@@ -114,16 +121,26 @@ class McpIdentityHook(AgentHook):
     def _identity(self, context: Any) -> dict[str, str] | None:
         """Личность текущего оборота или ``None``, если она неполна.
 
-        Порядок источников повторяет ``EnterpriseMcpClient._identity_from_turn``:
-        это тот же расчёт из того же ``RequestContext``, иначе событие в
-        журнале и файл сессии описывали бы разные вызовы.
+        Расчёт стоит в ``lib/services/turn_identity.py`` вместе с чтением
+        ``RequestContext`` и с носителем записи. Прежняя копия была ещё и в
+        клиенте платформы, и держались две копии только комментарием друг об
+        друге: разошлись бы — подпись в журнале и содержимое файла сессии
+        описали бы разные вызовы, и нигде бы это не было видно.
         """
-        session_id = self._session_key(context)
-        user_id = self._sender_id()
+        turn = read_turn_context()
+        # Прямое поле хука важнее contextvar: ``AgentHookContext.session_key``
+        # приходит аргументом и есть даже у вызова вне итерации.
+        raw_key = getattr(context, "session_key", None)
+        session_id = (
+            raw_key.strip() if isinstance(raw_key, str) and raw_key.strip() else None
+        )
+        if not session_id and turn is not None:
+            session_id = turn.session_key
+        user_id = turn.user_id if turn is not None else None
         if not session_id or not user_id:
             return None
 
-        request_id = self._request_id(session_id)
+        request_id = request_id_from(self._db_logging_service, session_id)
         if not request_id:
             # Сервер требует все три ключа, а ``request_id`` — PK оборота в
             # ``agent_question_runs``. Нет оборота — нет и связи события с
@@ -131,67 +148,7 @@ class McpIdentityHook(AgentHook):
             # несуществующему вопросу.
             return None
 
-        return {
-            "session_id": session_id,
-            "user_id": user_id,
-            "request_id": request_id,
-        }
-
-    def _session_key(self, context: Any) -> str | None:
-        """Ключ сессии оборота.
-
-        Сначала контекст хука: ``AgentHookContext.session_key`` — прямое
-        поле, без обращения к contextvar. Contextvar остаётся запасным
-        путём для вызовов вне итерации.
-        """
-        session_key = getattr(context, "session_key", None)
-        if isinstance(session_key, str) and session_key.strip():
-            return session_key.strip()
-        return self._current_request_session_key()
-
-    @staticmethod
-    def _current_request_session_key() -> str | None:
-        try:
-            from nanobot.agent.tools.context import current_request_session_key
-
-            value = current_request_session_key()
-        except Exception:  # noqa: BLE001 - нанобот может не отдавать contextvar
-            return None
-        return str(value) if isinstance(value, str) and value.strip() else None
-
-    @staticmethod
-    def _sender_id() -> str | None:
-        """``RequestContext.sender_id`` текущего request.
-
-        Единственное обращение к identity-store в хуке: зависимость от
-        nanobot 0.3.0 изолирована здесь, и переименование поля чинит одна
-        функция, а не весь хук.
-        """
-        try:
-            from nanobot.agent.tools.context import current_request_context
-
-            ctx = current_request_context()
-        except Exception:  # noqa: BLE001 - тот же контракт, что и в клиенте
-            return None
-        if ctx is None:
-            return None
-        sender_id = getattr(ctx, "sender_id", None)
-        return sender_id if isinstance(sender_id, str) and sender_id else None
-
-    def _request_id(self, session_id: str) -> str | None:
-        """PK оборота из индекса журнала.
-
-        Журнал недоступен — не повод отказывать в вызове, но и подставить
-        нечего: без ``request_id`` платформа всё равно отвергнет вызов.
-        """
-        service = self._db_logging_service
-        if service is None:
-            return None
-        try:
-            value = service.get_request_id(session_id)
-        except Exception:  # noqa: BLE001 - индекс, а не граница изоляции
-            return None
-        return str(value) if value else None
+        return call_identity(session_id, user_id, request_id)
 
     @staticmethod
     def _tool_name(tool_call: Any, tool: Any) -> str:

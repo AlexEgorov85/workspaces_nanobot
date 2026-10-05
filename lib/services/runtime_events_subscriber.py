@@ -56,7 +56,11 @@ from nanobot.bus.runtime_events import TurnCompleted, TurnRuntimeAdmitted
 from lib.events.subagent import SubagentTurnCompleted
 from lib.hooks.database_logging_hook import seed_context_window
 from lib.services.db_logging_service import LogEvent
-from lib.services.turn_identity import TurnIdentityStore
+from lib.services.turn_identity import (
+    TurnIdentityStore,
+    read_turn_context,
+    request_id_from,
+)
 
 
 def _current_sender_id() -> str | None:
@@ -71,16 +75,12 @@ def _current_sender_id() -> str | None:
     ``nanobot/agent/loop.py`` снимается до ``delivery.complete()``, поэтому
     после финала оборота контекста уже не существует.
     """
-    try:
-        from nanobot.agent.tools.context import current_request_context
-
-        ctx = current_request_context()
-    except Exception:
-        return None
-    if ctx is None:
-        return None
-    sender_id = getattr(ctx, "sender_id", None)
-    return sender_id if isinstance(sender_id, str) and sender_id else None
+    # Чтение ``RequestContext`` живёт в ``lib/services/turn_identity.py``:
+    # тот же contextvar читались хук подписи вызовов и клиент платформы, и три
+    # копии правила разъезжались бы молча — подпись в журнале и файл сессии
+    # описали бы разные вызовы.
+    turn = read_turn_context()
+    return turn.user_id if turn is not None else None
 
 
 @dataclass(frozen=True)
@@ -211,15 +211,15 @@ class RuntimeEventsSubscriber:
         # контекст привязан к задаче оборота, а подписчик живёт в своей. На
         # практике agent.completed терял подпись в каждом обороте, тогда как
         # следом идущий agent.delivered её получал.
-        identity: dict[str, Any] = {}
+        identity = None
         store = self._turn_identities
         if store is not None:
             try:
-                identity = store.current(session_key) or {}
+                identity = store.current(session_key)
             except Exception:
-                identity = {}
+                identity = None
 
-        user_id = identity.get("user_id")
+        user_id = identity.user_id if identity is not None else None
         if not isinstance(user_id, str) or not user_id:
             # Журнал личности не знает — остаётся контекст оборота. Выдумывать
             # значение нельзя: подставленный отправитель записал бы событие в
@@ -228,14 +228,14 @@ class RuntimeEventsSubscriber:
         if not user_id:
             return
 
-        request_id: str | None = identity.get("request_id")
+        request_id: str | None = (
+            identity.request_id if identity is not None else None
+        )
         if not request_id:
-            try:
-                request_id = service.get_request_id(session_key)
-            except Exception:
-                # Журнал может быть недоступен — это не повод терять user_id,
-                # он уже получен и его достаточно для подписи вызова.
-                request_id = None
+            # Журнал здесь — фасад над тем же хранилищем, а не второй
+            # источник: ответ у них один. Отказ хранилища не повод терять
+            # user_id, он уже получен и его достаточно для подписи вызова.
+            request_id = request_id_from(service, session_key)
         with self._identity_lock:
             self._turn_identities_seen[session_key] = _TurnIdentity(
                 user_id=user_id, request_id=request_id

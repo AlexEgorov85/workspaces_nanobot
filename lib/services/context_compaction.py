@@ -595,20 +595,16 @@ def _current_request_sender_id() -> str | None:
     для прокидывания ``user_id`` в ``agent_gateway_logs`` (security
     boundary для ``history_search(session_scope="all")``).
     """
-    try:
-        from nanobot.agent.tools.context import current_request_context
-    except Exception:
-        return None
-    try:
-        ctx = current_request_context()
-    except Exception:
-        return None
-    if ctx is None:
-        return None
-    sender_id = getattr(ctx, "sender_id", None)
-    if isinstance(sender_id, str) and sender_id:
-        return sender_id
-    return None
+    # Чтение личности оборота живёт в lib/services/turn_identity.py:
+    # тот же contextvar читались хук подписи вызовов, клиент платформы,
+    # подписчик событий и ещё три места, и копии правила разъезжались бы
+    # молча — подпись в журнале и файл сессии описали бы разные вызовы.
+    # Импорт ленивый: функцию подменяют в тестах по имени, и лишний
+    # импорт на этапе сборки модуля ей не нужен.
+    from lib.services.turn_identity import read_turn_context
+
+    turn = read_turn_context()
+    return turn.user_id if turn is not None else None
 
 
 def _anchor_or_none(value: str | None, predicate) -> str | None:
