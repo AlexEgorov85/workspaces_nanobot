@@ -379,9 +379,30 @@ async def _report_enterprise_mcp_health(ctx, client) -> None:
                 healthy = bool(payload.get("ok"))
             elif operation == "list_indexes":
                 indexes = payload.get("indexes") or []
-                healthy = bool(indexes) and all(
-                    i.get("state") == "ready" for i in indexes
+                # Готовность судится по индексам, которые ПЛАТФОРМА ОБЯЗАНА
+                # прогреть на старте: объявленным и не отключённым. Источник,
+                # который лежит в снимке, но не объявлен, в прогреве не
+                # участвует никогда — судить по нём было бы признанием
+                # «платформа нездорова» по объявлению, а не по данным, и баннер
+                # горел бы WARN постоянно.
+                enabled = [
+                    i for i in indexes
+                    if i.get("declared", True) is not False
+                    and i.get("enabled", True)
+                ]
+                orphans = [i for i in indexes if i.get("declared") is False]
+                healthy = bool(enabled) and all(
+                    i.get("state") == "ready" for i in enabled
                 )
+                if orphans:
+                    names = ", ".join(
+                        str(i.get("index_name")) for i in orphans
+                    )
+                    line = (
+                        f"{line}; в снимке {len(orphans)} незаявленных источников "
+                        f"({names}) — в прогреве они не участвуют"
+                    )
+                    healthy = False
             elif operation == "list_scripts":
                 count = payload.get("count")
                 if count is None:
@@ -481,20 +502,42 @@ def _indexes_line(data: dict) -> str:
     Возвращается ГОЛЫЙ текст, без rich-разметки: строка уходит в общий
     построчный поток loguru, и ``[red]`` в нём был бы виден как мусор.
     Тяжесть строки задаёт вызывающий (см. ``_report_enterprise_mcp_health``).
+
+    В счёт идут только **объявленные и включённые** индексы — их прогревает
+    старт платформы. Незаявленный источник из снимка в готовность не входит,
+    а отключённый объявлением (``enabled=false``) не входит по определению:
+    его отсутствие в памяти — не дефект. Оба называются в строке отдельно.
     """
     indexes = data.get("indexes") or []
     if not indexes:
         return "индексы не объявлены"
-    ready = [i for i in indexes if i.get("state") == "ready"]
-    counts = ", ".join(str(i.get("vector_count", "?")) for i in indexes)
-    if len(ready) != len(indexes):
+    # Поле ``declared`` в ответе может отсутствовать: агент и платформа — два
+    # разных процесса, и при подъёме против более старой сборки сервера поля
+    # ещё нет. Отсутствие читается как «объявлен», а не как «не объявлен»:
+    # иначе сводка сказала бы «объявленных индексов нет» там, где они есть.
+    declared = [i for i in indexes if i.get("declared", True) is not False]
+    if not declared:
+        return "индексы не объявлены"
+    enabled = [i for i in declared if i.get("enabled", True)]
+    disabled = [i for i in declared if not i.get("enabled", True)]
+    if not enabled:
+        return "все объявленные индексы отключены (enabled=false)"
+    ready = [i for i in enabled if i.get("state") == "ready"]
+    counts = ", ".join(str(i.get("vector_count", "?")) for i in enabled)
+    if len(ready) != len(enabled):
         bad = ", ".join(
             "%s=%s" % (i.get("index_name"), i.get("state") or "unknown")
-            for i in indexes
+            for i in enabled
             if i.get("state") != "ready"
         )
-        return f"{len(ready)}/{len(indexes)} ready ({bad})"
-    return f"{len(ready)}/{len(indexes)} ready (векторов: {counts})"
+        line = f"{len(ready)}/{len(enabled)} ready ({bad})"
+    else:
+        line = f"{len(ready)}/{len(enabled)} ready (векторов: {counts})"
+    if disabled:
+        line += ", отключено объявлением: " + ", ".join(
+            str(i.get("index_name")) for i in disabled
+        )
+    return line
 
 
 def _schema_line(data: dict) -> str:

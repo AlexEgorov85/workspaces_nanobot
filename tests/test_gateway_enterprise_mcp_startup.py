@@ -508,6 +508,106 @@ class TestRenderers:
         assert "1/2 ready" in line
         assert "b=failed" in line
 
+    def test_undeclared_source_is_not_counted_as_unready(self):
+        """Источник из снимка без объявления — не «неготовый индекс».
+
+        Платформа прогревает объявленные индексы, и незаявленный в прогреве не
+        участвует никогда. Если считать его неготовым, баннер горит WARN
+        постоянно, хотя данные в порядке: это расхождение объявления со
+        снимком, и оно должно быть названо своим именем, а не выглядеть как
+        поломка поиска.
+        """
+        from gateway import _indexes_line
+
+        line = _indexes_line(
+            {
+                "indexes": [
+                    {
+                        "index_name": "audits_index",
+                        "declared": True,
+                        "enabled": True,
+                        "state": "ready",
+                        "vector_count": 10,
+                    },
+                    {
+                        "index_name": "legacy_index",
+                        "declared": False,
+                        "enabled": False,
+                        "state": "missing",
+                        "vector_count": 4,
+                    },
+                ]
+            }
+        )
+
+        assert "1/1 ready" in line, "незаявленный источник попал в знаменатель"
+        assert "legacy_index" not in line, (
+            "незаявленный источник назван в строке готовности: он не в счёте"
+        )
+
+    def test_disabled_index_is_named_but_not_unready(self):
+        """Отключённый объявлением индекс назван и не портит счёт."""
+        from gateway import _indexes_line
+
+        line = _indexes_line(
+            {
+                "indexes": [
+                    {
+                        "index_name": "audits_index",
+                        "declared": True,
+                        "enabled": True,
+                        "state": "ready",
+                        "vector_count": 10,
+                    },
+                    {
+                        "index_name": "reports_index",
+                        "declared": True,
+                        "enabled": False,
+                        "state": "missing",
+                        "vector_count": 0,
+                    },
+                ]
+            }
+        )
+
+        assert "1/1 ready" in line
+        assert "reports_index" in line
+        assert "отключено" in line
+
+    def test_all_disabled_indexes_are_reported(self):
+        """Все индексы отключены — это состояние, а не пустота."""
+        from gateway import _indexes_line
+
+        line = _indexes_line(
+            {
+                "indexes": [
+                    {
+                        "index_name": "audits_index",
+                        "declared": True,
+                        "enabled": False,
+                        "state": "missing",
+                    }
+                ]
+            }
+        )
+
+        assert "отключены" in line
+
+    def test_payload_without_declared_field_still_counts(self):
+        """Агент против более старой сборки сервера: поля ``declared`` нет.
+
+        Ответ с молчащим полем читается как «всё объявлено» — иначе сводка
+        сказала бы «индексы не объявлены» при трёх готовых индексах, то есть
+        выдумала бы дефект там, где его нет.
+        """
+        from gateway import _indexes_line
+
+        line = _indexes_line(
+            {"indexes": [{"index_name": "a", "state": "ready", "vector_count": 3}]}
+        )
+
+        assert "1/1 ready" in line
+
     def test_missing_tables_are_named(self):
         from gateway import _schema_line
 

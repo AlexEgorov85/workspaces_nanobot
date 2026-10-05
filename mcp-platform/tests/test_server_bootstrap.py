@@ -335,6 +335,64 @@ class TestStartupPreparation:
 
         assert "error" in caplog.text, "состояние индекса в логе не отражено"
 
+    def test_disabled_index_is_not_built_at_startup(self) -> None:
+        """Индекс с ``enabled=false`` объявлен, но отключён.
+
+        Прогревать его нельзя: его отсутствие в памяти — не дефект, а
+        исполнение объявления. Иначе отключённый индекс собирается вопреки
+        воле оператора и платит памятью за то, что выключено, — а проверка
+        готовности потом честно говорит «не готов», то есть враньё вместо
+        отказа.
+        """
+
+        class _WithDisabled(self._Vectors):
+            def list_indexes(self) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "index_name": name,
+                        "declared": True,
+                        "enabled": name != "violations_index",
+                    }
+                    for name in self._declared
+                ]
+
+        owner = self._Owner()
+        vectors = _WithDisabled(["audits_index", "violations_index"], owner)
+
+        enterprise_server._prepare_capabilities(self._Container(vectors=vectors))
+
+        assert owner.built == ["audits_index"], (
+            "отключённый объявлением индекс не должен собираться на старте"
+        )
+
+    def test_snapshot_only_source_is_not_built_at_startup(self) -> None:
+        """Источник, который есть в снимке, но не объявлен, прогреву не подлежит.
+
+        У него нет ни метрики, ни размерности, ни подписи — собирать его нечем
+        и незачем. Но отказом это тоже не считается: несовпадение объявления и
+        данных наблюдается в ответе операций, а не роняет старт.
+        """
+
+        class _WithUndeclared(self._Vectors):
+            def list_indexes(self) -> list[dict[str, Any]]:
+                return [
+                    {"index_name": name, "declared": True, "enabled": True}
+                    for name in self._declared
+                ] + [
+                    {
+                        "index_name": "legacy_index",
+                        "declared": False,
+                        "enabled": False,
+                    }
+                ]
+
+        owner = self._Owner()
+        vectors = _WithUndeclared(["audits_index"], owner)
+
+        enterprise_server._prepare_capabilities(self._Container(vectors=vectors))
+
+        assert owner.built == ["audits_index"]
+
     def test_preparation_runs_before_loop_starts(self) -> None:
         statements = _main_statements()
         loop = _loop_statement_index()
