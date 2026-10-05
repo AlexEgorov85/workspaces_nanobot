@@ -711,88 +711,6 @@
       "stale_tolerance_seconds": 120,
       "sync_lag_threshold_seconds": 3600
     },
-    "vector": {
-      "index": {
-        "enable": true,
-        "storage_table": "oarb.audit_vectors",
-        "default_root": "data_store/vectors",
-        "backend": "faiss",
-        "indexes": {
-          "audits_index": {
-            "table": "oarb.audits",
-            "pk": "id",
-            "source_table": "audits",
-            "content_columns": [
-              "title",
-              "audit_type",
-              "auditee_entity",
-              "status"
-            ],
-            "embedding_columns": [
-              "title",
-              "audit_type",
-              "auditee_entity",
-              "status"
-            ],
-            "track_column": "updated_at",
-            "chunk_size": 500,
-            "chunk_overlap": 80,
-            "metric": "cosine",
-            "enabled": true
-          },
-          "violations_index": {
-            "table": "oarb.violations",
-            "pk": "id",
-            "source_table": "violations",
-            "content_columns": [
-              "description",
-              "recommendation",
-              "violation_code",
-              "severity"
-            ],
-            "embedding_columns": [
-              {
-                "column": "description",
-                "chunk": true,
-                "chunk_size": 500,
-                "chunk_overlap": 80
-              },
-              "violation_code"
-            ],
-            "track_column": "updated_at",
-            "chunk_size": 500,
-            "chunk_overlap": 80,
-            "metric": "cosine",
-            "enabled": true
-          },
-          "audit_reports_index": {
-            "table": "oarb.audit_reports",
-            "pk": "id",
-            "source_table": "audit_reports",
-            "content_columns": [
-              "full_text",
-              "title",
-              "report_number",
-              "report_date"
-            ],
-            "embedding_columns": [
-              {
-                "column": "full_text",
-                "chunk": true,
-                "chunk_size": 500,
-                "chunk_overlap": 80
-              },
-              "title"
-            ],
-            "track_column": "updated_at",
-            "chunk_size": 500,
-            "chunk_overlap": 80,
-            "metric": "cosine",
-            "enabled": true
-          }
-        }
-      }
-    },
     "agent": {
       "project": {
         "version": "2.5.2"
@@ -813,36 +731,7 @@
       },
       "skills": {
         "audit_analyzer": {
-          "enabled": true,
-          "tables": [
-            {
-              "name": "oarb.audit_reports"
-            },
-            {
-              "name": "oarb.audits"
-            },
-            {
-              "name": "oarb.report_items"
-            },
-            {
-              "name": "oarb.violations"
-            },
-            {
-              "name": "public.agent_predefined_scripts",
-              "label": "scripts_registry"
-            }
-          ],
-          "vector_indexes": [
-            {
-              "name": "audits_index"
-            },
-            {
-              "name": "violations_index"
-            },
-            {
-              "name": "audit_reports_index"
-            }
-          ]
+          "enabled": true
         }
       },
       "logging": {

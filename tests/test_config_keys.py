@@ -85,20 +85,6 @@ def _required_keys():
         ("channels.postgres.pool.max_conn", 4),
         ("channels.postgres.pool.pool_timeout", 5.0),
         # channels.redis удалён вместе с каналом: каналов один — PostgreSQL.
-        # skills.audit_analyzer
-        # Новая модель (Phase 7): tables[] + vector_indexes[] вместо db.* + vector_index.*
-        ("skills.audit_analyzer.tables", [
-            {"name": "oarb.audit_reports"},
-            {"name": "oarb.audits"},
-            {"name": "oarb.report_items"},
-            {"name": "oarb.violations"},
-            {"name": "public.agent_predefined_scripts", "label": "scripts_registry"},
-        ]),
-        ("skills.audit_analyzer.vector_indexes", [
-            {"name": "audits_index"},
-            {"name": "violations_index"},
-            {"name": "audit_reports_index"},
-        ]),
         # Секция ``gateway.sync.*`` удалена вместе со снимком
         # ``PgDuckDbSyncService`` (change ``drop-local-cache-read-from-pg``):
         # фонового режима синхронизации нет, кеш — разовая
@@ -111,11 +97,13 @@ def _required_keys():
         ("gateway.session_cold_sync.batch_size", 50),
         ("gateway.session_cold_sync.stale_tolerance_seconds", 120),
         ("gateway.session_cold_sync.sync_lag_threshold_seconds", 3600),
-        # Embedding-параметры захардкожены в cache_provider_impl (модульные
-        # константы); секция gateway.vector.embedding удалена. Бearer-токен —
-        # переменная окружения OS EMBED_TOKEN. Индексы декларируются в
-        # gateway.vector.index.indexes (перенесено из PG-реестра
-        # agent_vector_index_config, который больше не читается кодом).
+        # Embedding-параметры и Bearer-токен (переменная окружения ОС
+        # EMBED_TOKEN) принадлежат capability ``vectors`` платформы; в
+        # ``config.json`` своей секции у агента не имеют. Состав таблиц и
+        # индексов объявляет ``mcp-platform/platform.json`` (``audit.tables``,
+        # ``vectors.indexes``), и то, что агент своего состава индексов не
+        # держит, фиксирует страж
+        # ``TestAgentDeclaresNoVectorIndexComposition`` ниже.
         # cli
         ("cli.show_reasoning", True),
         ("cli.llm_timeout", 300),
@@ -143,20 +131,10 @@ def _required_keys():
         # gateway.duckdb_query / gateway.vector_search — удалены (этап 18):
         # Agent-facing tools (duckdb_query_tool.py, vector_search_tool.py)
         # удалены; Agent работает через Core capability (CacheProvider).
-        ("gateway.vector.index.enable", True),
-        ("gateway.vector.index.default_root", "data_store/vectors"),
-        ("gateway.vector.index.backend", "faiss"),
-        ("gateway.vector.index.storage_table", "oarb.audit_vectors"),
-        ("gateway.vector.index.indexes.audits_index.table", "oarb.audits"),
-        ("gateway.vector.index.indexes.audits_index.pk", "id"),
-        ("gateway.vector.index.indexes.audits_index.metric", "cosine"),
-        ("gateway.vector.index.indexes.audits_index.enabled", True),
-        ("gateway.vector.index.indexes.violations_index.table", "oarb.violations"),
-        ("gateway.vector.index.indexes.violations_index.pk", "id"),
-        ("gateway.vector.index.indexes.violations_index.metric", "cosine"),
-        ("gateway.vector.index.indexes.audit_reports_index.table", "oarb.audit_reports"),
-        ("gateway.vector.index.indexes.audit_reports_index.pk", "id"),
-        ("gateway.vector.index.indexes.audit_reports_index.metric", "cosine"),
+        # gateway.vector.index.* удалён: секции нет ни в config.json, ни в
+        # ProjectSettings. Состав индексов объявляет capability ``vectors``
+        # в mcp-platform/platform.json → vectors.indexes, и страж ниже
+        # проверяет, что агент своего списка индексов не объявляет.
         # logging.db
         ("logging.db.enabled", True),
         ("logging.db.table_name", runtime_table("gateway_logs")),
@@ -370,3 +348,91 @@ class TestLoggingDbFlushIntervalValidation:
         with pytest.raises(Exception) as exc_info:
             LoggingDbSettings(flush_interval_sec=70.0)
         assert "flush_interval_sec" in str(exc_info.value)
+
+
+class TestAgentDeclaresNoVectorIndexComposition:
+    """Агент своего состава таблиц и индексов не объявляет.
+
+    Канон состава — платформа: ``mcp-platform/platform.json →
+    vectors.indexes`` (индексы) и ``→ audit.tables`` (таблицы). Пока секция
+    ``gateway.vector.index.*`` и ключи ``skills.<name>.tables`` /
+    ``.vector_indexes`` жили и в ``config.json``, и в ``ProjectSettings``,
+    они были вторым объявлением без единого читателя: состава они не
+    меняли, но объявляли.
+
+    Список обязательных ключей этого не ловил — он проверяет наличие, а
+    мёртвое объявление проверяется только утверждением об ОТСУТСТВИИ.
+    Поэтому ниже именно отсутствие, а не значение.
+    """
+
+    def test_gateway_vector_section_absent(self):
+        assert "vector" not in _read_config_json()["gateway"], (
+            "gateway.vector удалён: состав индексов объявляет capability "
+            "vectors в mcp-platform/platform.json → vectors.indexes"
+        )
+
+    @pytest.mark.parametrize("key", ["tables", "vector_indexes"])
+    def test_skill_declares_no_composition(self, key):
+        skill = _read_config_json()["gateway"]["agent"]["skills"]["audit_analyzer"]
+        assert key not in skill, (
+            f"skills.audit_analyzer.{key} удалён: состав объявляет платформа "
+            "(audit.tables / vectors.indexes)"
+        )
+
+    def test_skill_section_survives_without_composition(self):
+        """Секция навыка остаётся: удалён состав, а не сам навык.
+
+        Корневой ``enabled`` — рабочая конструкция отключения без удаления
+        секции, поэтому её отсутствие означало бы снос навыка, а не снос
+        мёртвой конфигурации.
+        """
+        assert _read_config_json()["gateway"]["agent"]["skills"][
+            "audit_analyzer"
+        ] == {"enabled": True}
+
+    def test_no_removed_key_path_survives_in_settings_view(self):
+        """Ни в одной раскрытой секции SETTINGS удалённый путь не остался.
+
+        Проверка по поднятому в корень виду: секция, объявленная иначе,
+        всплыла бы сюда и продолжала читаться как рабочая. Сравнение по
+        точному пути и его продолжениям — ``skills.audit_analyzer.enabled``
+        остаётся и остаться должен, а вот ``...tables`` не должен.
+        """
+        removed = (
+            "vector",
+            "skills.audit_analyzer.tables",
+            "skills.audit_analyzer.vector_indexes",
+        )
+        flat = [p for p, _ in _walk(_load_config_keys())]
+        leftovers = [
+            p
+            for p in flat
+            if any(p == r or p.startswith(r + ".") for r in removed)
+        ]
+        assert leftovers == [], (
+            f"Остались пути удалённой конфигурации: {leftovers}"
+        )
+
+    def test_project_settings_has_no_vector_models(self):
+        """Модели удалены из схемы, а не только из файла.
+
+        Модель без потребителя — это объявление, за которым нечего читать;
+        страж читает ``__all__``, а не файл, поэтому проверяет оба.
+        """
+        from lib.core import project_settings
+
+        assert not [
+            name
+            for name in (
+                "VectorIndexSettings",
+                "VectorInfrastructureSettings",
+                "VectorIndexConfig",
+                "VectorIndexEntry",
+                "TableEntry",
+            )
+            if hasattr(project_settings, name)
+        ]
+        assert "vector" not in project_settings.GatewaySettings.model_fields
+        fields = project_settings.SkillSettings.model_fields
+        assert "tables" not in fields
+        assert "vector_indexes" not in fields

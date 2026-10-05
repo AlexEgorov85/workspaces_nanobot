@@ -1,14 +1,13 @@
 """Unit-тесты ``lib/core/project_settings.py``."""
 
 from __future__ import annotations
-from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
+from tests.conftest import TEST_VECTOR_TABLE
 
 import pytest
 
 from config import ConfigurationError
 from lib.core.project_settings import (
     SkillSettings,
-    TableEntry,
     validate_project_settings,
 )
 
@@ -118,89 +117,64 @@ class TestValidateProjectSettings:
         assert "document_text_threshold" in str(excinfo.value)
 
 
-class TestTableEntry:
-    """Pydantic-модель ``TableEntry`` и её использование в ``SkillSettings.tables``.
+class TestAgentCompositionNotDeclared:
+    """Навык своего состава таблиц и индексов не объявляет.
 
-    Расширение формата ``tables``: помимо строк допускаются
-    объекты ``{"name", "label?", "tracking_column?"}`` для задания
-    per-table атрибутов. Unknown keys запрещены (``extra="forbid"``).
+    ``tables`` / ``vector_indexes`` — второе объявление, а не привязка:
+    канон состава в ``mcp-platform/platform.json`` (``audit.tables`` и
+    ``vectors.indexes``), и в дереве агента у этих полей не было ни
+    одного читателя. Поля сняты, и объявление навыка теперь отвергается
+    ``extra="forbid"`` — как опечатка, а не как «пока игнорируем».
     """
 
-    def test_table_entry_minimal(self) -> None:
-        e = TableEntry.model_validate({"name": TEST_TABLE})
-        assert e.name == TEST_TABLE
-        assert e.label is None
-        assert e.tracking_column is None
-
-    def test_table_entry_full(self) -> None:
-        e = TableEntry.model_validate(
-            {"name": "public.scripts", "label": "scripts_registry", "tracking_column": "modified_at"}
-        )
-        assert e.name == "public.scripts"
-        assert e.label == "scripts_registry"
-        assert e.tracking_column == "modified_at"
-
-    def test_table_entry_extra_forbidden(self) -> None:
+    @pytest.mark.parametrize("key", ["tables", "vector_indexes"])
+    def test_skill_composition_key_rejected(self, key: str) -> None:
+        payload = {key: [{"name": "oarb.audits"}]}
         with pytest.raises(Exception) as excinfo:
-            TableEntry.model_validate({"name": "x", "bogus": 1})
-        assert "extra_forbidden" in str(excinfo.value) or "not permitted" in str(excinfo.value)
-
-    def test_table_entry_missing_name(self) -> None:
-        with pytest.raises(Exception):
-            TableEntry.model_validate({"label": "x"})
-
-    def test_skill_settings_tables_strings(self) -> None:
-        """Плоский список строк (min-контракт)."""
-        s = SkillSettings.model_validate({"tables": [TEST_TABLE, TEST_TABLE_2]})
-        assert s.tables == [TEST_TABLE, TEST_TABLE_2]
-
-    def test_skill_settings_tables_objects(self) -> None:
-        """Список объектов TableEntry."""
-        s = SkillSettings.model_validate({
-            "tables": [
-                {"name": TEST_TABLE},
-                {"name": "public.scripts", "label": "scripts_registry"},
-                {"name": "test.reports", "tracking_column": "modified_at"},
-            ],
-        })
-        assert len(s.tables) == 3
-        assert isinstance(s.tables[0], TableEntry)
-        assert s.tables[0].name == TEST_TABLE
-        assert s.tables[0].label is None
-        assert isinstance(s.tables[1], TableEntry)
-        assert s.tables[1].name == "public.scripts"
-        assert s.tables[1].label == "scripts_registry"
-        assert isinstance(s.tables[2], TableEntry)
-        assert s.tables[2].tracking_column == "modified_at"
-
-    def test_skill_settings_tables_mixed(self) -> None:
-        """Строки и объекты в одном списке."""
-        s = SkillSettings.model_validate({
-            "tables": [TEST_TABLE, {"name": "public.scripts", "label": "scripts_registry"}],
-        })
-        assert s.tables[0] == TEST_TABLE
-        assert isinstance(s.tables[1], TableEntry)
-        assert s.tables[1].name == "public.scripts"
-        assert s.tables[1].label == "scripts_registry"
-
-    def test_skill_settings_tables_object_unknown_key_rejected(self) -> None:
-        """Опечатки в ключах объекта ловятся на старте (fail-fast)."""
-        with pytest.raises(Exception) as excinfo:
-            SkillSettings.model_validate(
-                {"tables": [{"name": "x", "bogus": 1}]}
-            )
+            SkillSettings.model_validate(payload)
         msg = str(excinfo.value)
-        assert "not permitted" in msg or "extra_forbidden" in msg
+        assert "not permitted" in msg or "extra_forbidden" in msg, (
+            f"skills.<name>.{key} должен отвергаться как неизвестный ключ"
+        )
 
-    def test_skill_settings_tables_none(self) -> None:
-        """Отсутствие ``tables`` остаётся None (не ошибка)."""
-        s = SkillSettings.model_validate({})
-        assert s.tables is None
+    @pytest.mark.parametrize("key", ["tables", "vector_indexes"])
+    def test_skill_composition_key_rejected_in_project_settings(self, key: str) -> None:
+        with pytest.raises(ConfigurationError):
+            validate_project_settings(
+                {"skills": {"audit_analyzer": {"enabled": True, key: [{"name": "x"}]}}}
+            )
 
-    def test_table_entry_in_exports(self) -> None:
-        """TableEntry экспортируется из lib.core.project_settings."""
-        from lib.core.project_settings import TableEntry as Exported
-        assert Exported is TableEntry
+    def test_composition_models_are_gone(self) -> None:
+        """Модели удалены из схемы: нет места, где им сновальзутся."""
+        from lib.core import project_settings
+
+        for name in (
+            "TableEntry",
+            "VectorIndexEntry",
+            "VectorIndexConfig",
+            "VectorIndexSettings",
+            "VectorInfrastructureSettings",
+        ):
+            assert not hasattr(project_settings, name), (
+                f"{name} удалена вместе с секцией config.json"
+            )
+
+    def test_gateway_vector_field_is_gone(self) -> None:
+        from lib.core import project_settings
+
+        assert "vector" not in project_settings.GatewaySettings.model_fields
+
+
+class TestSkillSettings:
+    def test_enabled_only(self) -> None:
+        """Секция навыка без состава — рабочая: отключение, не снос."""
+        s = SkillSettings.model_validate({"enabled": True})
+        assert s.enabled is True
+        assert s.cli is None
+
+    def test_no_composition_fields(self) -> None:
+        for key in ("tables", "vector_indexes"):
+            assert key not in SkillSettings.model_fields
 
 
 class TestSkillSettingsExtraForbid:
@@ -214,23 +188,22 @@ class TestSkillSettingsExtraForbid:
     валидации. Это сильно сокращает класс «тихих» багов конфигурации.
     """
 
-    def test_typo_in_tables_rejected_direct(self) -> None:
+    def test_typo_in_skill_key_rejected_direct(self) -> None:
         """Прямая валидация SkillSettings ловит опечатку (``extra="forbid"``)."""
         with pytest.raises(Exception) as excinfo:
-            SkillSettings.model_validate({"tablse": [{"name": TEST_TABLE}]})
+            SkillSettings.model_validate({"defualt_mode": "predefined"})
         msg = str(excinfo.value)
         assert "extra_forbidden" in msg or "not permitted" in msg
 
     def test_legacy_embedding_section_rejected_direct(self) -> None:
         """Прямая валидация SkillSettings запрещает legacy-секцию ``embedding``.
 
-        Параметры эмбеддинга захардкожены в ``cache_provider_impl``
-        (``gateway.vector.embedding`` удалена); внутри skill'а секция
-        ``embedding`` по-прежнему extra-forbidden.
+        Параметры эмбеддинга принадлежат capability ``vectors`` платформы
+        (``mcp-platform/libs/vectors/embedding.py``); внутри skill'а секция
+        ``embedding`` extra-forbidden.
         """
         with pytest.raises(Exception) as excinfo:
             SkillSettings.model_validate({
-                "tables": [{"name": TEST_TABLE}],
                 "embedding": {"base_url": "http://x", "model": "m"},
             })
         msg = str(excinfo.value)
@@ -241,29 +214,28 @@ class TestSkillSettingsExtraForbid:
 
         ``cache.*`` удалена полностью (была мёртвой: ``max_age_sec`` /
         ``refresh_interval_sec`` / ``engine`` не пробрасывались в runtime).
-        DuckDB-кеш живёт в ``table_registry.snapshot_path()`` как часть
-        общей инфраструктуры.
+        Локальный кэш чтения снят вместе со снимком: снимок целиком
+        принадлежит capability ``data``.
         """
         with pytest.raises(Exception) as excinfo:
             SkillSettings.model_validate({
-                "tables": [{"name": TEST_TABLE}],
                 "cache": {"enabled": True},
             })
         msg = str(excinfo.value)
         assert "extra_forbidden" in msg or "not permitted" in msg
 
     def test_full_valid_skill_settings(self) -> None:
-        """Эталонный набор полей skill'а после рефакторинга."""
+        """Эталонный набор полей skill'а после рефакторинга.
+
+        Состава таблиц и индексов в наборе нет и быть не может: это
+        объявление платформы, а навык его повторять не должен.
+        """
         s = SkillSettings.model_validate({
             "enabled": True,
-            "tables": [{"name": TEST_TABLE}],
-            "vector_indexes": [{"name": "audits_index"}],
             "cli": {"default_mode": "predefined", "timeout_sec": 60},
             "llm": {"max_tokens": 8192, "temperature": 0.1},
         })
         assert s.enabled is True
-        assert len(s.tables) == 1
-        assert len(s.vector_indexes) == 1
         assert s.cli.timeout_sec == 60
         assert s.llm.temperature == 0.1
 
@@ -271,8 +243,6 @@ class TestSkillSettingsExtraForbid:
         """Skill без единой секции (только ``enabled`` опционально) — допустимо."""
         s = SkillSettings.model_validate({})
         assert s.enabled is None
-        assert s.tables is None
-        assert s.vector_indexes is None
         assert s.cli is None
         assert s.llm is None
 
@@ -282,14 +252,6 @@ class TestSkillSettingsExtraForbid:
             "skills": {
                 "audit_analyzer": {
                     "enabled": True,
-                    "tables": [
-                        {"name": "test_audit_reports", "tracking_column": "updated_at"},
-                        {"name": TEST_TABLE, "tracking_column": "updated_at"},
-                    ],
-                    "vector_indexes": [
-                        {"name": "audits_index"},
-                        {"name": "violations_index"},
-                    ],
                     "cli": {"default_mode": "predefined"},
                     "llm": {"max_tokens": 8192, "temperature": 0.1},
                 },
@@ -309,8 +271,7 @@ class TestSkillSettingsExtraForbid:
             validate_project_settings({
                 "skills": {
                     "audit_analyzer": {
-                        "tables": [{"name": TEST_TABLE}],
-                        "tablse": [{"name": "test.bogus"}],
+                        "defualt_mode": "predefined",
                     },
                 },
             })
@@ -324,7 +285,6 @@ class TestSkillSettingsExtraForbid:
             validate_project_settings({
                 "skills": {
                     "audit_analyzer": {
-                        "tables": [{"name": TEST_TABLE}],
                         "embedding": {"base_url": "http://x", "model": "m"},
                     },
                 },
@@ -386,183 +346,6 @@ class TestSkillBriefContextSettings:
         assert s.brief_context is None
 
 
-class TestVectorIndexEntryNoSource:
-    """``VectorIndexEntry.source`` удалён: source — конфиг
-    индексов (``gateway.vector.index.indexes``; см. ``VectorIndexConfig``),
-    не часть skill'а.
-
-    После commit ``VectorIndexEntry.extra="forbid"`` legacy-поля
-    (``source``, ``embedding``, любые другие) теперь не «тихо»
-    проходят через pydantic — старт gateway падает с
-    ``ConfigurationError``. Это regression-guard.
-    """
-
-    def test_minimal_index(self) -> None:
-        from lib.core.project_settings import VectorIndexEntry
-        e = VectorIndexEntry.model_validate({"name": "audits_index"})
-        assert e.name == "audits_index"
-
-    def test_source_field_rejected(self) -> None:
-        """Legacy ``source`` теперь reject'ится pydantic'ом (fail-fast).
-
-        Раньше ``extra="allow"`` пропускал source — это подрывало
-        рефакторинг «source перенесён в runtime-БД». Теперь старый
-        ``source`` в ``vector_indexes[]`` падает на старте gateway.
-        """
-        from lib.core.project_settings import VectorIndexEntry
-        with pytest.raises(Exception) as excinfo:
-            VectorIndexEntry.model_validate({"name": "x", "source": "y"})
-        msg = str(excinfo.value)
-        assert "extra_forbidden" in msg or "not permitted" in msg
-
-    def test_any_unknown_key_rejected(self) -> None:
-        """Любой неожиданный ключ отвергается (extra="forbid")."""
-        from lib.core.project_settings import VectorIndexEntry
-        with pytest.raises(Exception) as excinfo:
-            VectorIndexEntry.model_validate({"name": "x", "whatever": 123})
-        msg = str(excinfo.value)
-        assert "extra_forbidden" in msg or "not permitted" in msg
-
-    def test_project_settings_skills_legacy_source_rejected(self) -> None:
-        """Legacy ``skills.<name>.vector_indexes[].source`` падает через
-        SkillsSettings._validate_skill_sections.
-        """
-        from lib.core.project_settings import validate_project_settings
-        with pytest.raises(ConfigurationError) as excinfo:
-            validate_project_settings({
-                "skills": {
-                    "audit_analyzer": {
-                        "vector_indexes": [
-                            {"name": "audits_index", "source": TEST_TABLE},
-                        ],
-                    },
-                },
-            })
-        msg = str(excinfo.value)
-        assert "audit_analyzer" in msg
-        assert "extra_forbidden" in msg or "not permitted" in msg
-
-
-class TestGatewayVectorIndexConfig:
-    """``gateway.vector.index.indexes`` — единственный источник конфига индексов.
-
-    Секция ``gateway.vector.embedding`` удалена (параметры захардкожены в
-    ``cache_provider_impl``); индексы декларируются per-name словарём
-    ``gateway.vector.index.indexes`` (``VectorIndexConfig``), перенесены
-    из PG-реестра ``agent_vector_index_config``.
-    """
-
-    def test_valid_index_config(self) -> None:
-        result = validate_project_settings({
-            "gateway": {
-                "vector": {
-                    "index": {
-                        "storage_table": TEST_VECTOR_TABLE,
-                        "indexes": {
-                            "audits_index": {
-                                "table": "oarb.audits",
-                                "pk": "id",
-                                "source_table": "audits",
-                                "content_columns": ["title", "status"],
-                                "embedding_columns": ["title", "status"],
-                                "track_column": "updated_at",
-                                "chunk_size": 500,
-                                "chunk_overlap": 80,
-                                "metric": "cosine",
-                                "enabled": True,
-                            },
-                        },
-                    }
-                },
-            },
-        })
-        cfg = result.gateway.vector.index.indexes["audits_index"]
-        assert cfg.table == "oarb.audits"
-        assert cfg.pk == "id"
-        assert cfg.content_columns == ["title", "status"]
-        assert cfg.metric == "cosine"
-        assert cfg.enabled is True
-
-    def test_embedding_columns_accept_objects(self) -> None:
-        """embedding_columns: строки или объекты ``{"column":..., "chunk":...}``."""
-        result = validate_project_settings({
-            "gateway": {
-                "vector": {
-                    "index": {
-                        "indexes": {
-                            "violations_index": {
-                                "table": "oarb.violations",
-                                "pk": "id",
-                                "embedding_columns": [
-                                    {"column": "description", "chunk": True,
-                                     "chunk_size": 500, "chunk_overlap": 80},
-                                    "violation_code",
-                                ],
-                            },
-                        },
-                    }
-                },
-            },
-        })
-        cfg = result.gateway.vector.index.indexes["violations_index"]
-        assert cfg.embedding_columns[0]["column"] == "description"
-        assert cfg.embedding_columns[1] == "violation_code"
-
-    def test_unknown_key_in_index_rejected(self) -> None:
-        """Опечатки внутри ``indexes.<name>`` падают fail-fast (extra="forbid")."""
-        with pytest.raises((ConfigurationError, Exception)):
-            validate_project_settings({
-                "gateway": {
-                    "vector": {
-                        "index": {
-                            "indexes": {
-                                "audits_index": {
-                                    "table": "oarb.audits",
-                                    "pk": "id",
-                                    "tablse": "oops",
-                                },
-                            },
-                        },
-                    }
-                },
-            })
-
-    def test_embedding_section_rejected(self) -> None:
-        """Legacy ``gateway.vector.embedding`` больше не читается.
-
-        ``EmbeddingSettings`` удалена; ``VectorInfrastructureSettings`` не
-        содержит поля ``embedding``, поэтому legacy-ключи считаются
-        неизвестными и не валидируются как ошибка (extra="allow" для
-        forward-compat) — их никто не читает.
-        """
-        result = validate_project_settings({
-            "gateway": {
-                "vector": {
-                    "embedding": {"base_url": "http://x"},
-                    "index": {"indexes": {}},
-                },
-            },
-        })
-        assert result.gateway.vector.index is not None
-
-    def test_vector_index_path_unique(self) -> None:
-        """``gateway.vector.index.*`` — единственный канонический путь.
-
-        Legacy ``gateway.vector_index.*`` НЕ читается (fail-fast).
-        """
-        result = validate_project_settings({
-            "gateway": {
-                "vector": {
-                    "index": {
-                        "storage_table": TEST_VECTOR_TABLE,
-                        "default_root": "data_store/vectors",
-                        "backend": "faiss",
-                    }
-                },
-            },
-        })
-        assert result.gateway.vector.index.storage_table == TEST_VECTOR_TABLE
-
 class TestProjectMetadataSettings:
     """``project.*`` — канонический namespace для project metadata.
 
@@ -594,31 +377,15 @@ class TestProjectMetadataSettings:
         assert "name" in msg or "project.name" in msg
 
 
-class TestTableEntryTypeLiteral:
-    """``TableEntry.type`` — Literal['table', 'vector'] (не произвольная str)."""
-
-    def test_table_default(self) -> None:
-        e = TableEntry.model_validate({"name": TEST_TABLE})
-        assert e.type == "table"
-
-    def test_vector_explicit(self) -> None:
-        e = TableEntry.model_validate({"name": TEST_VECTOR_TABLE, "type": "vector"})
-        assert e.type == "vector"
-
-    def test_banana_type_rejected(self) -> None:
-        with pytest.raises(Exception) as excinfo:
-            TableEntry.model_validate({"name": TEST_TABLE, "type": "banana"})
-        msg = str(excinfo.value)
-        assert "type" in msg.lower()
-
-    def test_empty_string_type_rejected(self) -> None:
-        with pytest.raises(Exception):
-            TableEntry.model_validate({"name": TEST_TABLE, "type": ""})
-
-
 class TestGatewayLegacyFailFast:
     """Legacy-секции ``gateway.*`` падают на validation, а не «тихо»
-    проходят как extra-поля (через ``_StrictOptional(extra="allow")``)."""
+    проходят как extra-поля (через ``_StrictOptional(extra="allow")``).
+
+    Сам guard переименований пережил снятие канонической секции: он
+    отвергает ровно один известный legacy-путь — ``gateway.vector_index``
+    (без точки) — и продолжает называть его в ошибке, чтобы оператор
+    узнал старое имя, а не просто «неизвестный ключ».
+    """
 
     def test_legacy_vector_index_top_level_rejected(self) -> None:
         """``gateway.vector_index.*`` (legacy) → fail-fast через
@@ -634,21 +401,30 @@ class TestGatewayLegacyFailFast:
         # Должен быть hint на новый путь
         assert "gateway.vector.index" in msg
 
-    def test_legacy_vector_index_under_canonical_ignored(self) -> None:
-        """``gateway.vector.index.vector_index`` НЕ срабатывает (не тот путь)."""
-        # Нет legacy-секции → проходит.
+    def test_legacy_guard_does_not_fire_on_dotted_path(self) -> None:
+        """``gateway.vector`` — не тот путь, guard на него не срабатывает.
+
+        Секция ``gateway.vector.index.*`` снята из схемы, и отдельного
+        механизма её отвержения нет: ``_StrictOptional`` — это
+        ``extra="allow"``, а guard знает ровно один путь, ``vector_index``
+        без точки. Поэтому проверяется граница guard'а, а не «приём» или
+        «отказ» секции: решение о запрете ещё не принято, и молчаливый
+        проход нельзя выдавать за проверенное поведение.
+        """
         result = validate_project_settings({
             "gateway": {
                 "vector": {"index": {"storage_table": "x"}},
             },
         })
-        assert result.gateway.vector.index.storage_table == "x"
+        assert result.gateway is not None
+        assert "vector" not in type(result.gateway).model_fields
 
     def test_no_legacy_section_works(self) -> None:
-        """Без legacy-секции — нормальный путь.
+        """Без legacy-секции — нормальный путь: конфиг разбирается.
 
-        Секция ``gateway.vector.embedding`` удалена: поле не валидируется
-        (extra="allow" для forward-compat), старт не падает, никто его не читает.
+        Неизвестный ключ внутри ``gateway.*`` не валидируется как ошибка
+        (``extra="allow"`` для forward-compat) — старт не падает, и его
+        никто не читает.
         """
         result = validate_project_settings({
             "gateway": {
@@ -656,7 +432,6 @@ class TestGatewayLegacyFailFast:
             },
         })
         assert result.gateway is not None
-        assert result.gateway.vector.index is None
 
     def test_unknown_gateway_top_level_still_allowed(self) -> None:
         """Случайные flat-ключи в ``gateway.*`` (forward-compat) всё ещё

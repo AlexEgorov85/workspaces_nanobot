@@ -12,7 +12,8 @@ create``), а не в рантайме канала/сервиса.
   - неизвестные ключи на верхнем уровне разрешены (extra="allow") —
     forward-совместимость для новых подсекций;
   - внутри ``skills.<name>`` неизвестные ключи ЗАПРЕЩЕНЫ (extra="forbid")
-    — fail-fast на опечатках (например, ``tablse`` вместо ``tables``);
+    — fail-fast на опечатках (например, ``defualt_mode``) и на забытых
+    legacy-секциях (``tables``, ``vector_indexes``, ``embedding``, ``cache``);
   - единственный источник правды — SETTINGS после мержа
     config.json → session_manager.json → .secrets.env.
 """
@@ -41,11 +42,7 @@ __all__ = [
     "SkillsSettings",
     "StartupSchemaValidationSettings",
     "StartupSettings",
-    "TableEntry",
-    "VectorIndexConfig",
-    "VectorIndexEntry",
     "GatewaySettings",
-    "VectorInfrastructureSettings",
     "UsageStoreSettings",
     "SessionColdSyncSettings",
     "validate_project_settings",
@@ -138,64 +135,6 @@ class ErrorMessagesSettings(_StrictOptional):
 # Agent-facing tools (duckdb_query_tool.py, vector_search_tool.py) удалены.
 
 
-class VectorIndexSettings(_StrictOptional):
-    """Параметры FAISS-инфраструктуры.
-
-    Хранилище эмбеддингов и сами индексы — общий runtime, не привязанный
-    к домену skill'а. Доменные таблицы, нужные в DuckDB-кэше, декларируются
-    в ``skills.<name>.tables[]``. Какие индексы строить и из каких
-    source-таблиц — описывается в ``indexes`` (см. ``VectorIndexConfig``);
-    это единственный источник (раньше был PG-реестр
-    ``public.agent_vector_index_config``).
-
-    Путь в ``config.json``: ``gateway.vector.index.*`` (см.
-    ``VectorInfrastructureSettings``). Раньше жил в ``gateway.vector_index.*`` —
-    устаревший путь удалён, обратной совместимости нет (fail-fast).
-
-    ⚠️ **Секция валидируется, но никем не читается.** С 2026-10-01 сборку и
-    владение индексами забрала capability ``vectors``, и она читает
-    ``mcp-platform/platform.json → vectors.indexes`` (и ``vectors.storage_table``).
-    В дереве агента потребителей ``gateway.vector.index.*`` нет: grep по
-    ``lib/``, ``workspace/``, ``tools/``, ``gateway.py`` и ``cli_agent.py`` даёт
-    только эту модель. Правка ``config.json`` здесь не изменит ни сборку, ни
-    поиск — объявление продублировано в двух файлах, и какое из них отживает
-    своё, решает владелец. См. ``docs/MIGRATION.md`` и ``docs/VECTOR_INDEXES.md``.
-
-    Attributes:
-        enable: включён ли vector-indexing слой. ``None`` → дефолт ``True``.
-        default_root: корневая папка FAISS-индексов. Дефолт
-            ``"data_store/vectors"``. Путь к индексу = ``<root>/<name>``.
-        backend: runtime-бэкенд (``"faiss"``, ``"pgvector"``, ``"qdrant"``).
-        storage_table: единая PG-таблица-хранилище сырых эмбеддингов.
-            Чтением и загрузкой владеет capability ``vectors`` платформы;
-            реестр ресурсов, который раньше его объявлял, удалён.
-        indexes: полный конфиг vector-индексов ``{имя: VectorIndexConfig}``
-            (какие индексы строить, из каких source-таблиц, content_cols,
-            embedding_cols, chunk-параметры, metric). Единственный источник
-            для ``mcp-platform/libs/vectors/config.py`` и сборки индексов
-            на платформе.
-    """
-
-    enable: bool | None = None
-    default_root: str | None = None
-    backend: str | None = None
-    storage_table: str | None = None
-    indexes: dict[str, VectorIndexConfig] | None = None
-
-
-class VectorInfrastructureSettings(_StrictOptional):
-    """Векторная инфраструктура (``gateway.vector.*``): индексы.
-
-    Содержит ``index`` — ``VectorIndexSettings`` (конфиг индексов,
-    storage-таблица). Параметры подключения к эмбеддеру больше не
-    настраиваются: они принадлежат capability ``vectors`` платформы
-    (``mcp-platform/libs/vectors/embedding.py``) и читаются там.
-    Каноническое место для **общей** vector-инфраструктуры.
-    """
-
-    index: VectorIndexSettings | None = None
-
-
 class HeartbeatSettings(_StrictOptional):
     enabled: bool | None = None
     intervalS: int | None = Field(default=None, gt=0)
@@ -243,7 +182,6 @@ class GatewaySettings(_StrictOptional):
     compact: CompactSettings | None = None
     error_messages: ErrorMessagesSettings | None = None
     # duckdb_query / vector_search: Agent-facing tools удалены (этап 18).
-    vector: VectorInfrastructureSettings | None = None
     heartbeat: HeartbeatSettings | None = None
     usage_store: UsageStoreSettings | None = None
     session_cold_sync: SessionColdSyncSettings | None = None
@@ -415,115 +353,6 @@ class EnterpriseMcpSettings(_StrictOptional):
 # ---------------------------------------------------------------------------
 
 
-class TableEntry(BaseModel):
-    """Один ресурс skill'а в ``tables: [...]``.
-
-    Единый формат для всех PG-таблиц skill'а: обычные таблицы, vector-таблицы,
-    реестры метаданных, predefined scripts. Каждый ресурс имеет ``name``
-    (обязательно) и опциональные атрибуты, которые runtime-sync либо
-    игнорирует (``label``), либо читает (``tracking_column``, ``type``).
-
-    Attributes:
-        name: имя таблицы в формате ``schema.table``.
-        type: ``"table"`` (по умолчанию) или ``"vector"``. Определяет, за
-            таблицей или за векторным индексом стоит объявление.
-        label: opaque-метка. Если задана, таблица не попадает в описание
-            схемы для LLM. Реестр, который по ней искал
-            (``TableRegistry.resources_by_label``), удалён; метка осталась
-            только как признак «внутренняя таблица».
-        tracking_column: колонка для инкрементального поллинга. Дефолт
-            ``updated_at`` для обычных, ``id`` для vector.
-
-    Unknown keys запрещены (``extra="forbid"``) — fail-fast на опечатках
-    в ``config.json``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    type: Literal["table", "vector"] = "table"
-    label: str | None = None
-    tracking_column: str | None = None
-
-
-class VectorIndexEntry(BaseModel):
-    """Один vector-storage индекс в ``vector_indexes: [...]``.
-
-    Минимальный generic-контракт: **только имя** индекса.
-    Источник эмбеддингов (PG-таблица исходных строк), алгоритм построения
-    (FAISS / pgvector / Qdrant / иной бэкенд), параметры чанкинга и формат
-    хранения — это runtime-параметры конкретного бэкенда, **общая
-    инфраструктура** (см. ``gateway.vector.index.indexes``),
-    а не часть декларации ресурса в ``skills.<name>``.
-
-    Attributes:
-        name: логическое имя индекса (``"audits_index"``, ``"products_v"``).
-
-    Unknown keys запрещены (``extra="forbid"``). Это сознательно:
-    ``source``, ``embedding`` или другие legacy-поля НЕ должны «тихо»
-    проходить через pydantic-валидацию. Если кто-то добавит
-    legacy-поле — старт gateway упадёт с ``ConfigurationError``,
-    а не пройдёт валидацию и обнаружится только в runtime.
-
-    Раньше в этой модели было обязательное поле ``source`` (имя PG-таблицы
-    исходных строк). После того как source-таблицу перенесли в общий
-    runtime-конфиг (``gateway.vector.index.indexes``), ``source`` удалён
-    из декларации skill'а. Если будет добавлен новый backend, где source
-    декларируется прямо в skill'е — это будет новая схема, а не возврат
-    к старой.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-
-
-class VectorIndexConfig(BaseModel):
-    """Полный конфиг одного vector-индекса (``gateway.vector.index.indexes``).
-
-    Единственный источник деталей построения индекса: исходная таблица (``table``),
-    первичный ключ (``pk``), логическое имя источника (``source_table``),
-    колонки контента/эмбеддинга, track-колонка, chunk-параметры и metric.
-
-    Раньше это жило в PG-реестре ``public.agent_vector_index_config``
-    (``sql/vectors/create_vector_index_config.sql`` + seed) и читалось
-    ``cache_provider_impl.read_vector_index_config``. Теперь — это
-    настройка в ``config.json``, а читает её capability ``vectors``
-    платформы: ``mcp-platform/libs/vectors/config.py``.
-
-    Attributes:
-        table: исходная таблица для эмбеддинга (``schema.table``).
-        pk: колонка первичного ключа в ``table``.
-        source_table: логическое имя источника (значение ``source`` в
-            vector-хранилище ``oarb.audit_vectors``).
-        content_columns: колонки, попадающие в ``content`` вектора.
-        embedding_columns: колонки для эмбеддинга; элемент — строка
-            (имя колонки) или объект ``{"column": ..., "chunk": true,
-            "chunk_size": ..., "chunk_overlap": ...}``.
-        track_column: колонка инкрементального отслеживания (дефолт ``updated_at``).
-        chunk_size: размер чанка для длинных текстов (дефолт 500).
-        chunk_overlap: перекрытие чанков (дефолт 80).
-        metric: метрика FAISS (``cosine`` / ``inner_product``; дефолт ``cosine``).
-        enabled: включён ли индекс (дефолт ``True``).
-
-    Unknown keys запрещены (``extra="forbid"``) — fail-fast на опечатках
-    в ``config.json``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    table: str
-    pk: str
-    source_table: str | None = None
-    content_columns: list[str] = Field(default_factory=list)
-    embedding_columns: list[str | dict[str, Any]] | None = None
-    track_column: str | None = None
-    chunk_size: int | None = Field(default=None, gt=0)
-    chunk_overlap: int | None = Field(default=None, ge=0)
-    metric: Literal["cosine", "inner_product"] | None = None
-    enabled: bool = True
-
-
 class SkillCliSettings(_StrictOptional):
     """Секция ``cli`` — параметры CLI навыка (например, ``audit_analyze``).
 
@@ -636,9 +465,6 @@ class SkillSettings(BaseModel):
     Секции:
 
       * ``enabled`` — флаг включения skill'а (default ``True``);
-      * ``tables`` — единый список ресурсов (PG-таблицы + vector-источники);
-      * ``vector_indexes`` — какие vector-индексы нужны skill'у
-        (min-контракт: имя + источник; runtime определяет бэкенд);
       * ``cli`` — параметры CLI навыка;
       * ``llm`` — execution policy для навыка (опционально);
       * ``chunking`` — параметры map-reduce чанкинга;
@@ -646,14 +472,25 @@ class SkillSettings(BaseModel):
       * ``execution`` — параметры запуска (confirmation, safety net,
         context batching).
 
+    **Ни состава таблиц, ни состава vector-индексов навык не объявляет.**
+    Ключи ``tables`` и ``vector_indexes`` удалены вместе с моделями
+    ``TableEntry`` / ``VectorIndexEntry``: оба состава объявляет платформа —
+    ``mcp-platform/platform.json → audit.tables`` и
+    ``mcp-platform/platform.json → vectors.indexes``. Агент своего списка
+    индексов не держит (требование «Агент не объявляет состав индексов»,
+    ``openspec/specs/data/vector-indexes``), поэтому повторное объявление
+    здесь отвергается ``extra="forbid"`` как неизвестный ключ.
+
     Это **только domain binding** skill'а. Shared infrastructure
-    (DuckDB-кеш, FAISS root, sync) лежит вне ``skills.*`` —
-    см. ``gateway.duckdb``, ``gateway.vector.index.*``, ``gateway.sync``.
+    (DuckDB-снапшот, FAISS, embedding) принадлежит capability платформы
+    и лежит вне ``skills.*`` — в ``mcp-platform/platform.json``.
 
     Граница: ``model_config = ConfigDict(extra="forbid")`` — fail-fast
-    на опечатках в ``config.json`` (например, ``tablse`` вместо
-    ``tables`` сразу поднимет ``ConfigurationError`` на старте gateway,
-    а не тихо пройдёт валидацию). Имя skill'а остаётся динамическим —
+    на опечатках (например, ``defualt_mode``) и на забытых legacy-секциях
+    (``tables``, ``vector_indexes``, ``embedding``, ``cache``) в
+    ``config.json``: любая из них сразу поднимет
+    ``ConfigurationError`` на старте gateway, а не тихо пройдёт
+    валидацию. Имя skill'а остаётся динамическим —
     добавляется простым добавлением секции в ``config.json``; форма
     самой секции строго типизирована.
 
@@ -663,8 +500,6 @@ class SkillSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    tables: list[str | TableEntry] | None = None
-    vector_indexes: list[VectorIndexEntry] | None = None
     cli: SkillCliSettings | None = None
     llm: SkillLlmSettings | None = None
     chunking: SkillChunkingSettings | None = None
@@ -678,8 +513,9 @@ class SkillsSettings(_StrictOptional):
     Имя skill'а — произвольное (forward-compat), но **форма** секции
     строго типизирована через ``SkillSettings`` (``extra="forbid"``).
     Любой новый skill добавляется простым добавлением секции в
-    ``config.json``; опечатки внутри секции (``tablse``, ``embedding``,
-    ``cache`` и т.п.) ловятся на старте через ``_validate_skill_sections``.
+    ``config.json``; опечатки внутри секции (``defualt_mode``) и забытые
+    legacy-секции (``tables``, ``vector_indexes``, ``embedding``, ``cache``)
+    ловятся на старте через ``_validate_skill_sections``.
 
     Универсальное правило (TARGET_ARCHITECTURE §skills.* boundary):
 
@@ -700,7 +536,8 @@ class SkillsSettings(_StrictOptional):
         для новых skill'ов по имени) и не описывает вложенные секции
         как типизированный ``dict[str, SkillSettings]``. В результате
         ``SkillSettings(extra="forbid")`` не срабатывал бы, и опечатки
-        вроде ``tablse`` / забытый legacy ``embedding`` / ``cache``
+        вроде ``defualt_mode`` / забытые legacy-секции ``tables``,
+        ``vector_indexes``, ``embedding``, ``cache``
         проходили бы валидацию.
 
         Этот ``@model_validator(mode="before")`` нормализует каждую
