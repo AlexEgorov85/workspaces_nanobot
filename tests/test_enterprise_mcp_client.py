@@ -100,7 +100,7 @@ class TestCall:
     @pytest.mark.asyncio
     async def test_returns_text_of_first_block(self) -> None:
         client = _client(_FakeResult(json.dumps({"hits": []})))
-        assert json.loads(await client.call("history_search", {"session_id": "s"})) == {
+        assert json.loads(await client.call("data.history_search", {"session_id": "s"})) == {
             "hits": []
         }
 
@@ -110,7 +110,7 @@ class TestCall:
             _FakeResult("[invalid_request] session_id обязателен", is_error=True)
         )
         with pytest.raises(EnterpriseOperationError) as excinfo:
-            await client.call("history_search", {})
+            await client.call("data.history_search", {})
         assert excinfo.value.code == "invalid_request"
         assert "session_id обязателен" in excinfo.value.message
 
@@ -120,7 +120,7 @@ class TestCall:
         client = _client(RuntimeError("broken pipe"))
         assert client.is_connected
         with pytest.raises(EnterpriseMcpUnavailable):
-            await client.call("history_search", {})
+            await client.call("data.history_search", {})
         assert not client.is_connected
 
     @pytest.mark.asyncio
@@ -131,7 +131,7 @@ class TestCall:
 
         client = _client(_hang, tool_timeout_sec=0.05)
         with pytest.raises(EnterpriseMcpUnavailable):
-            await client.call("history_search", {})
+            await client.call("data.history_search", {})
         assert not client.is_connected
 
     @pytest.mark.asyncio
@@ -140,8 +140,8 @@ class TestCall:
         session = _FakeSession(_FakeResult("{}"))
         client = _client()
         client._session = session
-        await client.call("history_search", {"session_id": "s1", "limit": 7})
-        assert session.calls == [("history_search", {"session_id": "s1", "limit": 7})]
+        await client.call("data.history_search", {"session_id": "s1", "limit": 7})
+        assert session.calls == [("data.history_search", {"session_id": "s1", "limit": 7})]
 
 
 # --- окружение дочернего процесса ---------------------------------------

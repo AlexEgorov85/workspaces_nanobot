@@ -98,10 +98,10 @@ class TestInterception:
     async def test_meta_is_filled_without_explicit_identity(self) -> None:
         client, session = _client(_Logging())
         with _in_turn():
-            await client.call("query_operation", {"operation_id": "op-1"})
+            await client.call("legal_summarizer.query_operation", {"operation_id": "op-1"})
 
         operation, arguments, meta = session.calls[0]
-        assert operation == "query_operation"
+        assert operation == "legal_summarizer.query_operation"
         assert meta is not None, "_meta не отправлен - перехват не сработал"
         assert meta[f"{META_PREFIX}session_id"] == "s-1"
         assert meta[f"{META_PREFIX}user_id"] == "u-1"
@@ -115,7 +115,7 @@ class TestInterception:
         client, session = _client(_Logging())
         explicit = CallIdentity(session_id="s-explicit", user_id="u-explicit")
         with _in_turn():
-            await client.call("query_operation", {}, identity=explicit)
+            await client.call("legal_summarizer.query_operation", {}, identity=explicit)
 
         meta = session.calls[0][2]
         assert meta[f"{META_PREFIX}session_id"] == "s-explicit"
@@ -126,7 +126,7 @@ class TestInterception:
         """Пустой ``_meta`` неотличим от «идентичность была и пустая»."""
         client, session = _client(_Logging())
         with patch(_SESSION_CTX, lambda: None):
-            await client.call("query_operation", {"operation_id": "op-1"})
+            await client.call("legal_summarizer.query_operation", {"operation_id": "op-1"})
 
         assert session.calls[0][2] is None
 
@@ -134,7 +134,7 @@ class TestInterception:
     async def test_without_sender_no_meta(self) -> None:
         client, session = _client(_Logging())
         with _in_turn(sender_id=None):
-            await client.call("query_operation", {})
+            await client.call("legal_summarizer.query_operation", {})
 
         assert session.calls[0][2] is None
 
@@ -150,7 +150,7 @@ class TestInterception:
         """
         client, session = _client(_BrokenLogging())
         with _in_turn():
-            await client.call("query_operation", {"operation_id": "op-1"})
+            await client.call("legal_summarizer.query_operation", {"operation_id": "op-1"})
 
         meta = session.calls[0][2]
         assert meta is not None, "падение журнала отменяло вызов"
@@ -163,7 +163,7 @@ class TestInterception:
         """Журнал может быть выключен - это не повод отказывать в вызове."""
         client, session = _client(None)
         with _in_turn():
-            await client.call("query_operation", {"operation_id": "op-1"})
+            await client.call("legal_summarizer.query_operation", {"operation_id": "op-1"})
 
         meta = session.calls[0][2]
         assert meta is not None

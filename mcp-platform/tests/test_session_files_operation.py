@@ -49,8 +49,8 @@ def _ctx(session_id: str, request_id: str = "req-1") -> ToolExecutionContext:
         call=McpCallContext(
             request_id=request_id, session_id=session_id, user_id="u-1"
         ),
-        tool_name="session_files",
-        capability="session",
+        tool_name="platform.session_files",
+        capability="platform",
         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -193,7 +193,7 @@ def test_call_without_identity_is_refused_and_creates_nothing(
     код ради этой операции. И каталог при этом не появляется: иначе отказ
     оставлял бы после себя папку безымянного вызова.
     """
-    result = _wire(_transport(workspace), "session_files", {}, {})
+    result = _wire(_transport(workspace), "platform.session_files", {}, {})
 
     assert result.isError is True
     body = json.loads(result.content[0].text)
@@ -205,7 +205,7 @@ def test_call_without_identity_is_refused_and_creates_nothing(
 
 
 def test_call_with_identity_answers_on_the_wire(workspace: SessionWorkspace) -> None:
-    result = _wire(_transport(workspace), "session_files", {}, None)
+    result = _wire(_transport(workspace), "platform.session_files", {}, None)
 
     assert result.isError is False
     answer = json.loads(result.content[0].text)
@@ -222,9 +222,11 @@ def test_build_registers_the_operation() -> None:
 
     _, registry, _ = enterprise_server.build()
 
-    assert "session_files" in registry.names()
-    assert "session_files" in [
-        definition.name for definition in registry.by_category()["session"]
+    assert "platform.session_files" in registry.names()
+    # ``platform``, а не ``session``: каталога ``session`` нет, в перечне
+    # сервера его нет, и ``--capabilities session`` отвергается как опечатка.
+    assert "platform.session_files" in [
+        definition.name for definition in registry.by_capability()["platform"]
     ]
 
 
@@ -235,7 +237,7 @@ def test_skills_server_does_not_get_session_files() -> None:
 
     _, registry, _ = enterprise_server.build(capabilities=["llm"])
 
-    assert "session_files" not in registry.names()
+    assert "platform.session_files" not in registry.names()
 
 
 def test_workspace_is_not_in_the_container() -> None:
@@ -249,6 +251,6 @@ def test_workspace_is_not_in_the_container() -> None:
 
     _, registry, container = enterprise_server.build()
 
-    assert "session_files" in registry.names()
+    assert "platform.session_files" in registry.names()
     assert "workspace" not in container.services
     assert "session_workspace" not in container.services

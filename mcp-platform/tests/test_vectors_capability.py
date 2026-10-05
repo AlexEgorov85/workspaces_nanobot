@@ -149,7 +149,7 @@ class TestNoSqlSurface:
             schema = build_input_schema(definition.handler)
             properties = set(schema["properties"])
             assert not (properties & SQL_PARAM_NAMES), definition.name
-            assert definition.category == "vectors"
+            assert definition.capability == "vectors"
 
     def test_search_tool_exposes_only_text_and_index(self, service) -> None:
         from libs.enterprise_common.registry import build_input_schema

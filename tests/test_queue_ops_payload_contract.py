@@ -173,14 +173,14 @@ class TestQueueOpsPayloadMatchesDeclaredSchema:
         Умолчание платформы сделало бы размер пачки решением, о котором в коде
         не знает никто: смена дефолта на платформе изменила бы опрос молча.
         """
-        keys = _payloads_in_queue_ops()["claim_task"]
+        keys = _payloads_in_queue_ops()["data.claim_task"]
         assert {"batch", "cursor"} <= keys, (
-            f"claim_task отправляет {sorted(keys)} — размер пачки и курсор "
+            f"data.claim_task отправляет {sorted(keys)} — размер пачки и курсор "
             "должны уходить явно"
         )
-        declared = _operations_by_name().get("claim_task", set())
+        declared = _operations_by_name().get("data.claim_task", set())
         assert {"batch", "cursor"} <= declared, (
-            f"платформа объявляет для claim_task {sorted(declared)} — нет "
+            f"платформа объявляет для data.claim_task {sorted(declared)} — нет "
             "batch/cursor, отправлять их нельзя"
         )
 
@@ -245,7 +245,7 @@ class TestClaimedFormIsTheDeclaredOne:
         from lib.channels.queue_ops import QueueOps
 
         row = {"id": "m-1", "chat_id": "chat-1", "status": "processing"}
-        client = _StubClient({"claim_task": {"claimed": [row], "next_cursor": None}})
+        client = _StubClient({"data.claim_task": {"claimed": [row], "next_cursor": None}})
         ops = QueueOps(client)
 
         assert await ops.claim_task() == row
@@ -255,7 +255,7 @@ class TestClaimedFormIsTheDeclaredOne:
     async def test_empty_batch_is_an_empty_queue(self) -> None:
         from lib.channels.queue_ops import QueueOps
 
-        ops = QueueOps(_StubClient({"claim_task": {"claimed": []}}))
+        ops = QueueOps(_StubClient({"data.claim_task": {"claimed": []}}))
         assert await ops.claim_task() is None
 
     @pytest.mark.asyncio
@@ -271,7 +271,7 @@ class TestClaimedFormIsTheDeclaredOne:
         """Прежняя форма отвергается и называется, а не принимается за задачу."""
         from lib.channels.queue_ops import QueueOps, QueueOpsError
 
-        ops = QueueOps(_StubClient({"claim_task": {"claimed": {"id": "m-1"}}}))
+        ops = QueueOps(_StubClient({"data.claim_task": {"claimed": {"id": "m-1"}}}))
 
         with pytest.raises(QueueOpsError) as caught:
             await ops.claim_task()
@@ -282,7 +282,7 @@ class TestClaimedFormIsTheDeclaredOne:
     async def test_claimed_element_must_be_a_task(self) -> None:
         from lib.channels.queue_ops import QueueOps, QueueOpsError
 
-        ops = QueueOps(_StubClient({"claim_task": {"claimed": ["m-1"]}}))
+        ops = QueueOps(_StubClient({"data.claim_task": {"claimed": ["m-1"]}}))
 
         with pytest.raises(QueueOpsError) as caught:
             await ops.claim_task()
@@ -295,7 +295,7 @@ class TestClaimedFormIsTheDeclaredOne:
 
         rows = [{"id": "m-1"}, {"id": "m-2"}, {"id": "m-3"}]
         client = _StubClient(
-            {"claim_task": {"claimed": rows, "next_cursor": "2026-01-01|m-3"}}
+            {"data.claim_task": {"claimed": rows, "next_cursor": "2026-01-01|m-3"}}
         )
         ops = QueueOps(client)
 
@@ -310,7 +310,7 @@ class TestClaimedFormIsTheDeclaredOne:
     async def test_non_string_cursor_is_refused(self) -> None:
         from lib.channels.queue_ops import QueueOps, QueueOpsError
 
-        ops = QueueOps(_StubClient({"claim_task": {"claimed": [], "next_cursor": 7}}))
+        ops = QueueOps(_StubClient({"data.claim_task": {"claimed": [], "next_cursor": 7}}))
 
         with pytest.raises(QueueOpsError) as caught:
             await ops.claim_tasks()
@@ -321,6 +321,6 @@ class TestClaimedFormIsTheDeclaredOne:
         """Сторон реально две: разбор без стражей зелёный на пустом месте."""
         from lib.channels.queue_ops import QueueOps
 
-        client = _StubClient({"claim_task": {"claimed": [{"id": "m-1"}]}})
+        client = _StubClient({"data.claim_task": {"claimed": [{"id": "m-1"}]}})
         assert await QueueOps(client).claim_task() == {"id": "m-1"}
         assert _platform_claimed_tasks_is_a_list()

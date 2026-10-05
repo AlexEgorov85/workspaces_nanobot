@@ -67,7 +67,7 @@ class RecordingClient:
         self.calls.append((operation, dict(arguments or {}), identity))
         if self.fail_with is not None:
             raise self.fail_with
-        if operation == "log_events":
+        if operation == "data.log_events":
             count = len((arguments or {}).get("events", []))
             return json.dumps({"status": "ok", "accepted": count, "dropped": 0})
         return '{"status": "ok"}'
@@ -147,7 +147,7 @@ class TestSignedWrite:
         ) is True
         _drain(service)
 
-        writes = [c for c in client.calls if c[0] == "upsert_question_run"]
+        writes = [c for c in client.calls if c[0] == "data.upsert_question_run"]
         assert len(writes) == 2, "регистрация и завершение — две записи одного оборота"
         assert writes[1][1]["update_only"] is True
         for _, _, identity in writes:
@@ -174,7 +174,7 @@ class TestSignedWrite:
         service.finish_request("чужой-прогон", status="finished")
         _drain(service)
 
-        assert [c[0] for c in client.calls] == ["upsert_question_run"], (
+        assert [c[0] for c in client.calls] == ["data.upsert_question_run"], (
             "регистрация прошла, незнакомый прогон — нет"
         )
         assert client.calls[0][2].request_id == REQUEST_ID

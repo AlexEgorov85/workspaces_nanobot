@@ -415,20 +415,20 @@ class TestBootstrap:
         проверкой, которая в нём была.
         """
         _, registry, _ = enterprise_server.build()
-        by_category = registry.by_category()
-        assert {d.name for d in by_category["data"]} == {
-            "log_event",
-            "history_search",
-            "schema_check",
+        by_capability = registry.by_capability()
+        assert {d.name for d in by_capability["data"]} == {
+            "data.log_event",
+            "data.history_search",
+            "data.schema_check",
             # Фаза 7: контекст вопроса и очистка журнала. До этого агент писал
             # в agent_question_runs и удалял старые строки своим пулом — вторым
             # владельцем того же ресурса.
-            "upsert_question_run",
-            "purge_logs",
+            "data.upsert_question_run",
+            "data.purge_logs",
             # Фаза 7, п. 7.2: батчевый сброс буфера журнала. Без этой операции
             # агент отправлял бы по одному MCP-вызову на каждое событие
             # оборота — круговой оборот на каждый чих вместо одного на пачку.
-            "log_events",
+            "data.log_events",
             # Change 2026-10-02-task-queue-into-mcp, отмена п. 2.18: очередь
             # задач возвращена в capability data, но уже с другой схемой —
             # имя таблицы объявляет platform.json (data.task_table), а не тело
@@ -438,38 +438,38 @@ class TestBootstrap:
             # задании, потому что счётчик ретраев живёт в этой колонке, и пара
             # вызовов из двух конкурирующих обработчиков записала бы
             # одинаковый retry_count, то есть бесконечные повторы задачи.
-            "claim_task",
-            "update_task_status",
+            "data.claim_task",
+            "data.update_task_status",
             # Остальная часть оборота задачи: заглушка ответа, её откат,
             # потоковые патчи метаданных и возврат зависших задач.
-            "append_assistant_message",
-            "delete_assistant_message",
-            "patch_message_metadata",
-            "unstick_tasks",
+            "data.append_assistant_message",
+            "data.delete_assistant_message",
+            "data.patch_message_metadata",
+            "data.unstick_tasks",
             # Остаток оборота, который в агенте был транзакциями. Пока они
             # не были операциями, канал держал пул PostgreSQL и переписывал
             # по частям: обрыв между вызовами оставлял задачу в processing
             # навсегда. Каждая — одна транзакция над обеими строками
             # оборота, а не набор вызовов по одной.
-            "finalize_turn",
-            "fail_task",
-            "merge_tool_delivery",
-            "release_claimed_tasks",
+            "data.finalize_turn",
+            "data.fail_task",
+            "data.merge_tool_delivery",
+            "data.release_claimed_tasks",
             # Чтения, без которых канал всё равно держит пул: статус задачи
             # после захвата и размер очереди для вывода активности. Операции,
             # а не «SQL навылет» — иначе граница «платформа владеет данными»
             # дырявится ровно на чтениях.
-            "get_message",
-            "queue_stats",
+            "data.get_message",
+            "data.queue_stats",
             # Дописывание рассуждений. Отдельная операция, а не патч: патч
             # затирает значение, а стрим присылает куски, и без атомарной
             # конкатенации в SQL два параллельных сброса теряли бы друг
             # друга. Блокировка в канале это признавала, просто молча.
-            "append_reasoning",
+            "data.append_reasoning",
             # Заметка о сжатии: строка истории без reply_to и сразу
             # completed. Отдельная операция, потому что append_assistant_message
             # создаёт плейсхолдер, который обязан закрыть finalize_turn.
-            "append_history_notice",
+            "data.append_history_notice",
             # Холодное зеркало сессий. До 2026-10-04 эти три операции были
             # описаны в `DataService` и покрыты тестами, но регистрирующих их
             # файлов операций не существовало: загрузчик собирает реестр из
@@ -483,9 +483,9 @@ class TestBootstrap:
             # зовёт фоновая подсистема шлюза, модель их не видит, поэтому
             # белый список `config.json → tools.mcpServers.enterprise` не
             # меняется.
-            "session_mirror_state",
-            "mirror_session",
-            "cleanup_session_mirror",
+            "data.session_mirror_state",
+            "data.mirror_session",
+            "data.cleanup_session_mirror",
         }
 
     def test_every_capability_has_a_registered_service(self) -> None:
@@ -503,11 +503,11 @@ class TestBootstrap:
         второй путь к файлам сессии мимо стража границ.
         """
         _, registry, container = enterprise_server.build()
-        for category in registry.by_category():
-            if category not in enterprise_server._ALL_CAPABILITIES:
+        for capability in registry.by_capability():
+            if capability not in enterprise_server._ALL_CAPABILITIES:
                 continue
-            assert container.get(category) is not None, (
-                f"у capability {category!r} есть операции, но сервис не зарегистрирован"
+            assert container.get(capability) is not None, (
+                f"у capability {capability!r} есть операции, но сервис не зарегистрирован"
             )
 
     def test_no_capability_without_operations(self) -> None:
@@ -695,7 +695,7 @@ class TestWireContract:
 
         transport, _, _ = enterprise_server.build()
         tools = {t.name: t for t in anyio.run(_discover, transport)}
-        props = tools["history_search"].inputSchema["properties"]
+        props = tools["data.history_search"].inputSchema["properties"]
         assert {"tool_name", "until", "event_type", "level", "since", "query"} <= set(props)
 
     def test_call_returns_text(self) -> None:
@@ -714,7 +714,7 @@ class TestWireContract:
         result = anyio.run(
             _call,
             transport,
-            "log_event",
+            "data.log_event",
             {"event_type": TOOL_STARTED, "summary": "проверка"},
         )
         assert not result.isError
@@ -733,7 +733,7 @@ class TestWireContract:
         result = anyio.run(
             _call,
             transport,
-            "log_event",
+            "data.log_event",
             {"event_type": "smoke.contract", "summary": "проверка"},
         )
         assert not result.isError
@@ -743,7 +743,7 @@ class TestWireContract:
         import anyio
 
         transport, _, _ = enterprise_server.build()
-        result = anyio.run(_call, transport, "log_event", {"event_type": "   "})
+        result = anyio.run(_call, transport, "data.log_event", {"event_type": "   "})
         text = result.content[0].text
         assert result.isError is True
         assert "invalid_request" in text
@@ -758,7 +758,7 @@ class TestWireContract:
         сервер для скиллов не поднялся бы вовсе.
         """
         transport, registry, container = enterprise_server.build(capabilities=["llm"])
-        assert set(registry.names()) == {"complete", "embed"}
+        assert set(registry.names()) == {"llm.complete", "llm.embed"}
         assert "data" not in container.services
 
     def test_event_writer_counts_absent_sink_instead_of_crashing(
@@ -791,7 +791,7 @@ class TestWireContract:
         import anyio
 
         transport, _, _ = enterprise_server.build()
-        result = anyio.run(_call, transport, "log_event", {})
+        result = anyio.run(_call, transport, "data.log_event", {})
         assert result.isError is True
 
     def test_health_reports_missing_tables_over_the_wire(self) -> None:
@@ -817,7 +817,7 @@ class TestWireContract:
         result = anyio.run(
             _call,
             transport,
-            "schema_check",
+            "data.schema_check",
             {"expected": ["public.present_table", "public.absent_table"]},
         )
 
@@ -859,7 +859,7 @@ class TestWireContract:
         container.get("data")._db = pool  # noqa: SLF001 - подмена пула под провод
 
         started = time.monotonic()
-        result = anyio.run(_call, transport, "schema_check", {"expected": ["public.t"]})
+        result = anyio.run(_call, transport, "data.schema_check", {"expected": ["public.t"]})
         elapsed = time.monotonic() - started
 
         assert result.isError is True
@@ -874,12 +874,12 @@ class TestWireContract:
 
         # Живость: discovery идёт мимо исполнителя и обязан работать сразу.
         names = {t.name for t in anyio.run(_discover, transport)}
-        assert "schema_check" in names, "после таймаута сервер перестал отвечать"
+        assert "data.schema_check" in names, "после таймаута сервер перестал отвечать"
 
         # И вызов, когда дочерний поток освободил исполнитель.
         time.sleep(pool.delay)
         pool.delay = 0.0
-        alive = anyio.run(_call, transport, "schema_check", {"expected": ["public.t"]})
+        alive = anyio.run(_call, transport, "data.schema_check", {"expected": ["public.t"]})
         assert not alive.isError, alive.content[0].text
 
 
@@ -973,7 +973,7 @@ class TestNoManualToolRegistration:
         from libs.enterprise_common.container import ToolContainer
         from libs.enterprise_common.loader import discover_tool_files, load_registry
 
-        tools_dir = tmp_path / "data" / "tools"
+        tools_dir = tmp_path / "capabilities" / "data" / "tools"
         tools_dir.mkdir(parents=True)
         (tools_dir / "brand_new.py").write_text(
             "from libs.enterprise_common.registry import ToolDefinition\n"
@@ -982,9 +982,11 @@ class TestNoManualToolRegistration:
             "    return value\n"
             "\n"
             "def create_tool(container):\n"
-            "    return ToolDefinition(name='brand_new', description='Новая.', handler=handle, category='data')\n",
+            "    return ToolDefinition(name='data.brand_new', description='Новая.', handler=handle, capability='data')\n",
             encoding="utf-8",
         )
-        assert [p.name for p in discover_tool_files(tmp_path)] == ["brand_new.py"]
-        registry = load_registry(tmp_path, ToolContainer(), root=tmp_path)
-        assert "brand_new" in registry
+        assert [p.name for p in discover_tool_files(tmp_path / "capabilities")] == [
+            "brand_new.py"
+        ]
+        registry = load_registry(tmp_path / "capabilities", ToolContainer(), root=tmp_path)
+        assert "data.brand_new" in registry

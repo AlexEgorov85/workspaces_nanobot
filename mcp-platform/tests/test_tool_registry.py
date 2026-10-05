@@ -32,10 +32,10 @@ def _handler_ok() -> str:
 
 def _definition(**kwargs: object) -> ToolDefinition:
     base: dict[str, object] = {
-        "name": "op",
+        "name": "data.op",
         "description": "описание",
         "handler": _handler_ok,
-        "category": "data",
+        "capability": "data",
     }
     base.update(kwargs)
     return ToolDefinition(**base)  # type: ignore[arg-type]
@@ -43,7 +43,7 @@ def _definition(**kwargs: object) -> ToolDefinition:
 
 #: Операция пишется файлом и грузится загрузчиком: группировку имеет смысл
 #: сверять с каталогом только там, где файл действительно прошёл сверку
-#: категории с каталогом.
+#: capability с каталогом.
 OPERATION_FILE = '''
 from libs.enterprise_common.registry import ToolDefinition
 
@@ -58,7 +58,7 @@ def create_tool(container) -> ToolDefinition:
         name="{name}",
         description="Операция {name}.",
         handler=handle,
-        category="{category}",
+        capability="{capability}",
     )
 '''
 
@@ -180,7 +180,7 @@ class TestRegistryValidation:
     def test_valid_definition_registers(self) -> None:
         registry = ToolRegistry()
         registry.register(_definition())
-        assert "op" in registry
+        assert "data.op" in registry
         assert len(registry) == 1
 
     def test_wrong_type_rejected(self) -> None:
@@ -198,10 +198,10 @@ class TestRegistryValidation:
         with pytest.raises(ToolLoadError, match="описание операции не должно быть пустым"):
             registry.register(_definition(description=" "))
 
-    def test_empty_category_rejected(self) -> None:
+    def test_empty_capability_rejected(self) -> None:
         registry = ToolRegistry()
-        with pytest.raises(ToolLoadError, match="категория"):
-            registry.register(_definition(category=""))
+        with pytest.raises(ToolLoadError, match="capability не должна быть пустой"):
+            registry.register(_definition(capability=""))
 
     def test_non_callable_handler_rejected(self) -> None:
         registry = ToolRegistry()
@@ -215,11 +215,26 @@ class TestRegistryValidation:
             registry.register(_definition())
 
     def test_duplicate_across_capabilities_rejected(self) -> None:
-        """Имена уникальны глобально: агент видит плоский список инструментов."""
+        """Имена уникальны глобально, и после переезда это гарантировано формой.
+
+        Прежняя конструкция — одно имя в двух capability — после переезда
+        невозможна: имя само несёт capability, поэтому ``data.op`` и ``audit.op``
+        разойдутся автоматически. Остаётся проверяемая часть инварианта: две
+        операции одной capability под одним именем отвергаются, а разные
+        capability под одним именем не сходятся.
+        """
         registry = ToolRegistry()
-        registry.register(_definition(category="data"))
+        registry.register(_definition(name="data.op", capability="data"))
+        # Переименование второй половины имени вместо смены только поля:
+        # иначе отказ пришёл бы от сверки префикса с полем, а не от проверки
+        # уникальности, и тест доказал бы не то правило.
         with pytest.raises(ToolLoadError, match="уже зарегистрировано"):
-            registry.register(_definition(category="audit"))
+            registry.register(_definition(name="data.op", capability="data"))
+
+        separate = ToolRegistry()
+        separate.register(_definition(name="data.op", capability="data"))
+        separate.register(_definition(name="audit.op", capability="audit"))
+        assert separate.names() == ("audit.op", "data.op")
 
     def test_unknown_name_lookup_raises(self) -> None:
         registry = ToolRegistry()
@@ -232,48 +247,65 @@ class TestRegistryValidation:
 
     def test_disabled_definition_hidden_from_iteration(self) -> None:
         registry = ToolRegistry()
-        registry.register(_definition(name="on", enabled=True))
-        registry.register(_definition(name="off", enabled=False))
-        assert registry.names() == ("off", "on")
-        assert [d.name for d in registry] == ["on"]
+        registry.register(_definition(name="data.on", enabled=True))
+        registry.register(_definition(name="data.off", enabled=False))
+        assert registry.names() == ("data.off", "data.on")
+        assert [d.name for d in registry] == ["data.on"]
         assert len(registry) == 2
 
-    def test_by_category_groups(self) -> None:
+    def test_by_capability_groups(self) -> None:
         registry = ToolRegistry()
-        registry.register(_definition(name="a", category="data"))
-        registry.register(_definition(name="b", category="audit"))
-        grouped = registry.by_category()
+        registry.register(_definition(name="data.a"))
+        registry.register(_definition(name="audit.b", capability="audit"))
+        grouped = registry.by_capability()
         assert set(grouped) == {"audit", "data"}
-        assert [d.name for d in grouped["data"]] == ["a"]
+        assert [d.name for d in grouped["data"]] == ["data.a"]
 
 
-class TestCategoryGrouping:
-    """Регрессия: сверка ``category`` с каталогом не развела группировку.
+class TestCapabilityGrouping:
+    """Регрессия: сверка capability с каталогом не развела группировку.
 
-    Обоснование прогона — **сверка категории с каталогом**, а не переименования:
-    переименований полей в этом change нет. После сверки ключ
-    ``by_category()`` это ровно имя каталога capability, из которого файл
-    загружен, и группировка разойтись с каталогом уже не может молча.
+    Обоснование прогона — **сверка capability с каталогом**. Переименований полей
+    в этом change теперь есть (поле ``category`` стало ``capability``), и
+    прежняя формулировка об этом умалчивала; ложь была не безобидной, потому
+    что обоснование — это ответ на вопрос «почему этот класс вообще нужен», и
+    без него класс выглядел бы дублем проверки формы имени.
+
+    После переезда правил стало три, и все три сходятся в ``register``: форма
+    имени, сверка его префикса с полем и принадлежность значения capability
+    перечню сервера. Ключ ``by_capability()`` — это ровно то, что объявлено
+    полем, а поле обязано совпадать с каталогом, из которого файл загружен, и с
+    префиксом имени. Группировка разойтись с каталогом уже не может молча.
     """
 
     @staticmethod
-    def _write(root: Path, capability: str, name: str, category: str) -> Path:
-        tools = root / capability / "tools"
+    def _write(root: Path, capability: str, name: str, declared: str) -> Path:
+        """Положить файл операции в ``capabilities/<capability>/tools/``.
+
+        Корень ``capabilities`` в пути обязателен: имя capability сверяется с
+        каталогом **от него**, и файл без него дал бы пустое имя — сверка
+        молча не сработала бы, и весь класс стал бы зелёным, ничего не
+        проверяя.
+        """
+        tools = root / "capabilities" / capability / "tools"
         tools.mkdir(parents=True, exist_ok=True)
         path = tools / f"{name}.py"
         path.write_text(
-            OPERATION_FILE.format(name=name, category=category), encoding="utf-8"
+            OPERATION_FILE.format(name=declared, capability=capability), encoding="utf-8"
         )
         return path
 
+    @staticmethod
+    def _load(root: Path) -> ToolRegistry:
+        return load_registry(root / "capabilities", ToolContainer(), root=root)
+
     def test_group_keys_are_capability_directories(self, tmp_path: Path) -> None:
-        self._write(tmp_path, "data", "op_a", "data")
-        self._write(tmp_path, "audit", "op_b", "audit")
-        registry = load_registry(tmp_path, ToolContainer(), root=tmp_path)
-        grouped = registry.by_category()
+        self._write(tmp_path, "data", "op_a", "data.op_a")
+        self._write(tmp_path, "audit", "op_b", "audit.op_b")
+        grouped = self._load(tmp_path).by_capability()
         assert set(grouped) == {"audit", "data"}
-        assert {d.name for d in grouped["data"]} == {"op_a"}
-        assert {d.name for d in grouped["audit"]} == {"op_b"}
+        assert {d.name for d in grouped["data"]} == {"data.op_a"}
+        assert {d.name for d in grouped["audit"]} == {"audit.op_b"}
 
     def test_every_group_matches_the_directory_its_files_came_from(
         self, tmp_path: Path
@@ -284,24 +316,37 @@ class TestCategoryGrouping:
         группировку и сверку связаны: одна операция под чужой capability
         переставила бы ключ, а набор ключей остался бы прежним.
         """
-        self._write(tmp_path, "data", "op_a", "data")
-        self._write(tmp_path, "data", "op_b", "data")
-        self._write(tmp_path, "audit", "op_c", "audit")
-        registry = load_registry(tmp_path, ToolContainer(), root=tmp_path)
-        expected: dict[str, set[str]] = {"data": {"op_a", "op_b"}, "audit": {"op_c"}}
-        assert {k: {d.name for d in v} for k, v in registry.by_category().items()} == expected
+        self._write(tmp_path, "data", "op_a", "data.op_a")
+        self._write(tmp_path, "data", "op_b", "data.op_b")
+        self._write(tmp_path, "audit", "op_c", "audit.op_c")
+        expected: dict[str, set[str]] = {
+            "data": {"data.op_a", "data.op_b"},
+            "audit": {"audit.op_c"},
+        }
+        assert {
+            k: {d.name for d in v} for k, v in self._load(tmp_path).by_capability().items()
+        } == expected
 
-    def test_foreign_category_stops_the_registry(self, tmp_path: Path) -> None:
+    def test_foreign_capability_stops_the_registry(self, tmp_path: Path) -> None:
         """Файл из ``data``, объявивший ``audit``, обязан остановить загрузку.
 
-        Без сверки он занял бы группу ``audit``, и ``by_category`` продолжал бы
+        Без сверки он занял бы группу ``audit``, и ``by_capability`` продолжал бы
         выглядеть правдой — расхождение с каталогом осталось бы невидимым
         именно там, где оно опаснее всего, в разбиении по capability.
         """
-        self._write(tmp_path, "data", "op", "data")
-        self._write(tmp_path, "data", "impostor", "audit")
+        self._write(tmp_path, "data", "op", "data.op")
+        # Имя ``audit.impostor`` и поле ``audit`` согласованы между собой и
+        # расходятся только с каталогом ``data``. Это единственная расстановка,
+        # при которой срабатывает именно сверка с каталогом: если бы префикс
+        # имени и поле расходились, отказ пришёл бы раньше, от сверки формы с
+        # полем, и тест доказал бы не то правило.
+        impostor = tmp_path / "capabilities" / "data" / "tools" / "impostor.py"
+        impostor.write_text(
+            OPERATION_FILE.format(name="audit.impostor", capability="audit"),
+            encoding="utf-8",
+        )
         with pytest.raises(ToolLoadError, match="не совпадает с capability"):
-            load_registry(tmp_path, ToolContainer(), root=tmp_path)
+            self._load(tmp_path)
 
 
 class TestToolLoadErrorMessage:

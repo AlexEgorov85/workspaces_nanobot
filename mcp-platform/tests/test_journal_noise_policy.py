@@ -83,10 +83,10 @@ class Sink:
 
 def _definition(handler: Any, *, quality_policy: str) -> ToolDefinition:
     return ToolDefinition(
-        name="probe",
+        name="test.probe",
         description="Проверочная операция",
         handler=handler,
-        category="test",
+        capability="test",
         quality_policy=quality_policy,
     )
 

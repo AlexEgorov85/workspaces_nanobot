@@ -210,7 +210,9 @@ def test_handle_is_bound_to_one_session(workspace: SessionWorkspace) -> None:
 
 def test_artifact_roundtrip(workspace: SessionWorkspace) -> None:
     store = ArtifactStore(workspace)
-    artifact = store.create("s1", name="report.json", content=b'{"a":1}', tool_name="run_script")
+    artifact = store.create(
+        "s1", name="report.json", content=b'{"a":1}', tool_name="audit.run_script"
+    )
     assert isinstance(artifact, Artifact)
     assert artifact.size == len(b'{"a":1}')
     assert artifact.session_id == "s1"

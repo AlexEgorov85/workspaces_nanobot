@@ -26,7 +26,7 @@
 **Про границы.** Проверяется путь, доступный модели: белый список
 ``config.json → tools.mcpServers.enterprise.enabled_tools``, настоящий процесс
 ``enterprise-mcp``, настоящая личность в ``params._meta``. Личность синтетическая
-и заведомо несуществующая, поэтому ``history_search`` обязан вернуть пусто — и
+и заведомо несуществующая, поэтому ``data.history_search`` обязан вернуть пусто — и
 возврат чужого был бы отдельной находкой про утечку, а не поводом её скрыть.
 """
 
@@ -52,7 +52,7 @@ pytestmark = [
 
 #: Личность синтетическая и заведомо несуществующая. Живой прогон не имеет
 #: права читать чужие данные: ограничение изоляции проверяется тем, что
-#: ``history_search`` по такому ``user_id`` возвращает пусто, а не запись
+#: ``data.history_search`` по такому ``user_id`` возвращает пусто, а не запись
 #: чужого оборота.
 _SESSION_ID = "live_probe_no_such_session"
 _USER_ID = "live_probe_no_such_user"
@@ -165,7 +165,7 @@ async def test_every_declared_operation_is_served_by_the_server(
     Обратное направление («сервер умеет, но модели не объявлено») **не**
     проверяется и проверкой быть не должно: платформа отдаёт 34 операции, а
     модель получает 7, и это замысел, а не расхождение. Например,
-    ``session_files`` намеренно не объявлена модели — её вызывает резолвер
+    ``platform.session_files`` намеренно не объявлена модели — её вызывает резолвер
     сессии напрямую, потому что выбор корня файлов не должен зависеть от
     того, что модель о нём подумала.
     """
@@ -180,13 +180,13 @@ async def test_every_declared_operation_is_served_by_the_server(
 
 @_MODULE
 async def test_script_catalogue_is_usable(platform: _Platform) -> None:
-    """Каталог скриптов непуст и описан: без него ``run_script`` не вызвать.
+    """Каталог скриптов непуст и описан: без него ``audit.run_script`` не вызвать.
 
     Проверяется форма, а не число: добавление седьмого скрипта — не поломка,
     а пустой каталог или скрипт без параметров — поломка, при которой модель
     не может вызвать ни один из них осмысленно.
     """
-    catalogue = await platform.call("list_scripts")
+    catalogue = await platform.call("audit.list_scripts")
     scripts = catalogue.get("scripts") or []
     assert scripts, "каталог предопределённых скриптов пуст — звать нечего"
 
@@ -209,7 +209,7 @@ async def test_every_script_of_the_catalogue_runs(platform: _Platform) -> None:
     по-прежнему рабочий, — выполнить его. Отказ любого скрипта валит тест с
     именем скрипта и его аргументами в сообщении.
     """
-    catalogue = await platform.call("list_scripts")
+    catalogue = await platform.call("audit.list_scripts")
     scripts = catalogue.get("scripts") or []
     assert scripts, "каталог пуст — исполнять нечего"
 
@@ -225,7 +225,7 @@ async def test_every_script_of_the_catalogue_runs(platform: _Platform) -> None:
                 f"скрипт {name!r} требует параметров, которые нельзя набрать "
                 "без доменных знаний; он не проверен этим прогоном"
             )
-        payload = await platform.call("run_script", {"script": name, **arguments})
+        payload = await platform.call("audit.run_script", {"script": name, **arguments})
         assert "rows" in payload, f"скрипт {name!r} не отдал строки: {payload}"
         assert payload.get("status") == "ok", f"скрипт {name!r}: {payload}"
         executed += 1
@@ -237,13 +237,13 @@ async def test_every_script_of_the_catalogue_runs(platform: _Platform) -> None:
 
 @_MODULE
 async def test_generated_sql_answers_with_data(platform: _Platform) -> None:
-    """``generate_sql`` отвечает настоящим результатом, а не пустым SQL.
+    """``audit.generate_sql`` отвечает настоящим результатом, а не пустым SQL.
 
-    Отдельно от ``run_script``: этот скрипт SQL строит сам, и его поломка —
+    Отдельно от ``audit.run_script``: этот скрипт SQL строит сам, и его поломка —
     не результат неверного фильтра, а невозможность построить запрос вовсе.
     """
     payload = await platform.call(
-        "generate_sql", {"query": "сколько аудитов есть в системе"}
+        "audit.generate_sql", {"query": "сколько аудитов есть в системе"}
     )
     assert payload.get("status") == "ok", payload
     assert payload.get("row_count", 0) >= 1, (
@@ -260,7 +260,7 @@ async def test_vector_search_answers_from_a_ready_index(platform: _Platform) -> 
     последствиями, поэтому утверждения здесь два.
     """
     payload = await platform.call(
-        "vector_search", {"query": "аудит", "index_name": "audits_index"}
+        "vectors.vector_search", {"query": "аудит", "index_name": "audits_index"}
     )
     assert payload.get("index_state") == "ready", payload
     assert payload.get("found", 0) >= 1, (
@@ -277,7 +277,7 @@ async def test_declared_tables_are_present_in_the_snapshot(platform: _Platform) 
     переименовании падает он, а ``test_every_script_of_the_catalogue_runs`` —
     следом, уже с указанием конкретного отказа.
     """
-    payload = await platform.call("schema_check")
+    payload = await platform.call("data.schema_check")
     assert payload.get("ok") is True, payload
     assert payload.get("missing") == [], (
         f"снимок не содержит объявленных таблиц: {payload.get('missing')}"
@@ -295,7 +295,7 @@ async def test_history_search_does_not_leak_other_sessions(
     и если изоляция ослабла, чужой оборот всплыл бы здесь. Молчаливый возврат
     чужих строк — находка, которую этот тест обязан показать, а не скрыть.
     """
-    payload = await platform.call("history_search", {"limit": 5})
+    payload = await platform.call("data.history_search", {"limit": 5})
     rows = payload.get("results") or payload.get("rows") or []
     assert rows == [], (
         f"по несуществующему user_id вернулось {len(rows)} чужих строк — "

@@ -298,10 +298,10 @@ class TestPublishedSchemaMatchesHandler:
             "    ) -> str:\n"
             "        return 'ok'\n"
             "    return ToolDefinition(\n"
-            "        name='probe',\n"
+            "        name='data.probe',\n"
             "        description='Проверочная операция',\n"
             "        handler=handle_probe,\n"
-            "        category='data',\n"
+            "        capability='data',\n"
             "    )\n",
             encoding="utf-8",
         )
@@ -382,10 +382,10 @@ class TestPublishedSchemaMatchesHandler:
             return "ok"
 
         plain = ToolDefinition(
-            name="probe",
+            name="data.probe",
             description="Проверочная операция",
             handler=handle_probe,
-            category="data",
+            capability="data",
         )
         assert plain.input_schema == {}, "признак «не объявлено» изменился"
         assert not hasattr(plain, "schema_declared"), (
@@ -401,10 +401,10 @@ class TestPublishedSchemaMatchesHandler:
             "    def handle_probe(mode: str = 'a') -> str:\n"
             "        return 'ok'\n"
             "    return ToolDefinition(\n"
-            "        name='probe',\n"
+            "        name='data.probe',\n"
             "        description='Проверочная операция',\n"
             "        handler=handle_probe,\n"
-            "        category='data',\n"
+            "        capability='data',\n"
             "    )\n",
             encoding="utf-8",
         )
@@ -443,11 +443,11 @@ class TestPublishedSchemaMatchesHandler:
         }
         # Идентичность вызова приходит плоскими ключами аргументов, а не внутри
         # кадра: операция читает её из контекста вызова.
-        assert _accepts(schemas["log_events"], "events", [frame]), (
+        assert _accepts(schemas["data.log_events"], "events", [frame]), (
             "кадр журнала агента не проходит валидацию объявленной схемой log_events"
         )
         assert _accepts_null(
-            schemas["log_events"],
+            schemas["data.log_events"],
             events=[frame],
             session_id="sess-1",
             user_id="user-1",
@@ -455,7 +455,7 @@ class TestPublishedSchemaMatchesHandler:
         ), "вызов log_events с идентичностью отвергнут схемой"
         # Личность неидентична событию без request_id: так агент пишет события
         # вне оборота, и они не должны отвергаться по этому признаку.
-        assert _accepts_null(schemas["log_events"], events=[{**frame, "id": None}]), (
+        assert _accepts_null(schemas["data.log_events"], events=[{**frame, "id": None}]), (
             "log_events отвергает кадр без id — id выдаёт сервер, это законно"
         )
 

@@ -274,17 +274,17 @@ class TestPostgresChannelQueueWire:
         self, mock_db_and_psycopg
     ):
         PostgresChannel, _, client = mock_db_and_psycopg
-        client.responses["claim_task"] = {"claimed": [self.ROW]}
+        client.responses["data.claim_task"] = {"claimed": [self.ROW]}
         ch = _make_channel((PostgresChannel, None, client))
 
         assert await ch._claim_one() == self.ROW
         # Размер пачки уходит явно, а не подставляется под умолчание.
-        assert client.last_call("claim_task")["arguments"]["batch"] == 1
+        assert client.last_call("data.claim_task")["arguments"]["batch"] == 1
 
     @pytest.mark.asyncio
     async def test_empty_batch_is_an_empty_queue(self, mock_db_and_psycopg):
         PostgresChannel, _, client = mock_db_and_psycopg
-        client.responses["claim_task"] = {"claimed": []}
+        client.responses["data.claim_task"] = {"claimed": []}
         ch = _make_channel((PostgresChannel, None, client))
 
         assert await ch._claim_one() is None
@@ -295,7 +295,7 @@ class TestPostgresChannelQueueWire:
         from lib.channels.queue_ops import QueueOpsError
 
         PostgresChannel, _, client = mock_db_and_psycopg
-        client.responses["claim_task"] = {"claimed": self.ROW}
+        client.responses["data.claim_task"] = {"claimed": self.ROW}
         ch = _make_channel((PostgresChannel, None, client))
 
         with pytest.raises(QueueOpsError) as caught:
@@ -310,10 +310,10 @@ class TestPostgresChannelQueueWire:
         задачи, и объявление платформы перестало бы быть единственным.
         """
         PostgresChannel, _, client = mock_db_and_psycopg
-        client.responses["claim_task"] = {"claimed": [self.ROW]}
-        client.responses["unstick_tasks"] = {"recovered": []}
-        client.responses["append_assistant_message"] = {"assistant_msg_id": "a-1"}
-        client.responses["fail_task"] = {"status": "error", "retry_count": 1}
+        client.responses["data.claim_task"] = {"claimed": [self.ROW]}
+        client.responses["data.unstick_tasks"] = {"recovered": []}
+        client.responses["data.append_assistant_message"] = {"assistant_msg_id": "a-1"}
+        client.responses["data.fail_task"] = {"status": "error", "retry_count": 1}
         ch = _make_channel((PostgresChannel, None, client))
 
         await ch._claim_one()
@@ -422,7 +422,7 @@ class TestPostgresChannelInsertAssistantMessage:
     @pytest.mark.asyncio
     async def test_inserts_and_returns_id(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["append_assistant_message"] = {
+        mock_db.responses["data.append_assistant_message"] = {
             "assistant_msg_id": "new-msg-42"
         }
 
@@ -490,7 +490,7 @@ class TestPostgresChannelSend:
     async def test_final_turn_finalizes_and_cleans_ctx(self, mock_db_and_psycopg):
         """Финальный outbound (маркер ``_final_turn``) финализирует оборот."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -514,7 +514,7 @@ class TestPostgresChannelSend:
     async def test_legacy_final_with_latency_ms_finalizes(self, mock_db_and_psycopg):
         """Legacy-финал без ``_final_turn``, но с ``latency_ms`` — финализирует."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -538,7 +538,7 @@ class TestPostgresChannelSend:
     async def test_message_tool_delivery_merges_not_finalizes(self, mock_db_and_psycopg):
         """Промежуточная публикация message(...) merge'ится, слот/клейм не трогаются."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["merge_tool_delivery"] = {"updated": True}
+        mock_db.responses["data.merge_tool_delivery"] = {"updated": True}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -564,16 +564,16 @@ class TestPostgresChannelSend:
         # Запись идёт операцией merge_tool_delivery, а не UPDATE: слияние
         # контента и вложений — read-modify-write, и одним UPDATE его
         # больше не написать.
-        call = mock_db.last_call("merge_tool_delivery")
+        call = mock_db.last_call("data.merge_tool_delivery")
         assert call["arguments"]["assistant_msg_id"] == "a-1"
         assert call["arguments"]["content"] == "Hello from tool"
-        assert not mock_db.was_called("finalize_turn")
+        assert not mock_db.was_called("data.finalize_turn")
 
     @pytest.mark.asyncio
     async def test_plain_text_message_tool_merges(self, mock_db_and_psycopg):
         """message('текст') без media/флагов — тоже merge, а не финал."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["merge_tool_delivery"] = {"updated": True}
+        mock_db.responses["data.merge_tool_delivery"] = {"updated": True}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
@@ -590,7 +590,7 @@ class TestPostgresChannelSend:
         assert "m-1" in ch._msg_ctx  # не финализировано
         # Накопление содержимого живёт на платформе: канал передаёт дельту
         # и не решает, как она склеится с уже накопленным.
-        call = mock_db.last_call("merge_tool_delivery")
+        call = mock_db.last_call("data.merge_tool_delivery")
         assert call["arguments"]["content"] == "Second"
         assert call["arguments"]["assistant_msg_id"] == "a-1"
 
@@ -609,8 +609,8 @@ class TestPostgresChannelSend:
         Тест проверяет именно этот контракт.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["merge_tool_delivery"] = {"updated": True}
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.merge_tool_delivery"] = {"updated": True}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -650,12 +650,12 @@ class TestPostgresChannelSend:
         assert "m-1" not in ch._msg_ctx  # финализировано
         assert "m-1" not in ch.exchange.inflight
         # Пустой финальный content - это «взять накопленное», а не «очистить».
-        finalize = mock_db.last_call("finalize_turn")
+        finalize = mock_db.last_call("data.finalize_turn")
         assert finalize["arguments"]["content"] == ""
         assert finalize["arguments"]["assistant_msg_id"] == "a-1"
         # Порядок важен: сначала накопление, потом закрытие.
         operations = [c["operation"] for c in mock_db.calls]
-        assert operations.index("merge_tool_delivery") < operations.index("finalize_turn")
+        assert operations.index("data.merge_tool_delivery") < operations.index("data.finalize_turn")
 
 
 class TestPostgresChannelSendDelta:
@@ -675,7 +675,7 @@ class TestPostgresChannelSendDelta:
         ch._stream_buffers["s-1"] = "Final content"
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
 
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         await ch.send_delta("chat-1", "", {
             "_stream_end": True,
@@ -892,7 +892,7 @@ class TestPostgresChannelWorkerActivity:
         ch = await self._channel(
             PostgresChannel, mock_db, enabled=True, queue_report_interval=0.0
         )
-        mock_db.responses["queue_stats"] = {"pending": 3, "error": 1}
+        mock_db.responses["data.queue_stats"] = {"pending": 3, "error": 1}
         with patch("lib.services.operator_console.emit") as emit:
             await ch._report_queue()
             emit.assert_called_once()
@@ -902,7 +902,7 @@ class TestPostgresChannelWorkerActivity:
             assert "error=1" in detail
             await ch._report_queue()
             assert emit.call_count == 1
-            mock_db.responses["queue_stats"] = {"pending": 4, "error": 0}
+            mock_db.responses["data.queue_stats"] = {"pending": 4, "error": 0}
             await ch._report_queue()
             assert emit.call_count == 2
 
@@ -922,19 +922,19 @@ class TestPostgresChannelWorkerActivity:
         ch = await self._channel(
             PostgresChannel, mock_db, enabled=True, queue_report_interval=30.0
         )
-        mock_db.responses["queue_stats"] = {"pending": 3, "error": 1}
+        mock_db.responses["data.queue_stats"] = {"pending": 3, "error": 1}
         with patch("lib.services.operator_console.emit"):
             await ch._report_queue()
-            assert len(mock_db.calls_to("queue_stats")) == 1
+            assert len(mock_db.calls_to("data.queue_stats")) == 1
             # Цикл опроса зовёт отчёт дважды за итерацию: интервал держит
             for _ in range(5):
                 await ch._report_queue()
-            assert len(mock_db.calls_to("queue_stats")) == 1
+            assert len(mock_db.calls_to("data.queue_stats")) == 1
             # Время прошло — следующий отчёт снова спрашивает платформу
             ch._last_queue_report_at -= 31.0
-            mock_db.responses["queue_stats"] = {"pending": 4, "error": 0}
+            mock_db.responses["data.queue_stats"] = {"pending": 4, "error": 0}
             await ch._report_queue()
-            assert len(mock_db.calls_to("queue_stats")) == 2
+            assert len(mock_db.calls_to("data.queue_stats")) == 2
 
     @pytest.mark.asyncio
     async def test_first_report_always_happens(self, mock_db_and_psycopg):
@@ -948,10 +948,10 @@ class TestPostgresChannelWorkerActivity:
         ch = await self._channel(
             PostgresChannel, mock_db, enabled=True, queue_report_interval=3600.0
         )
-        mock_db.responses["queue_stats"] = {"pending": 0, "error": 0}
+        mock_db.responses["data.queue_stats"] = {"pending": 0, "error": 0}
         with patch("lib.services.operator_console.emit") as emit:
             await ch._report_queue()
-        assert len(mock_db.calls_to("queue_stats")) == 1
+        assert len(mock_db.calls_to("data.queue_stats")) == 1
         emit.assert_called_once()
         assert "phase=idle" in emit.call_args.args[0].detail
 
@@ -959,9 +959,9 @@ class TestPostgresChannelWorkerActivity:
     async def test_report_queue_disabled_skips_query(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=False)
-        mock_db.errors["queue_stats"] = AssertionError("query must be skipped")
+        mock_db.errors["data.queue_stats"] = AssertionError("query must be skipped")
         await ch._report_queue()  # не падает и не ходит к платформе
-        assert not mock_db.was_called("queue_stats")
+        assert not mock_db.was_called("data.queue_stats")
 
     @pytest.mark.asyncio
     async def test_poll_once_hands_over_claimed_fact(self, mock_db_and_psycopg):
@@ -1046,7 +1046,7 @@ class TestPostgresChannelWorkerActivity:
         exchange.is_slot_free = lambda: True
         ch.exchange = exchange
 
-        mock_db.responses["fail_task"] = {"status": "error", "retry_count": 1}
+        mock_db.responses["data.fail_task"] = {"status": "error", "retry_count": 1}
         with patch("lib.services.operator_console.emit") as emit:
             await ch._mark_failed("m-1", "a-1", "dispatch_error")
             emit.assert_called_once()
@@ -1062,7 +1062,7 @@ class TestPostgresChannelWorkerActivity:
         """Успешный финал — факт с исходом completed."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = await self._channel(PostgresChannel, mock_db, enabled=True)
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
         ch._msg_chat["m-1"] = "chat-1"
@@ -1125,7 +1125,7 @@ class TestPostgresChannelContextWindow:
 
         await ch._flush_live_context()
 
-        call = mock_db.last_call("patch_message_metadata")
+        call = mock_db.last_call("data.patch_message_metadata")
         assert call["arguments"]["task_id"] == "a-1"
         assert call["arguments"]["role"] == "assistant"
         window = call["arguments"]["patch"]["context_window"]
@@ -1153,7 +1153,7 @@ class TestPostgresChannelContextWindow:
 
         await ch._flush_live_context()
 
-        window = mock_db.last_call("patch_message_metadata")["arguments"]["patch"]["context_window"]
+        window = mock_db.last_call("data.patch_message_metadata")["arguments"]["patch"]["context_window"]
         assert window["used"] == 32768
         assert window["limit"] == 65536
         assert window["pct"] == 0.5
@@ -1275,7 +1275,7 @@ class TestPostgresChannelTurnLifecycle:
     async def test_final_turn_full_lifecycle(self, mock_db_and_psycopg):
         """Тест 1: обычный ``_final_turn`` финал. Все структуры очищены."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1290,13 +1290,13 @@ class TestPostgresChannelTurnLifecycle:
         ))
 
         _assert_local_clean(ch, "m-1", "chat-1")
-        assert mock_db.was_called("finalize_turn")
+        assert mock_db.was_called("data.finalize_turn")
 
     @pytest.mark.asyncio
     async def test_turn_end_finalizes(self, mock_db_and_psycopg):
         """Тест 3: legacy ``_turn_end`` маркер финализирует оборот."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1318,7 +1318,7 @@ class TestPostgresChannelTurnLifecycle:
         Контент непустой → всё завершается штатно.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1335,7 +1335,7 @@ class TestPostgresChannelTurnLifecycle:
 
         _assert_local_clean(ch, "m-3", "chat-3")
         assert "s-3" not in ch._stream_buffers
-        assert mock_db.was_called("finalize_turn")
+        assert mock_db.was_called("data.finalize_turn")
 
     @pytest.mark.asyncio
     async def test_stream_end_empty_delta_still_finalizes(self, mock_db_and_psycopg):
@@ -1348,7 +1348,7 @@ class TestPostgresChannelTurnLifecycle:
         в ``processing`` в БД и слот в inflight.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1364,7 +1364,7 @@ class TestPostgresChannelTurnLifecycle:
         })
 
         _assert_local_clean(ch, "m-4", "chat-4")
-        assert mock_db.was_called("finalize_turn")
+        assert mock_db.was_called("data.finalize_turn")
 
     @pytest.mark.asyncio
     async def test_final_with_only_answer_id_recovers_user(self, mock_db_and_psycopg):
@@ -1373,7 +1373,7 @@ class TestPostgresChannelTurnLifecycle:
         ``reply_to`` assistant-строки и завершить оборот.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1383,7 +1383,7 @@ class TestPostgresChannelTurnLifecycle:
         # Обратный поиск user_msg_id: платформа отдаёт reply_to по строке
         # ответа. Раньше здесь патчился ``postgres_channel.fetchone`` -
         # функции, в канале больше нет.
-        mock_db.responses["get_message"] = {
+        mock_db.responses["data.get_message"] = {
             "message": {
                 "id": "a-5",
                 "role": "assistant",
@@ -1399,7 +1399,7 @@ class TestPostgresChannelTurnLifecycle:
             answer_id="a-5",
             _final_turn=True,
         ))
-        assert mock_db.was_called("get_message")
+        assert mock_db.was_called("data.get_message")
 
         _assert_local_clean(ch, "m-5", "chat-5")
 
@@ -1409,7 +1409,7 @@ class TestPostgresChannelTurnLifecycle:
         no-op — задача должна быть терминально failed, локал очищен.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["fail_task"] = {"status": "failed", "retry_count": 6}
+        mock_db.responses["data.fail_task"] = {"status": "failed", "retry_count": 6}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1452,7 +1452,7 @@ class TestPostgresChannelLifecycleDiagnostics:
         local_released (по одной строке на каждую фазу).
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["finalize_turn"] = {"outcome": "completed"}
+        mock_db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
@@ -1497,7 +1497,7 @@ class TestPostgresChannelUnstickProcessing:
     async def test_returns_recovered_id_and_clears_local(self, mock_db_and_psycopg):
         """Одна зависшая задача: recovered → local state очищен."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["unstick_tasks"] = {"recovered": ["m-stuck"]}
+        mock_db.responses["data.unstick_tasks"] = {"recovered": ["m-stuck"]}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         _claim_task(ch, user_msg_id="m-stuck", chat_id="chat-stuck",
@@ -1510,7 +1510,7 @@ class TestPostgresChannelUnstickProcessing:
         # Очистку делает _unstick_loop.
         assert "m-stuck" in ch.exchange.inflight
         # Пороги передаются платформе, а не применяются в канале.
-        call = mock_db.last_call("unstick_tasks")
+        call = mock_db.last_call("data.unstick_tasks")
         assert call["arguments"]["max_stuck_retries"] == ch._max_stuck_retries
         assert call["arguments"]["processing_timeout_sec"] == ch._processing_timeout
 
@@ -1518,7 +1518,7 @@ class TestPostgresChannelUnstickProcessing:
     async def test_unstick_loop_clears_local_for_recovered(self, mock_db_and_psycopg):
         """``_unstick_loop`` после ``_unstick_processing`` чистит локал."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["unstick_tasks"] = {"recovered": ["m-loop"]}
+        mock_db.responses["data.unstick_tasks"] = {"recovered": ["m-loop"]}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         _claim_task(ch, user_msg_id="m-loop", chat_id="chat-loop",
@@ -1543,7 +1543,7 @@ class TestPostgresChannelUnstickProcessing:
         иначе два конкурирующих прохода записали бы одинаковый счётчик.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["unstick_tasks"] = {"recovered": ["m-term"]}
+        mock_db.responses["data.unstick_tasks"] = {"recovered": ["m-term"]}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db), max_stuck_retries=3,
@@ -1551,7 +1551,7 @@ class TestPostgresChannelUnstickProcessing:
 
         recovered = await ch._unstick_processing()
         assert recovered == ["m-term"]
-        assert mock_db.last_call("unstick_tasks")["arguments"][
+        assert mock_db.last_call("data.unstick_tasks")["arguments"][
             "max_stuck_retries"
         ] == 3
 
@@ -1566,7 +1566,7 @@ class TestPostgresChannelMarkFailed:
     async def test_dispatch_error_marks_error_and_clears_local(self, mock_db_and_psycopg):
         """``_mark_failed(reason='dispatch_error')`` → DB error, локал чист."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["fail_task"] = {"status": "error", "retry_count": 1}
+        mock_db.responses["data.fail_task"] = {"status": "error", "retry_count": 1}
 
         ch = _make_channel((PostgresChannel, None, mock_db))
         _claim_task(ch, user_msg_id="m-d", chat_id="chat-d",
@@ -1576,7 +1576,7 @@ class TestPostgresChannelMarkFailed:
 
         _assert_local_clean(ch, "m-d", "chat-d")
         # Статус приходит от платформы: она же увеличивала счётчик.
-        call = mock_db.last_call("fail_task")
+        call = mock_db.last_call("data.fail_task")
         assert call["arguments"]["user_msg_id"] == "m-d"
         assert call["arguments"]["assistant_msg_id"] == "a-d"
         assert call["arguments"]["reason"] == "dispatch_error"
@@ -1585,7 +1585,7 @@ class TestPostgresChannelMarkFailed:
     async def test_mark_failed_after_max_retries_is_terminal(self, mock_db_and_psycopg):
         """retry_count >= max → terminal failed, локал чист."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.responses["fail_task"] = {"status": "failed", "retry_count": 4}
+        mock_db.responses["data.fail_task"] = {"status": "failed", "retry_count": 4}
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db), max_stuck_retries=3,
@@ -1597,7 +1597,7 @@ class TestPostgresChannelMarkFailed:
 
         _assert_local_clean(ch, "m-t", "chat-t")
         # Порог уходит на платформу вместе с обеими строками оборота.
-        call = mock_db.last_call("fail_task")
+        call = mock_db.last_call("data.fail_task")
         assert call["arguments"]["max_stuck_retries"] == 3
 
     @pytest.mark.asyncio

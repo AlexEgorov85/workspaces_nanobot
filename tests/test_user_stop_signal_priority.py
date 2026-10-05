@@ -128,7 +128,7 @@ class TestClaimOnePriorityFilter:
 
         await ch._claim_one(priority_contents=("/stop", "/restart"))
 
-        arguments = db.last_call("claim_task")["arguments"]
+        arguments = db.last_call("data.claim_task")["arguments"]
         assert arguments["priority_contents"] == ["/stop", "/restart"], (
             "список priority-команд не доехал до платформы: "
             f"{arguments!r}"
@@ -141,7 +141,7 @@ class TestClaimOnePriorityFilter:
 
         await ch._claim_one()
 
-        arguments = db.last_call("claim_task")["arguments"]
+        arguments = db.last_call("data.claim_task")["arguments"]
         # ``None``, а не ``[]``: платформа трактует пустой список как «не
         # захватывать ничего», и обычная очередь встала бы молча.
         assert arguments["priority_contents"] is None, (
@@ -166,7 +166,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         # Заглушка ответа создаётся на этом пути, как на обычном: без неё
         # исходящее не резолвится. Само создание проверяется отдельным тестом.
@@ -197,7 +197,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
@@ -234,7 +234,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._handle_message = AsyncMock()
 
@@ -271,7 +271,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._insert_assistant_message = AsyncMock(side_effect=RuntimeError("нет"))
         ch._handle_message = AsyncMock()
 
@@ -280,10 +280,10 @@ class TestPollPriorityOnce:
 
         assert result is False
         ch._handle_message.assert_not_awaited()
-        assert db.calls_to("update_task_status"), "задача не возвращена в очередь"
-        args = db.calls_to("update_task_status")[0]["arguments"]
+        assert db.calls_to("data.update_task_status"), "задача не возвращена в очередь"
+        args = db.calls_to("data.update_task_status")[0]["arguments"]
         assert args["status"] == "pending"
-        assert db.calls_to("fail_task") == [], (
+        assert db.calls_to("data.fail_task") == [], (
             "fail_task увеличивает retry_count задаче, которая не виновата"
         )
         assert "m-stop" not in ch._claimed_ids
@@ -305,7 +305,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._handle_message = AsyncMock()
 
@@ -339,16 +339,16 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._handle_message = AsyncMock(side_effect=RuntimeError("диспатч упал"))
-        db.responses["fail_task"] = {"status": "error", "retry_count": 1}
+        db.responses["data.fail_task"] = {"status": "error", "retry_count": 1}
 
         exchange = MagicMock()
         result = await ch._poll_priority_once(exchange)
 
         assert result is True
-        failed = db.calls_to("fail_task")
+        failed = db.calls_to("data.fail_task")
         assert len(failed) == 1
         assert failed[0]["arguments"]["assistant_msg_id"] == "asst-1", (
             "откат обязан знать id заглушки: без него ошибочная запись "
@@ -374,7 +374,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
@@ -405,7 +405,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._release_slot = MagicMock()
 
@@ -439,10 +439,10 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._handle_message = AsyncMock(side_effect=RuntimeError("диспатч упал"))
-        db.responses["fail_task"] = {"status": "error", "retry_count": 1}
+        db.responses["data.fail_task"] = {"status": "error", "retry_count": 1}
 
         await ch._poll_priority_once(MagicMock())
 
@@ -472,7 +472,7 @@ class TestPollPriorityOnce:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "cancelled"}}
+        db.responses["data.get_message"] = {"message": {"status": "cancelled"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -513,7 +513,7 @@ class TestPollPriorityInbound:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
@@ -559,7 +559,7 @@ class TestPriorityRaceConditions:
             "created_at": None,
         })
         # re-check fetchval возвращает 'cancelled' (race window).
-        db.responses["get_message"] = {"message": {"status": "cancelled"}}
+        db.responses["data.get_message"] = {"message": {"status": "cancelled"}}
         ch._handle_message = AsyncMock()
 
         exchange = MagicMock()
@@ -587,7 +587,7 @@ class TestPriorityRaceConditions:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
@@ -616,7 +616,7 @@ class TestPriorityRaceConditions:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock(side_effect=RuntimeError("boom"))
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._mark_failed = AsyncMock()
@@ -649,7 +649,7 @@ class TestPriorityRaceConditions:
             "metadata": "{}",
             "created_at": None,
         })
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         ch._handle_message = AsyncMock()
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._release_slot = MagicMock()

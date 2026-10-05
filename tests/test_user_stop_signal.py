@@ -117,7 +117,7 @@ class TestClaimOneSkipsCancelled:
         # запросом; его структура закреплена в
         # ``mcp-platform/tests/test_data_task_queue.py::TestClaimTaskSqlStructure``.
         # Здесь — что канал вообще звал захват.
-        assert db.was_called("claim_task")
+        assert db.was_called("data.claim_task")
 
 
 class TestPollOnceRaceCheck:
@@ -140,9 +140,9 @@ class TestPollOnceRaceCheck:
             "metadata": "{}",
             "created_at": None,
         }
-        db.responses["claim_task"] = {"claimed": [claim_row]}
+        db.responses["data.claim_task"] = {"claimed": [claim_row]}
         # re-check fetchval возвращает 'cancelled'.
-        db.responses["get_message"] = {"message": {"status": "cancelled"}}
+        db.responses["data.get_message"] = {"message": {"status": "cancelled"}}
 
         # Подменяем exchange, чтобы не упасть в реальную логику.
         exchange = MagicMock()
@@ -153,7 +153,7 @@ class TestPollOnceRaceCheck:
 
         # Re-check статуса уехал в операцию get_message: она и читает
         # статус, и не даёт подменной SQL разойтись с реальным захватом.
-        assert db.was_called("get_message"), (
+        assert db.was_called("data.get_message"), (
             "после захвата статус перепроверяется - иначе отмена пришедшая "
             "между отбором кандидата и захватом будет проигнорирована"
         )
@@ -177,8 +177,8 @@ class TestPollOnceRaceCheck:
             "metadata": "{}",
             "created_at": None,
         }
-        db.responses["claim_task"] = {"claimed": [claim_row]}
-        db.responses["get_message"] = {"message": {"status": "processing"}}
+        db.responses["data.claim_task"] = {"claimed": [claim_row]}
+        db.responses["data.get_message"] = {"message": {"status": "processing"}}
         # _insert_assistant_message возвращает UUID assistant.
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
 
@@ -216,7 +216,7 @@ class TestFinalizeTurnDropsCancelled:
             "chat_id": "chat-A",
             "source": "metadata",
         })
-        db.responses["finalize_turn"] = {
+        db.responses["data.finalize_turn"] = {
             "outcome": "cancelled_drop",
             "placeholder_deleted": 1,
         }
@@ -240,17 +240,17 @@ class TestFinalizeTurnDropsCancelled:
         # Закрытие оборота — одна операция, а не «прочитал статус, потом
         # записал»: разделение оставляло окно, в котором отмена успевала
         # прийти, а ответ всё равно ложился.
-        assert db.was_called("finalize_turn"), (
+        assert db.was_called("data.finalize_turn"), (
             "оборот закрывается операцией finalize_turn; "
             f"вызваны: {db.operations()}"
         )
-        args = db.last_call("finalize_turn")["arguments"]
+        args = db.last_call("data.finalize_turn")["arguments"]
         assert args["user_msg_id"] == "u-1"
         assert args["assistant_msg_id"] == "asst-1"
 
         # Никакого отдельного чтения статуса перед записью: отмена решается
         # внутри той же транзакции.
-        assert not db.was_called("get_message"), (
+        assert not db.was_called("data.get_message"), (
             "отмена проверяется внутри finalize_turn; отдельное чтение статуса "
             "оставляет окно, в котором отмена приходит уже после него"
         )
@@ -272,7 +272,7 @@ class TestFinalizeTurnDropsCancelled:
             "chat_id": "chat-B",
             "source": "metadata",
         })
-        db.responses["finalize_turn"] = {"outcome": "completed"}
+        db.responses["data.finalize_turn"] = {"outcome": "completed"}
 
         ch._embed_media_for_db = AsyncMock(return_value=[])
         ch._release_slot = MagicMock()
@@ -290,7 +290,7 @@ class TestFinalizeTurnDropsCancelled:
 
         await ch.send(msg)
 
-        args = db.last_call("finalize_turn")["arguments"]
+        args = db.last_call("data.finalize_turn")["arguments"]
         assert args["user_msg_id"] == "u-2"
         assert args["assistant_msg_id"] == "asst-2"
         assert args["content"] == "done", "ответ должен уйти на платформу целиком"

@@ -164,7 +164,7 @@ class TestCycle:
         каждую минуту, и ни одно из них ничего не меняет."""
         path = _session_file(tmp_path, "s.jsonl")
         sm = _FakeSessionManager({"k1": (path, _FakeSession())})
-        mcp = _FakeMcp({"session_mirror_state": {
+        mcp = _FakeMcp({"data.session_mirror_state": {
             "count": 1, "sessions": {
                 "k1": {"source_digest": file_digest(path), "updated_at": str(NOW)},
             },
@@ -173,19 +173,19 @@ class TestCycle:
 
         await svc._cycle()
 
-        assert mcp.ops() == ["session_mirror_state", "cleanup_session_mirror"]
+        assert mcp.ops() == ["data.session_mirror_state", "data.cleanup_session_mirror"]
         assert svc.get_stats()["skipped_unchanged_total"] == 1
 
     async def test_changed_session_is_written(self, tmp_path: Path) -> None:
         path = _session_file(tmp_path, "s.jsonl")
         sm = _FakeSessionManager({"k1": (path, _FakeSession())})
         mcp = _FakeMcp({
-            "session_mirror_state": {
+            "data.session_mirror_state": {
                 "count": 1, "sessions": {
                     "k1": {"source_digest": "старый", "updated_at": str(NOW)},
                 },
             },
-            "mirror_session": {
+            "data.mirror_session": {
                 "verdict": "updated", "messages_written": 1, "reason": "digest_only_change",
             },
         })
@@ -193,7 +193,7 @@ class TestCycle:
 
         await svc._cycle()
 
-        assert "mirror_session" in mcp.ops()
+        assert "data.mirror_session" in mcp.ops()
         stats = svc.get_stats()
         assert stats["sessions_written_total"] == 1
         assert stats["messages_written_total"] == 1
@@ -207,18 +207,18 @@ class TestCycle:
         digest_now = file_digest(path)
         sm = _FakeSessionManager({"k1": (path, _FakeSession())})
         mcp = _FakeMcp({
-            "session_mirror_state": {
+            "data.session_mirror_state": {
                 "count": 1, "sessions": {
                     "k1": {"source_digest": "прежний", "updated_at": str(NOW)},
                 },
             },
-            "mirror_session": {"verdict": "updated", "messages_written": 1},
+            "data.mirror_session": {"verdict": "updated", "messages_written": 1},
         })
         svc = _service(sm, mcp)
 
         await svc._cycle()
 
-        payload = mcp.args_for("mirror_session")[0]
+        payload = mcp.args_for("data.mirror_session")[0]
         assert payload["source_digest"] == digest_now
         assert payload["replica_id"] == "gw-1"
 
@@ -226,8 +226,8 @@ class TestCycle:
         path = _session_file(tmp_path, "s.jsonl")
         sm = _FakeSessionManager({"k1": (path, _FakeSession())})
         mcp = _FakeMcp({
-            "session_mirror_state": {"count": 0, "sessions": {}},
-            "mirror_session": {"verdict": "inserted", "messages_written": 1},
+            "data.session_mirror_state": {"count": 0, "sessions": {}},
+            "data.mirror_session": {"verdict": "inserted", "messages_written": 1},
         })
         svc = _service(sm, mcp, replica_id="gw-7")
 
@@ -243,24 +243,24 @@ class TestCycle:
         """Файл прямо сейчас переписывается. Засчитать дайджест можно лишь
         выдумав его, и тогда зеркало сохранит байты, которых в файле не было."""
         sm = _FakeSessionManager({"k1": (tmp_path / "нет.jsonl", _FakeSession())})
-        mcp = _FakeMcp({"session_mirror_state": {"count": 0, "sessions": {}}})
+        mcp = _FakeMcp({"data.session_mirror_state": {"count": 0, "sessions": {}}})
         svc = _service(sm, mcp)
 
         await svc._cycle()
 
-        assert "mirror_session" not in mcp.ops()
+        assert "data.mirror_session" not in mcp.ops()
         assert svc.get_stats()["unreadable_total"] == 1
 
     async def test_unreadable_snapshot_is_counted(self, tmp_path: Path) -> None:
         path = _session_file(tmp_path, "s.jsonl")
         sm = _FakeSessionManager({"k1": (path, _FakeSession())})
         sm.snapshot_missing.add("k1")
-        mcp = _FakeMcp({"session_mirror_state": {"count": 0, "sessions": {}}})
+        mcp = _FakeMcp({"data.session_mirror_state": {"count": 0, "sessions": {}}})
         svc = _service(sm, mcp)
 
         await svc._cycle()
 
-        assert "mirror_session" not in mcp.ops()
+        assert "data.mirror_session" not in mcp.ops()
         assert svc.get_stats()["snapshot_missing_total"] == 1
 
 
@@ -271,17 +271,17 @@ class TestCycle:
 class TestWipeGuard:
     async def test_empty_upstream_never_triggers_cleanup(self, tmp_path: Path) -> None:
         sm = _FakeSessionManager({})
-        mcp = _FakeMcp({"session_mirror_state": {"count": 42, "sessions": {}}})
+        mcp = _FakeMcp({"data.session_mirror_state": {"count": 42, "sessions": {}}})
         svc = _service(sm, mcp)
 
         await svc._cycle()
 
-        assert "cleanup_session_mirror" not in mcp.ops()
+        assert "data.cleanup_session_mirror" not in mcp.ops()
         assert svc.get_stats()["cleanup_guarded_total"] == 1
 
     async def test_empty_upstream_with_empty_mirror_is_quiet(self, tmp_path: Path) -> None:
         sm = _FakeSessionManager({})
-        mcp = _FakeMcp({"session_mirror_state": {"count": 0, "sessions": {}}})
+        mcp = _FakeMcp({"data.session_mirror_state": {"count": 0, "sessions": {}}})
         svc = _service(sm, mcp)
 
         await svc._cycle()
@@ -296,7 +296,7 @@ class TestWipeGuard:
             "k2": (path_b, _FakeSession()),
         })
         mcp = _FakeMcp({
-            "session_mirror_state": {
+            "data.session_mirror_state": {
                 "count": 2,
                 "sessions": {
                     "k1": {"source_digest": file_digest(path_a)},
@@ -308,7 +308,7 @@ class TestWipeGuard:
 
         await svc._cycle()
 
-        payload = mcp.args_for("cleanup_session_mirror")[0]
+        payload = mcp.args_for("data.cleanup_session_mirror")[0]
         assert payload["present_keys"] == ["k1", "k2"]
         assert payload["delete_after_missed_cycles"] == 2
 
@@ -321,7 +321,7 @@ class TestFailures:
     async def test_platform_failure_rolls_back_to_backoff(self, tmp_path: Path) -> None:
         sm = _FakeSessionManager({})
         mcp = _FakeMcp({
-            "session_mirror_state": RuntimeError("платформа недоступна"),
+            "data.session_mirror_state": RuntimeError("платформа недоступна"),
         })
         svc = _service(sm, mcp, sync_interval_sec=30.0)
 
@@ -352,7 +352,7 @@ class TestFailures:
     ) -> None:
         """Нечитаемый ответ хуже отсутствующего: выглядит как пустой успех."""
         sm = _FakeSessionManager({})
-        mcp = _FakeMcp({"session_mirror_state": "не json вовсе"})
+        mcp = _FakeMcp({"data.session_mirror_state": "не json вовсе"})
         svc = _service(sm, mcp)
 
         with pytest.raises(ValueError, match="JSON"):
@@ -360,7 +360,7 @@ class TestFailures:
 
     async def test_answer_of_wrong_type_is_refused(self, tmp_path: Path) -> None:
         sm = _FakeSessionManager({})
-        mcp = _FakeMcp({"session_mirror_state": "[1, 2, 3]"})
+        mcp = _FakeMcp({"data.session_mirror_state": "[1, 2, 3]"})
         svc = _service(sm, mcp)
 
         with pytest.raises(ValueError, match="объектом"):

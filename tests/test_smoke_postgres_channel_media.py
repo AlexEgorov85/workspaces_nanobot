@@ -160,7 +160,7 @@ def _make_outbound(content, media, chat_id="chat-1"):
 
 #: Операции платформы, в которые ``send`` кладёт вложения. Порядок важен:
 #: сначала промежуточная доставка (если она была), затем финальная запись.
-_MEDIA_OPERATIONS = ("merge_tool_delivery", "finalize_turn")
+_MEDIA_OPERATIONS = ("data.merge_tool_delivery", "data.finalize_turn")
 
 
 def _captured_media(client) -> list:

@@ -60,7 +60,7 @@ class RecordingClient:
         self.calls.append((operation, dict(arguments or {}), identity))
         if self.fail_with is not None:
             raise self.fail_with
-        if operation == "log_events":
+        if operation == "data.log_events":
             count = len((arguments or {}).get("events", []))
             return json.dumps(
                 {"status": "ok", "accepted": count, "dropped": 0}
@@ -584,7 +584,7 @@ class TestServiceWiring:
         service._handle_question_run(record)
 
         operations = [call[0] for call in client.calls]
-        assert operations == ["upsert_question_run"]
+        assert operations == ["data.upsert_question_run"]
         assert client.calls[0][2].request_id == "r1"
         assert "request_id" not in client.calls[0][1], (
             "request_id берётся из контекста вызова, а не из аргументов"
@@ -650,7 +650,7 @@ class TestBatchedAsyncFlush:
         # к батчу отношения не имеет. Раньше он не происходил только потому,
         # что ``purge_empty_outbound`` молча выходила по отсутствию DSN, —
         # то есть отличался не путь, а DSN у теста.
-        journal_calls = [c for c in client.calls if c[0] == "log_events"]
+        journal_calls = [c for c in client.calls if c[0] == "data.log_events"]
         assert len(journal_calls) == 1, "батч уходит одним вызовом, а не пятью"
         assert len(journal_calls[0][1]["events"]) == 5
         assert service.get_stats()["written"] == 5

@@ -33,41 +33,53 @@ CONFIG = REPO_ROOT / "config.json"
 #: Проверку равенства объявлению делает ``tests/test_mcp_platform_declaration.py``;
 #: здесь список нужен как «какие строки таблицы обязаны быть».
 #:
-#: ``vector_search`` и ``list_indexes`` — операции capability ``vectors``, а не
-#: ``audit``, и это не оговорка: смысловой поиск по нарушениям и есть ответ на
-#: вопрос про нарушения. ``list_indexes`` добавлена вместе с выдачей её модели
-#: (см. ``TestSkillDocIndexCatalog``) — до этого навык держал имена индексов
-#: таблицей у себя.
+#: Имена — **с capability**, то есть так, как операция называется на проводе
+#: (``audit.…``, ``vectors.…``). Плоское ``list_scripts`` навык больше не пишет.
+#:
+#: ``vectors.vector_search`` и ``vectors.list_indexes`` — операции capability
+#: ``vectors``, а не ``audit``, и это не оговорка: смысловой поиск по нарушениям
+#: и есть ответ на вопрос про нарушения. ``vectors.list_indexes`` добавлена
+#: вместе с выдачей её модели (см. ``TestSkillDocIndexCatalog``) — до этого
+#: навык держал имена индексов таблицей у себя.
 ROUTED_OPERATIONS = (
-    "list_scripts",
-    "run_script",
-    "generate_sql",
-    "vector_search",
-    "list_indexes",
+    "audit.list_scripts",
+    "audit.run_script",
+    "audit.generate_sql",
+    "vectors.vector_search",
+    "vectors.list_indexes",
 )
 
 #: Обязательные аргументы каждой операции — в том виде, в каком они должны
 #: стоять в колонке «Обязательные аргументы» таблицы выбора.
 #:
 #: Источник истины — опубликованная схема операции (``inputSchema``, которую
-#: платформа отдаёт в ``tools/list``): ``list_scripts`` без аргументов,
-#: ``run_script`` требует ``script``, ``generate_sql`` — ``query``.
-#: Для ``vector_search`` схема требует только ``query``, а ``index_name``
+#: платформа отдаёт в ``tools/list``): ``audit.list_scripts`` без аргументов,
+#: ``audit.run_script`` требует ``script``, ``audit.generate_sql`` — ``query``.
+#: Для ``vectors.vector_search`` схема требует только ``query``, а ``index_name``
 #: необязателен — но цена его отсутствия несимметрична: платформа подставит
 #: индекс по умолчанию, которого в объявлении нет, и поиск вернёт пустую
 #: выдачу ВМЕСТО ошибки. Поэтому навык обязан требовать оба.
-#: ``list_indexes`` аргументов не имеет — это каталог, а не запрос.
+#: ``vectors.list_indexes`` аргументов не имеет — это каталог, а не запрос.
 REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
-    "list_scripts": (),
-    "run_script": ("script",),
-    "generate_sql": ("query",),
-    "vector_search": ("query", "index_name"),
-    "list_indexes": (),
+    "audit.list_scripts": (),
+    "audit.run_script": ("script",),
+    "audit.generate_sql": ("query",),
+    "vectors.vector_search": ("query", "index_name"),
+    "vectors.list_indexes": (),
 }
 
 #: Строка таблицы операций: ``| `имя` | описание | обязательные аргументы |``.
+#:
+#: Имя операции **с точкой**: после переезда навык пишет ``audit.list_scripts``,
+#: и группа ``[a-z_]+`` без точки не нашла бы ни одной строки. Это не поломка
+#: с красным: строки перестали бы разбираться вовсе, и проверки ниже — «в
+#: таблице только объявленные модели», «у каждой строки верные аргументы» —
+#: проходили бы на **пустом** множестве, то есть проверяли бы уже не навык, а
+#: собственную регулярку. Против этого стоит
+#: ``TestSkillDocDescribesOperations::test_operation_table_was_parsed``.
 _OPERATION_ROW = re.compile(
-    r"^\|\s*`(?P<name>[a-z_]+)`\s*\|(?P<middle>[^|]*)\|(?P<args>[^|]*)\|\s*$",
+    r"^\|\s*`(?P<name>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?)`\s*"
+    r"\|(?P<middle>[^|]*)\|(?P<args>[^|]*)\|\s*$",
     re.MULTILINE,
 )
 
@@ -171,6 +183,36 @@ class TestSkillDocFrontmatter:
 
 
 class TestSkillDocDescribesOperations:
+    def test_operation_table_was_parsed(self) -> None:
+        """Таблица выбора обязана разбираться — и разбираться не в пустоту.
+
+        Единственная защита от вакуумности этого стража. Вся группа ниже
+        работает с результатом ``_operation_rows``: «у каждой строки верные
+        аргументы», «в таблице только объявленные модели», «у лишней строки нет
+        инструмента». Если разбор перестаёт находить строки — а он перестаёт
+        молча, стоит таблице переехать на ``audit.list_scripts`` или сменить
+        разделитель, — все три проходят на **пустом** множестве, то есть
+        проверяют уже не навык, а собственную регулярку. Зелёный прогон при
+        этом означает ноль охраняемого.
+
+        Поэтому число разобранных строк обязано быть ненулевым и покрывать все
+        маршрутизируемые операции: снимать строку из таблицы — тоже регрессия,
+        и ловить её должна проверка аргументов, а не пустое множество.
+        """
+        rows = _operation_rows(_skill_text())
+        assert rows, (
+            "из SKILL.md не разобрано ни одной строки таблицы выбора операций. "
+            "Проверки ниже считают строки по регулярке и на пустом множестве "
+            "проходят всегда — то есть страж зелёный, не проверяя ничего. "
+            "Либо навык потерял таблицу, либо её форма перестала совпадать с "
+            f"{_OPERATION_ROW.pattern!r}."
+        )
+        missing = sorted(set(ROUTED_OPERATIONS) - set(rows))
+        assert not missing, (
+            f"в таблице выбора нет строк: {missing} — навык перестал объяснять "
+            "эти операции, и модель зовёт их вслепую"
+        )
+
     @pytest.mark.parametrize("operation", ROUTED_OPERATIONS)
     def test_operation_is_documented(self, operation: str) -> None:
         assert f"`{operation}`" in _skill_text(), (
@@ -206,8 +248,8 @@ class TestSkillDocDescribesOperations:
         """Строка таблицы обязана быть операцией, которая у модели есть.
 
         Проверяется объявление, а не наличие файла операции на платформе:
-        ``index_stats`` файл имеет, но модели не объявлена, поэтому навык,
-        назвавший её, обещал бы вызов, которого не будет.
+        ``vectors.index_stats`` файл имеет, но модели не объявлена, поэтому
+        навык, назвавший её, обещал бы вызов, которого не будет.
         """
         unknown = set(_operation_rows(_skill_text())) - _declared_to_model()
         assert not unknown, (
@@ -218,16 +260,16 @@ class TestSkillDocDescribesOperations:
     def test_no_unrouted_operation_is_promised(self) -> None:
         """Операция вне ``enabled_tools`` — обещание без инструмента.
 
-        ``index_stats`` существует на платформе, но модели не объявлена: имя
-        индекса и состояние приходят из ``list_indexes``, а состояние
-        конкретного поиска — из ``vector_search``. Навык, обещавший её модели,
-        отправил бы её в вызов, которого у модели нет.
+        ``vectors.index_stats`` существует на платформе, но модели не объявлена:
+        имя индекса и состояние приходят из ``vectors.list_indexes``, а состояние
+        конкретного поиска — из ``vectors.vector_search``. Навык, обещавший её
+        модели, отправил бы её в вызов, которого у модели нет.
 
-        Раньше в этом перечне стояла и ``list_indexes`` — она объявлена модели
-        теперь, и именно с неё берутся имена индексов.
+        Раньше в этом перечне стояла и ``vectors.list_indexes`` — она объявлена
+        модели теперь, и именно с неё берутся имена индексов.
         """
         text = _skill_text()
-        for operation in ("index_stats",):
+        for operation in ("vectors.index_stats",):
             assert f"`{operation}`" not in text, (
                 f"{operation!r} не объявлена модели — упоминать её как доступную "
                 "операцию нельзя"
@@ -246,7 +288,7 @@ class TestSkillDocIndexCatalog:
         согласие с платформой, — то есть заставляли повторять копирование, а
         не отменяли его.
 
-        Теперь имена приходят из ``list_indexes`` (объявлена модели в
+        Теперь имена приходят из ``vectors.list_indexes`` (объявлена модели в
         ``config.json → tools.mcpServers.enterprise.enabled_tools``), поэтому
         перечисление в навыке — копия, которая протухает молча: новый индекс
         в платформе появится, а модель о нём не узнает, пока не спросит.
@@ -254,19 +296,20 @@ class TestSkillDocIndexCatalog:
         hardcoded = _mentioned_indexes(_skill_text()) - {PLATFORM_DEFAULT_INDEX}
         assert not hardcoded, (
             f"навык перечисляет имена индексов: {sorted(hardcoded)} — они "
-            "объявляет платформа, модель берёт их из list_indexes"
+            "объявляет платформа, модель берёт их из vectors.list_indexes"
         )
 
     def test_index_names_reach_the_model_from_the_platform(self) -> None:
         """То, что навык перестал перечислять, обязано приходить откуда-то.
 
         Проверка на объявление, а не на наличие файла операции: стража выше
-        зелёная и при снятом из ``enabled_tools`` ``list_indexes``, то есть
-        когда у модели не осталось бы ни одного способа узнать имя индекса.
+        зелёная и при снятом из ``enabled_tools`` ``vectors.list_indexes``, то
+        есть когда у модели не осталось бы ни одного способа узнать имя индекса.
         """
-        assert "list_indexes" in _declared_to_model(), (
-            "без list_indexes в enabled_tools имена индексов недоступны модели: "
-            "навык их не перечисляет, а объявлять состав индексов агент не должен"
+        assert "vectors.list_indexes" in _declared_to_model(), (
+            "без vectors.list_indexes в enabled_tools имена индексов недоступны "
+            "модели: навык их не перечисляет, а объявлять состав индексов агент "
+            "не должен"
         )
 
     def test_the_platform_still_declares_indexes(self) -> None:
@@ -274,15 +317,15 @@ class TestSkillDocIndexCatalog:
 
         Дыра, которую открывает отказ от перечисления в навыке: со всех сторон
         зелёная проверка при пустом ``platform.json → vectors.indexes``, где
-        ``list_indexes`` отдаёт пустой каталог и навык советует модели спросить
-        имена индексов, которых нет. Прежняя пара стража такой случай не ловила
-        по построению: пустое объявление означало и пустое перечисление.
+        ``vectors.list_indexes`` отдаёт пустой каталог и навык советует модели
+        спросить имена индексов, которых нет. Прежняя пара стража такой случай
+        не ловила по построению: пустое объявление означало и пустое перечисление.
         """
         declared = _declared_indexes()
         assert declared, (
-            "platform.json → vectors.indexes пуст: list_indexes отдаст пустой "
-            "каталог, а навык больше не перечисляет имена индексов — модели "
-            "неоткуда взять index_name"
+            "platform.json → vectors.indexes пуст: vectors.list_indexes отдаст "
+            "пустой каталог, а навык больше не перечисляет имена индексов — "
+            "модели неоткуда взять index_name"
         )
 
 
@@ -307,5 +350,6 @@ class TestSkillDocHasNoPhysicalDataNames:
             assert pattern not in text, (
                 f"SKILL.md предлагает вызов {pattern!r} — CLI навыка удалён, "
                 "единственный вход — операции capability audit: "
-                "mcp_enterprise_{list_scripts,run_script,generate_sql,vector_search}"
+                "mcp_enterprise_audit_{list_scripts,run_script,generate_sql}, "
+                "mcp_enterprise_vectors_{vector_search,list_indexes}"
             )

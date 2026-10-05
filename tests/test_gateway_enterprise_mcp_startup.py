@@ -52,7 +52,7 @@ class _FakeClient:
         self.calls = 0
         self.call_ops: list[str] = []
         self.identities: list[object] = []
-        self._operations = operations or ["run_script", "schema_check"]
+        self._operations = operations or ["audit.run_script", "data.schema_check"]
         self._error = error
         self._responses = responses or {}
         self._call_error = call_error
@@ -221,7 +221,7 @@ class TestHandshake:
 class TestHealthSummary:
     """Процесс может подняться и быть частично нерабочим.
 
-    Контекст здесь — профильный, и ``schema_check`` отдаёт список таблиц:
+    Контекст здесь — профильный, и ``data.schema_check`` отдаёт список таблиц:
     иначе сверка профиля проходила бы вхолостую (пустые настройки = ничего
     сверять), и тесты сводки были бы зелёными при сломанной сверке.
     """
@@ -231,11 +231,11 @@ class TestHealthSummary:
         suffix = "_test" if profile == "test" else ""
         return _FakeClient(
             responses={
-                "list_indexes": '{"indexes": ['
+                "vectors.list_indexes": '{"indexes": ['
                 '{"index_name": "audits_index", "state": "ready", "vector_count": 10},'
                 '{"index_name": "violations_index", "state": "ready", "vector_count": 100}'
                 ']}',
-                "schema_check": json.dumps(
+                "data.schema_check": json.dumps(
                     {
                         "ok": True,
                         "expected": 4,
@@ -244,7 +244,7 @@ class TestHealthSummary:
                         "tables": [t + suffix for t in _PLATFORM_TABLES],
                     }
                 ),
-                "list_scripts": '{"count": 6, "scripts": []}',
+                "audit.list_scripts": '{"count": 6, "scripts": []}',
             },
             **kw,
         )
@@ -254,7 +254,11 @@ class TestHealthSummary:
 
         _connect(client, **_ctx_kw("prod"))
 
-        assert set(client.call_ops) == {"list_indexes", "schema_check", "list_scripts"}
+        assert set(client.call_ops) == {
+            "vectors.list_indexes",
+            "data.schema_check",
+            "audit.list_scripts",
+        }
 
     def test_healthy_capabilities_are_summarised(self, capfd):
         _connect(self._client(), **_ctx_kw("prod"))
@@ -777,9 +781,9 @@ def _aligned_responses() -> dict[str, str]:
     """Ответы проб capability с согласованным набором таблиц — иначе
     сверка профиля валила бы старт и порядок было бы нечем мерить."""
     return {
-        "list_indexes": '{"indexes": []}',
-        "list_scripts": '{"count": 1, "scripts": []}',
-        "schema_check": json.dumps(
+        "vectors.list_indexes": '{"indexes": []}',
+        "audit.list_scripts": '{"count": 1, "scripts": []}',
+        "data.schema_check": json.dumps(
             {"ok": True, "expected": 1, "found": 1, "tables": _PLATFORM_TABLES}
         ),
     }
@@ -1330,7 +1334,7 @@ def _schema_check_client(tables: list[str]) -> _FakeClient:
     """Клиент, у которого capability ``data`` отвечает списком таблиц."""
     return _FakeClient(
         responses={
-            "schema_check": json.dumps(
+            "data.schema_check": json.dumps(
                 {"ok": True, "found": len(tables), "expected": len(tables),
                  "tables": tables}
             )

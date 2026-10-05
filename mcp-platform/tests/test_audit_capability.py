@@ -378,4 +378,4 @@ def test_build_input_schema_is_not_empty() -> None:
     for factory in (create_list_scripts, create_run_script, create_generate_sql):
         tool: ToolDefinition = factory(_container(_snapshot()))
         assert tool.input_schema == build_input_schema(tool.handler)
-        assert tool.category == "audit"
+        assert tool.capability == "audit"

@@ -77,7 +77,7 @@ class TestHistoryNoticeGoesThroughThePlatform:
 
         assert client.calls, "заметка не ушла в платформу"
         operation, arguments, _ = client.calls[0]
-        assert operation == "append_history_notice"
+        assert operation == "data.append_history_notice"
         assert arguments["chat_id"] == "chat-1"
         assert arguments["text"], "у заметки должен быть видимый текст"
         assert arguments["metadata"]["kind"] == "context_compact"

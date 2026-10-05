@@ -22,6 +22,7 @@ Maintenance»). Каждое нарушение — регрессия: код �
 """
 
 from __future__ import annotations
+import ast
 import json
 import re
 from pathlib import Path
@@ -434,6 +435,51 @@ _ENTERPRISE_SERVER = _PROJECT_ROOT / "mcp-platform" / "servers" / "enterprise"
 _ENTERPRISE_CAPABILITIES = _ENTERPRISE_SERVER / "capabilities"
 
 
+def _declared_operations(tools_dir: Path) -> set[str]:
+    """Имена операций из ``name=`` объявления ``ToolDefinition`` в каталоге.
+
+    Имя операции уезжает на провод из объявления, а не из имени файла: после
+    переезда в capability'ы файлы остались плоскими (``data/tools/
+    claim_task.py``), и ``stem`` перестал быть именем операции. Считать
+    файлы вместо имён — значит сверять документ не с тем, что публикуется,
+    и расхождение приходит как «число операций изменилось», хотя менялись
+    только имена.
+
+    Инвариант «файл операции объявляет ровно одно имя» проверяется здесь же:
+    молча пропавший ``name=`` (или два файла с одним именем) уменьшил бы
+    число в документе незаметно — ровно тот класс расхождения, ради которого
+    страж и написан.
+    """
+    files = [f for f in sorted(tools_dir.glob("*.py")) if f.name != "__init__.py"]
+    names: set[str] = set()
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else None
+            )
+            if called != "ToolDefinition":
+                continue
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "name"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                ):
+                    names.add(keyword.value.value)
+    assert len(names) == len(files), (
+        f"{tools_dir.as_posix()}: файлов операций {len(files)}, "
+        f"объявленных имён {len(names)} — файл не объявил name= или два "
+        "файла объявили одно имя; число в документе разошлось бы молча"
+    )
+    return names
+
+
 def _published_operations() -> dict[str, set[str]]:
     """Операции реестра по правилу самого загрузчика.
 
@@ -451,13 +497,10 @@ def _published_operations() -> dict[str, set[str]]:
         tools_dir = capability / "tools"
         if not tools_dir.is_dir():
             continue
-        names = {f.stem for f in tools_dir.glob("*.py") if f.name != "__init__.py"}
+        names = _declared_operations(tools_dir)
         if names:
             per_source[capability.name] = names
-    per_source["платформенные"] = {
-        f.stem for f in (_ENTERPRISE_SERVER / "tools").glob("*.py")
-        if f.name != "__init__.py"
-    }
+    per_source["платформенные"] = _declared_operations(_ENTERPRISE_SERVER / "tools")
     return per_source
 
 
@@ -484,6 +527,15 @@ def test_mcp_contracts_operation_count_matches_registry() -> None:
     catalog = set().union(*(names for src, names in per_source.items() if src != "платформенные"))
     platform = per_source.get("платформенные", set())
     total = catalog | platform
+    # Пустой реестр прошёл бы любую сверку числа только потому, что обе
+    # стороны равны нулю. Считать объявленные ``name=`` и проверять, что
+    # перечень не пуст, — иначе проверка остаётся зелёной на выключенном
+    # резолвере, то есть проверяет ровно ничего.
+    assert total, (
+        "реестр операций платформы пуст: объявления ToolDefinition(name=...) "
+        "не разобрались ни в одном каталоге capability'а. Тогда и число в "
+        "документе, и перечень ниже сверялись бы с пустотой."
+    )
 
     stated_total = _stated(text, r"публикует весь реестр,\s*(\d+)\s*операци")
     assert stated_total is not None, (

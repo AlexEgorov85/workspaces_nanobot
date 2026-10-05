@@ -79,7 +79,11 @@ _CHILD = textwrap.dedent(
 
     server = FastMCP(os.environ.get("FAKE_NAME", "enterprise-mcp"))
 
-    @server.tool()
+    # Имя операции уезжает в discovery ровно таким, каким его объявляет
+    # платформа: с capability. FastMCP выводит имя из имени функции, то есть
+    # без явного ``name=`` в объявление ушло бы старое плоское ``list_indexes``
+    # и проверка состава операций падала бы на несуществующем имени.
+    @server.tool(name="vectors.list_indexes")
     def list_indexes() -> list[str]:
         return ["check_entity_index"]
 
@@ -854,7 +858,7 @@ class TestHttpServing:
             return await c.list_operations()
 
         operations = _scenario(client)(action)
-        assert "list_indexes" in operations
+        assert "vectors.list_indexes" in operations
 
     def test_ephemeral_port_announced_by_platform(self) -> None:
         """Порт 0: адрес приходит от ОС, и клиент берёт именно его."""

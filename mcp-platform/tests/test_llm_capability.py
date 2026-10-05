@@ -457,8 +457,8 @@ class TestOperation:
         service, _ = _service()
         definition = complete_tool.create_tool(ToolContainer(services={"llm": service}))
         assert isinstance(definition, ToolDefinition)
-        assert definition.name == "complete"
-        assert definition.category == "llm"
+        assert definition.name == "llm.complete"
+        assert definition.capability == "llm"
         assert definition.description.strip()
         assert "runtime-only" in definition.tags
         assert definition.permissions == ("llm:complete",)
@@ -537,7 +537,7 @@ class TestLoaderAndWire:
         transport = build_server(
             self._registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
         )
-        result = anyio.run(call_tool, transport, "complete", {"prompt": "вопрос"})
+        result = anyio.run(call_tool, transport, "llm.complete", {"prompt": "вопрос"})
         assert result.isError is False
         assert result.content[0].text == "текст по проводу"
 
@@ -552,7 +552,7 @@ class TestLoaderAndWire:
         transport = build_server(
             self._registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
         )
-        result = anyio.run(call_tool, transport, "complete", {"prompt": "   "})
+        result = anyio.run(call_tool, transport, "llm.complete", {"prompt": "   "})
         assert result.isError is True
         # Отказ приходит конвертом ``{"error": {...}}``, а не префиксом в
         # тексте: код читается разбором, а не глазами.
@@ -596,23 +596,23 @@ class TestLoaderAndWire:
         registry = ToolRegistry(
             [
                 ToolDefinition(
-                    name="complete",
+                    name="llm.complete",
                     description="Проверка",
                     handler=handler,
-                    category="llm",
+                    capability="llm",
                 )
             ]
         )
         transport = build_server(
             registry, name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
         )
-        result = anyio.run(call_tool, transport, "complete", {"prompt": "вопрос"})
+        result = anyio.run(call_tool, transport, "llm.complete", {"prompt": "вопрос"})
         assert result.isError is True
         body = json.loads(result.content[0].text)
         assert body["error"]["code"] == "infrastructure_error"
         assert "Traceback" not in result.content[0].text
         # Сервер пережил отказ и обслуживает следующий вызов.
-        again = anyio.run(call_tool, transport, "complete", {"prompt": "ещё раз"})
+        again = anyio.run(call_tool, transport, "llm.complete", {"prompt": "ещё раз"})
         assert json.loads(again.content[0].text)["error"]["code"] == (
             "infrastructure_error"
         )
@@ -632,7 +632,7 @@ class TestLoaderAndWire:
         transport = build_server(
             self._registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
         )
-        result = anyio.run(call_tool, transport, "complete", {"prompt": "вопрос"}, {})
+        result = anyio.run(call_tool, transport, "llm.complete", {"prompt": "вопрос"}, {})
         assert result.isError is True
         assert json.loads(result.content[0].text)["error"]["code"] == "identity_missing"
         assert recorder.calls == [], "домен не должен запускаться без идентичности"
@@ -642,7 +642,7 @@ async def _call(transport: Any, arguments: dict[str, Any]) -> Any:
     from mcp.shared.memory import create_connected_server_and_client_session as connect
 
     async with connect(transport) as session:
-        return await session.call_tool("complete", arguments=arguments)
+        return await session.call_tool("llm.complete", arguments=arguments)
 
 
 class TestNoArbitraryEndpoint:

@@ -34,29 +34,44 @@ REPO = Path(__file__).resolve().parents[1]
 PLATFORM = REPO / "mcp-platform"
 PIPELINE = PLATFORM / "libs" / "enterprise_common" / "execution" / "pipeline.py"
 PLATFORM_JSON = PLATFORM / "platform.json"
+#: Файлы объявлений операций enterprise-сервера — источник имён на проводе.
+ENTERPRISE_TOOLS = PLATFORM / "servers" / "enterprise"
+
+#: Пояснение к потолку длины имени для сообщения отказа. **Не само число:**
+#: величина живёт в наноботе (``nanobot.agent.tools.mcp._MAX_TOOL_NAME_LENGTH``),
+#: и повторять её здесь значило бы завести второго владельца — смена потолка
+#: тогда не требовала бы правки теста, и потеря инструмента прошла бы мимо.
+MAX_NAME_BUDGET_NOTE = "nanobot.agent.tools.mcp._MAX_TOOL_NAME_LENGTH"
 
 #: Операции, объявленные модели. Ровно те, что раньше прятались за
 #: самописными обёртками ``audit_analyzer_query`` / ``legal_summarizer_query``
-#: / ``history_search_tool``, плюс ``read_result``: без него крупный результат,
+#: / ``history_search_tool``, плюс ``platform.read_result``: без него крупный результат,
 #: сохранённый платформой под ссылкой ``session://results/...``, нечем прочесть.
 #:
-#: ``list_indexes`` добавлена тем, что с неё модель берёт имена индексов для
-#: ``vector_search``. Пока её не было в списке, имена приходилось держать
-#: таблицей в ``workspace/skills/audit_analyzer/SKILL.md`` — копией объявления
-#: ``mcp-platform/platform.json → vectors.indexes``, которая протухает молча:
-#: новый индекс в платформе не появлялся в навыке, и ``vector_search`` по нему
-#: нельзя было позвать. ``index_stats`` в список не входит: состояние индекса
-#: модель получает в ответе ``vector_search`` (``index_state``) и в
-#: ``list_indexes``, отдельная операция ей ничего не добавляет.
+#: Имена — **на проводе**, то есть с capability: после переезда
+#: (``2026-10-05-tool-capability-namespace``) объявление обязано называть
+#: операцию так, как её зовёт сервер. Нанобот принимает и имя на проводе, и
+#: обёрнутое (``nanobot/agent/tools/mcp.py``, ``mcp_<сервер>_<операция>``), но
+#: сверка идёт по первому: обёрнутое имя платформе неизвестно, и именно оно
+#: строится из имени на проводе, а не наоборот.
+#:
+#: ``vectors.list_indexes`` добавлена тем, что с неё модель берёт имена индексов
+#: для ``vectors.vector_search``. Пока её не было в списке, имена приходилось
+#: держать таблицей в ``workspace/skills/audit_analyzer/SKILL.md`` — копией
+#: объявления ``mcp-platform/platform.json → vectors.indexes``, которая протухает
+#: молча: новый индекс в платформе не появлялся в навыке, и поиск по нему нельзя
+#: было позвать. ``vectors.index_stats`` в список не входит: состояние индекса
+#: модель получает в ответе ``vectors.vector_search`` (``index_state``) и в
+#: ``vectors.list_indexes``, отдельная операция ей ничего не добавляет.
 EXPECTED_TOOLS = {
-    "list_scripts",
-    "run_script",
-    "generate_sql",
-    "vector_search",
-    "list_indexes",
-    "query_operation",
-    "history_search",
-    "read_result",
+    "audit.list_scripts",
+    "audit.run_script",
+    "audit.generate_sql",
+    "vectors.vector_search",
+    "vectors.list_indexes",
+    "legal_summarizer.query_operation",
+    "data.history_search",
+    "platform.read_result",
 }
 
 
@@ -86,6 +101,74 @@ def _server() -> dict:
 def _client_settings() -> dict:
     """Секция ``gateway.agent.enterprise_mcp`` — то, чем агент ждёт вызов."""
     return _load_json(REPO / "config.json")["gateway"]["agent"]["enterprise_mcp"]
+
+
+def _server_name() -> str:
+    """Имя MCP-сервера для модели — ключ в ``tools.mcpServers``, не литерал.
+
+    Ключ входит в полное имя инструмента, поэтому подставлять здесь строку
+    ``"enterprise"`` нельзя: переименование ключа в конфигурации обязано ломать
+    сверку длины имени, а не проходить по старому совпадению. Ключ ищется по
+    равенству самому объявлению, поэтому он остаётся тем же ключом, который
+    нанобот использует при сборке имён, — даже если объявление переехало.
+    """
+    servers = _load_json(REPO / "config.json").get("tools", {}).get("mcpServers") or {}
+    spec = _server()
+    names = [name for name, declared in servers.items() if declared == spec]
+    assert len(names) == 1, (
+        f"объявление платформы найдено в {len(names)} ключах tools.mcpServers "
+        f"({names}) — имя сервера для модели определить нечем"
+    )
+    return names[0]
+
+
+def _platform_operations() -> set[str]:
+    """Имена на проводе, объявленные enterprise-сервером.
+
+    Разбор по AST, а не регуляркой: имя операции и её capability берутся из
+    одного модуля, и регулярка склеила бы соседние объявления в один результат.
+    Список составляется машинно из самих объявлений, а не перечислением руками —
+    ручной список уже дважды терял операции, и терял их молча.
+    """
+    found: set[str] = set()
+    for path in sorted(ENTERPRISE_TOOLS.rglob("tools/*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            called = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if called != "ToolDefinition":
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                    found.add(str(keyword.value.value))
+    assert found, f"в {ENTERPRISE_TOOLS} не найдено ни одного ToolDefinition(name=…)"
+    return found
+
+
+def _model_facing_name(server: str, operation: str) -> str:
+    """Полное имя инструмента в том виде, в каком его видит модель.
+
+    Собирается по формуле нанобота (``mcp_<сервер>_<операция>``) и **намерено
+    не** пропускается через ``_sanitize_mcp_tool_name``: тот обрезает длинное
+    имя хэшем, и проверка «длина не больше потолка» после обрезки была бы
+    истинна всегда — то есть страж проверял бы санитайзер вместо имени.
+    Точка в имени операции заменяется подчёркиванием ровно так же, как это
+    делает санитайзер, и длина от замены не меняется.
+    """
+    return f"mcp_{server}_{operation}".replace(".", "_")
+
+
+def _nanobot_name_budget() -> int:
+    """Потолок длины имени инструмента — **из нанобота**, а не отсюда.
+
+    Повторённое в проверке число стало бы вторым владельцем величины: смена
+    потолка в наноботе оставила бы страж зелёным, и потеря инструмента у
+    модели прошла бы мимо. Читать надо у того, кто применяет.
+    """
+    from nanobot.agent.tools.mcp import _MAX_TOOL_NAME_LENGTH
+
+    return int(_MAX_TOOL_NAME_LENGTH)
 
 
 def _platform_settings() -> dict:
@@ -174,6 +257,69 @@ class TestServerDeclaration:
 
     def test_declares_exactly_the_agent_facing_operations(self):
         assert set(_server()["enabled_tools"]) == EXPECTED_TOOLS
+
+    def test_every_enabled_tool_exists_on_the_wire(self):
+        """Запись ``enabled_tools`` обязана называть операцию, которая есть.
+
+        Нанобот сверяет белый список с именами, пришедшими от сервера, и запись
+        мимо просто **не регистрируется**: в журнале это одна строка ``WARNING``
+        («enabledTools entries not found») среди десятков, сводка capability на
+        старте остаётся зелёной, а модель тихо теряет инструмент — узнать об
+        этом можно только по тому, что его нет в ответе на запрос.
+
+        Поэтому сверка идёт с объявлениями платформы, а не с ожиданием,
+        продублированным рядом: продублированное ожидание разошлось бы с
+        оригиналом молча, и страж проверял бы само себя.
+        """
+        declared = _platform_operations()
+        missing = sorted(set(_server()["enabled_tools"]) - declared)
+        assert not missing, (
+            f"в enabled_tools есть имена, которых платформа не объявляет: {missing}. "
+            f"Объявлено {len(declared)} операций; несогласованная запись не "
+            "регистрируется, а видна только WARNING в журнале нанобота — модель "
+            "теряет инструмент молча. Сверьте написание с именем на проводе."
+        )
+
+    def test_model_facing_names_fit_the_budget(self):
+        """Полное имя для модели обязано помещаться в потолок нанобота.
+
+        Меряется **полное** имя — ``mcp_<сервер>_<операция>``, — а не имя на
+        проводе: обрезает-то ``_limit_tool_name`` полное, и отмерить от
+        короткого значит отмерить не то. Потолок берётся у нанобота
+        (``nanobot/agent/tools/mcp.py`` → ``_MAX_TOOL_NAME_LENGTH``), число в
+        проверке не повторяется.
+
+        Меряются обе стороны: каждая запись белого списка (её модель зовёт) и
+        каждое имя из реестра платформы (оно попадёт в полное имя, как только
+        операцию объявят, а объявление белым списком не защищено).
+
+        **Измерение, а не порог:** на момент правки самое длинное имя —
+        ``mcp_enterprise_legal_summarizer_query_operation``, 47 символов из 64,
+        и оно таким и останется после любой следующей правки навыка. Утверждение
+        о 47 здесь быть не должно: смена потолка в наноботе не должна требовать
+        правки числа в этом файле, — вместо этого замер попадает в сообщение
+        отказа, где его видно ровно тогда, когда он нужен.
+        """
+        server = _server_name()
+        budget = _nanobot_name_budget()
+        measured = {
+            operation: _model_facing_name(server, operation)
+            for operation in sorted(set(_server()["enabled_tools"]) | _platform_operations())
+        }
+        over_budget = {
+            operation: name
+            for operation, name in measured.items()
+            if len(name) > budget
+        }
+        longest, longest_name = max(
+            (len(name), operation) for operation, name in measured.items()
+        )
+        assert not over_budget, (
+            f"полное имя для модели длиннее потолка {MAX_NAME_BUDGET_NOTE}: "
+            f"{over_budget}. Самое длинное сейчас — {measured[longest_name]!r}, "
+            f"{longest} символов из {budget}. Нанобот обрежет такое имя хэшем, "
+            "и модель будет звать инструмент, которого не объявляла."
+        )
 
     def test_call_timeout_does_not_expire_before_the_platform_stops(self):
         """Каждая объявленная нога ждёт строго дольше, чем платформа работает.

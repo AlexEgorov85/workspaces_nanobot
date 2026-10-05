@@ -102,7 +102,7 @@ def _client_with(identity: McpCallContext | None, answer: str = "ответ") ->
 
 def _call(client: LlmClient, **kwargs: Any) -> str:
     """Прогнать вызов в его же цикле событий, без фонового потока."""
-    return asyncio.run(client._call_async("complete", {"prompt": "x"}))  # type: ignore[arg-type]
+    return asyncio.run(client._call_async("llm.complete", {"prompt": "x"}))  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

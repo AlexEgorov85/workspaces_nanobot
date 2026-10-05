@@ -289,7 +289,7 @@ class TestIdentityWithoutQuestion:
             "события ушли в fallback-файл вместо agent_gateway_logs: группа "
             "батча неполна, транспорт не смог их подписать"
         )
-        assert [op for op, _, _ in sent] == ["log_events"]
+        assert [op for op, _, _ in sent] == ["data.log_events"]
         assert result.dropped == 0
         assert result.accepted == len(batch)
         written = sent[0][1]["events"]

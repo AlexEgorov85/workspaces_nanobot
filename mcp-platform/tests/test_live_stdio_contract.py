@@ -79,8 +79,8 @@ async def _call(
         async with ClientSession(read, write) as session:
             await session.initialize()
             if meta is None:
-                return await session.call_tool("echo", arguments)
-            return await session.call_tool("echo", arguments, meta=meta)
+                return await session.call_tool("template.echo", arguments)
+            return await session.call_tool("template.echo", arguments, meta=meta)
 
 
 def _meta(request_id: str = "req-live-1") -> dict[str, str]:

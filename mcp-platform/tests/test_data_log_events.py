@@ -81,7 +81,7 @@ def _ctx(
         call=McpCallContext(
             request_id=request_id, session_id=session_id, user_id=user_id
         ),
-        tool_name="log_events",
+        tool_name="data.log_events",
         capability="data",
         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
@@ -303,7 +303,7 @@ class TestLogEventsOperation:
         service = _service()
         container = ToolContainer(services={"data": service})
         registry = ToolRegistry([mod.create_tool(container)])
-        assert [d.name for d in registry] == ["log_events"]
+        assert [d.name for d in registry] == ["data.log_events"]
 
 
 class TestLevelNormalisation:

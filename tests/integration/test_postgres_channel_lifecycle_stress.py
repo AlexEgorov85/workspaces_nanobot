@@ -197,7 +197,7 @@ def platform_client():
     ) or {}
     try:
         client = client_from_settings(EnterpriseMcpSettings(**declared))
-        client.call("schema_check", {})
+        client.call("data.schema_check", {})
     except Exception as exc:  # noqa: BLE001 - причина уходит в отчёт pytest
         pytest.skip(
             f"enterprise-mcp по профилю {profile!r} не поднялся "

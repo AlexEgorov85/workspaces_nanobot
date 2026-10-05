@@ -215,10 +215,10 @@ class Sink:
 
 def _definition() -> ToolDefinition:
     return ToolDefinition(
-        name="probe",
+        name="data.probe",
         description="Проверочная операция",
         handler=lambda **kw: {"ok": True, **kw},
-        category="data",
+        capability="data",
     )
 
 

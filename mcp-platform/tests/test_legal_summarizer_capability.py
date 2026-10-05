@@ -159,8 +159,8 @@ class TestOperationContract:
             ToolContainer(services={"legal_summarizer": _service(tmp_path)})
         )
         assert isinstance(definition, ToolDefinition)
-        assert definition.name == "query_operation"
-        assert definition.category == "legal_summarizer"
+        assert definition.name == "legal_summarizer.query_operation"
+        assert definition.capability == "legal_summarizer"
         assert definition.description.strip()
         # Не «runtime-only»: операция объявлена модели в config.json, и метка
         # внутренней операции на ней врала. Согласованность объявления и метки
@@ -327,7 +327,7 @@ class TestWire:
         transport = build_server(
             _registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
         )
-        result = _wire(transport, "query_operation", {"operation_id": "op1"})
+        result = _wire(transport, "legal_summarizer.query_operation", {"operation_id": "op1"})
         assert result.isError is False
         body = json.loads(result.content[0].text)
         assert body["status"] == "ok"
@@ -347,7 +347,7 @@ class TestWire:
         transport = build_server(
             _registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
         )
-        result = _wire(transport, "query_operation", {"operation_id": "absent"})
+        result = _wire(transport, "legal_summarizer.query_operation", {"operation_id": "absent"})
         assert result.isError is True
         assert json.loads(result.content[0].text)["error"]["code"] == "not_found"
         assert "Traceback" not in result.content[0].text
@@ -374,7 +374,9 @@ class TestWire:
             pipeline=make_layer(tmp_path).pipeline,
         )
         result = _wire(
-            transport, "query_operation", {"operation_id": "op1", "field": "section"}
+            transport,
+            "legal_summarizer.query_operation",
+            {"operation_id": "op1", "field": "section"},
         )
         assert result.isError is True
         text = result.content[0].text
@@ -402,7 +404,7 @@ class TestWire:
         transport = build_server(
             _registry(service), name="enterprise-mcp", pipeline=make_layer(tmp_path).pipeline
         )
-        result = _wire(transport, "query_operation", {"operation_id": "op1"}, {})
+        result = _wire(transport, "legal_summarizer.query_operation", {"operation_id": "op1"}, {})
         assert result.isError is True
         body = json.loads(result.content[0].text)
         assert body["error"]["code"] == "identity_missing"
@@ -428,12 +430,12 @@ class TestWire:
         )
         result = _wire(
             transport,
-            "query_operation",
+            "legal_summarizer.query_operation",
             {"operation_id": "op1"},
             call_meta(request_id="req-legal-42", session_id="sess-legal-7"),
         )
         assert result.isError is False
         execution = json.loads(result.content[0].text)["_execution"]
         assert execution["request_id"] == "req-legal-42"
-        assert execution["tool"] == "query_operation"
+        assert execution["tool"] == "legal_summarizer.query_operation"
         assert execution["capability"] == "legal_summarizer"

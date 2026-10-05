@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -39,6 +40,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = REPO_ROOT / "workspace"
 CONFIG_JSON = REPO_ROOT / "config.json"
+
+#: Дерево объявлений операций платформы. Это единственный источник имён
+#: операций: имя на провод уезжает из ``name=`` объявления ``ToolDefinition``,
+#: а НЕ из имени файла — при переезде в capability'ы файлы остались плоскими
+#: (``data/tools/claim_task.py``), и их ``stem`` перестал быть именем
+#: операции. Резолвер на ``path.stem`` поэтому давал пустое пересечение с
+#: ``enabled_tools`` и проверка падала, ничего не проверяя.
+ENTERPRISE_SERVER = REPO_ROOT / "mcp-platform" / "servers" / "enterprise"
 
 #: Каталоги, которые ``nanobot.agent.skills.SkillsLoader`` реально читает:
 #: ``workspace_skills = workspace / "skills"`` плюс ``workspace / "plugins"``
@@ -73,8 +82,35 @@ REPO_PATH_PREFIXES = ("workspace/", "lib/", "mcp-platform/", "tools/", "openspec
 REPO_PATH_FILES = ("config.py", "config.json")
 
 _BACKTICKED = re.compile(r"`([^`\n]{3,200})`")
-_MCP_TOOL = re.compile(r"\bmcp_enterprise_([a-z_]+)\b")
+#: Префикс, по которому инструкции называют вызовы модели. После переезда на
+#: ``<capability>.<operation>`` префикс ``mcp_enterprise_`` из инструкций исчез
+#: (навыки пишут имя на проводе, ``data.history_search``), и прежняя регулярка
+#: ``mcp_enterprise_([a-z_]+)`` перестала находить что бы то ни было — проверка
+#: проходила на **пустом** множестве и больше никогда не сработала бы. Теперь
+#: операция в инструкции опознаётся по форме ``<capability>.<operation>``, а
+#: множество capability берётся из дерева каталогов плюс два платформенных
+#: значения (``platform`` для операций слоя исполнения, ``template`` для
+#: эталона) — обе они не являются каталогами capability и в дереве их нет.
+_CAPABILITY_DIRS = frozenset(
+    p.name
+    for p in (ENTERPRISE_SERVER / "capabilities").iterdir()
+    if p.is_dir()
+)
+_NAMESPACED_CAPABILITIES = frozenset(_CAPABILITY_DIRS | {"platform", "template"})
+_OPERATION = re.compile(
+    r"\b(" + "|".join(sorted(_NAMESPACED_CAPABILITIES)) + r")\.([a-z_]+)\b"
+)
 _BACKTICKED_EXEC = re.compile(r"`exec`")
+
+#: Расширения файлов: ``platform.json`` — это файл платформы, а не операция
+#: capability ``platform``, и регулярка опознания его видит как имя операции.
+#: Список явный, а не «всё, что похоже на расширение»: ровно такой же приём
+#: применён выше для ``REPO_PATH_PREFIXES``, и ложные срабатывания там
+#: специально отсекаются, потому что находок они дают больше, чем находок
+#: от настоящих нарушений.
+_FILE_SUFFIXES = frozenset(
+    {"py", "pyi", "json", "jsonc", "md", "txt", "html", "yml", "yaml", "sql"}
+)
 
 #: Секции ``config.json → tools``, у которых нет ни файла tool'а, ни читающего
 #: кода. Не снимаются молча: ``column_descriptions`` — это карта «имя колонки →
@@ -125,6 +161,38 @@ def _settings() -> dict:
 
 def _enabled_tools() -> set[str]:
     return set(_settings()["tools"]["mcpServers"]["enterprise"]["enabled_tools"])
+
+
+def _declared_operations() -> set[str]:
+    """Имена операций, объявленные в ``ToolDefinition(name=...)``.
+
+    Разбором AST, а не регуляркой по тексту: регулярка поймала бы и совпадения
+    в докстрингах, и имя файла. AST берёт ровно то, что уедет на провод, —
+    строковый литерал в аргументе ``name=``.
+    """
+    names: set[str] = set()
+    for path in sorted(ENTERPRISE_SERVER.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute)
+                else None
+            )
+            if called != "ToolDefinition":
+                continue
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "name"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                ):
+                    names.add(keyword.value.value)
+    return names
 
 
 def _exec_enabled() -> bool:
@@ -193,15 +261,29 @@ class TestSkillFileIsLoadable:
 
 class TestAgentDocsNameOnlyRealTools:
     def test_mcp_tools_are_in_enabled_list(self) -> None:
-        """``mcp_enterprise_*`` вне белого списка — вызов, которого у модели нет."""
+        """Имя операции в инструкции обязано быть в белом списке модели."""
         enabled = _enabled_tools()
+        seen: dict[str, Path] = {}
         for doc in _agent_facing_docs():
             text = doc.read_text(encoding="utf-8")
-            unknown = {op for op in _MCP_TOOL.findall(text) if op not in enabled}
-            assert not unknown, (
-                f"{_rel(doc)} зовёт операции вне "
-                f"tools.mcpServers.enterprise.enabled_tools: {sorted(unknown)}"
-            )
+            for name in _OPERATION.findall(text):
+                if name[1] in _FILE_SUFFIXES:
+                    continue
+                seen[f"{name[0]}.{name[1]}"] = doc
+        # Невакуумность: пустой обход означал бы, что форма опознавания больше
+        # не совпадает ни с одной строкой документов, и проверка зеленела бы
+        # ровно тогда, когда её предмет исчез.
+        assert seen, (
+            "ни один агентский документ не называет операцию в форме "
+            "<capability>.<operation> — форма опознавания разошлась с "
+            "документами, и проверка ничего не смотрит"
+        )
+        unknown = {op: where for op, where in seen.items() if op not in enabled}
+        assert not unknown, (
+            f"{_rel(seen[next(iter(unknown))])} зовёт операции вне "
+            f"tools.mcpServers.enterprise.enabled_tools: "
+            f"{sorted(unknown)}"
+        )
 
     def test_documents_a_mcp_tool_mention_a_real_operation(self) -> None:
         """Обратная сторона: операция из инструкции должна существовать в коде.
@@ -210,14 +292,19 @@ class TestAgentDocsNameOnlyRealTools:
         из снятых capability, которые в списке ещё не вычеркнули.
         """
         enabled = _enabled_tools()
-        declared = {
-            path.stem
-            for path in (REPO_ROOT / "mcp-platform" / "servers" / "enterprise").rglob("*.py")
-            if path.stem in enabled
-        }
+        declared = _declared_operations()
+        # Пустой перечень — это не «всё в порядке» и не «всё сломано», а
+        # проверка, которая ничего не проверяет: ``missing`` тогда равен всему
+        # белому списку, и падение говорило бы о резолвере, а не об именах.
+        # Поэтому пустота обязана быть видна сама.
+        assert declared, (
+            f"AST-разбор {ENTERPRISE_SERVER.as_posix()} не нашёл ни одного "
+            "объявления ToolDefinition(name=...) — правило ниже проверяет "
+            "несуществующий перечень и падало бы по ложной причине"
+        )
         missing = enabled - declared
         assert not missing, (
-            f"в enabled_tools есть операции без файла реализации: {sorted(missing)}"
+            f"в enabled_tools есть операции без объявления в коде: {sorted(missing)}"
         )
 
     def test_disabled_tools_have_no_config_section(self) -> None:

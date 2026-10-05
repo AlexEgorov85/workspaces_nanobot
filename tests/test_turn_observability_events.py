@@ -189,13 +189,13 @@ class TestEventTimeThroughMcpTransport:
         # Считаются вызовы ``log_events``, а не все: тот же worker на первом
         # тике чистит журнал (``_last_purge`` стартует с нуля), и к батчу этот
         # вызов отношения не имеет.
-        journal_calls = [c for c in client.calls if c[0] == "log_events"]
+        journal_calls = [c for c in client.calls if c[0] == "data.log_events"]
         assert len(journal_calls) == 1, (
             "события разъехались по вызовам — тест не проверяет выживание "
             f"момента при буферизации: {[c[0] for c in client.calls]}"
         )
         operation, arguments = journal_calls[0]
-        assert operation == "log_events"
+        assert operation == "data.log_events"
         events = arguments["events"]
         assert len(events) == 4
 

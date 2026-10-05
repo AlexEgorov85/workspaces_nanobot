@@ -66,8 +66,8 @@ class TestAdapterDiscovery:
     def test_operations_come_from_registry_not_decorators(self) -> None:
         """Добавление операции — новый файл, а не правка bootstrap'а."""
         _, registry, _ = build()
-        assert set(registry.names()) == {"echo", "lookup"}
-        assert set(registry.by_category()) == {"template"}
+        assert set(registry.names()) == {"template.echo", "template.lookup"}
+        assert set(registry.by_capability()) == {"template"}
 
     def test_tools_are_discoverable(self) -> None:
         import anyio
@@ -102,7 +102,7 @@ class TestAdapterDiscovery:
         async def call() -> Any:
             async with connect(transport) as session:
                 return await session.call_tool(
-                    "lookup",
+                    "template.lookup",
                     arguments={"key": "нет-такого"},
                     meta={
                         KEY_REQUEST_ID: "req-template",
@@ -132,7 +132,7 @@ class TestAdapterDiscovery:
 
         async def call() -> Any:
             async with connect(transport) as session:
-                return await session.call_tool("echo", arguments={"text": "привет"})
+                return await session.call_tool("template.echo", arguments={"text": "привет"})
 
         result = anyio.run(call)
         assert result.isError is True

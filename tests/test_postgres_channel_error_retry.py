@@ -145,7 +145,7 @@ class TestBackoffReachesThePlatform:
 
         await ch._claim_one()
 
-        arguments = error_retry_mock_db.db.last_call("claim_task")["arguments"]
+        arguments = error_retry_mock_db.db.last_call("data.claim_task")["arguments"]
         assert arguments["error_retry_delay_sec"] == BACKOFF_SEC, (
             f"backoff не доехал до платформы: {arguments!r}"
         )
@@ -156,7 +156,7 @@ class TestBackoffReachesThePlatform:
 
         await ch._claim_one(priority_contents=("/stop", "/restart"))
 
-        arguments = error_retry_mock_db.db.last_call("claim_task")["arguments"]
+        arguments = error_retry_mock_db.db.last_call("data.claim_task")["arguments"]
         assert arguments["priority_contents"] == ["/stop", "/restart"]
 
     @pytest.mark.asyncio
@@ -172,7 +172,7 @@ class TestBackoffReachesThePlatform:
 
         await ch._claim_one(priority_contents=None)
 
-        arguments = error_retry_mock_db.db.last_call("claim_task")["arguments"]
+        arguments = error_retry_mock_db.db.last_call("data.claim_task")["arguments"]
         assert arguments["priority_contents"] is None
 
     @pytest.mark.asyncio
@@ -182,7 +182,7 @@ class TestBackoffReachesThePlatform:
 
         await ch._claim_one()
 
-        identity = error_retry_mock_db.db.last_call("claim_task")["identity"]
+        identity = error_retry_mock_db.db.last_call("data.claim_task")["identity"]
         assert identity is not None
         assert identity.session_id.startswith("task-worker:"), (
             f"захват подписан сессией, которой нет: {identity.session_id!r}"

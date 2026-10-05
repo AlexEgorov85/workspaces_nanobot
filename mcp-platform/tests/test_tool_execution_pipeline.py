@@ -80,15 +80,15 @@ class Sink:
 def definition(
     handler: Any,
     *,
-    name: str = "probe",
+    name: str = "test.probe",
     quality_policy: str = "default",
-    category: str = "test",
+    capability: str = "test",
 ) -> ToolDefinition:
     return ToolDefinition(
         name=name,
         description="Проверочная операция",
         handler=handler,
-        category=category,
+        capability=capability,
         quality_policy=quality_policy,
     )
 
@@ -514,7 +514,7 @@ def test_json_string_body_receives_execution_metadata(tmp_path: Path) -> None:
     assert payload["hits"] == []
     assert payload["next_offset"] is None
     assert payload[EXECUTION_KEY]["request_id"] == "req-1"
-    assert payload[EXECUTION_KEY]["tool"] == "probe"
+    assert payload[EXECUTION_KEY]["tool"] == "test.probe"
 
 
 def test_execution_metadata_is_added_as_a_key(tmp_path: Path) -> None:
@@ -525,7 +525,7 @@ def test_execution_metadata_is_added_as_a_key(tmp_path: Path) -> None:
     payload = body(result)
     assert payload["hits"] == [1]
     assert payload[EXECUTION_KEY]["request_id"] == "req-1"
-    assert payload[EXECUTION_KEY]["tool"] == "probe"
+    assert payload[EXECUTION_KEY]["tool"] == "test.probe"
 
 
 def test_domain_owned_key_is_not_overwritten(tmp_path: Path) -> None:
@@ -539,7 +539,7 @@ def test_domain_owned_key_is_not_overwritten(tmp_path: Path) -> None:
     payload = body(result)
     assert payload["result"]["_execution"] == {"домен": "мой"}
     assert payload["result"]["hits"] == [1]
-    assert payload[EXECUTION_KEY]["tool"] == "probe"
+    assert payload[EXECUTION_KEY]["tool"] == "test.probe"
 
 
 def test_non_object_body_is_not_wrapped(tmp_path: Path) -> None:
@@ -762,10 +762,10 @@ def handle(session_id: str = "") -> str:
 
 def create_tool(container: ToolContainer) -> ToolDefinition:
     return ToolDefinition(
-        name="probe",
+        name="probe.probe",
         description="Проверочная операция",
         handler=handle,
-        category="probe",
+        capability="probe",
     )
 '''
 
@@ -783,10 +783,10 @@ def handle(ctx: ToolExecutionContext, query: str = "") -> str:
 
 def create_tool(container: ToolContainer) -> ToolDefinition:
     return ToolDefinition(
-        name="probe",
+        name="probe.probe",
         description="Проверочная операция",
         handler=handle,
-        category="probe",
+        capability="probe",
         quality_policy="sql_result",
     )
 '''
@@ -814,7 +814,7 @@ def test_loaded_operation_answers_the_call(tmp_path: Path, tmp_sessions: Path) -
     path = _write_operation(tmp_path, OPERATION_OK)
     registry = ToolRegistry([load_definition(path, ToolContainer(), tmp_path)])
     layer = make_layer(tmp_sessions, ENTERPRISE_EXEC_QUALITY_CHECK=False)
-    result = layer.pipeline.execute(registry.get("probe"), {"query": "x"}, call_meta())
+    result = layer.pipeline.execute(registry.get("probe.probe"), {"query": "x"}, call_meta())
     assert not result.is_error
     assert result.text == "ок"
 
@@ -839,7 +839,7 @@ class _WireRegistry:
             name=definition_.name,
             description=definition_.description,
             handler=definition_.handler,
-            category=definition_.category,
+            capability=definition_.capability,
             input_schema=build_input_schema(definition_.handler),
         )
 
@@ -895,7 +895,7 @@ def test_meta_reaches_the_context_through_the_wire(tmp_path: Path) -> None:
     async def call() -> Any:
         async with connect(transport) as session:
             return await session.call_tool(
-                "probe",
+                "test.probe",
                 arguments={"query": "проверка"},
                 meta={
                     "workspaces/request_id": "req-wire",
@@ -913,7 +913,7 @@ def test_meta_reaches_the_context_through_the_wire(tmp_path: Path) -> None:
     assert payload["ok"] is True
     assert payload["query"] == "проверка"
     assert payload[EXECUTION_KEY]["request_id"] == "req-wire"
-    assert payload[EXECUTION_KEY]["tool"] == "probe"
+    assert payload[EXECUTION_KEY]["tool"] == "test.probe"
     assert seen == {
         "session_id": "sess-wire",
         "user_id": "user-wire",
@@ -951,9 +951,9 @@ def test_context_parameter_is_absent_from_the_wire_schema(tmp_path: Path) -> Non
             return {tool.name: tool.inputSchema for tool in listed.tools}
 
     schemas = anyio.run(discover)
-    assert set(schemas["probe"]["properties"]) == {"query"}
+    assert set(schemas["test.probe"]["properties"]) == {"query"}
     for name in (*IDENTITY_PARAMS, CONTEXT_PARAM):
-        assert name not in schemas["probe"]["properties"]
+        assert name not in schemas["test.probe"]["properties"]
 
 
 # -- сквозной путь -----------------------------------------------------------

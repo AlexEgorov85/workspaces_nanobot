@@ -74,8 +74,8 @@ def _ctx(session_id: str, request_id: str = "req-1") -> ToolExecutionContext:
         call=McpCallContext(
             request_id=request_id, session_id=session_id, user_id="u-1"
         ),
-        tool_name="read_result",
-        capability="session",
+        tool_name="platform.read_result",
+        capability="platform",
         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -244,8 +244,12 @@ def test_build_registers_the_operation() -> None:
     from servers.enterprise import server as enterprise_server
 
     _, registry, _ = enterprise_server.build()
-    assert "read_result" in registry.names()
-    assert registry.by_category()["session"]
+    assert "platform.read_result" in registry.names()
+    # Capability — ``platform``, а не ``session``: каталога ``session`` нет, в
+    # перечне сервера его нет, и ``--capabilities session`` отвергается как
+    # опечатка. Значение выглядело как capability, и журнал, политика и
+    # артефакты вызова уезжали в несуществующую группу.
+    assert registry.by_capability()["platform"]
 
 
 def test_server_for_skills_keeps_exactly_two_operations() -> None:
@@ -254,4 +258,4 @@ def test_server_for_skills_keeps_exactly_two_operations() -> None:
     from servers.enterprise import server as enterprise_server
 
     _, registry, _ = enterprise_server.build(capabilities=["llm"])
-    assert set(registry.names()) == {"complete", "embed"}
+    assert set(registry.names()) == {"llm.complete", "llm.embed"}

@@ -48,7 +48,7 @@ def _definition(handler: Any, *, name: str = "probe") -> Any:
         name=name,
         description="Проверочная операция",
         handler=handler,
-        category="test",
+        capability="test",
         input_schema=build_input_schema(handler),
     )
 

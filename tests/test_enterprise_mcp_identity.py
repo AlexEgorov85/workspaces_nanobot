@@ -112,7 +112,7 @@ class TestMetaShape:
         """
         sent = _Sent()
         payload = {"limit": 5, "offset": 0}
-        await _client(sent).call("history_search", payload, identity=CallIdentity("s", "u"))
+        await _client(sent).call("data.history_search", payload, identity=CallIdentity("s", "u"))
         assert sent.arguments == payload
 
 
@@ -141,7 +141,7 @@ class TestModelCannotSupplyIdentity:
         """
         sent = _Sent()
         await _client(sent).call(
-            "history_search",
+            "data.history_search",
             {**supplied, "query": "q"},
             identity=CallIdentity("real-session", "real-user", "real-req"),
         )
@@ -213,7 +213,9 @@ class TestRequestIdIsCompletedAtTheBoundary:
     @pytest.mark.asyncio
     async def test_call_without_request_id_still_gets_one(self) -> None:
         sent = _Sent()
-        await _client(sent).call("list_scripts", {}, identity=CallIdentity("sess-1", "user-1"))
+        await _client(sent).call(
+            "audit.list_scripts", {}, identity=CallIdentity("sess-1", "user-1")
+        )
         assert sent.had_meta is True
         parsed = McpCallContext.from_meta(sent.meta)
         assert parsed.session_id == "sess-1"
@@ -229,7 +231,7 @@ class TestRequestIdIsCompletedAtTheBoundary:
         усложняется ради одного пути.
         """
         sent = _Sent()
-        await _client(sent).call("list_scripts", {}, identity=CallIdentity("s", "u"))
+        await _client(sent).call("audit.list_scripts", {}, identity=CallIdentity("s", "u"))
         uuid.UUID(sent.meta[KEY_REQUEST_ID])  # форма uuid4, без префикса
 
     @pytest.mark.asyncio
@@ -237,7 +239,7 @@ class TestRequestIdIsCompletedAtTheBoundary:
         """Найденный PK оборота связывает вызов с ним; подмена это ломает."""
         sent = _Sent()
         await _client(sent).call(
-            "list_scripts", {}, identity=CallIdentity("s", "u", "req-42")
+            "audit.list_scripts", {}, identity=CallIdentity("s", "u", "req-42")
         )
         assert sent.meta[KEY_REQUEST_ID] == "req-42"
 
@@ -250,9 +252,9 @@ class TestRequestIdIsCompletedAtTheBoundary:
         """
         sent = _Sent()
         client = _client(sent)
-        await client.call("list_scripts", {}, identity=CallIdentity("s", "u"))
+        await client.call("audit.list_scripts", {}, identity=CallIdentity("s", "u"))
         first = sent.meta[KEY_REQUEST_ID]
-        await client.call("list_scripts", {}, identity=CallIdentity("s", "u"))
+        await client.call("audit.list_scripts", {}, identity=CallIdentity("s", "u"))
         assert sent.meta[KEY_REQUEST_ID] != first
 
     @pytest.mark.asyncio
@@ -265,14 +267,14 @@ class TestRequestIdIsCompletedAtTheBoundary:
         """
         identity = CallIdentity("s", "u")
         sent = _Sent()
-        await _client(sent).call("list_scripts", {}, identity=identity)
+        await _client(sent).call("audit.list_scripts", {}, identity=identity)
         assert identity.request_id is None
         assert sent.meta[KEY_REQUEST_ID], "но на провод ушёл заполненный"
 
     @pytest.mark.asyncio
     async def test_without_identity_no_meta_key_is_sent(self) -> None:
         sent = _Sent()
-        await _client(sent).call("list_scripts", {})
+        await _client(sent).call("audit.list_scripts", {})
         assert sent.had_meta is False
         assert sent.meta is None
 
@@ -285,7 +287,7 @@ class TestRequestIdIsCompletedAtTheBoundary:
         """
         sent = _Sent()
         await _client(sent).call(
-            "run_script", {"script": "s", "query": "q"},
+            "audit.run_script", {"script": "s", "query": "q"},
             identity=CallIdentity("sess-1", "user-1", "req-1"),
         )
         for key in ("session_id", "user_id", "request_id"):
@@ -309,7 +311,7 @@ class TestRegressionNoTwoKeyMeta:
         """
         sent = _Sent()
         client = _client(sent)
-        await client.call("list_scripts", {}, identity=CallIdentity("sess-1", "user-1"))
+        await client.call("audit.list_scripts", {}, identity=CallIdentity("sess-1", "user-1"))
         with pytest.raises(Exception) as excinfo:
             McpCallContext.from_meta(
                 {

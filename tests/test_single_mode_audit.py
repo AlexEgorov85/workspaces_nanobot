@@ -271,7 +271,7 @@ class TestSingleModeHotPath:
             "metadata": "{}",
             "created_at": None,
         }
-        rec.client.responses["claim_task"] = {"claimed": [row]}
+        rec.client.responses["data.claim_task"] = {"claimed": [row]}
         result = await ch._claim_one()
         assert result == row
         rec.assert_no_claims_access("in _claim_one")
@@ -356,14 +356,14 @@ class TestSingleModeFullLifecycle:
             "metadata": "{}",
             "created_at": None,
         }
-        rec.client.responses["claim_task"] = {"claimed": [row]}
+        rec.client.responses["data.claim_task"] = {"claimed": [row]}
         claimed_row = await ch._claim_one()
         rec.reset()  # дальше проверяем только finalize/failed
 
         assert claimed_row is not None
 
         # Симулируем finalize через _finalize_turn
-        rec.client.responses["finalize_turn"] = {"outcome": "completed"}
+        rec.client.responses["data.finalize_turn"] = {"outcome": "completed"}
         ch._reasoning_buffers = {}
         ch._msg_ctx = {"msg-1": {"assistant_msg_id": "assistant-1"}}
         ch._msg_chat = {"msg-1": "chat-1"}

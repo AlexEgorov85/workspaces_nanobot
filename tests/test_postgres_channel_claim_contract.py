@@ -53,11 +53,11 @@ class TestClaimTaskContract:
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         channel = _make_channel((PostgresChannel, None, mock_db))
-        mock_db.responses["claim_task"] = None
+        mock_db.responses["data.claim_task"] = None
 
         await channel._claim_one()
 
-        call = mock_db.last_call("claim_task")
+        call = mock_db.last_call("data.claim_task")
         assert call is not None, "claim_task не вызван"
         assert call["arguments"]["priority_contents"] is None, (
             "обычный опрос обязан слать null (без фильтра); список означал бы "
@@ -71,11 +71,11 @@ class TestClaimTaskContract:
         """Priority-путь сохраняет список команд, а не теряет его."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         channel = _make_channel((PostgresChannel, None, mock_db))
-        mock_db.responses["claim_task"] = None
+        mock_db.responses["data.claim_task"] = None
 
         await channel._claim_one(priority_contents=("/stop", "/status"))
 
-        call = mock_db.last_call("claim_task")
+        call = mock_db.last_call("data.claim_task")
         assert call["arguments"]["priority_contents"] == ["/stop", "/status"]
 
     def test_declared_schema_admits_null(self):

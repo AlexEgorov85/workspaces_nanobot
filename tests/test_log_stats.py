@@ -51,7 +51,7 @@ class RecordingClient:
         self.calls.append((operation, dict(arguments or {}), identity))
         if self.fail_with is not None:
             raise self.fail_with
-        if operation == "log_events":
+        if operation == "data.log_events":
             count = len((arguments or {}).get("events", []))
             return json.dumps({"status": "ok", "accepted": count, "dropped": 0})
         return '{"status": "ok"}'

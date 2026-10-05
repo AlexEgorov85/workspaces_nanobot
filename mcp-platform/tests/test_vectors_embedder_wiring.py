@@ -327,8 +327,8 @@ class TestEmbedOperation:
         definition = embed_tool.create_tool(container)
         payload = json.loads(definition.handler(text="договор"))
 
-        assert definition.name == "embed"
-        assert definition.category == "llm"
+        assert definition.name == "llm.embed"
+        assert definition.capability == "llm"
         assert definition.permissions == ("llm:embed",)
         assert definition.tags == ("infrastructure", "runtime-only")
         assert payload["vector"] == [0.5, 0.25]

@@ -98,12 +98,12 @@ class TestClaimOneSqlAudit:
         client, pg_mod = mock_db
         ch = _make_channel(pg_mod, client)
         row = {"id": "msg-1", "chat_id": "chat-1"}
-        client.responses["claim_task"] = {"claimed": [row]}
+        client.responses["data.claim_task"] = {"claimed": [row]}
 
         import asyncio
         result = asyncio.run(ch._claim_one())
         assert result == row
-        assert client.was_called("claim_task")
+        assert client.was_called("data.claim_task")
 
     def test_claim_one_uses_single_operation(self, mock_db):
         """Захват — одна операция, а не цепочка SQL-вызовов."""
@@ -113,7 +113,7 @@ class TestClaimOneSqlAudit:
         import asyncio
         asyncio.run(ch._claim_one())
 
-        assert client.operations() == ["claim_task"], (
+        assert client.operations() == ["data.claim_task"], (
             f"захват должен быть одной операцией, получено: {client.operations()!r}"
         )
 
@@ -153,15 +153,15 @@ class TestUnstickProcessingInSingle:
     async def test_unstick_processing_asks_the_platform(self, mock_db):
         client, pg_mod = mock_db
         ch = _make_channel(pg_mod, client)
-        client.responses["unstick_tasks"] = {"recovered": []}
+        client.responses["data.unstick_tasks"] = {"recovered": []}
 
         recovered = await ch._unstick_processing()
         assert recovered == []
-        assert client.was_called("unstick_tasks"), (
+        assert client.was_called("data.unstick_tasks"), (
             "откат зависших должен идти операцией unstick_tasks"
         )
         # Пороги передаются платформе: счётчик попыток и терминальный
         # переход считаются там же, где живёт сам счётчик.
-        arguments = client.last_call("unstick_tasks")["arguments"]
+        arguments = client.last_call("data.unstick_tasks")["arguments"]
         assert "max_stuck_retries" in arguments
         assert "processing_timeout_sec" in arguments

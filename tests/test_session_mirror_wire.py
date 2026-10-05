@@ -94,7 +94,7 @@ def test_declaration_scan_is_not_vacuous() -> None:
     проходит, ничем не проверяя.
     """
     assert DECLARED, f"не найдено ни одной операции в {TOOL_DIRS}"
-    assert "log_events" in DECLARED, (
+    assert "data.log_events" in DECLARED, (
         "разбор файлов операций перестал видеть обычные операции capability — "
         f"найдено только {sorted(DECLARED)[:5]}"
     )
