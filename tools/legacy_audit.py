@@ -10,7 +10,7 @@
   ``node_modules`` исключены.
 * ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit,
   при наличии запрещённых файлов или при наличии legacy секций в
-  ``project.json``.
+  ``config.json``.
 * ``main()`` — печать отчёта (production vs test разделение).
 
 **Один canonical registry** для всего проекта:
@@ -21,7 +21,7 @@
 * ``_FORBIDDEN_SYMBOLS`` — символы, запрещённые в production.
 * ``_FORBIDDEN_FILES`` — файлы, которые были удалены и не должны быть
   воссозданы.
-* ``_LEGACY_CONFIG_KEYS`` — legacy-ключи в ``project.json``.
+* ``_LEGACY_CONFIG_KEYS`` — legacy-ключи в ``config.json``.
 * ``_ALLOWED_LEGACY_TESTS`` — **test-level allow-list**:
   словарь ``{file.py::test_function_name: rationale}``. Allow-list
   применяется **только к конкретным тестовым функциям**, а не ко
@@ -31,8 +31,13 @@
   код**, который попытается импортировать удалённый модуль в
   production-логике внутри test-файла.
 
-Config-level guard: ``project.json::gateway.vector_index`` (legacy →
-``gateway.vector.index``). Это Type E — fail-fast, без нормализации.
+Config-level guard: ``config.json::gateway.vector_index`` — старый путь БЕЗ
+точки. Это Type E — fail-fast, без нормализации. Запись переживает удаление
+секции намеренно: назначения у старого пути больше нет (ни он, ни бывший
+канонический ``vector.index`` ничем не читаются — состав индексов
+объявляет платформа, ``mcp-platform/platform.json`` →
+``vectors.indexes``), и guard остаётся регрессионным: он ловит возврат
+секции, которую агент всё равно не прочитает.
 """
 
 from __future__ import annotations
@@ -116,7 +121,7 @@ _FORBIDDEN_FILES = frozenset({
     "workspace/skills/legal_summarizer/scripts/skill_config.py",
 })
 
-# Legacy-ключи в project.json (Type E — fail-fast).
+# Legacy-ключи в config.json (Type E — fail-fast).
 _LEGACY_CONFIG_KEYS = frozenset({
     "gateway.vector_index",
 })
@@ -374,7 +379,8 @@ def assert_no_legacy() -> None:
             gw = cfg.get("gateway") or {}
             if isinstance(gw, dict) and "vector_index" in gw:
                 config_legacy.append(
-                    "config.json::gateway.vector_index (legacy → gateway.vector.index)"
+                    "config.json::gateway.vector_index (старый путь без точки; "
+                    "не читается ни он, ни бывший vector.index)"
                 )
         except (OSError, json.JSONDecodeError):
             pass

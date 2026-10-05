@@ -38,7 +38,7 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
   ``[File: <basename> — text omitted (len=… > threshold=…); read at <path>]``
   вместо полного текста документа (защита от раздува контекста).
 * ``gateway.*`` — сервер, перезапуск, subprocess'ы, память, compact,
-  usage_store, session_cold_sync, vector, print_*.
+  usage_store, session_cold_sync, print_*.
   Ключей ``host``/``port`` здесь нет и быть не должно: gateway не поднимает
   HTTP-сервер. Health/Readiness — не эндпойнт, а вычисляемое по запросу
   состояние (``ctx.runtime_health`` / ``ctx.runtime_readiness``), см.
@@ -73,51 +73,58 @@ nanobot). Бывший второй файл ``project.json`` (JSONC с комм
 (``mcp-platform/platform.json`` → ``audit.tables`` и ``vectors.indexes``).
 Чтобы добавить новый skill:
 
-  1. Добавить секцию ``gateway.agent.skills.<name>`` с массивом ``tables``.
-  2. Если нужны векторные индексы — добавить ``vector_indexes``.
+  1. Добавить секцию ``gateway.agent.skills.<name>``.
+  2. Состав таблиц и индексов здесь НЕ объявляется: он принадлежит
+     платформе (``audit.tables`` / ``vectors.indexes``, см. ниже).
   3. Готово: skill подхватится на старте gateway без правок кода.
 
-Секции (все OPTIONAL): ``enabled`` (default: true), ``tables``,
-``vector_indexes``, ``cli.*`` (параметры CLI навыка), ``llm.*``
-(execution policy). Выбор модели/провайдера — в настройках nanobot,
-вне ``skills.*``.
+Секции (все OPTIONAL): ``enabled`` (default: true), ``cli.*`` (параметры CLI
+навыка), ``llm.*`` (execution policy). Выбор модели/провайдера — в настройках
+nanobot, вне ``skills.*``. Полей ``tables`` и ``vector_indexes`` в секции
+больше нет, и объявлять их негде: оба дублировали платформенное объявление, а
+потребителей в ``lib/`` не имели.
 
 ГРАНИЦА ``skills.*``: только то, что меняется при смене ДОМЕНА skill'а.
-Общая runtime-инфраструктура — снаружи: FAISS backend/storage/root →
-``gateway.vector.index.*``; storage-таблицы индексов — там же. Правило
-описано в TARGET_ARCHITECTURE §skills.* boundary.
+Общая runtime-инфраструктура — снаружи, и в дереве агента её объявления
+не осталось вовсе: FAISS backend, storage-таблица и состав индексов
+объявляет платформа (``mcp-platform/platform.json`` → ``vectors.indexes``).
+Правило описано в TARGET_ARCHITECTURE §skills.* boundary.
 
-Структура ``tables`` (``project_settings.py::TableEntry``):
+БЫВШИЕ ``tables`` / ``vector_indexes`` (сняты 2026-10-05, change
+``2026-10-05-vector-indexes-canon-gap``). Схему этих полей описывала модель
+``lib/core/project_settings.py`` — она удалена вместе с самими полями,
+поэтому искать описание в дереве агента бессмысленно: описывать состав
+таблиц и индексов здесь больше нечем. Что читателю нужно знать вместо него:
 
-* ``name`` — ОБЯЗАТЕЛЬНО, формат ``"schema.table"``.
-* ``type`` — ``"table"`` (по умолчанию) | ``"vector"``.
-* ``label`` — OPTIONAL opaque-метка. Таблица с label НЕ попадает в
-  описание схемы для LLM. Типичный кейс — реестры метаданных из других схем
-  (``public.agent_predefined_scripts`` с ``label="scripts_registry"``). В
-  агенте метку больше никто не читает: разбор объявления делает платформа,
-  ``mcp-platform/servers/enterprise/server.py::_audit_config``, и запись с
-  меткой уходит в каталог скриптов, а не в доменные таблицы. Runtime-sync
-  игнорирует.
-* ``tracking_column`` — OPTIONAL колонка для инкрементального поллинга;
-  дефолт ``updated_at`` для ``type="table"``, ``id`` для ``type="vector"``.
-* Элемент может быть строкой ``"schema.table"`` или объектом с полями
-  выше. Неизвестные ключи в объекте запрещены (``extra="forbid"``) —
-  fail-fast на опечатках.
+* какие таблицы входят в снимок — ``mcp-platform/platform.json`` →
+  ``audit.tables``;
+* какие индексы строятся и из каких source-таблиц — там же,
+  ``vectors.indexes`` (поля ``table``, ``pk``, ``source_table``,
+  ``content_columns``, ``embedding_columns``, ``track_column``,
+  ``chunk_size``/``chunk_overlap``, ``metric``, ``enabled``);
+* ``label`` (opaque-метка, отсекающая реестры метаданных вроде
+  ``public.agent_predefined_scripts`` от доменных таблиц) и
+  ``tracking_column`` (колонка инкрементального поллинга) — тоже
+  платформенные понятия; в агенте их не читал никто.
 
 ВНИМАНИЕ: ``skills.<name>`` имеет ``extra="forbid"``. Любой неизвестный
 ключ в skill-секции вызовет ``ConfigurationError`` на старте gateway
 (опечатка ``tablse`` или оставшийся от старой версии ``embedding``) —
-сознательное ужесточение контракта.
+сознательное ужесточение контракта. Снятие ``tables`` и
+``vector_indexes`` секцию не ослабило, а наоборот: пока эти поля были
+объявлены моделью, ``extra="forbid"`` их типизировал, а не отвергал.
 
 Секции ``gateway.sync.*`` (поллинг, очередь записей, reconnect-бэкофф)
 УДАЛЕНЫ: фоновой синхронизации больше нет, загрузка кэша — разовая
 операция при старте процесса.
 
-``skills.<name>.vector_indexes[*]``: ``name`` — логическое имя индекса
-(как его видит tool ``vector_search``). Source-таблица берётся из объявления
-индекса (``config.json → gateway.vector.index.indexes``); прежний PG-реестр
-``public.agent_vector_index_config`` кодом больше не читается (см. ниже про
-``vector.*``), backend и путь хранения — ``gateway.vector.index.*``.
+``skills.<name>.vector_indexes[*]`` УДАЛЁН. Логическое имя индекса
+(``audits_index``, ``violations_index``, ``audit_reports_index``) — это
+аргумент ``index_name`` операции платформы ``vector_search``, и объявлено
+оно вместе с source-таблицей в ``mcp-platform/platform.json`` →
+``vectors.indexes``. Прежний PG-реестр
+``public.agent_vector_index_config`` кодом не читается (см. ниже про
+``vector.*``).
 
 ``skills.audit_analyzer``: навык tool-only (никакого CLI), поэтому
 секции ``cli.*``/``llm.*`` ему не нужны. ``legal_summarizer`` — секция
@@ -172,19 +179,22 @@ tool'а-обёртки у агента больше нет: ``workspace/tools/le
   ``log_to_db`` — писать ли ``event_type="turn_failed"`` (default: true).
   Дефолты — ``ErrorMessagesSettings`` и ``_DEFAULT_INTERNAL_ERROR_TEXT``
   в ``lib/services/runtime_patcher.py``.
-* ``vector.*`` — общая runtime-инфраструктура эмбеддингов и индексов.
-  PG-реестр ``public.agent_vector_index_config`` больше НЕ читается
-  кодом. Параметры подключения к эмбеддеру (Ollama ``/api/embed``,
-  ``EMBED_TOKEN`` в ``.secrets.env``) — константы capability ``llm`` на
-  платформе, прямые значения в конфиге не нужны.
-  ``index.storage_table`` — единая PG-таблица-хранилище сырых
-  эмбеддингов (``register_infra``). ``index.default_root`` —
-  DEPRECATED (FAISS собирается в памяти из снапшота storage_table).
-  ``index.signature_table`` УДАЛЁН (change
-  ``remove-vector-index-store``). Ключи опциональны; дефолты — в
-  ``VectorIndexSettings``/``VectorIndexConfig``.
-  УСТАРЕВШИЙ ПУТЬ ``gateway.vector_index.*`` УДАЛЁН — используйте
-  ``gateway.vector.index.*`` (единственный канонический путь).
+* ``vector.*`` — секция УДАЛЕНА из ``config.json`` (change
+  ``2026-10-05-vector-indexes-canon-gap``). Состав индексов, их
+  source-таблицы, storage-таблица эмбеддингов, backend и корни FAISS
+  объявляет capability ``vectors`` платформы
+  (``mcp-platform/platform.json`` → ``vectors.indexes``): агент своего
+  списка индексов не держит ни в ``gateway.*``, ни в ``skills.*``, и
+  объявлять ему нечего. Параметры подключения к эмбеддеру (Ollama
+  ``/api/embed``, ``EMBED_TOKEN`` в ``.secrets.env``) — константы
+  capability ``llm`` на платформе, прямые значения в конфиге не нужны.
+  PG-реестр ``public.agent_vector_index_config`` кодом не читается,
+  ``index.signature_table`` снят раньше (change
+  ``remove-vector-index-store``). Оба прежних пути секции — старый без
+  точки и бывший канонический — одинаково ничем не читаются: первый
+  ловится fail-fast (``tools/legacy_audit.py``,
+  ``project_settings.py::_reject_legacy_renamed_sections``), чтобы
+  вернувшаяся секция не прошла молча.
 
 ``gateway.agent.logging.db`` — структурированный журнал агента
 (``DbLoggingService``); таблицы — profile-owned (см.

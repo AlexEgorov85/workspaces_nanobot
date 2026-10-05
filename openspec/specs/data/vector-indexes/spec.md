@@ -12,40 +12,62 @@
 ## Responsibility
 
 Vector Indexes отвечают за:
-- определение источника конфигурации векторных индексов
-- управление lifecycle векторных индексов (создание, сборка, загрузка)
-- предоставление единого API для vector search через CacheProvider
-- обеспечение FAISS-backed хранения
+- объявление состава и параметров векторных индексов — единственный источник
+  `mcp-platform/platform.json → vectors.indexes`
+- владение FAISS-индексами в памяти процесса платформы: ленивая сборка, состояние
+  индекса, подпись индекса и её сверка с текущей конфигурацией процесса
+- предоставление vector search модели через операцию `vector_search` capability
+  `vectors`
+- подтягивание `content` / `search_text` / `row_data` найденных чанков из
+  таблицы-источника, а не из метаданных индекса
 
 ## Boundary
 
 ### Owns
-- конфигурацией векторных индексов в config.json
-- сборкой и хранением FAISS индексов
-- предоставлением vector search API через CacheProvider.search_vector
+- объявлением состава и параметров векторных индексов: `mcp-platform/platform.json → vectors.indexes`
+- сборкой и хранением FAISS-индексов в памяти процесса платформы; владелец —
+  `mcp-platform/libs/vectors/`
+- подписью индекса и её сверкой с текущей конфигурацией процесса
+  (`mcp-platform/libs/vectors/signature.py`)
+- предоставлением vector search модели через операцию `vector_search` capability `vectors`
 
 ### Does Not Own
-- прямым доступом к FAISS файлам извне CacheProvider
+- владением файлом снимка DuckDB: снимок принадлежит capability `data`
+  (`mcp-platform/libs/enterprise_data/snapshot/`)
+- прямым доступом к FAISS из кода вне `mcp-platform/libs/vectors/`
 - бизнес-логикой Skills
 - альтернативными vector storage backends
 
 ### May Depend On
-- config.json (конфигурация индексов)
-- FAISS library
-- PostgreSQL (хранение embeddings)
-- CacheProvider (доступ к индексу)
+- `mcp-platform/libs/vectors/` — владелец индексов
+- `mcp-platform/libs/enterprise_data/snapshot/store.py` — владелец снимка: `search_vector`,
+  чтение векторов и payload чанка
+- FAISS library — движок индекса
+- эмбеддера capability `llm` (`platform.json → llm.embed_*`) — вектор запроса
+- PostgreSQL — источник строк для наполнения векторного хранилища
 
 ### Must Not Depend On
+- конфигурации агента (`config.json`): состав и параметры индексов там не объявляются
 - конкретной реализации Skills
-- legacy vector_index_config таблиц
 - других vector storage implementations
 
 ## Public Contract
 
-VectorIndexService предоставляет:
-- загрузку конфигурации индексов из config.json
-- сборку FAISS индексов через build_vectors.py
-- поиск по векторному сходству через CacheProvider.search_vector
+Векторный поиск модели предоставляет операция `vector_search` capability `vectors`
+(`mcp-platform/servers/enterprise/capabilities/vectors/tools/vector_search.py`):
+- параметры: `query`, `index_name`, `top_k`, `threshold`
+- ответ: `index_name`, `index_state`, `found`, `results[]` с `content`, `score`,
+  `source`, `table`, `pk_value`, `chunk`, `matched_chunks`, `row`;
+  `index_state` — состояние индекса на момент поиска (`missing` / `building` /
+  `ready` / `error`)
+
+Диагностические операции capability — `list_indexes` и `index_stats`
+(`mcp-platform/servers/enterprise/capabilities/vectors/tools/`). Они не поднимают
+индекс и модели не объявлены.
+
+Маршрут поиска: навык → операция `vector_search` → `search_vector` хранилища
+(`mcp-platform/libs/enterprise_data/snapshot/store.py`) → `mcp-platform/libs/vectors/`.
+Выход за `mcp-platform/libs/vectors/` на этом маршруте — обход владельца индексов.
 
 ## Requirements
 
@@ -185,92 +207,219 @@ VectorIndexService предоставляет:
 
 Система НЕ ДОЛЖНА:
 
-- читать конфигурацию векторного индекса из legacy таблицы `public.agent_vector_index_config` (сохранена только для исторической справки; не authoritative)
-- создавать второй vector storage backend рядом с FAISS без явного OpenSpec change
-- молча fallback на non-FAISS backend при ошибках FAISS
-- bypass `CacheProvider.search_vector` из Skill кода
-- читать legacy ключ конфигурации `gateway.vector_index.*` (удалён; runtime-mute если присутствует)
+- читать состав и параметры векторных индексов откуда-либо, кроме
+  `mcp-platform/platform.json → vectors.indexes` — ни из конфигурации агента, ни из
+  SQL-реестра
+- создавать второй vector storage backend рядом с FAISS без отдельного OpenSpec change
+- молча переходить на non-FAISS backend при ошибках FAISS
+- обращаться к FAISS в обход `mcp-platform/libs/vectors/`
+- возвращать пустой результат вместо отказа, когда индекс не найден, его подпись
+  разошлась с объявлением, снимок недоступен или эмбеддер не ответил
+- заводить в агенте standalone-сборку индексов: наполнением векторного хранилища
+  занимается сборщик capability (`mcp-platform/servers/enterprise/build_index.py`)
 
 ## Dependencies
 
-- `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные принципы
-- `lib/services/vector_index_service.py:VectorIndexService` — реализация
-- `tools/build_vectors.py` — сборка индексов
+- `mcp-platform/platform.json → vectors` — объявление состава, выключатель capability,
+  инфраструктурная таблица хранения векторов
+- `mcp-platform/libs/vectors/` — владелец индексов: сборка, подпись, группировка
+  чанков, состояние
+- `mcp-platform/libs/enterprise_data/snapshot/store.py` — владелец снимка: `search_vector`,
+  чтение векторов и payload чанка
+- `mcp-platform/servers/enterprise/capabilities/vectors/tools/` — операции `vector_search`,
+  `list_indexes`, `index_stats`
+- `mcp-platform/servers/enterprise/build_index.py` — наполнение векторного хранилища
+- `mcp-platform/docs/MCP-CONTRACTS.md` — контракт операций capability
+- `mcp-platform/docs/TARGET-ARCHITECTURE.md` — архитектурные принципы платформы
 - FAISS library — vector index engine
-- `lib/services/cache_provider.py:CacheProvider` — доступ к поиску
+- `docs/ARCHITECTURE.md` — раздел о владении данными: агент данных не держит,
+  состав векторной инфраструктуры объявляет платформа
 
 ## Configuration
 
+Состав и параметры векторных индексов объявляет capability `vectors` в
+`mcp-platform/platform.json → vectors`. Это единственный источник: агент своего
+списка индексов не держит, ни в `config.json`, ни в `gateway.*`, ни в `skills.*`.
+
 ```json
 {
-  "gateway": {
-    "vector": {
-      "index": {
-        "default_root": "/path/to/faiss/indexes",
-        "storage_table": "vector_embeddings",
-        "indexes": {
-          "audit_patterns": {
-            "dimension": 768,
-            "metric": "cosine"
+  "vectors": {
+    "enable": true,
+    "storage_table": "oarb.audit_vectors",
+    "indexes": {
+      "violations_index": {
+        "table": "oarb.violations",
+        "pk": "id",
+        "source_table": "violations",
+        "content_columns": [
+          "description",
+          "recommendation",
+          "violation_code",
+          "severity"
+        ],
+        "embedding_columns": [
+          {
+            "column": "description",
+            "chunk": true,
+            "chunk_size": 500,
+            "chunk_overlap": 80
           },
-          "legal_docs": {
-            "dimension": 768,
-            "metric": "cosine"
-          }
-        }
+          "violation_code"
+        ],
+        "track_column": "updated_at",
+        "chunk_size": 500,
+        "chunk_overlap": 80,
+        "metric": "cosine",
+        "enabled": true
       }
     }
   }
 }
 ```
 
+`storage_table` — инфраструктурная таблица хранения векторов внутри снимка; она же
+таблица эмбеддингов, поэтому второй настройки для того же факта не заводится.
+`table`, `pk` и `source_table` задают, по каким строкам и под каким именем индекс
+живёт в снимке; `track_column` — по какой колонке отслеживается изменение строки;
+`metric` — мера близости.
+
+`embedding_columns` — что эмбедится: значения этих колонок объединяются в один
+текст `search_text` с подписями колонок, и уже он эмбедится, поэтому набор
+колонок больше одного даёт один вектор на чанк. Колонка может быть задана строкой
+либо объектом со своими chunk-параметрами — второй формой задают разбиение.
+Незаданный `embedding_columns` означает `content_columns`. `content_columns` — что
+возвращается в `content`, то есть текст, который увидит человек.
+
+`enabled: false` исключает индекс из сборки. Объявление без `table` или `pk`
+пропускается как неполное, а не роняет сборку.
+
+Объявление читается как есть и разворачивается в pythonic-вид
+(`{имя: {table, pk, source_table, content_columns, embedding_columns, track_column,
+chunk_size, chunk_overlap, metric, enabled}}`) — `servers/enterprise/server.py::_vectors_config`
+собирает его из настроек capability, `libs/vectors/config.py::read_vector_index_config`
+приводит форму. Размерность эмбеддинга и таймаут эмбеддера объявлены отдельно
+(`platform.json → llm.embed_dimension`, `llm.embed_timeout`) и входят в подпись
+индекса, но объявлением индекса они не являются.
+
+Смена состава или параметров — операция контура платформы: она применяется без
+изменений в коде и без релиза, и пересборки агента не требует.
+
+Пустой `vectors.indexes` — законное состояние «индексов не объявлено», а не ошибка.
+Отсутствующий ключ в файле — ошибка конфигурации: у настроек платформенного контура
+значений по умолчанию в коде нет, и сервер на старте называет недостающий ключ.
+
 ## Lifecycle
 
-1. **Конфигурация**: индексы определяются в config.json
-2. **Сборка**: build_vectors.py строит FAISS индексы из данных
-3. **Публикация**: индексы сохраняются в default_root
-4. **Загрузка**: индексы загружаются по demand при query
-5. **Обновление**: periodic rebuild по расписанию или событию
+1. **Объявление**: состав, параметры и таблица хранения объявляет capability `vectors`
+   в `mcp-platform/platform.json → vectors`
+2. **Наполнение**: векторы пишет в инфраструктурную таблицу хранения сборщик
+   capability (`mcp-platform/servers/enterprise/build_index.py`); агент в этом шаге
+   не участвует
+3. **Сборка**: FAISS-индекс собирается в памяти лениво, по первому обращению к
+   `index_name`. Сборки на старте процесса нет: единственный триггер — векторный
+   запрос. Параллельные обращения к одному индексу дают ровно одну сборку.
+   Первичная сборка укладывается в ≤ 5 секунд на эталонной рабочей станции для
+   индексов до 20 000 векторов × 1024: ленивость меняет исполнителя, а не
+   пользовательский контракт первого поиска
+4. **Поиск**: `vector_search` эмбедит запрос, сверяет подпись индекса с текущей
+   конфигурацией процесса и ищет по FAISS; payload найденных чанков
+   (`content` / `search_text` / `row_data`) подтягивается из таблицы-источника по
+   ключу `(source, pk_value, chunk_index)`
+5. **Обновление**: векторы добавляет сборщик capability. Индекс, собранный в
+   процессе, живёт до конца его жизни; новое объявление или новые векторы учтутся
+   в следующем процессе платформы, а расхождение подписи с текущим объявлением
+   отражается отказом, а не молчаливой выдачей
 
 ## State
 
-VectorIndexService хранит:
-- конфигурацию индексов
-- пути к FAISS файлам
-- статус последней сборки
+Состояние индекса принадлежит capability `vectors` и наблюдаемо в ответе операции
+как `index_state`: `missing` → `building` → `ready`, либо `error` с кодом и
+текстом. На каждый `index_name` владелец индексов держит состояние, сам
+FAISS-индекс, метаданные, время сборки и счётчики `queries` / `builds`.
+
+Персиста у индекса нет — ни файла индекса, ни таблицы подписи: индекс существует
+только в памяти процесса, и его нельзя прочитать из другого процесса.
 
 ## Invariants
 
-- Конфигурация читается только из config.json
-- Все индексы FAISS-backed
-- Единый access path через CacheProvider.search_vector
-- Нет legacy table reads
+- Состав и параметры индексов читаются только из
+  `mcp-platform/platform.json → vectors`; второго источника нет, и правило
+  приоритета между двумя списками не применяется
+- Векторными индексами не владеет ни один компонент агента: агент их не строит,
+  не хранит и не прогревает
+- Все индексы FAISS-backed, в памяти, без персиста
+- Сборка индекса ленивая и ровно одна на процесс
+- Payload (`content` / `search_text` / `row_data`) читается из таблицы-источника,
+  а не из метаданных, сериализованных в индекс
+- Поиск идёт единственным маршрутом: операция `vector_search` → `search_vector`
+  хранилища → `mcp-platform/libs/vectors/`
+- Расхождение подписи индекса с текущей конфигурацией — отказ, а не молчаливая
+  деградация и не пустая выдача
 
 ## Error Behavior
 
-- FAISS build error → явная ошибка, нет silent fallback
-- Index not found → ошибка возвращается потребителю
-- Config missing → fail fast при старте
+- Неизвестный индекс (нет ни в объявлении, ни в снимке) → отказ `not_found`, а не
+  пустая выдача
+- Пустой `query` → `invalid_request`
+- Расхождение подписи индекса с текущей конфигурацией процесса →
+  `IndexIntegrityError` с кодом `stale_index` / `invalid_index`
+- Снимок недоступен → отказ инфраструктуры (`infrastructure_error`): снимок
+  принадлежит capability `data`, и его недоступность — не «пустое нашлось»
+- Эмбеддер не вернул вектор запроса → отказ инфраструктуры, а не пустой результат
+- Ошибка сборки индекса → состояние `error` с кодом и текстом и явный отказ;
+  следующий поиск в том же процессе повторяет сборку
+- Отсутствующее объявление в `platform.json` → отказ конфигурации на старте сервера
+  с именем недостающего ключа
+
+Коды операции перечислены в `mcp-platform/docs/MCP-CONTRACTS.md` §5.1; молчаливого
+перехода на другой backend при любом из этих отказов нет.
 
 ## Consumers
 
-- AuditAnalyzer — vector search для паттернов
-- LegalSummarizer — поиск юридических документов
-- Skills — general vector queries
+- Модель (навык) — операция `vector_search` capability `vectors`; в дереве агента
+  её называет `workspace/skills/audit_analyzer/SKILL.md`
+- Владелец снимка — `search_vector`
+  (`mcp-platform/libs/enterprise_data/snapshot/store.py`), делегирующий владельцу
+  индексов
+- Оператор — диагностические операции `list_indexes` и `index_stats`, которые
+  отвечают, не поднимая индекс
 
 ## Implementation
 
-Основная реализация:
-- `lib/services/vector_index_service.py:VectorIndexService`
+Владелец индексов — capability `vectors`:
+- `mcp-platform/libs/vectors/owner.py:VectorIndexOwner` — ленивая сборка,
+  single-flight, состояние индекса, поиск
+- `mcp-platform/libs/vectors/indexing.py` — `build_faiss_index`, `as_vector`,
+  `vector_dimension`
+- `mcp-platform/libs/vectors/signature.py` — `compute_index_signature`,
+  `verify_index_signature`
+- `mcp-platform/libs/vectors/grouping.py` — `build_raw_items`, `group_vector_hits`:
+  чанки сворачиваются в документы
+- `mcp-platform/libs/vectors/config.py` — чтение объявления индексов и параметров
+  эмбеддинга
+- `mcp-platform/libs/vectors/preload.py` — `compute_index_health`,
+  `format_index_health_lines`
 
 Связанные компоненты:
-- `tools/build_vectors.py` — сборка индексов
-- `lib/services/cache_provider.py:CacheProvider` — search_vector API
-- `lib/core/infra_registration.py:register_vector_storage` — регистрация таблицы
+- `mcp-platform/servers/enterprise/capabilities/vectors/tools/vector_search.py` —
+  операция для модели
+- `mcp-platform/libs/enterprise_data/snapshot/store.py` — `search_vector`, чтение
+  векторов и payload чанка
+- `mcp-platform/servers/enterprise/build_index.py` — наполнение векторного
+  хранилища
 
 ## Verification
 
 Валидация включает:
-1. Проверка отсутствия прямого доступа к FAISS из Skills (code review)
-2. Проверка конфигурации только из config.json (тесты)
-3. Проверка отсутствия legacy table reads (grep, тесты)
+1. Проверка единственного источника объявления: состав и параметры индексов в
+   `mcp-platform/platform.json → vectors.indexes` и отсутствие объявления
+   состава индексов в конфигурации агента
+2. Проверка единственного пути доступа: FAISS читается только из
+   `mcp-platform/libs/vectors/` (code review, grep по `mcp-platform/`)
+3. Проверка ленивой сборки: состояние `missing` до первого поиска и ровно одна
+   сборка на процесс при параллельных обращениях (счётчик `builds`)
+4. Проверка payload из источника: `content` и `row` соответствуют строке
+   таблицы-источника по `(source, pk_value, chunk_index)`, а не метаданным индекса
+5. Проверка отказов: `not_found` на неизвестный индекс, `stale_index` /
+   `invalid_index` на расхождение подписи
+6. Сверка контракта операции с `mcp-platform/docs/MCP-CONTRACTS.md` §5.1

@@ -29,7 +29,7 @@
 
 ## 2. Открытое решение — проза канона вне `## Requirements`
 
-- [ ] 2.1 **[O]** `data/vector-indexes` содержит **15** прозуических разделов вне
+- [x] 2.1 **[O]** `data/vector-indexes` содержит **15** прозуических разделов вне
   `## Requirements` (H2 в `openspec/specs/data/vector-indexes/spec.md`: `Purpose`:3,
   `Scope`:7, `Responsibility`:12, `Boundary`:20, `Public Contract`:43,
   `Forbidden Behavior`:184, `Dependencies`:194, `Configuration`:202, `Lifecycle`:227,
@@ -73,7 +73,7 @@
   прямо зовут вернуть то, что дельта удаляет. `## Scope` при этом не трогаем:
   он единственный уже верный. Тот же вопрос стоит перед
   `2026-10-04-close-cache-provider-canon-gap` (задача 2.2 в его `tasks.md`).
-- [ ] 2.2 **[O]** `## Configuration` в каноне — самый опасный раздел: он
+- [x] 2.2 **[O]** `## Configuration` в каноне — самый опасный раздел: он
   показывает валидный на вид JSON с `gateway.vector.index.indexes.<name>.dimension`.
   Такого ключа в `config.json` нет (0 совпадений), и `signature_table`, на который
   ссылаются три требования, тоже отсутствует (0 совпадений в `config.json` и в
@@ -85,13 +85,13 @@
 
 ## 3. Удаление мёртвого дубля конфигурации
 
-- [ ] 3.1 **[A]** Удалить `gateway.vector.index` из `config.json` (целиком, включая
+- [x] 3.1 **[A]** Удалить `gateway.vector.index` из `config.json` (целиком, включая
   `indexes`, `storage_table`, `default_root`, `backend`, `enable`).
-- [ ] 3.2 **[A]** Удалить `skills.audit_analyzer.tables` и
+- [x] 3.2 **[A]** Удалить `skills.audit_analyzer.tables` и
   `skills.audit_analyzer.vector_indexes` из `config.json` — обе секции дублируют
   `platform.json → audit.tables` и `platform.json → vectors.indexes`, потребителей
   в `lib/` нет.
-- [ ] 3.3 **[A]** Удалить из `lib/core/project_settings.py`: `VectorIndexConfig`
+- [x] 3.3 **[A]** Удалить из `lib/core/project_settings.py`: `VectorIndexConfig`
   (`:481`), `VectorInfrastructureSettings` (`:186`), `VectorIndexSettings`
   (`:141`), `TableEntry` (`:418`), `VectorIndexEntry` (`:449`), поля
   `SkillSettings.tables` (`:666`) и `SkillSettings.vector_indexes` (`:667`) и
@@ -110,11 +110,11 @@
   `extra="forbid"` модели `SkillSettings` (`:663`) их **типизирует, а не
   отвергает** — секция `skills.*` валидируется (`config.json:817,835`), и
   отвержение появляется ровно этим удалением.
-- [ ] 3.4 **[A]** Проверить **следствие** 3.3, а не заданное условие: после
+- [x] 3.4 **[A]** Проверить **следствие** 3.3, а не заданное условие: после
   удаления полей `SkillSettings.tables` и `SkillSettings.vector_indexes`
   (сделано в 3.3) секция навыка обязана остаться валидируемой
   (`enabled`, `cli`, `llm`), иначе `config.json` перестанет проходить разбор.
-- [ ] 3.5 **[A]** Обновить `tests/test_config_keys.py`: вместо ассертов со
+- [x] 3.5 **[A]** Обновить `tests/test_config_keys.py`: вместо ассертов со
   значениями (`:90-101, :146-159`) утверждать **отсутствие** секций. Диапазоны
   взяты по **фактическим блокам**, а не по началу: `:88-97` обрывается **внутри**
   `vector_indexes` и не покрывает `:98-101` (три имени индекса), а `:146-150`
@@ -133,7 +133,7 @@
     «индексы объявляет платформа, `platform.json → vectors.indexes`»
     (`mcp-platform/platform.json`); без отдельного пункта комментарий переживёт
     удаление и будет уводить читателя искать несуществующую секцию.
-- [ ] 3.6 **[A]** Обновить `tests/test_project_settings.py`: снять модульный
+- [x] 3.6 **[A]** Обновить `tests/test_project_settings.py`: снять модульный
   импорт `TableEntry` (`:9-13`) и удалить четыре класса — `TestTableEntry` (`:121`),
   `TestVectorIndexEntryNoSource` (`:389`, локальные импорты `VectorIndexEntry` на
   `:401,412,420`), `TestGatewayVectorIndexConfig` (`:446`, валидирует
@@ -146,7 +146,7 @@
   `TEST_VECTOR_TABLE` в `tests/conftest.py` после удаления последнего
   пользователя станет неиспользуемым — либо удалить, либо оставить с
   пояснением.
-- [ ] 3.7 **[A]** Вычистить упоминания `gateway.vector.index`, которые **не**
+- [x] 3.7 **[A]** Вычистить упоминания `gateway.vector.index`, которые **не**
   уходят вместе с моделями. Сейчас в `lib/` 7 совпадений: `:151,158` (docstring
   `VectorIndexSettings`), `:456,470,482` (уходят с моделями), **`:651`**
   (docstring `SkillSettings`, **не** `SkillsSettings` — тот объявлен на `:675`) и
@@ -176,7 +176,7 @@
   По обязательным нулём токенам в `config.py` одно совпадение — `TableEntry` на
   `:90`; `build_vectors`, `register_vector_storage`, `gateway_vector_index_config`
   и `CacheProvider.search_vector` — 0 совпадений.
-- [ ] 3.8 **[A]** Обновить `AGENTS.md` и `mcp-platform/platform.json`
+- [x] 3.8 **[A]** Обновить `AGENTS.md` и `mcp-platform/platform.json`
   (`_about`-пояснение про дубликат для `build_vectors.py`): файл сборки в дереве
   отсутствует, оправдание дубля больше не действует.
 - [ ] 3.9 **[A]** **Решение, а не правка по умолчанию:** определить, чем именно
@@ -193,13 +193,13 @@
 
 ## 4. Проверка
 
-- [ ] 4.1 **[A]** `tests/test_config_keys.py` — отдельно
-- [ ] 4.2 **[A]** `tests/test_enterprise_mcp_config.py` — отдельно. Замечание:
+- [x] 4.1 **[A]** `tests/test_config_keys.py` — отдельно
+- [x] 4.2 **[A]** `tests/test_enterprise_mcp_config.py` — отдельно. Замечание:
   формулировка «схема `ProjectSettings`, `extra="forbid"`» была неверной —
   `ProjectSettings` объявлен `extra="allow"`
   (`lib/core/project_settings.py:759`); файл проверяет разбор конфигурации, а не
   отвержение неизвестных ключей на корне.
-- [ ] 4.3 **[O]** `python tools/validate_component_specs.py --strict` — baseline
+- [x] 4.3 **[O]** `python tools/validate_component_specs.py --strict` — baseline
   = **ровно 3 нарушения, все три в
   `openspec/specs/runtime/entrypoints/spec.md`** (требования без сценариев); в
   `data/cache-provider` и `data/vector-indexes` — 0. Число не должно вырасти.
@@ -207,10 +207,10 @@
   (`tools/validate_component_specs.py:51,439`) — дельты в `openspec/changes/` он
   **не проверяет**, поэтому зелёный прогон не означает, что дельта этого change
   структурно корректна.
-- [ ] 4.4 **[A]** `py_compile` по `lib/core/project_settings.py`
-- [ ] 4.5 **[A]** `tests/test_project_settings.py` — отдельно (см. 3.6: файл падает
+- [x] 4.4 **[A]** `py_compile` по `lib/core/project_settings.py`
+- [x] 4.5 **[A]** `tests/test_project_settings.py` — отдельно (см. 3.6: файл падает
   целиком на модульном импорте `TableEntry`, а не на одном тесте)
-- [ ] 4.6 **[A]** Grep-страж **по исполняемому коду**, а не «0 совпадений вообще».
+- [x] 4.6 **[A]** Grep-страж **по исполняемому коду**, а не «0 совпадений вообще».
   Требование «0 совпадений в `lib/`, `tools/`, `openspec/specs/`» недостижимо и
   потому неисполнимо: легальные упоминания переживут удаление по построению.
 
