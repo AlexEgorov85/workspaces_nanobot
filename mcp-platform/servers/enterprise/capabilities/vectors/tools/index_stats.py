@@ -38,12 +38,12 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
             default=str,
         )
     return ToolDefinition(
-        name="index_stats",
+        name="vectors.index_stats",
         description=(
             "Метрики векторного индекса: число векторов, размерность, время "
             "последней сборки, число выполненных поисков. Индекс не собирается."
         ),
         handler=handle_index_stats,
-        category="vectors",
+        capability="vectors",
         tags=("vector", "diagnostics"),
     )

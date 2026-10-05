@@ -93,10 +93,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="append_history_notice",
+        name="data.append_history_notice",
         description=description,
         handler=handle_append_history_notice,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:append_history_notice",),
         input_schema=INPUT_SCHEMA,

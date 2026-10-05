@@ -72,10 +72,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="unstick_tasks",
+        name="data.unstick_tasks",
         description=description,
         handler=handle_unstick_tasks,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:unstick_tasks",),
         input_schema=INPUT_SCHEMA,

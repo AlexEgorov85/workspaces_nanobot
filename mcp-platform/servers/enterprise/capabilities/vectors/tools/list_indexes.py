@@ -36,13 +36,13 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
             default=str,
         )
     return ToolDefinition(
-        name="list_indexes",
+        name="vectors.list_indexes",
         description=(
             "Список векторных индексов снимка: имя, состояние (missing/"
             "building/ready/error), число векторов и размерность. "
             "Индексы не собираются."
         ),
         handler=handle_list_indexes,
-        category="vectors",
+        capability="vectors",
         tags=("vector", "diagnostics"),
     )

@@ -51,13 +51,13 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         )
 
     return ToolDefinition(
-        name="log_event",
+        name="data.log_event",
         description=(
             "Записать событие в долговечный журнал gateway. Неблокирующая: "
             "возвращает accepted или dropped при переполнении буфера."
         ),
         handler=handle_log_event,
-        category="data",
+        capability="data",
         tags=("logging", "infrastructure"),
         quality_policy="none",
         input_schema=build_input_schema(handle_log_event),

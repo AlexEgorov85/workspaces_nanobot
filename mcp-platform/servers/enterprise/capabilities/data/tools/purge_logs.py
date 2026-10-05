@@ -38,10 +38,10 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="purge_logs",
+        name="data.purge_logs",
         description=description,
         handler=purge_logs,
-        category="data",
+        capability="data",
         tags=("infrastructure", "runtime-only"),
         permissions=("data:purge_logs",),
         input_schema=build_input_schema(purge_logs),

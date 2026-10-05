@@ -80,10 +80,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="append_assistant_message",
+        name="data.append_assistant_message",
         description=description,
         handler=handle_append_assistant_message,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:append_assistant_message",),
         input_schema=INPUT_SCHEMA,

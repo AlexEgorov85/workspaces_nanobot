@@ -28,10 +28,10 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="generate_sql",
+        name="audit.generate_sql",
         description=description,
         handler=generate_sql,
-        category="audit",
+        capability="audit",
         tags=("infrastructure",),
         permissions=("audit:generate_sql",),
         input_schema=build_input_schema(generate_sql),

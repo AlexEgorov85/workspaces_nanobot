@@ -59,10 +59,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="cleanup_session_mirror",
+        name="data.cleanup_session_mirror",
         description=description,
         handler=handle_cleanup_session_mirror,
-        category="data",
+        capability="data",
         tags=("session", "mirror", "infrastructure", "runtime-only"),
         permissions=("data:cleanup_session_mirror",),
     )

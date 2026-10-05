@@ -77,13 +77,13 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         )
 
     return ToolDefinition(
-        name="history_search",
+        name="data.history_search",
         description=(
             "Поиск по долговечному журналу gateway в пределах сессии вызова. "
             "Область видимости задаёт вызывающая сторона, у модели её нет."
         ),
         handler=handle_history_search,
-        category="data",
+        capability="data",
         tags=("logging", "infrastructure"),
         quality_policy="vector_result",
         input_schema=build_input_schema(handle_history_search),

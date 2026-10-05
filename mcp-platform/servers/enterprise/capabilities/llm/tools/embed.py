@@ -52,13 +52,13 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         )
 
     return ToolDefinition(
-        name="embed",
+        name="llm.embed",
         description=(
             "Вернуть эмбеддинг текста. Используется поиском по векторам; "
             "в обычном диалоге вызывать не нужно."
         ),
         handler=handle_embed,
-        category="llm",
+        capability="llm",
         permissions=("llm:embed",),
         tags=("infrastructure", "runtime-only"),
         quality_policy="llm_result",

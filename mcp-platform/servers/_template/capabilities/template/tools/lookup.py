@@ -16,8 +16,8 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         return service.find(key).text
 
     return ToolDefinition(
-        name="lookup",
+        name="template.lookup",
         description="Найти запись по ключу. Пример доменной ошибки not_found.",
         handler=handle_lookup,
-        category="template",
+        capability="template",
     )

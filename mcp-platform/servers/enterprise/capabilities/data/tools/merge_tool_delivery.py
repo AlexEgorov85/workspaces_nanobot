@@ -91,10 +91,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="merge_tool_delivery",
+        name="data.merge_tool_delivery",
         description=description,
         handler=handle_merge_tool_delivery,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:merge_tool_delivery",),
         input_schema=INPUT_SCHEMA,

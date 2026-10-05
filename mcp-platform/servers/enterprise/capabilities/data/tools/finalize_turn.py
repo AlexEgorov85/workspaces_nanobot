@@ -110,10 +110,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="finalize_turn",
+        name="data.finalize_turn",
         description=description,
         handler=handle_finalize_turn,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:finalize_turn",),
         input_schema=INPUT_SCHEMA,

@@ -52,10 +52,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="session_mirror_state",
+        name="data.session_mirror_state",
         description=description,
         handler=handle_session_mirror_state,
-        category="data",
+        capability="data",
         tags=("session", "mirror", "infrastructure", "runtime-only"),
         permissions=("data:session_mirror_state",),
     )

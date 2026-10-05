@@ -41,10 +41,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="queue_stats",
+        name="data.queue_stats",
         description=description,
         handler=handle_queue_stats,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:queue_stats",),
         input_schema=INPUT_SCHEMA,

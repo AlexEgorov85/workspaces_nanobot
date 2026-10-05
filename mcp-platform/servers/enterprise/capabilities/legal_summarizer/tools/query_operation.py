@@ -46,10 +46,10 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="query_operation",
+        name="legal_summarizer.query_operation",
         description=description,
         handler=query_operation,
-        category="legal_summarizer",
+        capability="legal_summarizer",
         tags=("infrastructure",),
         permissions=("legal_summarizer:query_operation",),
         input_schema=build_input_schema(query_operation),

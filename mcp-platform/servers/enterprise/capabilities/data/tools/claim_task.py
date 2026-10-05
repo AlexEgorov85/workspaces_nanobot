@@ -150,10 +150,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="claim_task",
+        name="data.claim_task",
         description=description,
         handler=handle_claim_task,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:claim_task",),
         input_schema=INPUT_SCHEMA,

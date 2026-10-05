@@ -66,10 +66,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="append_reasoning",
+        name="data.append_reasoning",
         description=description,
         handler=handle_append_reasoning,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:append_reasoning",),
         input_schema=INPUT_SCHEMA,

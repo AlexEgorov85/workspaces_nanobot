@@ -37,8 +37,8 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         return json.dumps(payload, ensure_ascii=False)
 
     return ToolDefinition(
-        name="echo",
+        name="template.echo",
         description="Эхо с указанием длины. Пример операции capability.",
         handler=handle_echo,
-        category="template",
+        capability="template",
     )

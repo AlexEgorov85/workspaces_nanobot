@@ -80,10 +80,10 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="upsert_question_run",
+        name="data.upsert_question_run",
         description=description,
         handler=upsert_question_run,
-        category="data",
+        capability="data",
         tags=("infrastructure", "runtime-only"),
         permissions=("data:upsert_question_run",),
         input_schema=build_input_schema(upsert_question_run),

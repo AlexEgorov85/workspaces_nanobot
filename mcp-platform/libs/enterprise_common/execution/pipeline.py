@@ -146,7 +146,7 @@ class ToolExecutionPipeline:
         started_at = datetime.now(UTC)
         call_args = dict(arguments or {})
         tool_name = definition.name
-        capability = definition.category
+        capability = definition.capability
 
         # Шаги 1–3. Идентичность разбирается до всего остального: без неё
         # вызов не начинается, и ни журнал, ни каталог сессии не создаются.

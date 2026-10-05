@@ -170,7 +170,7 @@ def create_tool(artifacts: ArtifactStore, *, page_chars: int) -> ToolDefinition:
         return json.dumps(answer, ensure_ascii=False)
 
     definition = ToolDefinition(
-        name="read_result",
+        name="platform.read_result",
         description=(
             "Прочитать результат вызова, который был сохранён в файл из-за "
             "размера. Вызывается по artifact_id или uri из ответа операции, "
@@ -178,7 +178,7 @@ def create_tool(artifacts: ArtifactStore, *, page_chars: int) -> ToolDefinition:
             "по next_offset, на последней он null."
         ),
         handler=handle_read_result,
-        category="session",
+        capability="platform",
         tags=("session", "artifacts"),
     )
     # Те же проверки, что и для операций из каталога: подпись без аннотаций

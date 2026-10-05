@@ -62,10 +62,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="release_claimed_tasks",
+        name="data.release_claimed_tasks",
         description=description,
         handler=handle_release_claimed_tasks,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:release_claimed_tasks",),
         input_schema=INPUT_SCHEMA,

@@ -58,10 +58,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="delete_assistant_message",
+        name="data.delete_assistant_message",
         description=description,
         handler=handle_delete_assistant_message,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:delete_assistant_message",),
         input_schema=INPUT_SCHEMA,

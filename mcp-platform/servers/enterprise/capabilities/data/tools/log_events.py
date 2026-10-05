@@ -108,10 +108,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="log_events",
+        name="data.log_events",
         description=description,
         handler=handle_log_events,
-        category="data",
+        capability="data",
         tags=("logging", "infrastructure", "runtime-only"),
         permissions=("data:log_events",),
         input_schema=INPUT_SCHEMA,

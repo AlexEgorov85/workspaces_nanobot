@@ -30,12 +30,12 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         )
         return json.dumps(report, ensure_ascii=False)
     return ToolDefinition(
-        name="schema_check",
+        name="data.schema_check",
         description=(
             "Проверить наличие обязательных таблиц в PostgreSQL. Возвращает "
             "список недостающих таблиц и признак ok."
         ),
         handler=handle_schema_check,
-        category="data",
+        capability="data",
         tags=("infrastructure", "diagnostics"),
     )

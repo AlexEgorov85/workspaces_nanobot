@@ -31,10 +31,10 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="run_script",
+        name="audit.run_script",
         description=description,
         handler=run_script,
-        category="audit",
+        capability="audit",
         tags=("infrastructure",),
         permissions=("audit:run_script",),
         input_schema=build_input_schema(run_script),

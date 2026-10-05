@@ -84,7 +84,7 @@ def create_tool(workspace: SessionWorkspace) -> ToolDefinition:
         return json.dumps(answer, ensure_ascii=False)
 
     definition = ToolDefinition(
-        name="session_files",
+        name="platform.session_files",
         description=(
             "Каталог файлов этой сессии: где лежат файлы, созданные агентом "
             "(files_dir), и как называются подкаталоги сессии (layout). "
@@ -92,7 +92,7 @@ def create_tool(workspace: SessionWorkspace) -> ToolDefinition:
             "сторона, и повторный вызов при том же корне ничего не меняет."
         ),
         handler=handle_session_files,
-        category="session",
+        capability="platform",
         tags=("session", "files"),
     )
     # Те же проверки, что и для операций из каталога: подпись без аннотаций

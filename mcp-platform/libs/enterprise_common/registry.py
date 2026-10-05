@@ -62,21 +62,27 @@ class ToolDefinition:
     автоматический вывод опасен. Пустой дефолт — единственный признак
     «не объявлено», отдельного поля для этого нет.
 
-    ``category`` — **имя capability**, а не свободная классификация. По нему
+    ``capability`` — **имя capability**, а не свободная классификация. По нему
     выбираются политика (``execution/policy.py``), журнал и артефакты вызова
-    (``execution/pipeline.py``), и им же ``by_category`` группирует реестр.
-    Поле обязательно, и автор объявляет принадлежность к capability дважды:
-    каталогом, в который он положил файл, и этой строкой. Проверяются обе
-    половины и по отдельности — пустое значение отвергает
+    (``execution/pipeline.py``), и им же ``by_capability`` группирует реестр.
+    Поле обязательно, и автор объявляет принадлежность к capability **трижды**:
+    каталогом, в который он положил файл, этой строкой и именем операции
+    (``data.log_event``). Проверяются все три и по отдельности — пустое
+    значение, форму имени и несовпадающий префикс имени отвергает
     :meth:`ToolRegistry.register`, а расхождение с каталогом
     ``loader.load_definition``. Отказы разные, потому что и правки разные:
-    пустой категории не хватает значения, чужую надо переименовать.
+    пустому значению не хватает значения, чужое надо переименовать, а
+    половину имени пишут в имени, а не в поле.
+
+    Слово ``category`` для этого поля больше не употребляется: значение всегда
+    было именем capability, и два названия одного поля заставляли сообщение
+    об отказе пояснять, что «категория» и «capability» — одно и то же.
     """
 
     name: str
     description: str
     handler: Callable[..., Any]
-    category: str
+    capability: str
     version: str = "1"
     enabled: bool = True
     tags: tuple[str, ...] = ()
@@ -92,7 +98,7 @@ class ToolDefinition:
         """Урезанное описание для логов и health-отчёта."""
         return {
             "name": self.name,
-            "category": self.category,
+            "capability": self.capability,
             "version": self.version,
             "enabled": self.enabled,
             "tags": list(self.tags),
@@ -108,6 +114,16 @@ from libs.enterprise_common.execution.context import CONTEXT_PARAM  # noqa: E402
 #: вызова: идентичность приходит в ``params._meta`` (§ ``runtime/call-contract``)
 #: и в опубликованной схеме ей не места.
 IDENTITY_PARAMS: frozenset[str] = frozenset({"session_id", "user_id", "request_id"})
+
+#: Capability, зарезервированная платформенным словарём: операции слоя
+#: исполнения, а не capability какого-либо сервера. Значение библиотечное,
+#: поэтому оно и живёт здесь, а не в перечне capability конкретного сервера
+#: (``_ALL_CAPABILITIES`` в модуле enterprise-сервера — объявление того
+#: сервера, и общий код обслуживает ещё и эталонный). В выборку сервера оно не
+#: попадает: отбор нормализуется до сборки реестра, и добавленное после
+#: этого значение было бы отвергнуто как опечатка. Оно входит в множество
+#: сверки — см. :meth:`ToolRegistry.__init__`.
+PLATFORM_CAPABILITY = "platform"
 
 
 def validate_handler(
@@ -171,6 +187,62 @@ def validate_handler(
         raise ToolLoadError(
             f"параметр {CONTEXT_PARAM!r} должен быть аннотирован ToolExecutionContext, "
             f"а не {getattr(actual, '__name__', annotation)!r}",
+            path=path,
+            name=name,
+        )
+
+
+def validate_operation_name(name: str, capability: str = "", *, path: str = "") -> None:
+    """Проверить форму имени операции и совпадение его префикса с полем.
+
+    Имя на проводе — ``<capability>.<operation>``, и первая его половина обязана
+    совпадать с объявленным полем. Иначе на проводе у операции одна
+    capability, а в политике, журнале и артефактах вызова другая, и следом
+    остаётся только «неправильный» журнал.
+
+    Отказы формы названы по-разному, потому что и правки разные: имя без точки
+    (операция не сказала, к какой capability относится), пустое после точки
+    (capability сказана, операция — нет) и лишняя точка (объявлено третье, чего
+    в контракте нет). Пустое имя сюда не доходит: «не сказано» объявляет
+    вызывающий отдельной проверкой.
+
+    **Capability из имени не подставляется.** При пустом поле префикс не
+    сверяется вовсе: подстановка превратила бы сверку в проверку объявления
+    против самого себя, и объявление ``name="data.x"`` с пустым полем прошло бы
+    как годное. «Не сказано» объявляет :meth:`ToolRegistry.register`.
+
+    Args:
+        name: имя операции как объявлено.
+        capability: объявленное поле ``ToolDefinition.capability``.
+        path: путь до файла объявления — попадает в сообщение, если задан.
+    """
+    if "." not in name:
+        raise ToolLoadError(
+            f"имя операции должно называть capability и операцию через точку "
+            f"(например 'data.log_event'), а не {name!r}",
+            path=path,
+            name=name,
+        )
+    declared, _, operation = name.partition(".")
+    if not operation:
+        raise ToolLoadError(
+            f"в имени {name!r} после точки пусто: capability сказана, операция нет",
+            path=path,
+            name=name,
+        )
+    if "." in operation:
+        raise ToolLoadError(
+            f"в имени {name!r} больше одной точки: в контракте capability и "
+            "операция, а не три части",
+            path=path,
+            name=name,
+        )
+    if not capability.strip():
+        return
+    if capability != declared:
+        raise ToolLoadError(
+            f"имя {name!r} объявляет capability {declared!r}, а поле capability — "
+            f"{capability!r}",
             path=path,
             name=name,
         )
@@ -310,9 +382,43 @@ class ToolRegistry:
     Имена уникальны глобально, а не внутри capability: агент видит плоский
     список инструментов, и две операции с одинаковым именем в разных
     capability означают, что одна из них молча вытесняет другую.
+
+    Args:
+        definitions: объявления, регистрируемые сразу — для сборки реестра из
+            готового набора.
+        capabilities: capability, объявленные этим сервером, то есть те, что он
+            поднял в своём ``capabilities/``. Значение поля сверяется с этим
+            набором, и объявление с именем чужой capability отвергается на
+            регистрации, а не всплывает на первом вызове. Перечень приходит
+            сверху (``loader.load_registry`` выводит его из своего же обхода
+            каталогов): библиотечный код обслуживает два сервера, а список
+            capability — объявление конкретного сервера, не библиотеки.
+
+            К набору добавляется :data:`PLATFORM_CAPABILITY` — при построении
+            набора, то есть уже после того, как сервер нормализовал свой отбор.
+            В саму выборку значение не попадает: платформенные операции
+            регистрируются по наличию ``execution.artifacts`` /
+            ``execution.workspace``, а не по фильтру ``--capabilities``.
+
+            ``None`` — сервер набора не объявил, и сверять значение не с чем:
+            проверка принадлежности пропускается. Остальные проверки при этом
+            **не** пропускаются — форма имени, сверка префикса с полем, непустота
+            поля и различимость имён после проекции действуют всегда. Молча
+            пропустить и их было бы нельзя: у реестра без объявленного набора
+            нет одного основания, а не всех.
     """
 
-    def __init__(self, definitions: Iterable[ToolDefinition] = ()) -> None:
+    def __init__(
+        self,
+        definitions: Iterable[ToolDefinition] = (),
+        *,
+        capabilities: Iterable[str] | None = None,
+    ) -> None:
+        self._capabilities: frozenset[str] | None = (
+            None
+            if capabilities is None
+            else frozenset(capabilities) | {PLATFORM_CAPABILITY}
+        )
         self._by_name: dict[str, ToolDefinition] = {}
         for definition in definitions:
             self.register(definition)
@@ -329,8 +435,18 @@ class ToolRegistry:
             raise ToolLoadError("описание операции не должно быть пустым", name=definition.name)
         if not callable(definition.handler):
             raise ToolLoadError("handler обязан быть вызываемым", name=definition.name)
-        if not definition.category.strip():
-            raise ToolLoadError("категория (capability) не должна быть пустой", name=definition.name)
+        if not definition.capability.strip():
+            raise ToolLoadError("capability не должна быть пустой", name=definition.name)
+        # Форма имени и сверка его префикса с полем. Capability из имени не
+        # подставляется: пустое поле объявляет отказом выше, и подстановка
+        # превратила бы сверку в проверку объявления против самого себя.
+        validate_operation_name(definition.name, definition.capability)
+        if self._capabilities is not None and definition.capability not in self._capabilities:
+            raise ToolLoadError(
+                f"capability {definition.capability!r} сервер не объявлял; "
+                f"объявлены: {', '.join(sorted(self._capabilities))}",
+                name=definition.name,
+            )
         if definition.quality_policy not in POLICY_NAMES:
             raise ToolLoadError(
                 f"неизвестная политика качества {definition.quality_policy!r}; "
@@ -339,6 +455,22 @@ class ToolRegistry:
             )
         if definition.name in self._by_name:
             raise ToolLoadError("имя уже зарегистрировано", name=definition.name)
+        # Различимость — на проводе, а не в реестре: нанобот отдаёт модели имя с
+        # точкой, заменённой на подчёркивание (``mcp.py:176-178``), и два
+        # объявления, совпавшие после такой замены, отдали бы модели один
+        # инструмент вместо двух. Сравнение — по именам на проводе, без
+        # префикса ``mcp_<сервер>_``: префикс общий для всего процесса и на
+        # равенство не влияет, а имя MCP-сервера платформа не вычисляет.
+        # Сверка идёт против **уже зарегистрированных** имён, поэтому
+        # выполняется до записи в ``_by_name``.
+        projected = definition.name.replace(".", "_")
+        for registered in self._by_name:
+            if registered.replace(".", "_") == projected:
+                raise ToolLoadError(
+                    f"имя {definition.name!r} неразличимо с {registered!r}: после "
+                    "замены точки на подчёркивание оба дают одно имя на проводе",
+                    name=definition.name,
+                )
         self._by_name[definition.name] = definition
 
     def get(self, name: str) -> ToolDefinition:
@@ -350,10 +482,10 @@ class ToolRegistry:
     def enabled(self) -> tuple[ToolDefinition, ...]:
         return tuple(d for d in self._by_name.values() if d.enabled)
 
-    def by_category(self) -> dict[str, tuple[ToolDefinition, ...]]:
+    def by_capability(self) -> dict[str, tuple[ToolDefinition, ...]]:
         grouped: dict[str, list[ToolDefinition]] = {}
         for definition in self._by_name.values():
-            grouped.setdefault(definition.category, []).append(definition)
+            grouped.setdefault(definition.capability, []).append(definition)
         return {k: tuple(v) for k, v in sorted(grouped.items())}
 
     def names(self) -> tuple[str, ...]:

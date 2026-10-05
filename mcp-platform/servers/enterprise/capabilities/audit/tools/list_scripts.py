@@ -35,10 +35,10 @@ def create_tool(container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="list_scripts",
+        name="audit.list_scripts",
         description=description,
         handler=list_scripts,
-        category="audit",
+        capability="audit",
         tags=("infrastructure",),
         permissions=("audit:list_scripts",),
         input_schema=build_input_schema(list_scripts),

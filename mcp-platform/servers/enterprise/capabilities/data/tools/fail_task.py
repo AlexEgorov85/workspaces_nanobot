@@ -90,10 +90,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="fail_task",
+        name="data.fail_task",
         description=description,
         handler=handle_fail_task,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:fail_task",),
         input_schema=INPUT_SCHEMA,

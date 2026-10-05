@@ -56,10 +56,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="get_message",
+        name="data.get_message",
         description=description,
         handler=handle_get_message,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:get_message",),
         input_schema=INPUT_SCHEMA,

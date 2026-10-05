@@ -126,10 +126,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="update_task_status",
+        name="data.update_task_status",
         description=description,
         handler=handle_update_task_status,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:update_task_status",),
         input_schema=INPUT_SCHEMA,

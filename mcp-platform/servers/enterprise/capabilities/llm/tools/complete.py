@@ -55,13 +55,13 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         return result.text
 
     return ToolDefinition(
-        name="complete",
+        name="llm.complete",
         description=(
             "Вызвать настроенного LLM-провайдера и вернуть текст ответа. "
             "Инфраструктурная операция: доступна рантайму агента, не модели."
         ),
         handler=handle_complete,
-        category="llm",
+        capability="llm",
         tags=("infrastructure", "runtime-only"),
         permissions=("llm:complete",),
         quality_policy="llm_result",

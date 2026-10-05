@@ -80,10 +80,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="mirror_session",
+        name="data.mirror_session",
         description=description,
         handler=handle_mirror_session,
-        category="data",
+        capability="data",
         tags=("session", "mirror", "infrastructure", "runtime-only"),
         permissions=("data:mirror_session",),
     )

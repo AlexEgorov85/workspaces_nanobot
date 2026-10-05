@@ -203,7 +203,7 @@ class LlmClient:
             # стороной сообщения уходят как ``context``, а последнее
             # пользовательское — как ``prompt``.
             arguments["context"] = list(context)
-        return self._call("complete", arguments)
+        return self._call("llm.complete", arguments)
 
     def complete_json(
         self,
@@ -221,7 +221,7 @@ class LlmClient:
         не тем» значило бы замаскировать сбой.
         """
         payload = self._call(
-            "complete",
+            "llm.complete",
             _json_arguments(messages, context, model, max_tokens, temperature),
         )
         try:
@@ -247,7 +247,7 @@ class LlmClient:
         ):
             if value is not None:
                 arguments[name] = value
-        payload = self._call("embed", arguments)
+        payload = self._call("llm.embed", arguments)
         try:
             parsed = json.loads(payload)
         except (TypeError, ValueError) as exc:

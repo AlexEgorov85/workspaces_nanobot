@@ -67,10 +67,10 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
     )
 
     return ToolDefinition(
-        name="patch_message_metadata",
+        name="data.patch_message_metadata",
         description=description,
         handler=handle_patch_message_metadata,
-        category="data",
+        capability="data",
         tags=("queue", "infrastructure", "runtime-only"),
         permissions=("data:patch_message_metadata",),
         input_schema=INPUT_SCHEMA,

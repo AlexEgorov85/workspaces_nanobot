@@ -8,19 +8,22 @@
 
     def create_tool(container: ToolContainer) -> ToolDefinition:
         return ToolDefinition(
-            name="log_event",
+            name="data.log_event",
             description="...",
             handler=handle_log_event,
-            category="data",
+            capability="data",
         )
 
 Добавление файла не должно требовать правок в ``server.py`` — иначе через
 месяц ни одна новая операция не добавится.
 
-``category`` — **имя capability**, то есть имя каталога, в котором лежит файл.
-Свободной классификации здесь нет: по этому значению выбираются политика,
-журнал и артефакты вызова, поэтому объявление сверяется с каталогом, и
-расхождение останавливает загрузку.
+Имя операции — ``<capability>.<operation>``, а ``capability`` — **имя
+capability**, то есть имя каталога, в котором лежит файл. Свободной
+классификации здесь нет: по этому значению выбираются политика, журнал и
+артефакты вызова. Принадлежность объявляется трижды — каталогом, полем и
+именем, — и все три половины сверяются по отдельности: расхождение с
+каталогом останавливает здесь, форма имени и её префикс — в
+``registry.ToolRegistry.register``.
 
 **Fail-fast — обязателен.** Ошибка одного файла валит старт сервера целиком.
 Частично загруженный сервер хуже не загруженного: он принимает соединение,
@@ -47,6 +50,7 @@ from libs.enterprise_common.registry import (
     ToolRegistry,
     build_input_schema,
     validate_handler,
+    validate_operation_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,24 @@ ENTRY_POINT = "create_tool"
 #: же корню ``root``, что и ``_module_name``. Второй разбор пути в этом модуле
 #: был бы источником расхождения между фильтрацией и сверкой объявления.
 TOOLS_DIR = "tools"
+
+#: Корень каталогов capability: ``capabilities/``. Объявлен по той же причине и
+#: тем же приёмом, что ``TOOLS_DIR``: имя каталога должно быть объявлено, а не
+#: выведено из соглашения. Каталог capability опознаётся **только** под этим
+#: корнем — иначе ``servers/<сервер>/tools/<файл>.py`` (платформенные
+#: операции, ``read_result`` и ``session_files``) давал бы имя каталога
+#: сервера и сверялся бы с ним как с capability.
+CAPABILITIES_DIRNAME = "capabilities"
+
+
+def _capability_of(path: Path, capabilities_dir: Path) -> str:
+    """Имя capability из пути **от каталога capabilities**.
+
+    Первая часть пути, и ровно она: тем же приёмом пользуется фильтр
+    ``discover_tool_files``, поэтому фильтрация, построение объявленного набора
+    в ``load_registry`` и сверка объявления с каталогом читают путь одинаково.
+    """
+    return path.relative_to(capabilities_dir).parts[0]
 
 
 def discover_tool_files(
@@ -82,7 +104,7 @@ def discover_tool_files(
     for path in sorted(capabilities_dir.glob("*/tools/**/*.py")):
         if path.name == "__init__.py" or path.name.startswith("_"):
             continue
-        if wanted is not None and path.relative_to(capabilities_dir).parts[0] not in wanted:
+        if wanted is not None and _capability_of(path, capabilities_dir) not in wanted:
             continue
         found.append(path)
     return found
@@ -101,17 +123,29 @@ def _module_name(path: Path, root: Path) -> str:
 def _capability_from_path(path: Path, root: Path) -> str:
     """Имя capability из пути к файлу операции; ``""``, если каталога в пути нет.
 
-    Форма файла операции — ``<...>/<capability>/tools/<name>.py``, ровно та,
-    которую обходит ``discover_tool_files``. Пустой результат означает
-    «файл лежит не в capability-каталоге» (пробный файл прямо в
-    ``tmp_path``, как их пишут тесты), и сверять тогда нечего: правило про
-    каталог, а каталога нет.
+    Форма файла операции — ``<...>/capabilities/<capability>/tools/<name>.py``,
+    ровно та, которую обходит ``discover_tool_files``. Ищется каталог
+    capability **только под корнем ``capabilities/``**: иначе
+    ``servers/<сервер>/tools/<name>.py`` — платформенные операции ``read_result``
+    и ``session_files`` — давал бы имя каталога сервера и сверялся с ним как с
+    capability, то есть объявление ``platform.read_result`` пришло бы с отказом
+    о несовпадении с ``enterprise``.
+
+    Пустой результат означает «файла capability в пути нет» (пробный файл прямо
+    в ``tmp_path``, как их пишут тесты, либо ``tools/`` без корня
+    ``capabilities/``), и сверять тогда нечего: правило про каталог, а каталога
+    нет.
     """
     parts = path.relative_to(root).parts
-    if TOOLS_DIR not in parts:
+    if CAPABILITIES_DIRNAME not in parts:
         return ""
-    index = parts.index(TOOLS_DIR)
-    return parts[index - 1] if index else ""
+    tail = parts[parts.index(CAPABILITIES_DIRNAME) + 1:]
+    if TOOLS_DIR not in tail:
+        return ""
+    index = tail.index(TOOLS_DIR)
+    # ``capabilities/tools/<file>.py``: между корнем и ``tools`` каталога
+    # capability нет, и имя выводить не из чего.
+    return tail[index - 1] if index else ""
 
 
 def _import_module(path: Path, root: Path) -> ModuleType:
@@ -158,11 +192,18 @@ def load_definition(path: Path, container: ToolContainer, root: Path) -> ToolDef
     if not callable(definition.handler):
         raise ToolLoadError("handler обязан быть вызываемым", path=str(path), name=name)
 
-    # ``category`` — это имя capability, а не свободная классификация: по нему
+    # Форма имени и сверка его префикса с полем — те же проверки, что и в
+    # ``ToolRegistry.register``, и повторены здесь **ради пути до файла** в
+    # сообщении: по одному имени файла среди тридцати не сказать, какой сломан.
+    # Порядок дальше — сверка с каталогом; он не переставляется, иначе отказы
+    # перестают различаться.
+    validate_operation_name(name, definition.capability, path=str(path))
+
+    # ``capability`` — это имя capability, а не свободная классификация: по нему
     # берутся политика, журнал и артефакты вызова (``execution/policy.py``,
     # ``execution/pipeline.py``), и им же реестр группирует операции. Поэтому
     # объявление обязано совпадать с каталогом, из которого загружен файл:
-    # файл в ``capabilities/data/tools/``, объявивший ``category="audit"``,
+    # файл в ``capabilities/data/tools/``, объявивший ``capability="audit"``,
     # уводил бы журнал, артефакты и переопределение политики в чужую capability
     # молча, и следом оставался бы только «неправильный» журнал.
     #
@@ -170,14 +211,14 @@ def load_definition(path: Path, container: ToolContainer, root: Path) -> ToolDef
     # приёмом, что и фильтрация ``discover_tool_files``: сверяя объявление с
     # самим собой, расхождение прошло бы как «файл вне фильтра».
     #
-    # Пустую категорию эта проверка **не** отменяет: непустоту объявляет
+    # Пустую capability эта проверка **не** отменяет: непустоту объявляет
     # ``ToolRegistry.register``, и отказы должны остаться разными — «не
     # сказано» и «сказано не то» чинятся разными правками.
     capability = _capability_from_path(path, root)
-    if capability and definition.category.strip() and definition.category != capability:
+    if capability and definition.capability.strip() and definition.capability != capability:
         raise ToolLoadError(
-            f"категория {definition.category!r} не совпадает с capability "
-            f"{capability!r} из каталога файла",
+            f"объявленная capability {definition.capability!r} не совпадает с "
+            f"capability {capability!r} из каталога файла",
             path=str(path),
             name=name,
         )
@@ -222,7 +263,7 @@ def load_definition(path: Path, container: ToolContainer, root: Path) -> ToolDef
         name=definition.name,
         description=definition.description,
         handler=definition.handler,
-        category=definition.category,
+        capability=definition.capability,
         version=definition.version,
         enabled=definition.enabled,
         tags=definition.tags,
@@ -243,11 +284,21 @@ def load_registry(
     Args:
         capabilities: собрать только эти capability. ``None`` — все.
 
+    Объявленный сервером набор capability для сверки значения поля выводится из
+    **того же обхода**, что и пути к файлам, — иначе перечень и обход разошлись
+    бы, а набор был бы вторым списком рядом с первым. Сначала обход, потом набор,
+    потом реестр: реестр должен быть готов принять первое объявление уже с этим
+    набором. Сервер, выборку не передавший, получает набор из всего, что нашёл
+    в своём ``capabilities/``.
+
     Бросает ``ToolLoadError`` на первой проблеме — см. модульный докстринг.
     """
     platform_root = root if root is not None else capabilities_dir.parent.parent
-    registry = ToolRegistry()
-    for path in discover_tool_files(capabilities_dir, capabilities):
+    paths = discover_tool_files(capabilities_dir, capabilities)
+    registry = ToolRegistry(
+        capabilities={_capability_of(path, capabilities_dir) for path in paths}
+    )
+    for path in paths:
         definition = load_definition(path, container, platform_root)
         try:
             registry.register(definition)
