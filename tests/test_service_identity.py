@@ -151,3 +151,57 @@ def test_service_sessions_cannot_masquerade_as_channel_sessions() -> None:
     for session in (SERVICE_SESSION_JOURNAL, SERVICE_SESSION_COMPACTOR):
         assert session.startswith("service:"), session
         assert not session.startswith(channels), session
+
+
+def test_service_call_is_reported_as_service_not_as_lost_question() -> None:
+    """Служебный вызов без ``request_id`` не выглядит поломкой.
+
+    У служебного компонента оборота нет и быть не может, поэтому отсутствие
+    связи с ``agent_question_runs`` — норма. Раньше служебный вызов и оборот,
+    потерявший вопрос, попадали в одну строку «связь не появится», и служебный
+    вызов на старте читался как поломка: строк в логе не было, а владелец
+    искал, что сломалось.
+    """
+    from lib.services.enterprise_mcp_client import (
+        EnterpriseMcpClient,
+        CallIdentity,
+    )
+    from lib.services.service_identity import (
+        JOURNAL_WRITER,
+        SERVICE_SESSION_JOURNAL,
+    )
+
+    lines: list = []
+    from loguru import logger
+
+    sink = logger.add(lambda m: lines.append(str(m)), level="INFO")
+    try:
+        client = EnterpriseMcpClient.__new__(EnterpriseMcpClient)
+        client._generated_request_ids = 0
+
+        # Служебный вызов: сообщение обязано называть себя служебным.
+        lines.clear()
+        client._meta_for(CallIdentity(
+            session_id=SERVICE_SESSION_JOURNAL, user_id=JOURNAL_WRITER,
+            request_id=None,
+        ))
+        service_text = " ".join(lines)
+        assert "служебный вызов" in service_text, service_text[:200]
+        assert JOURNAL_WRITER in service_text, (
+            "сообщение обязано называть КОГО это вызов, а не говорить «вызов»"
+        )
+        assert "не признак потери" in service_text, service_text[:200]
+
+        # Оборот, потерявший связь с вопросом, — это признак, и он остаётся.
+        lines.clear()
+        client._generated_request_ids = 0
+        client._meta_for(CallIdentity(
+            session_id="postgres:chat_alice_1", user_id="alice", request_id=None,
+        ))
+        turn_text = " ".join(lines)
+        assert "вызов оборота без request_id" in turn_text, turn_text[:200]
+        assert "служебный вызов" not in turn_text, (
+            "оборот пользователя не должен выглядеть служебным вызовом"
+        )
+    finally:
+        logger.remove(sink)

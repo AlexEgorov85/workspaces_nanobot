@@ -89,6 +89,7 @@ from lib.services.enterprise_mcp_stderr import (
     write_marker,
 )
 from config import ConfigurationError
+from lib.services.service_identity import SERVICE_IDENTITIES
 from lib.services.session_files import SESSION_FILES_OPERATION
 from lib.services.turn_identity import read_turn_context, request_id_from
 
@@ -1098,24 +1099,48 @@ class EnterpriseMcpClient:
         if not identity.request_id:
             generated = _new_request_id()
             self._generated_request_ids += 1
-            # Подробная строка — на уровень ``trace``: за цикл опроса её
-            # порождают десятки вызовов фоновых служб, и на уровне ``turn``
-            # она забивала терминал, ничего не добавляя к картине. Один раз за
-            # процесс на уровне ``info`` остаётся: сам факт должен быть виден,
-            # иначе «связь с agent_question_runs не появится» обнаружится
-            # post-factum, по отсутствующим строкам итогов.
-            if self._generated_request_ids == 1:
-                logger.info(
-                    "вызов без request_id оборота: request_id доставляется "
-                    "самостоятельно, связь с agent_question_runs не появится. "
-                    "Дальше — счётчиком, подробности на уровне trace"
+            # Служебный вызов и оборот — разные вещи, и подставленный
+            # ``request_id`` означает для них разное.
+            #
+            # У служебного компонента оборота нет и быть не может: чистит
+            # журнал, опрашивает очередь, зеркалит сессии. Связи с
+            # ``agent_question_runs`` у такого вызова не будет НИКОГДА, и её
+            # отсутствие — норма, а не признак. Раньше оба случая попадали в
+            # одну строку «связь не появится», и служебный вызов на старте
+            # читался как поломка: владелец видел её и искал, что сломалось.
+            service_call = identity.user_id in SERVICE_IDENTITIES
+            if service_call:
+                if self._generated_request_ids == 1:
+                    logger.info(
+                        "служебный вызов {} без request_id оборота: оборота у "
+                        "компонента нет и не бывает, request_id доставляется "
+                        "самостоятельный. Это норма, а не признак потери",
+                        identity.user_id,
+                    )
+                logger.debug(
+                    "служебный вызов %s: подставлен самостоятельный "
+                    "request_id=%s (всего %d за процесс)",
+                    identity.user_id, generated, self._generated_request_ids,
                 )
-            logger.debug(
-                "вызов без request_id оборота: подставлен самостоятельный "
-                "request_id=%s (всего %d за процесс)",
-                generated,
-                self._generated_request_ids,
-            )
+            else:
+                # Подробная строка — на уровень ``trace``: за цикл опроса её
+                # порождают десятки вызовов, и на уровне ``turn`` она забивала
+                # терминал. Один раз за процесс на уровне ``info`` остаётся:
+                # сам факт должен быть виден, иначе «связь с
+                # agent_question_runs не появится» обнаружится post-factum, по
+                # отсутствующим строкам итогов.
+                if self._generated_request_ids == 1:
+                    logger.info(
+                        "вызов оборота без request_id: request_id доставляется "
+                        "самостоятельно, связь с agent_question_runs не "
+                        "появится. Дальше — счётчиком, подробности на уровне trace"
+                    )
+                logger.debug(
+                    "вызов оборота без request_id: подставлен самостоятельный "
+                    "request_id=%s (всего %d за процесс)",
+                    generated,
+                    self._generated_request_ids,
+                )
             identity = identity.with_request_id(generated)
         return identity.as_meta()
 
