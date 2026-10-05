@@ -33,7 +33,7 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 
 | Спека | Где смотреть |
 |---|---|
-| `data/operation-schema/spec.md` | `mcp-platform/libs/enterprise_common/registry.py` (`build_input_schema`, `_json_type`), `libs/enterprise_common/loader.py` (выбор публикуемой схемы), `INPUT_SCHEMA` в `capabilities/*/tools/*.py` |
+| `data/operation-schema/spec.md` | `mcp-platform/libs/enterprise_common/registry.py` (`build_input_schema`, `_json_type`, `validate_operation_name`, `ToolRegistry.register` — общая точка проверки имени), `libs/enterprise_common/loader.py` (выбор публикуемой схемы, `load_definition`, `load_registry`, `build_server`), `libs/enterprise_common/execution/pipeline.py` (capability в политике и журнале), `INPUT_SCHEMA`, имя и capability в `capabilities/*/tools/*.py`, платформенные операции в `servers/enterprise/tools/*.py`, второй сервер на общем реестре — `servers/_template/` |
 | `runtime/db-queue-classes/spec.md` | `mcp-platform/libs/enterprise_data/db.py` (`_Worker`, `submit`, `submit_transaction`), `platform.json` (`pool`, `job_classes`) |
 
 ## `shared` — контракт между агентом и платформой

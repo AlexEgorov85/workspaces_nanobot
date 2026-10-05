@@ -11,7 +11,7 @@
 Тема здесь, а не в новой capability, по трём причинам:
 
 1. Канон уже владеет проверкой объявления на загрузке и уже объявляет её
-   предметом (`openspec/specs/data/operation-schema/spec.md:20-25` — `Scope`:
+   предметом (`openspec/specs/data/operation-schema/spec.md:52-72` — `Scope`:
    `registry.py`, `loader.py`, файлы операций). Проверка формы имени — такое же
    требование к объявлению, как проверка схемы.
 2. Активный change `2026-10-05-call-boundary-invariants` кладёт в эту же
@@ -31,12 +31,20 @@
 (`%APPDATA%\npm\node_modules\@fission-ai\openspec\dist\core\specs-apply.js:209-215`,
 предупреждение «delta Purpose ignored; … already has one»), а `## Scope` вообще не
 секция слияния: при archive обрабатываются только `Purpose` и `Requirements`.
-Канон `## Purpose` (`openspec/specs/data/operation-schema/spec.md:3-9`) говорит
-только про `inputSchema`, а `## Scope` (`:20-25`) не называет ни имени операции,
-ни `servers/enterprise/tools/*.py`, ни `execution/pipeline.py` — все три в Scope
-дельты ниже. Задача 7.3 поэтому требует расширить оба заголовка канона вручную:
-эта дельта такого требования не выражает и молча оставила бы канон владельцем
-трёх требований, объявляя в `Purpose` только про `inputSchema`.
+До правки 7.3 канон `## Purpose`
+(`openspec/specs/data/operation-schema/spec.md:3-9` в редакции до 2026-10-05) говорил
+только про `inputSchema`, а `## Scope` (`:20-25` там же) не называл ни имени
+операции, ни `servers/enterprise/tools/*.py`, ни `execution/pipeline.py` — все три
+в Scope дельты ниже. Задача 7.3 поэтому требует расширить оба заголовка канона
+вручную: эта дельта такого требования не выражает и молча оставила бы канон
+владельцем трёх требований, объявляя в `Purpose` только про `inputSchema`. Правка
+сделана: `## Purpose` теперь `:3-50` — имя названо второй частью провода, названы
+три новых требования и внесены термины дельты, иначе после archive они исчезли бы
+вместе с игнорируемым `## Scope`, а требования остались бы ссылаться на
+неопределённые термины; `## Scope` теперь `:52-72` — добавлены
+`validate_operation_name`, `ToolRegistry.register`, `execution/pipeline.py`,
+`servers/enterprise/tools/*.py` и второй сервер на общем реестре
+(`servers/_template/`).
 
 ## Scope
 
