@@ -86,6 +86,7 @@ class AgentFactory:
         framework_hooks: list[Any] | None = None,
         print_llm_calls: bool = False,
         usage_store: Any | None = None,
+        tool_registry: Any | None = None,
     ) -> tuple[Any, list[Any], list[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
@@ -251,7 +252,9 @@ class AgentFactory:
             "session_manager": session_manager,
             "hooks": hooks,
             "hook_factories": hook_factories,
-            "tool_registry": ToolRegistry(),
+            "tool_registry": (
+                tool_registry if tool_registry is not None else ToolRegistry()
+            ),
         }
         # Fallback на internal-ошибку — через публичную точку nanobot, а не
         # патчем (ADR turn-delivery-public-extension). Путь один: иначе путь,

@@ -236,6 +236,11 @@ def _run_cli_repl(ctx, args: argparse.Namespace, *, background_task_factory=None
         # обнаружился бы посреди первого оборота (см.
         # ``_connect_enterprise_mcp``).
         await _connect_enterprise_mcp(ctx)
+        # Второй процесс платформы — тот, из которого операции получает
+        # МОДЕЛЬ. Шаг обязателен: без него семь объявленных операций в реестр
+        # не попадут, и навык audit_analyzer будет обещать вызовы, которых
+        # нет (см. _connect_mcp_provider).
+        await _connect_mcp_provider(ctx)
         ctx.attach_log_transport()
         await run_repl(ctx.agent, ctx.config, session=args.session,
                        display=display,
@@ -276,6 +281,44 @@ def _migrate_cron_store(config) -> None:
 
 
 _SCRIPT_DIR: Path | None = None
+
+
+async def _connect_mcp_provider(ctx) -> None:
+    """Поднять MCP-серверы, объявленные для модели.
+
+    Тот же контракт, что у рукопожатия клиента (``_connect_enterprise_mcp``),
+    и та же нетерпимость к тихой деградации: без соединения семь операций
+    ``mcp_enterprise_*`` не попадут в реестр, а ``audit_analyzer`` продолжит
+    обещать их вызов — REPL поднялся бы, навыки были бы в промпте, вызовов
+    не существовало бы. ``MCPProvider.connect()`` отказ не бросает, поэтому
+    сверку объявленных серверов с соединёнными делает
+    :func:`connect_mcp_provider`, а не сам провайдер.
+
+    Вызывается до REPL, на живом loop, рядом с рукопожатием клиента.
+    """
+    from lib.services.mcp_provider import McpProviderUnavailable, connect_mcp_provider
+
+    provider = getattr(ctx, "mcp_provider", None)
+    if provider is None:
+        console.print(
+            "[yellow]○[/yellow] MCP-серверы для модели не объявлены "
+            "(tools.mcpServers пуст) — mcp_enterprise_* модели не достаются"
+        )
+        return
+
+    try:
+        servers = await connect_mcp_provider(provider)
+    except McpProviderUnavailable as exc:
+        console.print(f"[red]✗ MCP-серверы для модели: НЕ ПОДНЯЛИСЬ[/red] — {exc}")
+        console.print(
+            "[red]  проверьте: config.json -> tools.mcpServers.enterprise, "
+            "NANOBOT_ENTERPRISE_MCP_PROFILE, доступность платформы[/red]"
+        )
+        logger.error("MCP-серверы для модели не поднялись: %s", exc)
+        raise CliStartupError(f"MCP-серверы для модели: {exc}") from exc
+    console.print(
+        f"[green]✓[/green] MCP-серверы для модели: подняты ({', '.join(servers)})"
+    )
 
 
 async def _connect_enterprise_mcp(ctx) -> None:

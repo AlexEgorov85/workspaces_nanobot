@@ -32,6 +32,8 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
 
+from lib.services.turn_identity import TurnIdentityStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -403,8 +405,18 @@ def _turn_identity_snapshot(
     принадлежит другому входу, и выдавать её — утечка (см.
     ``_resolve_event_user_id_without_request``).
 
-    Блокировку индекса не берёт: вызывающий (``register_request``) держит её
-    сам, иначе пара «индекс + снимок» писалась бы в два захода.
+    Снимок кладётся в хранилище (``TurnIdentityStore``), у которого свой
+    замок, а индекс вопроса остаётся под замком службы. Значит пара «индекс +
+    снимок» пишется НЕ атомарно, и читатель может увидеть новый снимок при
+    старом индексе. Это безопасно, и оба читателя это проверяют сами:
+
+    * ветка по индексу сверяет ``request_id`` — при старом индексе сверка не
+      сойдётся, и событие останется неподписанным;
+    * ветка по снимку сверяет ``at_seq`` с моментом события — при новом
+      снимке сверка не сойдётся, и событие останется неподписанным.
+
+    Худший исход в обоих случаях один: подписи нет. Утечки личности нет ни
+    в одном.
     """
     return {
         "request_id": request_id,
@@ -655,6 +667,7 @@ class DbLoggingService:
         purge_interval_sec: float = 3600.0,
         mcp_writer: Any | None = None,
         fallback_sink: Any | None = None,
+        turn_identities: TurnIdentityStore | None = None,
     ) -> None:
         # Имена таблиц и DSN больше не участвуют в записи: писатель один, и он
         # не агент. Параметры оставлены на месте, потому что их передаёт
@@ -830,7 +843,12 @@ class DbLoggingService:
         # ``at_seq`` — момент появления, чтобы отложенное событие не унаследовало
         # личность следующего входа. Тип значений — ``Any``, а не ``str|None``,
         # именно из-за ``at_seq``.
-        self._turn_identity: dict[str, dict[str, Any]] = {}
+        # Личность оборота лежит в хранилище рантайма, а не в словаре
+        # службы: читают её двое - подписчик событий и сам журнал на
+        # пути финальной доставки, и владелец у них общий. Без переданного
+        # хранилища (сборка без composition root, тесты) служба берёт
+        # своё - тогда читателей у личности ровно один.
+        self.turn_identities = turn_identities or TurnIdentityStore()
         self._request_index_lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -921,7 +939,7 @@ class DbLoggingService:
         # Снимки личности входа относятся к оборотам этого процесса: после
         # остановки подписчик не должен отдать их следующему start().
         with self._request_index_lock:
-            self._turn_identity.clear()
+            self.turn_identities.clear()
         self._abandon_deferred_batches()
         if not self._stats_reported:
             self._stats_reported = True
@@ -1149,9 +1167,9 @@ class DbLoggingService:
             # личности — другое дело, он про отправителя, а не про вопрос.
             if session_key:
                 with self._request_index_lock:
-                    self._turn_identity[session_key] = _turn_identity_snapshot(
+                    self.turn_identities.record(session_key, _turn_identity_snapshot(
                         None, user_id,
-                    )
+                    ))
             with self._state_lock:
                 self._stats["registration_skipped"] += 1
             return False
@@ -1166,9 +1184,9 @@ class DbLoggingService:
                 # блокировкой — читатель снимка увидит либо старую, либо новую
                 # пару целиком. ``clear_request`` его НЕ трогает: финальный
                 # ответ приходит после конца оборота (см. ``_take_turn_identity``).
-                self._turn_identity[session_key] = _turn_identity_snapshot(
+                self.turn_identities.record(session_key, _turn_identity_snapshot(
                     request_id, user_id,
-                )
+                ))
         return self._enqueue(_QuestionRunRecord(
             request_id=request_id,
             session_id=session_key,
@@ -1256,7 +1274,7 @@ class DbLoggingService:
         if not session_key:
             return None
         with self._request_index_lock:
-            return self._turn_identity.pop(session_key, None)
+            return self.turn_identities.take(session_key)
 
     def _identity_of_request(self, request_id: str) -> tuple[str | None, str | None]:
         """Найти ``(session_id, user_id)`` вопроса по его ``request_id``.
@@ -1845,7 +1863,7 @@ class DbLoggingService:
             # подписывать по сессии без сверки запрещено.
             return
         with self._request_index_lock:
-            snapshot = self._turn_identity.get(event.session_id)
+            snapshot = self.turn_identities.current(event.session_id)
         if not isinstance(snapshot, dict):
             return
         if snapshot.get("request_id") is not None:

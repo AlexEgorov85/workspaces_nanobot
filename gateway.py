@@ -272,6 +272,54 @@ async def _connect_enterprise_mcp(ctx) -> None:
         raise
 
 
+async def _connect_mcp_provider(ctx) -> None:
+    """Поднять MCP-серверы, объявленные для модели, и убедиться, что есть
+    инструменты.
+
+    Отдельный шаг от рукопожатия нашего клиента, хотя контракт тот же: и то
+    и другое MUST подниматься до работы агента, и отказ обоих MUST быть
+    слышен. Разные они по последствиям. Клиент нужен фоновым подсистемам,
+    провайдер — модели: если соединение не поднялось, семь операций
+    ``mcp_enterprise_*`` не появятся в реестре, а ``audit_analyzer``
+    продолжит обещать их вызов. Это объявленная настройка, которая не
+    действует, и без проверки её не видно нигде.
+
+    Проверка не «исключение из connect»: ``MCPProvider.connect()`` отказ не
+    бросает, а пишет warning, поэтому сверка объявленных серверов с
+    соединёнными — наша работа (:func:`connect_mcp_provider`).
+
+    ``None`` — ``tools.mcpServers`` пуст: оператор не объявлял модели
+    инструменты платформы, и это не повод падать.
+    """
+    from lib.services.mcp_provider import McpProviderUnavailable, connect_mcp_provider
+
+    provider = getattr(ctx, "mcp_provider", None)
+    if provider is None:
+        _verdict(
+            "MCP-серверы для модели не объявлены "
+            "(tools.mcpServers пуст) — mcp_enterprise_* модели не достаются",
+            level="WARN",
+        )
+        return
+
+    try:
+        servers = await connect_mcp_provider(provider)
+    except McpProviderUnavailable as exc:
+        _verdict(
+            f"MCP-серверы для модели: НЕ ПОДНЯЛИСЬ — {exc}",
+            level="ERROR",
+        )
+        _verdict(
+            "проверьте config.json -> tools.mcpServers.enterprise, "
+            "NANOBOT_ENTERPRISE_MCP_PROFILE и доступность платформы",
+            level="ERROR",
+        )
+        raise
+    _verdict(
+        "MCP-серверы для модели: подняты (%s)" % ", ".join(servers),
+    )
+
+
 def _verdict(text: str, *, level: str = "INFO", who: str = "gateway") -> None:
     """Вердитная строка баннера в общий построчный поток консоли.
 
@@ -495,6 +543,12 @@ async def _run(ctx) -> None:
     # не декоративная — подъём ленивый, а отказ тогда обнаруживался бы посреди оборота, и
     # «платформа лежит» выглядел бы как «агент работает».
     await _connect_enterprise_mcp(ctx)
+
+    # Второй процесс платформы — тот, из которого операции получает МОДЕЛЬ.
+    # Шаг обязателен и по той же причине: без соединения семь объявленных
+    # операций в реестр не попадут, и навык audit_analyzer будет обещать
+    # вызовы, которых нет (см. _connect_mcp_provider).
+    await _connect_mcp_provider(ctx)
 
     # Транспорт журнала подключается ЗДЕСЬ, а не в ``ctx.start()``: ``start()`` выполняется
     # вне event loop, где мост ``LoopCallRunner`` построить не на чем, и сервис молча ушёл бы

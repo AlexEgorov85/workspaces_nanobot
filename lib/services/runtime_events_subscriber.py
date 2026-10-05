@@ -56,6 +56,7 @@ from nanobot.bus.runtime_events import TurnCompleted, TurnRuntimeAdmitted
 from lib.events.subagent import SubagentTurnCompleted
 from lib.hooks.database_logging_hook import seed_context_window
 from lib.services.db_logging_service import LogEvent
+from lib.services.turn_identity import TurnIdentityStore
 
 
 def _current_sender_id() -> str | None:
@@ -150,15 +151,21 @@ class RuntimeEventsSubscriber:
         self,
         bus: Any,
         db_logging_service: Any | None = None,
+        turn_identities: TurnIdentityStore | None = None,
     ) -> None:
         self._bus = bus
         self._db_logging_service = db_logging_service
+        # Личность оборота берётся из хранилища рантайма, а не из журнала:
+        # журнал не ею владеет, и ходить за чужой личностью в его словарь
+        # было ровно тем, из-за чего подпись терялась.
+        self._turn_identities = turn_identities
         self._unsubscribers: list[Callable[[], None]] = []
         self._started = False
-        # Личность оборота, снятая в середине оборота (см. ``_TurnIdentity``).
+        # Снятая в середине оборота личность, перенесённая на его событие.
         # Ключ — ``session_key``; сессии обрабатываются конкурентно, поэтому
-        # доступ под замком.
-        self._turn_identities: dict[str, _TurnIdentity] = {}
+        # доступ под замком. Это копия, а не сам снимок из хранилища: снимок
+        # остаётся финальной доставке ответа.
+        self._turn_identities_seen: dict[str, _TurnIdentity] = {}
         self._identity_lock = threading.Lock()
         # События ``agent.completed``, у которых личность снять не удалось.
         # Считаются здесь, а не молча теряются в транспорте.
@@ -174,28 +181,63 @@ class RuntimeEventsSubscriber:
         return self._unidentified_turn_events
 
     def _capture_identity(self, session_key: str) -> None:
-        """Запомнить личность оборота, пока она ещё доступна.
+        """Перенести личность оборота на его событие.
 
-        Пишется только непустой ``sender_id``: подставленное значение
+        Источник — ``TurnIdentityStore`` рантайма: там она лежит с момента
+        входа оборота. Событие приходит после конца оборота, когда снимок
+        уже не виден ни в индексе вопросов, ни в contextvar задачи, поэтому
+        подписать его может только тот, кто заранее сохранил личность, —
+        подписчик.
+
+        Переносится только непустой ``sender_id``: подставленное значение
         (``"unknown"`` и подобное) записало бы событие в чужую личность —
         ровно то, от чего журнал намеренно отказывается. Если личности нет,
-        снимок не создаётся вовсе, и ``agent.completed`` уйдёт без неё
+        копия не создаётся вовсе, и ``agent.completed`` уйдёт без неё
         (с WARNING и счётчиком), а не с выдуманной.
         """
-        if self._db_logging_service is None:
+        service = self._db_logging_service
+        if service is None:
             return
-        user_id = _current_sender_id()
+
+        # Откуда берётся личность. Хранилище принадлежит рантайму и кладёт её
+        # на входе оборота, где известны и отправитель, и вопрос.
+        #
+        # Журнал её не выведет сам: для события без вопроса он берёт снимок
+        # входа только если в снимке самом вопроса нет, иначе событие утечёт в
+        # чужой scope. Значит событие оборота подписывает тот, кто знает, что
+        # это за оборот, — подписчик, — и личность берёт у её владельца.
+        #
+        # Прежним источником был contextvar, и это было гарантированно слепо:
+        # контекст привязан к задаче оборота, а подписчик живёт в своей. На
+        # практике agent.completed терял подпись в каждом обороте, тогда как
+        # следом идущий agent.delivered её получал.
+        identity: dict[str, Any] = {}
+        store = self._turn_identities
+        if store is not None:
+            try:
+                identity = store.current(session_key) or {}
+            except Exception:
+                identity = {}
+
+        user_id = identity.get("user_id")
+        if not isinstance(user_id, str) or not user_id:
+            # Журнал личности не знает — остаётся контекст оборота. Выдумывать
+            # значение нельзя: подставленный отправитель записал бы событие в
+            # чужую личность.
+            user_id = _current_sender_id()
         if not user_id:
             return
-        request_id: str | None = None
-        try:
-            request_id = self._db_logging_service.get_request_id(session_key)
-        except Exception:
-            # Журнал может быть недоступен — это не повод терять user_id,
-            # он уже получен и его достаточно для подписи вызова.
-            request_id = None
+
+        request_id: str | None = identity.get("request_id")
+        if not request_id:
+            try:
+                request_id = service.get_request_id(session_key)
+            except Exception:
+                # Журнал может быть недоступен — это не повод терять user_id,
+                # он уже получен и его достаточно для подписи вызова.
+                request_id = None
         with self._identity_lock:
-            self._turn_identities[session_key] = _TurnIdentity(
+            self._turn_identities_seen[session_key] = _TurnIdentity(
                 user_id=user_id, request_id=request_id
             )
 
@@ -204,7 +246,7 @@ class RuntimeEventsSubscriber:
         if not session_key:
             return None
         with self._identity_lock:
-            return self._turn_identities.pop(session_key, None)
+            return self._turn_identities_seen.pop(session_key, None)
 
     def start(self) -> None:
         """Зарегистрировать подписки на TurnRuntimeAdmitted через
@@ -269,7 +311,7 @@ class RuntimeEventsSubscriber:
         # Снимки identity переживать остановку не должны: следующий start()
         # обслуживает уже другие обороты.
         with self._identity_lock:
-            self._turn_identities.clear()
+            self._turn_identities_seen.clear()
 
     async def _handle_turn_runtime_admitted(self, event: TurnRuntimeAdmitted) -> None:
         """Seed лимита окна/модели в мост ``_CONTEXT_BRIDGE``.

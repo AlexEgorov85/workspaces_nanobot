@@ -40,6 +40,8 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
+from lib.services.turn_identity import TurnIdentityStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -198,6 +200,18 @@ class ApplicationContext:
     # ``enterprise_mcp`` включён, но соединение ленивое: сервер не поднимается,
     # пока не понадобился, и не мешает старту агента, если платформа не собрана.
     enterprise_mcp: Any | None = None
+
+    # Реестр инструментов, общий для ``MCPProvider`` и ``AgentLoop``, и сам
+    # провайдер (``lib/services/mcp_provider.py``). Соединение провайдера
+    # поднимается на старте в gateway/cli_agent, закрывается в ``stop()``.
+    tool_registry: Any | None = None
+    mcp_provider: Any | None = None
+
+    # Личность оборота (кто прислал вход и какой это вопрос). Владеет рантайм:
+    # журнал кладёт снимок на входе, подписчик событий читает его при
+    # подписи agent.completed. Владелец один, иначе читателю пришлось бы
+    # лезть в чужое хранилище (``lib/services/turn_identity.py``).
+    turn_identities: Any | None = None
 
     # Наблюдатель за живостью платформы (``lib/gateway/mcp_health.py``).
     #: Подсистема шлюза: без неё остановленный процесс платформы замечает
@@ -358,6 +372,13 @@ class ApplicationContext:
         ctx.storage_mode = storage_mode
         ctx.session_manager = session_manager
 
+        # 3a. Личность оборота. Хранилище принадлежит рантайму и создаётся
+        # ДО обеих подсистем, которые её читают: журнал кладёт снимок на
+        # входе оборота, подписчик событий берёт его, когда подписывает
+        # agent.completed уже завершившегося оборота. Владелец один — иначе
+        # читателю пришлось бы лезть в чужое хранилище, и это уже было.
+        ctx.turn_identities = TurnIdentityStore()
+
         # 4. DbLoggingService
         if ctx.enable_db_logging:
             ctx.db_logging_service = _make_db_logging(ctx)
@@ -426,6 +447,23 @@ class ApplicationContext:
         except Exception as exc:
             logger.warning("hook_loader.scan_and_register failed: %s", exc)
 
+        # Реестр инструментов — ОДИН объект на провайдера и на AgentLoop.
+        # ``AgentLoop`` хранит ссылку на него (``nanobot/agent/loop.py:383``),
+        # поэтому инструменты, зарегистрированные при connect() позже, видит
+        # модель без пересборки агента. Свой реестр на каждого — это ровно тот
+        # случай, когда провайдер пишет в свою корзину, а модель едет с
+        # пустым: семь операций объявлены и недоступны.
+        from lib.services.mcp_provider import build_mcp_provider
+        from nanobot.agent.tools.registry import ToolRegistry
+
+        ctx.tool_registry = ToolRegistry()
+        ctx.mcp_provider = build_mcp_provider(ctx.config, ctx.tool_registry)
+        if ctx.mcp_provider is not None:
+            logger.info(
+                "MCPProvider создан для %s, соединение поднимается на старте",
+                sorted(ctx.mcp_provider.configured_server_names),
+            )
+
         agent_factory = AgentFactory()
         ctx.agent, ctx.hooks, ctx.hook_factories = agent_factory.create(
             ctx.config,
@@ -438,6 +476,7 @@ class ApplicationContext:
             project_hooks=project_hooks or None,
             print_llm_calls=ctx.print_llm_calls,
             usage_store=ctx.usage_store,
+            tool_registry=ctx.tool_registry,
         )
 
         # ToolAuditHook — фреймворковый, входит в ``ctx.hooks`` последним
@@ -735,6 +774,7 @@ class ApplicationContext:
             self.runtime_events_subscriber = RuntimeEventsSubscriber(
                 self.bus,
                 db_logging_service=self.db_logging_service,
+                turn_identities=self.turn_identities,
             )
             self.runtime_events_subscriber.start()
             if self._shutdown is not None:
@@ -811,6 +851,25 @@ class ApplicationContext:
                 self.enterprise_mcp.close()
             except Exception as exc:
                 logger.warning("enterprise_mcp.close failed: %s", exc)
+        # MCPProvider: его соединения живут на event loop, а ``stop()`` синхронен.
+        # Тот же приём, что у ``MessageBus.drain()`` ниже: если loop ещё жив —
+        # задача в него, иначе дожигаем на месте. Нет loop — дочерний процесс
+        # завершится вместе с родителем, и это не повод ронять остановку.
+        if getattr(self, "mcp_provider", None) is not None:
+            try:
+                import asyncio
+
+                from lib.services.mcp_provider import close_mcp_provider
+
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(close_mcp_provider(self.mcp_provider))
+                else:
+                    loop.run_until_complete(close_mcp_provider(self.mcp_provider))
+            except RuntimeError:
+                pass
+            except Exception as exc:
+                logger.warning("MCPProvider close failed: %s", exc)
         # MessageBus.drain() ожидает завершения in-flight handler'ов
         # (например, _handle_turn_completed ещё может писать в БД через
         # DbLoggingService с батчевым flush). Вызываем ПОСЛЕ остановки
@@ -1540,6 +1599,7 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
 
     return DbLoggingService(
         dsn=dsn,
+        turn_identities=getattr(ctx, "turn_identities", None),
         table_name=table_name,
         question_runs_table=question_runs_table,
         schema=db_cfg.get("schema", "public"),

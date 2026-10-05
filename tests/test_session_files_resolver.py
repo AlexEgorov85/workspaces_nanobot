@@ -97,20 +97,55 @@ class TestPlatformBacked:
         assert await resolver.ensure("postgres:42") == Path(answer["root"])
         assert resolver.has_platform is True
 
-    async def test_operation_is_called_without_a_root_or_identity(self, tmp_path: Path) -> None:
-        """Корень и личность вызову не передаются.
+    async def test_operation_carries_no_root_but_is_signed_by_the_gateway(
+        self, tmp_path: Path
+    ) -> None:
+        """Корень не передаётся, личность — да, и она служебная.
 
-        Корень объявлен у платформы, а личность собирает сам клиент из оборота.
-        Если резолвер начнёт слать что-то из этого, у платформы появится второе
-        объявление корня, а событие в журнале и каталог сессии могут описать
-        разные вызовы.
+        Корень объявлен у платформы: если резолвер начнёт его слать, у
+        платформы появится второе объявление корня.
+
+        Личность же передаётся. Прежний страж утверждал обратное — «личность
+        собирает сам клиент из оборота» — и это было неверно: каталог
+        спрашивает канал на пути разбора ВХОДЯЩЕГО сообщения, оборота ещё нет,
+        личность оборота пуста, вызов уходил без params._meta, и платформа
+        отвечала identity_missing на каждом входящем сообщении.
+
+        session_id — настоящий: вызов адресован именно этой сессии.
+        user_id — шлюз, потому что отправителя в этой точке ещё не существует.
         """
         client = FakePlatformClient(_answer(tmp_path))
         resolver = SessionFileResolver(enterprise_mcp=client, workspace_dir=tmp_path)
 
         await resolver.files_dir("postgres:42")
 
-        assert client.calls == [((), {})]
+        assert len(client.calls) == 1
+        args, kwargs = client.calls[0]
+        assert args == (), "корень операции передавать нельзя: он объявлен у платформы"
+        identity = kwargs["identity"]
+        assert identity.session_id == "postgres:42"
+        assert identity.user_id == "gateway"
+
+    async def test_signed_call_never_binds_a_question(
+        self, tmp_path: Path
+    ) -> None:
+        """Служебный вызов не прикидывается вопросом.
+
+        ``request_id`` не подставляется: вопроса не было, и связывать каталог
+        с чужим вопросом в журнале платформы нельзя. Клиент доставит свой
+        ``request_id`` сам — это отдельный механизм, к этому вызову отношения
+        не имеющий.
+        """
+        client = FakePlatformClient(_answer(tmp_path))
+        resolver = SessionFileResolver(enterprise_mcp=client, workspace_dir=tmp_path)
+
+        await resolver.files_dir("postgres:42")
+
+        _args, kwargs = client.calls[0]
+        identity = kwargs["identity"]
+        assert not getattr(identity, "request_id", None), (
+            "служебный вызов каталога не должен выдавать себя за вопрос"
+        )
 
     async def test_second_call_does_not_reach_the_client(self, tmp_path: Path) -> None:
         """Один вызов на сессию: кэш, а не «как получится»."""

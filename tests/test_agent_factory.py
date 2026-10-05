@@ -34,6 +34,27 @@ def fake_modules(tmp_path):
         sys.modules["nanobot.agent"] = sol.agent
         sys.modules["nanobot.agent.loop"] = loop
 
+        # nanobot.agent.tools.registry — фабрика берёт оттуда ToolRegistry.
+        # Без этой подмены ``from nanobot.agent.tools.registry import ...``
+        # падает: фейковый ``nanobot.agent`` объявлен обычным модулем без
+        # ``__path__``, то есть не пакетом, и вложенный модуль не находится.
+        # Отсюда была зависимость от порядка запуска — файл проходил только
+        # если рядом уже импортировали настоящий нанобот (например,
+        # test_runtime_patcher.py). Порядок файлов не является контрактом.
+        tools = types.ModuleType("nanobot.agent.tools")
+        tools.__path__ = []  # type: ignore[attr-defined]
+        registry_module = types.ModuleType("nanobot.agent.tools.registry")
+
+        class _ToolRegistry:
+            def __init__(self):
+                self.tools: dict = {}
+
+        registry_module.ToolRegistry = _ToolRegistry
+        tools.registry = registry_module
+        sol.agent.tools = tools
+        sys.modules["nanobot.agent.tools"] = tools
+        sys.modules["nanobot.agent.tools.registry"] = registry_module
+
         # hooks.tool_audit_hook больше не существует: фреймворковые хуки
         # (ToolAuditHook, DatabaseLoggingHook) переехали в lib/hooks/ и
         # импортируются через ``from lib.hooks.*`` (реальные модули — при

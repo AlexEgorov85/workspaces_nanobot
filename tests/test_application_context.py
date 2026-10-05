@@ -71,6 +71,31 @@ def full_fake_modules(tmp_path):
         sys.modules["nanobot.agent.tools"] = tools_pkg
         sys.modules["nanobot.agent.tools.registry"] = tools_registry
 
+        # ``lib/services/mcp_provider.py`` импортирует
+        # ``nanobot.agent.tools.mcp`` ради ``MCPProvider.from_config``. Без
+        # этой подмены импорт падает с ModuleNotFoundError: фейковый
+        # ``nanobot.agent`` — простой ModuleType, а не пакет. Состав
+        # провайдера эти тесты не проверяют (это делает
+        # tests/test_mcp_provider_wiring.py), поэтому фейк объявляет
+        # «серверов нет» — build_mcp_provider вернёт None, и сборка контекста
+        # останется прежней.
+        mcp_mod = types.ModuleType("nanobot.agent.tools.mcp")
+
+        class _ProviderWithoutServers:
+            configured_server_names = frozenset()
+            connected_server_names = frozenset()
+
+            def runtime_status(self):
+                return {}
+
+        mcp_mod.MCPProvider = MagicMock()
+        mcp_mod.MCPProvider.from_config = MagicMock(
+            return_value=_ProviderWithoutServers()
+        )
+        tools_pkg.mcp = mcp_mod
+        sys.modules["nanobot.agent.tools.mcp"] = mcp_mod
+
+
         # nanobot.bus
         sol.bus = types.ModuleType("nanobot.bus")
         bus = types.ModuleType("nanobot.bus.queue")

@@ -17,6 +17,8 @@ loop, чтобы тесты были детерминированными и б�
 
 from __future__ import annotations
 
+from io import open as io_open
+
 from typing import Any
 
 import pytest
@@ -70,13 +72,28 @@ class FakeDbLoggingService:
 
     Подписчик передаёт реальный ``LogEvent`` (dataclass), проверяем
     через ``dataclasses.fields``.
+
+    ``current_turn_identity`` — та же личность ВХОДА, которую журнал отдаёт
+    владельцу. Журнал не выводит её для события сам (правило против утечки
+    между сессиями), поэтому подписчик спрашивает напрямую у того, кому
+    личность принадлежит.
     """
 
     def __init__(self) -> None:
         self.events: list[Any] = []
+        self.turn_identities: dict[str, dict[str, Any]] = {}
 
     def log_event(self, event: Any) -> None:
         self.events.append(event)
+
+    def current_turn_identity(self, session_key: str | None) -> dict[str, Any] | None:
+        # Читатель, а не ``take``: снимок одноразовый, и следующий за
+        # подписчиком agent.delivered должен получить свою подпись.
+        found = self.turn_identities.get(session_key or "")
+        return dict(found) if found else None
+
+    def get_request_id(self, session_key: str | None) -> str | None:
+        return None
 
     def finish_request(self, *args: Any, **kwargs: Any) -> None:
         pass
@@ -344,3 +361,137 @@ def test_start_wires_subagent_default_bus(bus: FakeBus) -> None:
     # Без патча set_default_bus не существует — _set_subagent_default_bus
     # ловит AttributeError silently.
     RuntimeEventsSubscriber(bus).start()  # не падает
+
+# --- личность оборота: владелец один, снимок не изымается ------------------
+
+
+def _store_with(session_key: str, user_id: str, request_id: str) -> Any:
+    from lib.services.turn_identity import TurnIdentityStore
+
+    store = TurnIdentityStore()
+    store.record(session_key, {"user_id": user_id, "request_id": request_id, "at_seq": 0})
+    return store
+
+
+def test_completed_is_signed_when_contextvar_is_blind(
+    bus: FakeBus, db_service: FakeDbLoggingService
+) -> None:
+    """Подписчик берёт личность у владельца, а не из своего contextvar.
+
+    contextvar привязан к задаче оборота, а подписчик живёт в своей: он там
+    гарантированно пуст. На практике это стоило подписи каждого
+    agent.completed - следом идущий agent.delivered подписывался (он идёт
+    через журнал), а completed уходил неподписанным, и в журнале не
+    оставалось самого важного события оборота.
+    """
+    import asyncio
+
+    store = _store_with("telegram:1", "alice", "req-1")
+    subscriber = RuntimeEventsSubscriber(
+        bus, db_logging_service=db_service, turn_identities=store
+    )
+    subscriber.start()
+
+    asyncio.run(
+        subscriber._handle_turn_runtime_admitted(  # noqa: SLF001
+            _make_turn_runtime_admitted(session_key="telegram:1")
+        )
+    )
+    asyncio.run(
+        subscriber._handle_turn_completed(  # noqa: SLF001
+            _make_turn_completed(session_key="telegram:1")
+        )
+    )
+
+    completed = [
+        e for e in db_service.events if getattr(e, "event_type", "") == "agent.completed"
+    ]
+    assert completed, "agent.completed не записан вовсе"
+    log = completed[-1]
+    assert log.user_id == "alice"
+    assert log.request_id == "req-1"
+
+
+def test_subscriber_never_takes_the_snapshot(bus: FakeBus, db_service: FakeDbLoggingService) -> None:
+    """Снимок остаётся для финальной доставки ответа.
+
+    Изъятие одноразовое и принадлежит ``agent.delivered``; страж
+    ``tests/test_final_delivery_is_signed.py`` это прямо запрещает делать
+    в другом месте. Значит подписчик читает, а не забирает.
+    """
+    import asyncio
+
+    store = _store_with("telegram:1", "alice", "req-1")
+    subscriber = RuntimeEventsSubscriber(
+        bus, db_logging_service=db_service, turn_identities=store
+    )
+    subscriber.start()
+
+    asyncio.run(
+        subscriber._handle_turn_runtime_admitted(  # noqa: SLF001
+            _make_turn_runtime_admitted(session_key="telegram:1")
+        )
+    )
+
+    assert store.current("telegram:1"), "подписчик забрал снимок ВХОДА"
+    assert store.take("telegram:1"), "финальная доставка осталась бы без снимка"
+    assert store.current("telegram:1") is None, "take() обязан опустошать запись"
+
+
+def test_missing_sender_still_produces_no_identity(
+    bus: FakeBus, db_service: FakeDbLoggingService
+) -> None:
+    """Выдумывать отправителя нельзя: событие ушло бы в чужую личность."""
+    import asyncio
+
+    from lib.services.turn_identity import TurnIdentityStore
+
+    subscriber = RuntimeEventsSubscriber(
+        bus, db_logging_service=db_service, turn_identities=TurnIdentityStore()
+    )
+    subscriber.start()
+
+    asyncio.run(
+        subscriber._handle_turn_runtime_admitted(  # noqa: SLF001
+            _make_turn_runtime_admitted(session_key="telegram:1")
+        )
+    )
+    asyncio.run(
+        subscriber._handle_turn_completed(  # noqa: SLF001
+            _make_turn_completed(session_key="telegram:1")
+        )
+    )
+
+    for log in db_service.events:
+        assert not log.user_id, (
+            "подпись без снимка и без contextvar - это выдуманный отправитель"
+        )
+
+
+def test_store_is_the_single_owner_across_both_consumers() -> None:
+    """Владелец личности один: и журнал, и подписчик берут ОДНО И ТО ЖЕ.
+
+    Возврат к схеме «журнал хранит, подписчик ходит в журнал» означал бы
+    второе место хранения и снова расхождение по видимости.
+    """
+    from lib.services.turn_identity import TurnIdentityStore
+
+    import lib.core.application_context as context_module
+    import lib.services.db_logging_service as journal_module
+    import lib.services.runtime_events_subscriber as subscriber_module
+
+    for module in (context_module, journal_module, subscriber_module):
+        source = io_open(module.__file__, encoding="utf-8").read()
+        assert "TurnIdentityStore" in source, (
+            "%s не знает о хранилище личности" % module.__name__
+        )
+
+    store = TurnIdentityStore()
+    assert store.current("telegram:1") is None
+    store.record("telegram:1", {"user_id": "alice", "request_id": "r", "at_seq": 1})
+    copied = store.current("telegram:1")
+    assert copied is not None and copied["user_id"] == "alice"
+    copied["user_id"] = "mallory"
+    assert store.current("telegram:1")["user_id"] == "alice", (
+        "читатель сумел изменить снимок - это не копия"
+    )
