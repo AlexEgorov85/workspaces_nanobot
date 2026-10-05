@@ -426,3 +426,99 @@ def test_code_has_no_stale_phase_claims() -> None:
         "Код обещает незавершённую работу (фазы 4-11 позади):\n"
         + "\n".join(stale)
     )
+
+
+#: Документ, где число операций платформы названо прозой.
+_MCP_CONTRACTS = _PROJECT_ROOT / "mcp-platform" / "docs" / "MCP-CONTRACTS.md"
+_ENTERPRISE_SERVER = _PROJECT_ROOT / "mcp-platform" / "servers" / "enterprise"
+_ENTERPRISE_CAPABILITIES = _ENTERPRISE_SERVER / "capabilities"
+
+
+def _published_operations() -> dict[str, set[str]]:
+    """Операции реестра по правилу самого загрузчика.
+
+    Ключ — источник объявления: каталог capability'а либо «платформенные»,
+    то есть объявленные вне capability'ов и зарегистрированные composition
+    root'ом. Считать их надо тем же способом, каким их находит загрузчик
+    (``capabilities/*/tools/`` плюс ``servers/enterprise/tools/``, без
+    ``__init__.py``), иначе число в документе и число в реестре разойдутся
+    не из-за правки документа, а из-за правки подсчёта.
+    """
+    per_source: dict[str, set[str]] = {}
+    for capability in sorted(_ENTERPRISE_CAPABILITIES.glob("*")):
+        if not capability.is_dir():
+            continue
+        tools_dir = capability / "tools"
+        if not tools_dir.is_dir():
+            continue
+        names = {f.stem for f in tools_dir.glob("*.py") if f.name != "__init__.py"}
+        if names:
+            per_source[capability.name] = names
+    per_source["платформенные"] = {
+        f.stem for f in (_ENTERPRISE_SERVER / "tools").glob("*.py")
+        if f.name != "__init__.py"
+    }
+    return per_source
+
+
+def _stated(text: str, pattern: str) -> int | None:
+    match = re.search(pattern, text)
+    return int(match.group(1)) if match else None
+
+
+def test_mcp_contracts_operation_count_matches_registry() -> None:
+    """Число операций в ``MCP-CONTRACTS.md`` обязано совпадать с реестром.
+
+    Число там было написано руками и разошлось трижды: «22 операции» против
+    фактических 34, а оговорка поверх считала для модели 7 при белом списке из
+    восьми имён. Дальше оно разойдётся снова — со каждой новой операцией, —
+    и разойдётся молча, потому что читатель не может проверить документ,
+    не подняв реестр.
+
+    Поэтому число обязано быть **пересчитываемым**: страж берёт реестр и
+    сверяет с текстом. Убрать число из документа нельзя молча — страж упадёт
+    и заставит решить, чем оно заменится.
+    """
+    text = _MCP_CONTRACTS.read_text(encoding="utf-8")
+    per_source = _published_operations()
+    catalog = set().union(*(names for src, names in per_source.items() if src != "платформенные"))
+    platform = per_source.get("платформенные", set())
+    total = catalog | platform
+
+    stated_total = _stated(text, r"публикует весь реестр,\s*(\d+)\s*операци")
+    assert stated_total is not None, (
+        "MCP-CONTRACTS.md больше не называет число публикуемых операций — "
+        "страж не может сверить, и число вернётся расходиться молча"
+    )
+    assert stated_total == len(total), (
+        f"документ говорит о {stated_total} операциях, в реестре {len(total)} "
+        f"(каталог {len(catalog)} + платформенные {len(platform)})"
+    )
+
+    stated_catalog = _stated(text, r"В\s+каталоге\s+(\d+)\s+операци")
+    if stated_catalog is not None:
+        assert stated_catalog == len(catalog), (
+            f"документ говорит о {stated_catalog} операциях в каталогах, "
+            f"в каталогах {len(catalog)}"
+        )
+
+    stated_for_model = _stated(text, r"модель видит\s*(\d+)")
+    assert stated_for_model is not None, (
+        "MCP-CONTRACTS.md не называет, сколько операций видит модель"
+    )
+    # ``config.json`` — JSONC, комментарии в нём штатны, поэтому грубый
+    # ``json.loads`` здесь упал бы на первом же ``//``.
+    declared = json.loads(
+        _strip_jsonc_comments(
+            (_PROJECT_ROOT / "config.json").read_text(encoding="utf-8")
+        )
+    )["tools"]["mcpServers"]["enterprise"]["enabled_tools"]
+    assert stated_for_model == len(declared), (
+        f"документ говорит, что модель видит {stated_for_model} операций, "
+        f"а в enabled_tools {len(declared)}"
+    )
+    unresolved = sorted(set(declared) - total)
+    assert not unresolved, (
+        "белый список ссылается на операции, которых нет в реестре: "
+        f"{unresolved}"
+    )
