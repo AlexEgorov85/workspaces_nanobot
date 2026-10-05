@@ -36,7 +36,7 @@ flowchart LR
     PG[("PostgreSQL<br/>(источник истины)") --> SNAP[("Снимок DuckDB<br/>cache.duckdb")]
     LOAD["Операторская загрузка<br/>load_snapshot"] --> SNAP
     SNAP --> DATA["capability data<br/>открывает файл на время операции"]
-    DATA --> VEC["capability vectors<br/>FAISS в памяти, сборка ленивая"]
+    DATA --> VEC["capability vectors<br/>FAISS в памяти, сборка на старте"]
     AGENT["Агент / Навык"] -->|MCP stdio-сессия| MCP["enterprise-mcp"]
     MCP --> AUDIT["capability audit<br/>данные аудита"]
     MCP --> DATA
@@ -66,13 +66,14 @@ flowchart LR
   операцией `vector_search` у capability `vectors`. Агентских tool'ов
   `duckdb_query` / `vector_search` в `workspace/tools/` больше нет; вход агента к
   данным аудита — операции `mcp_enterprise_*` capability `audit`.
-- Векторные индексы capability `vectors` собирает **лениво**, при первом
-  `vector_search`; состояние индекса (`missing` / `building` / `ready` / `error`)
-  возвращается в ответе, поэтому «индекс не поднят» наблюдаемо, а не спрятано за
-  пустой выдачей. Отдельного прогона FAISS при старте gateway нет: на старте
-  выполняется по одной дешёвой пробной операции на capability
-  (`gateway._report_enterprise_mcp_health`: `list_indexes` / `schema_check` /
-  `list_scripts`), и её результат печатается вердиктом.
+- Векторные индексы capability `vectors` собирает **на старте сервера платформы**,
+  до event loop (`server.py::_prepare_capabilities` → `ensure_index` по объявленным
+  и включённым индексам); состояние индекса (`missing` / `building` / `ready` /
+  `error`) возвращается в ответе, поэтому «индекс не поднят» наблюдаемо, а не
+  спрятано за пустой выдачей. На старте **gateway** выполняется по одной дешёвой
+  пробной операции на capability (`gateway._report_enterprise_mcp_health`:
+  `list_indexes` / `schema_check` / `list_scripts`), и её результат печатается
+  вердиктом — то есть подъём шлюза индексы не пересобирает, а сверяет состояние.
 - Навык `audit_analyzer` — тонкий: в `workspace/skills/audit_analyzer/` остался
   только `SKILL.md`, своего CLI у него больше нет.
 
@@ -423,11 +424,11 @@ is out of scope».
 терминал gateway (мгновенно). Два источника «тихих» сбоев подняты на
 этот уровень:
 
-**1. Векторные индексы — состояние видно на старте без прогона.**
-Агентского прогона FAISS при старте больше нет: снятый `preload_indexes`
-принадлежал локальному кэшу агента, а capability `vectors` прогревает индекс
-лениво, по первому векторному запросу. Наблюдаемость переехала на другую
-сторону той же границы:
+**1. Векторные индексы — состояние видно на старте, и сборка там же.**
+Прогон FAISS переехал к новому владельцу: снятый агентский `preload_indexes`
+принадлежал локальному кэшу агента, а capability `vectors` прогревает индексы на
+старте платформы, до event loop (`_prepare_capabilities`). Наблюдаемость переехала
+на другую сторону той же границы:
 
 * `list_indexes` у capability `vectors` отдаёт состояние каждого индекса
   (`missing` / `building` / `ready` / `error`), поэтому «индекс не поднят» —

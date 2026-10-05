@@ -103,9 +103,10 @@ DuckDB `ATTACH ... READ_WRITE` берёт эксклюзивный `flock`, ко
 
 ### `FAISS preload: no data in cache`
 
-Индексы в память прогревает capability `vectors` (лениво, отдельного вызова не
-требует), а снимок наполняет capability `data`. Агент в обоих не участвует —
-`CacheLoadService` (снят) и его `preload_indexes()` в дереве агента больше нет.
+Индексы в память прогревает capability `vectors` — сама, на старте сервера
+(`_prepare_capabilities`), отдельного вызова не требует, — а снимок наполняет
+capability `data`. Агент в обоих не участвует — `CacheLoadService` (снят) и его
+`preload_indexes()` в дереве агента больше нет.
 
 Если preload не нашёл данных, причина одна из трёх:
 

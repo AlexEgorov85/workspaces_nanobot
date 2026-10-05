@@ -35,8 +35,9 @@
 
 **Автоматические изменения**:
 
-- FAISS-индексы строятся **в памяти** процесса платформы, лениво — при первом
-  запросе к индексу (`mcp-platform/libs/vectors/owner.py`), из DuckDB-снапшота
+- FAISS-индексы строятся **в памяти** процесса платформы, на старте сервера до
+  первого запроса (`mcp-platform/libs/vectors/owner.py`, вызов из
+  `servers/enterprise/server.py::_prepare_capabilities`), из DuckDB-снапшота
   `platform.json → vectors.storage_table`; persisted-артефактов в PG больше нет.
   Прежний прогрев на старте gateway (`PreloadService.preload_vector_indexes`)
   удалён вместе с агентским кластером.

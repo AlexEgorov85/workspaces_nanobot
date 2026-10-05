@@ -15,8 +15,11 @@
   ``libs/enterprise_data/db.py``. Владелец индекса сам файл снимка **не
   открывает** и пути к нему не знает: строки приходят от capability ``data``.
 * ``duckdb`` в этом пакете не импортируется вовсе.
-* Индекс собирается **лениво**, по первому векторному запросу, и **один раз на
-  процесс** (см. :class:`~libs.vectors.owner.VectorIndexOwner`).
+* Индекс собирается **на старте сервера**, до первого запроса: ``ensure_index``
+  для каждого объявленного и включённого индекса зовёт
+  ``servers/enterprise/server.py::_prepare_capabilities`` до старта event loop, и
+  **один раз на процесс** (см.
+  :class:`~libs.vectors.owner.VectorIndexOwner`).
 * ``SearchResult`` и ``IndexIntegrityError`` не дублируются: они определены
   один раз в ``libs.enterprise_data.snapshot.contracts`` и импортируются
   оттуда. Направление ``libs.vectors → enterprise_data.snapshot.contracts``

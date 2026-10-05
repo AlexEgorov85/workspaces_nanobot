@@ -84,7 +84,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     Миграция на MCP · аудит завершён
   </div>
   <h1>Один сервер.<br>Агент теряет данные, код и патчи.</h1>
-  <p class="lede">Всё enterprise-слой живёт в <strong>одном</strong> MCP-процессе <strong>enterprise-mcp</strong>, наполняемом динамическим реестром: capability добавляется файлом. PostgreSQL — единственный стор, локальный снимок DuckDB остаётся под владением capability <code>data</code>, FAISS собирается в памяти лениво. Из двенадцати патчей Nanobot остаётся четыре.</p>
+  <p class="lede">Всё enterprise-слой живёт в <strong>одном</strong> MCP-процессе <strong>enterprise-mcp</strong>, наполняемом динамическим реестром: capability добавляется файлом. PostgreSQL — единственный стор, локальный снимок DuckDB остаётся под владением capability <code>data</code>, FAISS собирается в памяти на старте сервера. Из двенадцати патчей Nanobot остаётся четыре.</p>
 </header>
 
 <section>
@@ -132,7 +132,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <text x="240" y="246" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">vector_search</text>
     <text x="240" y="263" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">list_indexes</text>
     <text x="240" y="280" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#2f6f5e">index_stats</text>
-    <text x="240" y="297" font-family="'Outfit',sans-serif" font-size="10.5" fill="#a9a391">FAISS — ленивая сборка</text>
+    <text x="240" y="297" font-family="'Outfit',sans-serif" font-size="10.5" fill="#a9a391">FAISS — сборка на старте</text>
 
     <rect x="399" y="204" width="160" height="100" rx="11" fill="#fbfaf7" stroke="#e9e3d6"/>
     <text x="412" y="226" font-family="'JetBrains Mono',monospace" font-size="12.5" fill="#14171e">llm</text>
@@ -234,13 +234,13 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <text x="530" y="146" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">data · audit · vectors · llm · legal</text>
     <text x="530" y="168" font-family="'Outfit',sans-serif" font-size="11.5" fill="#3a4256">пул PostgreSQL и FAISS живут в одном процессе —</text>
     <text x="530" y="186" font-family="'Outfit',sans-serif" font-size="11.5" fill="#3a4256">join данных и векторов выполняется на месте</text>
-    <text x="530" y="204" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">индекс FAISS грузится лениво, по первому запросу</text>
+    <text x="530" y="204" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">индекс FAISS собран на старте, до первого запроса</text>
 
     <text x="514" y="240" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">Capability ≠ процесс: если каталогу понадобится изоляция,</text>
     <text x="514" y="258" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">он уезжает в свой процесс конфигурацией загрузчика.</text>
   </svg>
   </div>
-  <p class="caption">Что разделение покупало и чем заменено: изоляция тяжёлой загрузки FAISS — ленивой сборкой индекса, изоляция зависшего вызова LLM — очередью и таймаутом на сетевом вызове.</p>
+  <p class="caption">Что разделение покупало и чем заменено: изоляция тяжёлой загрузки FAISS — её переносом на старт сервера, до event loop; изоляция зависшего вызова LLM — очередью и таймаутом на сетевом вызове.</p>
 
   <div class="tbl-wrap" style="margin-top:20px">
   <table>
@@ -249,7 +249,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     </thead>
     <tbody>
       <tr><td class="blk">Топология</td><td>Один процесс <code>enterprise-mcp</code>. Capability — каталоги, а не серверы</td><td>Крах одной capability валит все. Возврат к разделению остаётся возможным: это правка списка каталогов, не кода операций</td></tr>
-      <tr><td class="blk">Индекс FAISS</td><td>Ленивая сборка по первому векторному запросу, лок на прогрев, наблюдаемое состояние</td><td>Первый <code>vector_search</code> ждёт десятки секунд. <code>list_indexes</code> и <code>index_stats</code> отвечают сразу — из конфигурации</td></tr>
+      <tr><td class="blk">Индекс FAISS</td><td>Сборка на старте сервера, до старта loop, лок на прогрев, наблюдаемое состояние</td><td>Старт линеен по размеру снимка: на большом индексе подъём занимает секунды. Зато <code>list_indexes</code> и <code>index_stats</code> отвечают сразу и показывают настоящее состояние, а первый <code>vector_search</code> не платит за чужую подготовку</td></tr>
       <tr><td class="blk">Документы</td><td>Нативный tool агента, <code>office_files.py</code> не переезжает</td><td>Офисные пакеты остаются в <code>requirements.txt</code> агента — сознательное исключение из цели «Nanobot не тянет enterprise-стек»</td></tr>
       <tr><td class="blk">Доступ к данным</td><td><strong>Модель не пишет SQL.</strong> Три входа: <code>run_script</code> — шаблон из реестра, <code>generate_sql</code> — LLM внутри сервера, <code>history_search</code> — код платформы. Запрос к данным живёт в capability <code>audit</code></td><td>Новый вопрос без подходящего скрипта идёт через LLM и стоит вызова провайдера. Взамен граница изоляции <code>history_search</code> перестаёт обходиться, а список таблиц становится границей, а не подсказкой в промпте</td></tr>
       <tr><td class="blk">Владение ресурсами</td><td>Пул и очередь PostgreSQL, векторные индексы и LLM-клиент — по одному владельцу. Capability получают сервис</td><td>Ничего, кроме одного стражем проверяемого запрета. Вторая копия индекса — это вторая сотня тысяч векторов в памяти, а второй пул — второе число соединений против той же базы</td></tr>
@@ -522,7 +522,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <li><div class="who">ШАГ 1</div><p><strong>Реестр:</strong> <code>ToolDefinition</code>, <code>ToolRegistry</code>, загрузчик <code>capabilities/*/tools/*.py</code>, fail-fast на любом нарушении. Идёт раньше любой capability, иначе состав придётся перечислять руками.</p></li>
     <li><div class="who">ШАГ 2</div><p><code>libs/enterprise_data</code> ← <code>workspace/utils/db.py</code> + <code>sql_safety</code> + <code>jsonb</code> + <code>clean_text</code>. Это перенос готового модуля, а не постройка.</p></li>
     <li><div class="who">ШАГ 3</div><p>Capability <code>data</code> — инфраструктура: <code>log_event</code>, <code>history_search</code>, <code>schema_check</code>. Обязательные предохранители: запрет старта без <code>sqlglot</code>, серверный предел стоимости запроса, которого в коде нет, и архитектурный страж, валящий сборку при обходе сервисов.</p></li>
-    <li><div class="who">ШАГ 4</div><p>Capability <code>vectors</code>: сборка FAISS из снимка <strong>и лениво</strong> — по первому векторному запросу, с локом на прогрев и наблюдаемым состоянием. Снимок читается только через capability <code>data</code>. Векторы документов предрассчитаны, но вектор запроса эмбедится в рантайме: зависимость от сервиса эмбеддингов остаётся. Переносит <code>build_faiss_index</code>, <code>group_vector_hits</code> и векторную половину <code>cache_provider_impl.py</code>.</p></li>
+    <li><div class="who">ШАГ 4</div><p>Capability <code>vectors</code>: сборка FAISS из снимка <strong>на старте сервера</strong>, до старта loop, с локом на прогрев и наблюдаемым состоянием. Снимок читается только через capability <code>data</code>. Векторы документов предрассчитаны, но вектор запроса эмбедится в рантайме: зависимость от сервиса эмбеддингов остаётся. Переносит <code>build_faiss_index</code>, <code>group_vector_hits</code> и векторную половину <code>cache_provider_impl.py</code>.</p></li>
     <li><div class="who">ШАГ 5</div><p>Capability <code>llm</code>: <code>libs/llm</code> + операция <code>complete</code>. Убирает 287 строк LLM-клиента из агента.</p></li>
     <li><div class="who">ШАГ 6</div><p>Capability <code>audit</code>: перенос конвейера с сохранением диалекта снимка (<code>?</code> и <code>main</code> остаются), проверка списка таблиц в коде, потолок строк, без <code>context</code> от вызывающей стороны. Миграции реестра на PostgreSQL нет — она была бы правкой диалекта без выигрыша для вызывающего.</p></li>
     <li><div class="who">ШАГ 7</div><p><strong>Перенос кластера снимка</strong> во владельца <code>libs/enterprise_data</code> одним коммитом. ~2 600 строк меняют место жительства, ни одна не удаляется. Снаружи — страж: вне владельца запрещены <code>duckdb.connect</code> и <code>ATTACH</code>. Baseline пересобирается здесь, не раньше.</p></li>
