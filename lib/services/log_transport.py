@@ -56,6 +56,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from lib.services.service_identity import (
+    JOURNAL_WRITER,
+    SERVICE_SESSION_JOURNAL,
+)
 from lib.services.enterprise_mcp_client import (
     CallIdentity,
     EnterpriseMcpUnavailable,
@@ -372,10 +376,16 @@ class McpLogWriter:
         статистики, и ``purge_old`` обязан вернуть пару. Ключ ``status``
         отбрасывается — он строка, и в счётчики ему не место.
 
-        Личность вызова не нужна и не выдумывается: чистка журнала не оборот и
-        не сессия. Единственное, что здесь важно, — не подставлять ``session_id``
-        от какого-нибудь оборота: у платформы это означало бы «прибери мою
-        сессию», а чистится всё подряд.
+        Личность вызова — служебная и своя: писатель журнала. Раньше здесь
+        стояло «не нужна и не выдумывается», и намерение было верным, но
+        следствие давало вызов, который не мог пройти никогда: без личности
+        платформа отвечает ``identity_missing``, и ``purge_logs`` отвергался на
+        каждом старте процесса.
+
+        Намерение верное — подставлять ``session_id`` чужого оборота нельзя, у
+        платформы это означало бы «прибери мою сессию», а чистится всё подряд.
+        Но решением должно было быть «передать своё», а не «не передавать
+        ничего»: личность у писателя есть, это он сам.
         """
         payload: dict[str, Any] = {"retention_days": int(retention_days)}
         if remove_empty_outbound is not None:
@@ -400,7 +410,14 @@ class McpLogWriter:
         }
 
     async def _invoke_purge(self, payload: dict[str, Any]) -> str:
-        return await self.call(OP_PURGE_LOGS, payload)
+        return await self.call(
+            OP_PURGE_LOGS, payload,
+            identity=CallIdentity(
+                session_id=SERVICE_SESSION_JOURNAL,
+                user_id=JOURNAL_WRITER,
+                request_id=None,
+            ),
+        )
 
     def upsert_question_run(self, record: Any) -> bool:
         """Записать контекст вопроса операцией ``upsert_question_run``.

@@ -122,12 +122,15 @@ class McpHealthStatus:
 #: принимает фабрика сборки: ``(event_type, name, payload, level)``.
 PublishFn = Callable[[str, str, dict[str, Any], str], Awaitable[None]]
 
-#: Служебная личность событий наблюдателя — та же, что у зеркала. Без неё
+from lib.services.service_identity import MCP_HEALTH
+
+#: Служебная личность событий наблюдателя — своя у наблюдателя. Без неё
 #: транспорт отправляет событие не в базу, а в локальный fallback и в счётчик
 #: ``dropped``: отказ наблюдателя оказался бы невидим ровно тогда, когда он и
-#: случается. Идентичность выбрана по образцу ``MirrorPoller``.
+#: случается. Раньше имена не различались (все компоненты были ``gateway``),
+#: теперь у каждого своё — см. ``lib/services/service_identity.py``.
 SERVICE_SESSION_ID = "mcp-health"
-SERVICE_USER = "gateway"
+SERVICE_USER = MCP_HEALTH
 
 
 class McpHealthMonitor:

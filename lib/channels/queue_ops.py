@@ -50,15 +50,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from lib.services.enterprise_mcp_client import CallIdentity
+from lib.services.service_identity import QUEUE_WORKER
 
 #: Префикс сессии служебного вызова. Помечает вызов как не связанный с
 #: пользовательским оборотом — и для чтения в логах, и для возможной
 #: политики шума на платформе.
 SERVICE_SESSION_PREFIX = "task-worker"
 
-#: Пользователь служебного вызова. Не существует как человек: обозначает
-#: сам шлюз, а не того, кто что-то писал.
-SERVICE_USER = "gateway"
+#: Пользователь служебного вызова. Не существует как человек: это имя
+#: опросчика очереди, а не того, кто что-то писал. Раньше на всех компонентах
+#: стоял один ``gateway``, и 97 % строк журнала были подписаны им — по журналу
+#: было не видно, кто что делал. Имя объявлено один раз в
+#: ``lib/services/service_identity.py``.
+SERVICE_USER = QUEUE_WORKER
 
 
 class QueueOpsError(RuntimeError):

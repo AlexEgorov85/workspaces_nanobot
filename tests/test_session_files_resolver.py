@@ -34,6 +34,7 @@ from lib.services.enterprise_mcp_client import (
     EnterpriseMcpUnavailable,
     EnterpriseOperationError,
 )
+from lib.services.service_identity import SESSION_FILES
 from lib.services.session_files import (
     DEFAULT_ROOT_PARTS,
     FILES_SUBDIR,
@@ -112,7 +113,10 @@ class TestPlatformBacked:
         отвечала identity_missing на каждом входящем сообщении.
 
         session_id — настоящий: вызов адресован именно этой сессии.
-        user_id — шлюз, потому что отправителя в этой точке ещё не существует.
+        user_id — компонент, а не отправитель: отправителя в этой точке ещё не
+        существует, а подставлять чужого значило бы записать вызов каталога в
+        личность пользователя. Имя своё у каждого компонента, а не общее
+        ``gateway`` на весь шлюз: по журналу иначе не видно, кто что делал.
         """
         client = FakePlatformClient(_answer(tmp_path))
         resolver = SessionFileResolver(enterprise_mcp=client, workspace_dir=tmp_path)
@@ -124,7 +128,9 @@ class TestPlatformBacked:
         assert args == (), "корень операции передавать нельзя: он объявлен у платформы"
         identity = kwargs["identity"]
         assert identity.session_id == "postgres:42"
-        assert identity.user_id == "gateway"
+        assert identity.user_id == SESSION_FILES, (
+            "служебный вызов подписывается именем компонента, а не шлюза"
+        )
 
     async def test_signed_call_never_binds_a_question(
         self, tmp_path: Path

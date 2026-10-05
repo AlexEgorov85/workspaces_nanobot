@@ -45,6 +45,8 @@ import socket
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from lib.services.service_identity import SESSION_MIRROR
+
 if TYPE_CHECKING:
     from lib.services.db_logging_service import DbLoggingService
     from lib.services.enterprise_mcp_client import CallIdentity
@@ -71,9 +73,11 @@ _LEVEL_INFO = "INFO"
 #: выглядела бы как действие пользователя.
 SERVICE_SESSION_PREFIX = "session-mirror"
 
-#: Пользователь служебного вызова. Не существует как человек: обозначает сам
-#: шлюз, а не того, кто что-то писал.
-SERVICE_USER = "gateway"
+#: Пользователь служебного вызова. Не существует как человек: это имя
+#: зеркала сессий, а не того, кто что-то писал. Имя объявлено один раз в
+#: ``lib/services/service_identity.py``, чтобы разные компоненты не подписывали
+#: журнал одним и тем же именем.
+SERVICE_USER = SESSION_MIRROR
 
 #: Вердикты, при которых содержимое НЕ записывается. Всё остальное — запись.
 #: Список назван явно, чтобы неизвестный вердикт не был молча принят за
