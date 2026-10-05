@@ -366,3 +366,102 @@ def test_configure_logging_is_idempotent() -> None:
     enterprise_server._configure_logging()
     assert len(logging.getLogger().handlers) == before
     assert logging.getLogger("mcp").level == logging.WARNING
+
+
+# -- ручка громкости: без неё строку нельзя ни увидеть, ни вернуть -----------
+
+
+class _StubSettings:
+    """Настройки, отдающие заданное значение по имени.
+
+    Настоящий ``Settings`` здесь не годится: значение лежит в файле, и поднять
+    уровень в проверке можно было бы только подменой файла на диске. Имя
+    настройки при этом проверяется отдельно — реестром и тестом ниже.
+    """
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def get(self, name: str) -> str:
+        assert name == "ENTERPRISE_LOG_STDERR_LEVEL", f"неожиданное имя настройки: {name}"
+        return self._value
+
+
+def test_declared_level_is_applied_to_the_process() -> None:
+    """Объявленный уровень доезжает до процесса: строку вызова можно вернуть.
+
+    Без ручки строка успеха на DEBUG была бы недостижима навсегда: уровень
+    процесса был зашит в ``basicConfig``, и ``platform.json`` не мог его
+    изменить. Поэтому проверка идёт от настройки к числу уровня.
+    """
+    from servers.enterprise import server as enterprise_server
+
+    assert (
+        enterprise_server._resolve_stderr_level(_StubSettings("DEBUG"))
+        == logging.DEBUG
+    )
+    assert (
+        enterprise_server._resolve_stderr_level(_StubSettings("warning"))
+        == logging.WARNING
+    )
+    assert (
+        enterprise_server._resolve_stderr_level(_StubSettings("INFO"))
+        == logging.INFO
+    )
+
+
+def test_default_level_comes_from_the_platform_file() -> None:
+    """Файл объявляет уровень, и он доезжает до настроек процесса.
+
+    Проверяется связка «файл → реестр → ``Settings``», потому что ручка,
+    объявленная в реестре, но не прочитанная файлом, выглядит настроенной и
+    не применяется.
+    """
+    from libs.enterprise_common.settings import Settings, _flatten
+    from tests.conftest import DUMMY_SECRETS
+
+    settings = Settings(env=dict(DUMMY_SECRETS), secrets={})
+    declared = str(settings.get("ENTERPRISE_LOG_STDERR_LEVEL")).strip().upper()
+    assert declared in logging.getLevelNamesMapping(), (
+        f"platform.json → logging.stderr_level={declared!r} не назван в logging"
+    )
+
+
+def test_unknown_level_falls_back_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Опечатка в уровне не молчит: ``WARNING`` называет значение и допустимые имена.
+
+    Отказ на старте здесь был бы хуже самой опечатки: громкость вывода не
+    останавливает процесс, а вот молчаливый откат выглядел бы как «настройка
+    прочитана».
+    """
+    from servers.enterprise import server as enterprise_server
+
+    with caplog.at_level(logging.WARNING, logger=SERVER_LOGGER):
+        level = enterprise_server._resolve_stderr_level(_StubSettings("DEBGU"))
+
+    assert level == logging.INFO
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("DEBGU" in message for message in messages), messages
+    assert any("logging.stderr_level" in message for message in messages), messages
+
+
+def test_third_party_logger_stays_quiet_at_debug() -> None:
+    """На DEBUG логгер ``mcp`` остаётся на ``WARNING``.
+
+    Объявленный уровень процесса поднимает громкость платформы, а не чужой
+    библиотеки: иначе ``Processing request of type ...`` вернулся бы вместе с
+    нашими строками, то есть шум, ради которого всё и затевалось.
+    """
+    from servers.enterprise import server as enterprise_server
+
+    previous_root = logging.getLogger().level
+    previous_mcp = logging.getLogger("mcp").level
+    try:
+        enterprise_server._configure_logging(_StubSettings("DEBUG"))
+        assert logging.getLogger().level == logging.DEBUG
+        assert logging.getLogger("mcp").level == logging.WARNING
+    finally:
+        logging.getLogger().setLevel(previous_root)
+        logging.getLogger("mcp").setLevel(previous_mcp)

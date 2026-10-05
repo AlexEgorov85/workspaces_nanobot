@@ -613,6 +613,14 @@ SETTINGS: tuple[Setting, ...] = (
        "модель эмбеддера; входит в подпись индекса",
        file_key="llm.embed_model"),
     # -- журнал и бюджеты запросов: собственные ручки платформы ---------------
+    _s("ENTERPRISE_LOG_STDERR_LEVEL", "str", FROM_FILE, OWNER_PLATFORM,
+       "servers/enterprise/server.py:_configure_logging",
+       "уровень вывода процесса в stderr. Объявлен, потому что строка каждого "
+       "вызова операции печатается на DEBUG (loader._log_call), а уровень "
+       "процесса был зашит в basicConfig: строку нельзя было ни увидеть, ни "
+       "вернуть обратно. DEBUG показывает вызов целиком, INFO — стартовые "
+       "факты и отказы, WARNING — только отказы и предупреждения",
+       file_key="logging.stderr_level"),
     _s("ENTERPRISE_LOG_TABLE", "str", FROM_FILE, OWNER_PLATFORM,
        "servers/enterprise/server.py:_log_table",
        "таблица долговечного журнала gateway", file_key="data.log_table"),
@@ -1053,6 +1061,11 @@ SHARED_SETTINGS: tuple[str, ...] = (
     "ENTERPRISE_POOL_JOB_MAX_RETRIES",
     "ENTERPRISE_POOL_PRINT_ACTIVITY",
     "ENTERPRISE_POOL_RESERVED_WORKERS",
+    # Громкость процесса читается один раз, на старте, из ``_configure_logging``
+    # — то есть общим кодом платформы, а ни одной capability. Объявлять её в
+    # секции capability означало бы, что громкость вывода — дело чужой
+    # capability; по той же причине, что и пул.
+    "ENTERPRISE_LOG_STDERR_LEVEL",
     # Транспорт процесса платформы: stdio или http, адрес слушания, запрошенный
     # порт и дескриптор уведомления. Объявляет их агент, а читает `server` —
     # то есть владение разделено, а сам разделяемый код стоит в `servers/`, а не
@@ -1113,8 +1126,14 @@ SHARED_SETTINGS: tuple[str, ...] = (
 #: значение настройки: верхнеуровневый ключ рядом с ``execution``. Поэтому он и
 #: в :data:`RESERVED_SECTIONS` (снимается до проверки «ключ известен») и здесь
 #: (секция файла принадлежит общему коду, а не capability).
+#:
+#: ``logging`` — по той же причине, что и ``execution``: громкость процесса
+#: принадлежит общему коду платформы, а не capability. Ни одна capability не
+#: читает её, поэтому объявлять её ``OPTIONAL`` было бы нельзя: ``OPTIONAL``
+#: означает «capability может быть не настроена», а не «у общего кода есть
+#: запасное значение» — запасное значение здесь и было бы вторым владельцем.
 SHARED_SECTIONS: tuple[str, ...] = (
-    "db", "pool", "job_classes", "execution", "profiles", "agent_settings",
+    "db", "pool", "job_classes", "execution", "profiles", "agent_settings", "logging",
 )
 
 #: Ключ пула -> имя настройки. Связь названа один раз здесь, и ею пользуется

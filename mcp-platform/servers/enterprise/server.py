@@ -942,13 +942,46 @@ def _server_identity_name(profile: str | None) -> str:
     return f"enterprise-mcp:{profile}" if profile else "enterprise-mcp"
 
 
-def _configure_logging() -> None:
-    """Настроить вывод процесса: наши логгеры INFO, логгер ``mcp`` — WARNING.
+def _resolve_stderr_level(settings: Settings | None) -> int:
+    """Уровень вывода процесса из настроек платформы, как число ``logging``.
+
+    Вынесено из :func:`_configure_logging` потому, что ``basicConfig`` —
+    no-op, если у корневого логгера уже есть обработчики: под тестами он
+    всегда есть, и правило отбора, записанное прямо в вызове, оказалось бы
+    непроверяемым. Число возвращается, а не применяется, — применение в одном
+    месте, здесь.
+
+    Неизвестное имя — не отказ на старте и не молчаливый откат: громкость
+    вывода не стоит остановки процесса, но оператор обязан узнать, что
+    написал в файле не то. Поэтому ``WARNING`` с перечнем допустимых имён.
+    """
+    if settings is None:
+        return logging.INFO
+    declared = str(settings.get("ENTERPRISE_LOG_STDERR_LEVEL") or "").strip().upper()
+    if not declared:
+        return logging.INFO
+    resolved = logging.getLevelNamesMapping().get(declared)
+    if resolved is None:
+        logger.warning(
+            "logging.stderr_level=%r не назван в logging; беру INFO. Допустимы: %s",
+            declared,
+            ", ".join(
+                name
+                for name, value in logging.getLevelNamesMapping().items()
+                if isinstance(value, int)
+            ),
+        )
+        return logging.INFO
+    return resolved
+
+
+def _configure_logging(settings: Settings | None = None) -> None:
+    """Настроить вывод процесса: наши логгеры на объявленный уровень, ``mcp`` — WARNING.
 
     Отдельная функция, а не две строки в ``main()``, потому что понижение
     уровня стороннего логгера — это **правило отбора**, а правила отбора
     должны быть проверяемы: ``main()`` не вызывается в тестах, а строка в
-    ней осталась бы непроверяемой и потому поехала бы обратно к INFO при
+    ней осталась бы непроверяемой и потому поехала бы обратно на INFO при
     первом же рефакторинге.
 
     Что убирается. ``mcp`` на INFO печатает на каждый запрос ``Processing
@@ -956,12 +989,27 @@ def _configure_logging() -> None:
     операции, исхода и времени. Своя строка вызова у платформы есть
     (``loader._log_call``), и она говорит о вызове то, чего эта не говорит.
     WARNING у библиотеки остаётся: за ``mcp`` читают её сбои, а не
-    ``PingRequest``.
+    ``PingRequest``. Этот уровень не зависит от ``stderr_level`` — при DEBUG
+    процесс поднимает громкость у себя, а не у чужой библиотеки.
 
-    Идемпотентна: ``basicConfig`` сам по себе не добавляет второй обработчик
-    при повторном вызове, а уровень логгера ставится тем же значением.
+    Уровень ставится и на корневой логгер, а не только через ``basicConfig``:
+    ``basicConfig`` молча ничего не делает, если обработчики уже есть, и
+    тогда объявленный уровень выглядел бы применённым, но не был бы. Ручка
+    обязана работать в обоих случаях, иначе её пришлось бы искать.
+
+    Args:
+        settings: настройки платформы; ``None`` — дефолтный ``INFO``
+            (тесты и путь, где файла может не быть). Уровень приходит файлом
+            (``platform.json → logging.stderr_level``), а не аргументом
+            запуска: у процесса нет второго владельца этого значения, а агент
+            не должен решать, насколько громкой будет платформа.
+
+    Идемпотентна: обработчики не добавляются повторно, а уровни ставятся теми
+    же значениями.
     """
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    level = _resolve_stderr_level(settings)
+    logging.basicConfig(level=level, stream=sys.stderr)
+    logging.getLogger().setLevel(level)
     logging.getLogger("mcp").setLevel(logging.WARNING)
 
 
@@ -985,11 +1033,14 @@ def main(argv: list[str] | None = None) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
-    _configure_logging()
     settings = Settings(
         profile=_profile_from_argv(argv),
         agent_settings_path=_agent_settings_path_from_argv(argv),
     )
+    # Уровень вывода — из настроек платформы, поэтому ``Settings`` читается
+    # раньше настройки логирования, а не наоборот: файл объявляет и пороги, и
+    # громкость, и поднимать вывод, не прочитав файл, нельзя.
+    _configure_logging(settings)
     request = http_transport.requested_transport(settings)
     transport, _, container = build(
         _capabilities_from_argv(argv),
