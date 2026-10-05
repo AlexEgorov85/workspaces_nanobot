@@ -80,8 +80,8 @@ def create_tool(registry_container: ToolContainer) -> ToolDefinition:
         name="vector_search",
         description=(
             "Семантический поиск по документам снимка: текст запроса и имя "
-            "индекса. Индекс собирается при первом обращении и далее "
-            "переиспользуется. SQL не принимается — только текст запроса."
+            "индекса. Индекс уже собран при старте платформы и переиспользуется. "
+            "SQL не принимается — только текст запроса."
         ),
         handler=handle_vector_search,
         category="vectors",
