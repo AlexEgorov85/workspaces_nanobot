@@ -758,7 +758,7 @@ def run_map_reduce_execution(
             done=_count_completed_units(chunk_states),
             expected=len(expected_chunk_ids),
         )
-        return _limited_step_payload(
+        payload = _limited_step_payload(
             operation_id=operation_id,
             chunk_states=chunk_states,
             expected_chunk_ids=expected_chunk_ids,
@@ -775,6 +775,40 @@ def run_map_reduce_execution(
             strategy=strategy,
             deferred_batches=deferred_batches,
         )
+        if failed_batch_ids:
+            # ``_limited_step_payload`` написан для шага БЕЗ провалов, и это
+            # предположение ломается при провале: остаток не уменьшается,
+            # потому что упавший батч встанет в очередь снова — следующий
+            # вызов получит то же состояние и оплатит тот же провал. Отдавать
+            # это как «продолжение» значит увести вызывающего в петлю, тем
+            # более что подсказка обещает обратное («уже выполненные батчи
+            # повторно не оплачиваются»), хотя не выполнено ничего.
+            #
+            # Словарь не расширяется: ``partial`` уже занят смыслом
+            # частичного провала, а когда не выполнено ни одной единицы
+            # работы, отказом является ``failed`` — по правилу, что ответ без
+            # единицы выполненной работы не обещает остатка.
+            done_units = _count_completed_units(chunk_states)
+            report = payload.get("progress_report") or {}
+            report["continues"] = False
+            if done_units <= 0:
+                payload["status"] = "failed"
+                payload.pop("progress_report", None)
+                payload.pop("hint", None)
+                payload["error"] = first_batch_error or {
+                    "code": "BATCH_FAILED",
+                    "message": "Ни один батч ограниченного шага не выполнен",
+                }
+            else:
+                payload["status"] = "partial"
+                payload["hint"] = (
+                    f"Батчи не выполнены: {', '.join(failed_batch_ids)}. "
+                    f"Первая причина — "
+                    f"{first_batch_error.get('code') if first_batch_error else 'неизвестна'}. "
+                    f"Повторный вызов поставит их в очередь снова; остаток "
+                    f"работы по уже выполненным батчам сохранён."
+                )
+        return payload
 
     all_partials = load_cached_partials(
         operation_id, expected_chunk_ids, workspace_root,

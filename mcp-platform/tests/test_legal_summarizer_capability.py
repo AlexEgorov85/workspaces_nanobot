@@ -50,6 +50,7 @@ from libs.legal_summarizer.cli_query import (  # noqa: E402
 from servers.enterprise.tools.analyze_document import (  # noqa: E402
     BATCH_BUDGET_SHARE,
     _batch_budget,
+    _compute_operation_id,
     access_marker,
     state_root,
 )
@@ -876,3 +877,124 @@ class TestLaunchStepIsBounded:
             "и не уложившийся в потолок результат будет отброшен"
         )
         assert captured["batch_limit"] >= 1
+
+
+class TestOperationIdentityMatchesDomain:
+    """Идентификатор операции один и тот же у операции и у домена.
+
+    Домен берёт переданный идентификатор как есть, а операция вычисляет его
+    заранее — чтобы отвергнуть чужой до единого LLM-вызова. Расхождение между
+    этими двумя вычислениями не заметно ни на одном одиночном прогоне: каждое
+    из них верно само по себе. Оно проявляется только на втором обращении,
+    когда уборка ищет отметку по имени каталога состояния, не находит её под
+    другим именем и удаляет свежее состояние — ограниченный шаг перестаёт
+    накапливаться, и каждый вызов заново оплачивает первый батч.
+
+    Найдено боевой пробой на настоящем PDF: расхождение в два пробела по
+    краям текста.
+    """
+
+    def test_computed_id_equals_the_one_the_domain_uses(
+        self, workspace: SessionWorkspace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from libs.legal_summarizer.application import service as domain
+
+        _install_llm_stubs(monkeypatch)
+        handle = workspace.handle(SESSION, create=True)
+        files = handle.subdir("files")
+        # Пробелы по краям обязательны: именно ими тексты разошлись.
+        text = "\n  " + _build_doc() + "  \n"
+        doc = files / "doc.txt"
+        doc.write_text(text, encoding="utf-8")
+
+        computed = _compute_operation_id(
+            text,
+            "detailed",
+            document_path=str(doc),
+            question="",
+            focus="",
+        )
+        outcome = domain.run(
+            text,
+            length="detailed",
+            document_path=str(doc),
+            workspace_root=_session_state_root(workspace),
+            confirmed=True,
+            batch_limit=1,
+        )
+
+        assert outcome["operation_id"] == computed, (
+            "домен берёт переданный идентификатор, поэтому состояние пишется "
+            "под его значением, а отметка обращения — под вычисленным "
+            f"операцией. Домен: {outcome['operation_id']}, операция: {computed}"
+        )
+
+    def test_second_call_accumulates_instead_of_repeating(
+        self, workspace: SessionWorkspace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from libs.legal_summarizer.llm import calls as llm_calls
+
+        paid: list[str] = []
+
+        def _counting_batch(chunks, *, chunks_total, structure, length, question=None):
+            paid.extend(c.chunk_id for c in chunks)
+            return {c.chunk_id: f"сводка {c.chunk_id}" for c in chunks}
+
+        _install_llm_stubs(monkeypatch)
+        monkeypatch.setattr(llm_calls, "llm_batch", _counting_batch)
+
+        handle = workspace.handle(SESSION, create=True)
+        (handle.subdir("files") / "doc.txt").write_text(
+            _build_doc(sections=8), encoding="utf-8"
+        )
+
+        tool = create_analyze_tool(workspace, execution_timeout_sec=40.0)
+        arguments = {
+            "document": "session://files/doc.txt",
+            "load_mode": "full",
+            "length": "detailed",
+        }
+
+        first = json.loads(tool.handler(_ctx(SESSION, "r1"), confirmed=True, **arguments))
+        assert first["status"] == "requires_continuation", first
+        assert first["stats"]["deferred_batches"] >= 1, first["stats"]
+        first_paid = list(paid)
+        assert first_paid, "первый шаг обязан что-то оплатить"
+        previous_done = first["progress_report"]["done"]
+        last = first
+
+        # Каждый следующий вызов обязан продвигать разбор, а не начинать его
+        # заново: если прогресс не растёт, оплаченный первый батч
+        # переплачивается на каждом шаге.
+        for step in range(2, 10):
+            paid.clear()
+            last = json.loads(
+                tool.handler(_ctx(SESSION, f"r{step}"), confirmed=True, **arguments)
+            )
+            done = (last.get("progress_report") or {}).get("done", 0)
+            assert done > previous_done, (
+                f"шаг {step}: done={done}, до этого {previous_done}; оплачено "
+                f"{paid}. Продолжение не накопило оплаченное."
+            )
+            previous_done = done
+            assert last["operation_id"] == first["operation_id"]
+            if last["status"] != "requires_continuation":
+                break
+        else:
+            pytest.fail(f"разбор не завершился за 9 шагов: {last}")
+
+        assert last["status"] == "completed", last
+
+        # И состояние лежит там, где его ищет следующий вызов.
+        state = _session_state_root(workspace) / "operations" / first["operation_id"]
+        assert (state / "manifest.json").is_file()
+        assert (state / "chunks").is_dir(), "оплаченные чанки обязаны лежать на диске"
+        assert (state / "result.json").is_file()
+
+        # Повторное обращение к готовому состоянию не платит ничего.
+        paid.clear()
+        again = json.loads(
+            tool.handler(_ctx(SESSION, "r-final"), confirmed=True, **arguments)
+        )
+        assert again["status"] == "completed", again
+        assert paid == [], f"повторное обращение оплатило заново: {paid}"

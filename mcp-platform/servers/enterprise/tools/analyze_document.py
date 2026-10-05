@@ -278,11 +278,21 @@ def _compute_operation_id(text: str, length: str, *, document_path: str, questio
     Переданный вызывающей стороной ``operation_id`` сверяется с вычисленным:
     в пределах сессии подстановка чужого значения адресовала бы чужое
     состояние, и это не «не тот аргумент», а обход границы.
+
+    Текст нормализуется **до** хеширования так же, как это делает
+    ``service.run`` (``text = (text or "").strip()``). Связь здесь жёсткая и
+    не косметическая: домен берёт переданный идентификатор как есть
+    (``operation_id or make_operation_id(...)``), поэтому состояние пишется
+    под идентификатором домена, а отметка обращения — под вычисленным здесь.
+    Расхождение в два пробела по краям давало разные значения, и уборка,
+    ищущая отметку по имени каталога состояния, не находила её и удаляла
+    свежее состояние — из-за чего ограниченный шаг не накапливался никогда:
+    каждый вызов заново оплачивал первый батч.
     """
     from libs.legal_summarizer.application.operation_id import make_operation_id
 
     computed = make_operation_id(
-        text,
+        (text or "").strip(),
         length,
         **_accepted_kwargs(
             make_operation_id, document_path=document_path, question=question, focus=focus
@@ -429,7 +439,7 @@ def _is_orphaned(operation_id: str, manifest: dict[str, Any], handle: SessionHan
     except Exception:  # noqa: BLE001 - пересчёт не обязан быть удачным
         return True
     return _compute_operation_id(
-        text,
+        (text or "").strip(),
         length,
         document_path=str(document_path),
         question="",
