@@ -104,18 +104,24 @@
   `list_indexes`, `index_stats` → с префиксом `vectors.`
 - [x] 2.3 `capabilities/llm/tools/` (2): `complete` → `llm.complete`,
   `embed` → `llm.embed`
-- [x] 2.4 `capabilities/legal_summarizer/tools/` (1): `query_operation` →
-  `legal_summarizer.query_operation`. Это самое длинное имя набора, и у модели
-  оно даёт `mcp_enterprise_legal_summarizer_query_operation` — 47 символов из 64,
-  запас 17. **Писать проекцию буквально, как её даёт нанобот:** точку он заменяет
-  на `_` (`mcp.py:176-178`), поэтому `mcp_enterprise_legal_summarizer.query_operation`
-  для модели не существует — такой записи нет ни в белом списке, ни в одном
-  страже, и сверять её будет не с чем. Длину проверить расчётом по всем 34
-  именам (следующие: `mcp_enterprise_data_delete_assistant_message` и
-  `mcp_enterprise_data_append_assistant_message` по 44,
-  `mcp_enterprise_data_patch_message_metadata` и
-  `mcp_enterprise_data_cleanup_session_mirror` по 42; за бюджет не выходит ни
-  одно), а не «на глаз» по самому длинному префиксу
+- [x] 2.4 `capabilities/legal_summarizer/tools/query_operation.py` (1):
+  `query_operation` → `legal_summarizer.query_operation`. **Позже capability
+  `legal_summarizer` разобрана соседним change'ом (`c7b48ce`, `c6b3536`,
+  `510dda4`), и операция переехала в `servers/enterprise/tools/query_operation.py`
+  как `platform.query_operation`** — имя на проводе у неё сменилось ещё раз, уже
+  после выполнения этого пункта, так что файла, названного выше, на диске больше
+  нет, а объявление переехало.
+  **Писать проекцию буквально, как её даёт нанобот:** точку он заменяет
+  на `_` (`mcp.py:176-178`), поэтому `mcp_enterprise_platform_query_operation`
+  — 39 символов, а «точечной» формы для модели не существует вовсе: такой
+  записи нет ни в белом списке, ни в одном страже, и сверять её будет не с чем.
+  Длину проверять расчётом по всем объявленным именам, а не «на глаз» по самому
+  длинному префиксу, и **не записывать замер в норму**: за сутки число операций
+  Enterprise сменилось 34 → 35, а имя, которое тут было названо самым длинным,
+  перестало существовать. Максимум теперь делят два имени по 44 из 64
+  (`…data_append_assistant_message`, `…data_delete_assistant_message`), запас 20,
+  и на границе они стоят недели — единственный победитель был бы утверждением
+  без проверяемого содержания.
 - [x] 2.5 `capabilities/data/tools/` (23): префикс `data.`, по списку имён,
   объявленных в `ToolDefinition(name=...)`
 - [x] 2.5.1 Эталон формы файла операции `servers/_template/` переезжает тем же

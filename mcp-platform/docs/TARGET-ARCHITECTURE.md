@@ -118,8 +118,9 @@ PostgreSQL владеет соединениями одна. Запрет на �
   │             vectors.index_stats                               │
   │             FAISS — в памяти, сборка на старте до loop        │
   │    llm/       llm.complete · llm.embed                        │
-  │    legal_summarizer/ legal_summarizer.query_operation         │
-  │                           · service/                          │
+  │               (capability legal_summarizer разобрана: её    │
+  │               операции стали платформенными, домен остался  │
+  │               в libs/legal_summarizer/)                      │
   ├───────────────────────────────────────────────────────────────┤
   │  libs/enterprise_common   реестр · ошибки · конфиг            │
   │  libs/enterprise_data     пул PG · очередь · sql_safety       │
@@ -132,6 +133,9 @@ PostgreSQL владеет соединениями одна. Запрет на �
   │  libs/office              разбор документов                   │
   │  libs/legal_summarizer    доменная логика capability          │
   │  servers/enterprise/tools/  platform.read_result              │
+  │                             platform.session_files           │
+  │                             platform.query_operation         │
+  │                             platform.analyze_document        │
   │                             — вне capability                  │
   │  servers/_template/       эталон сервера capability           │
   └──────────────┬────────────────────────────────┬───────────────┘
@@ -169,9 +173,10 @@ HTTP-клиент LLM, причём каждый будет выглядеть �
   второй `libs/llm`: поднимает лёгкий сервер только с capability `llm`, то
   есть не трогает ни PostgreSQL, ни снимок, и потому не становится их вторым
   владельцем;
-* `libs/legal_summarizer/` — доменная логика capability `legal_summarizer`
-  (чанкинг, retrieval, исполнитель карт). Capability отдаёт наружу одну
-  операцию `legal_summarizer.query_operation`, домен наружу не выходит;
+* `libs/legal_summarizer/` — доменная логика разбора документов (чанкинг,
+  retrieval, исполнитель карт). Наружу она отдаёт две платформенные операции —
+  `platform.query_operation` и `platform.analyze_document`; capability
+  `legal_summarizer` разобрана, домен наружу не выходит;
 * `libs/office/parser.py` — разбор офисных документов, из него читает
   `libs/legal_summarizer/document/`. Агент при этом сохраняет собственный
   нативный tool для офисных файлов (§1, строка «Документы»).

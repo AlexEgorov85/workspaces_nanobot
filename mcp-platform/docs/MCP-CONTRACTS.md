@@ -1506,8 +1506,11 @@ than …»), то есть модель о нём знает, но границ�
 `LoadedTool`. Ни фильтрации при публикации, ни проверки при вызове нет.
 
 `build_server(registry, name="enterprise-mcp", …)` получает весь реестр, то есть
-**весь реестр — 34 операции**: 32 из `capabilities/*/tools/` плюс платформенные
-`platform.read_result` (§2.1) и `platform.session_files`, которые регистрирует composition root. Модель, увидевшая
+**весь реестр — 35 операций**: 31 из `capabilities/*/tools/` плюс четыре
+платформенные — `platform.read_result` (§2.1), `platform.session_files`,
+`platform.query_operation` и `platform.analyze_document`; последние две переехали
+из разобранной capability `legal_summarizer` и регистрируются composition root'ом.
+Модель, увидевшая
 сервер в discovery, может вызвать `data.purge_logs` — то есть стереть журнал, — а
 также `data.claim_task` и `data.update_task_status`: очередь задач в перечень входит и
 объявлена runtime (`AUDIENCE_RUNTIME`), но публикуется наравне со всем
@@ -1538,10 +1541,12 @@ tools.mcpServers.enterprise.enabled_tools` (8 операций), и он **ра�
 а не отмена первого.
 
 О числах: прежние «22 операции» в этом разделе и в таблице §9 устарели. В
-каталоге 32 операции (`data` 23, `audit` 3, `vectors` 3, `llm` 2,
-`legal_summarizer` 1), и composition root добавляет платформенные `platform.read_result`
-и `platform.session_files` — платформа публикует весь реестр, 34 операции, из которых
-модель видит 8 (весь белый список `tools.mcpServers.enterprise.enabled_tools`,
+каталоге 31 операция (`data` 23, `audit` 3, `vectors` 3, `llm` 2), а capability
+`legal_summarizer` разобрана: её `query_operation` стала платформенной. Composition
+root добавляет платформенные `platform.read_result`, `platform.session_files`,
+`platform.query_operation` и `platform.analyze_document` — платформа публикует
+весь реестр, 35 операций, из которых
+модель видит 9 (весь белый список `tools.mcpServers.enterprise.enabled_tools`,
 все восемь имён разрешаются в реестре).
 
 Число **пересчитывается гардом** (`tests/test_docs_consistency.py`), а не
@@ -1559,7 +1564,7 @@ tools.mcpServers.enterprise.enabled_tools` (8 операций), и он **ра�
 | Сколько попыток генерации | Сегодня `MAX_ATTEMPTS = 4`, то есть до четырёх вызовов LLM на один вопрос. Стоимость на вопрос не ограничена ничем |
 | Снимать ли потолок `max_tokens` в `llm.complete` | Сейчас модель может заказать `max_tokens: 10**9`, и стоимость не ограничена |
 | Что отдавать в `row` у `vectors.vector_search` | Полная строка источника может быть большой. Нужен потолок и признак усечения в ответе |
-| Проверять ли `permissions` при вызове | Сегодня поле объявлено, но не читается рантаймом (§8.13): публикуются все 34 операции реестра. При этом граница доступа модели есть и работает — белый список `tools.mcpServers.enterprise.enabled_tools`, то есть `permissions` это слой поверх работающей границы, а не её отсутствие. Нужно решение — фильтровать ли при публикации в MCP или опираться на контракт `_meta` и правило «runtime-операции модели не выставляются» |
+| Проверять ли `permissions` при вызове | Сегодня поле объявлено, но не читается рантаймом (§8.13): публикуются все 35 операций реестра. При этом граница доступа модели есть и работает — белый список `tools.mcpServers.enterprise.enabled_tools`, то есть `permissions` это слой поверх работающей границы, а не её отсутствие. Нужно решение — фильтровать ли при публикации в MCP или опираться на контракт `_meta` и правило «runtime-операции модели не выставляются» |
 
 Один технический факт ограничивает любой из этих вопросов: `SkillSettings`
 объявлен с `extra="forbid"`. Любой новый ключ под `skills.audit_analyzer`
