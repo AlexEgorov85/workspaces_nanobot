@@ -11,6 +11,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Гейт структуры спецификаций. Отдельная джоба, а не шаг в fast-tests:
+  # проверка чистая — только stdlib, без БД, LLM и снимка, — и отвечает за
+  # секунды, тогда как fast-tests сперва ставит requirements.txt
+  # (nanobot/faiss/duckdb), то есть несколько минут. Структурный дефект спеки
+  # должен красеть сразу, а не после тяжёлой установки. Пока шага не было,
+  # «спека обязана иметь все 19 разделов» и «категория компонента — из
+  # закрытого перечня» проверялись только тем, что кто-то запустит скрипт
+  # руками: ни одна джоба его не звала.
+  spec-validation:
+    name: Spec validation (structure, categories, registry)
+    runs-on: ubuntu-latest
+    # Разбор markdown по 28 спекам и реестру — доли секунды на практике.
+    # 5 минут — запас на холодный раннер и обход дерева, не на саму проверку.
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Установка зависимостей не нужна: весь импорт валидатора — stdlib
+      # (argparse, collections.abc, dataclasses, pathlib, re, sys, typing).
+      # Ставить requirements.txt ради него значило бы платить установкой
+      # faiss и duckdb за проверку, которой они не касаются.
+      - name: Validate component specs
+        run: python tools/validate_component_specs.py
+
   fast-tests:
     name: Fast tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
