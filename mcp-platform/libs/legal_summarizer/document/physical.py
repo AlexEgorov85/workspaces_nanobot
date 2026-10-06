@@ -28,8 +28,9 @@
   который **ссылается** на блоки через ordinals, а не копирует текст.
 * ``PhysicalDocument`` намеренно **не знает** ни о каких ``semantic_type``,
   ``heading``, ``section``. Это строго отделено в ``structure/models.py``.
-* ``DocumentBlock.block_type`` (``"page"`` / ``"paragraph"`` / ``"table"``
-  / ``"text"``) — это **physical** тип, не семантический.
+* ``DocumentBlock.block_type`` (``"paragraph"`` / ``"table"`` / ``"text"``)
+  — это **physical** тип, не семантический. Значения ``"page"`` больше не
+  выдаётся: PDF разбирается до абзацев, см. ``_split_page_paragraphs``.
 
 ``DocumentIdentity`` — единственный owner identity/fingerprint.
 ``PhysicalDocument`` **не** придумывает собственный cache key —
@@ -38,6 +39,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,8 +58,8 @@ class DocumentBlock:
 
     Attributes:
         block_id: стабильный идентификатор вида ``"b_001"``.
-        block_type: ``"page"`` (PDF) | ``"paragraph"`` (DOCX) |
-            ``"table"`` | ``"text"`` (TXT) | ``"slide"`` (PPTX,
+        block_type: ``"paragraph"`` (PDF и DOCX) | ``"table"`` |
+            ``"text"`` (TXT) | ``"slide"`` (PPTX,
             зарезервировано на будущее).
         content: текст блока.
         char_count: ``len(content)``.
@@ -237,8 +239,35 @@ def _table_to_text(table: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def _split_page_paragraphs(text: str) -> list[str]:
+    """Страница PDF → абзацы по пустой строке.
+
+    Блок на страницу был неверной единицей: детектор заголовков читает блок
+    целиком и требует, чтобы заголовок стоял в его **начале**, а длинный блок
+    срезает score ниже порога. На странице из 2 800 символов заголовок вида
+    «Статья 5» в середине страницы не виден ни одним из двух путей: он не в
+    начале блока, и длина блока запрещает его вообще. PDF без закладок
+    (``outline`` пуст) не даёт третьего пути, и структура схлопывалась в один
+    корневой узел.
+
+    Разделитель — пустая строка, потому что именно её выдаёт pypdf между
+    абзацами. Страница без пустых строк остаётся одним блоком, то есть
+    поведение для таких файлов не меняется.
+    """
+    if not text.strip():
+        return []
+    paragraphs = [part.strip() for part in re.split(r"\r?\n[ \t]*\r?\n", text)]
+    return [part for part in paragraphs if part]
+
+
 def _iter_pdf_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
-    """PDF → blocks (по страницам). Таблицы встроены между страницами."""
+    """PDF → blocks (абзацы страниц). Таблицы встроены между абзацами.
+
+    Исторически блок = страница. Это ломало структуру целиком: см.
+    ``_split_page_paragraphs``. ``page_index`` у абзаца остаётся номером
+    страницы, поэтому ``page_start`` / ``page_end`` чанка и provenance
+    считаются как раньше.
+    """
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
@@ -265,13 +294,13 @@ def _iter_pdf_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
             text = page.extract_text() or ""
         except Exception:
             text = ""
-        if text.strip():
+        for paragraph in _split_page_paragraphs(text):
             blocks.append(
                 DocumentBlock(
                     block_id=f"b_{ordinal:04d}",
-                    block_type="page",
-                    content=text,
-                    char_count=len(text),
+                    block_type="paragraph",
+                    content=paragraph,
+                    char_count=len(paragraph),
                     page_index=page_idx,
                     page_start=page_idx,
                     page_end=page_idx,
