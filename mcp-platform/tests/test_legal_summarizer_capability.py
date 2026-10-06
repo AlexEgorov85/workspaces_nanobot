@@ -869,7 +869,6 @@ class TestLaunchStepIsBounded:
         tool.handler(
             _ctx(SESSION),
             document="session://files/doc.txt",
-            load_mode="full",
         )
 
         assert "batch_limit" in captured, (
@@ -951,7 +950,6 @@ class TestOperationIdentityMatchesDomain:
         tool = create_analyze_tool(workspace, execution_timeout_sec=40.0)
         arguments = {
             "document": "session://files/doc.txt",
-            "load_mode": "full",
             "length": "detailed",
         }
 

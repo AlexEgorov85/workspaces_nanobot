@@ -163,7 +163,6 @@ def _call(
     raw = definition.handler(
         _ctx(request_id),
         document=f"session://files/{DOCUMENT_NAME}",
-        load_mode="full",
         confirmed=True,
     )
     return json.loads(raw)

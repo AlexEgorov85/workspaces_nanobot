@@ -638,7 +638,6 @@ def test_sweep_runs_on_a_real_parse_call(
         _ctx("platform.analyze_document"),
         document=DOC_NAME,
         length="brief",
-        load_mode="brief",
         confirmed=True,
     )
 

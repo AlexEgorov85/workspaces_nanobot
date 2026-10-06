@@ -162,7 +162,7 @@ def _refuse_if_swept(
         f"состояние operation_id={operation_id} убрано по истечении срока жизни{when} "
         "и больше не читается: файл состояния удалён, вернуть его нечем. "
         "Начните разбор заново — повторный вызов platform.analyze_document "
-        "с тем же документом, length, focus и load_mode создаст новое состояние "
+        "с тем же документом, length, focus и question создаст новое состояние "
         "и вернёт новый operation_id.",
         code="not_found",
     )

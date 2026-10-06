@@ -326,7 +326,7 @@ def _not_ready(
     else:
         payload["hint"] = (
             "разбор не завершён; продолжите его повторным вызовом "
-            "analyze_document с теми же document, length, focus и load_mode"
+            "analyze_document с теми же document, length, focus и question"
         )
     return payload
 

@@ -137,7 +137,6 @@ def _call(workspace: SessionWorkspace) -> dict[str, Any]:
     raw = definition.handler(
         _ctx(),
         document=f"session://files/{DOCUMENT_NAME}",
-        load_mode="brief",
         confirmed=True,
     )
     return json.loads(raw)
@@ -224,7 +223,6 @@ class TestDomainSeesTheCallIdentity:
             definition.handler(
                 _ctx(rid),
                 document=f"session://files/{name}",
-                load_mode="brief",
                 confirmed=True,
             )
 

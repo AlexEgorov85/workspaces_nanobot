@@ -440,7 +440,6 @@ class TestCallBudgetWiring:
             _ctx(),
             document="doc.txt",
             length="brief",
-            load_mode="brief",
             confirmed=True,
         )
 

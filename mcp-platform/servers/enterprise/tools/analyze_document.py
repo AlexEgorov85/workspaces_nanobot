@@ -952,7 +952,6 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
         length: str = "brief",
         question: str = "",
         focus: str = "",
-        load_mode: str = "",
         confirmed: bool = False,
         operation_id: str = "",
     ) -> str:
@@ -964,15 +963,29 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
                 отказ, а не молчаливая замена на краткий формат.
             question: адресный вопрос по документу.
             focus: сузить разбор конкретной частью документа.
-            load_mode: ``brief`` или ``full`` — как извлекать текст. **Обязателен**:
-                выбор молча меняет объём, оценку и цену.
             confirmed: подтверждение платной работы, полученное от пользователя.
             operation_id: идентификатор состояния; проверяется, не подставляется.
+
+        Режим извлечения текста отдельным параметром **не принимается**: он
+        выводится из ``length`` (``brief`` → краткое извлечение, ``detailed`` →
+        полное), как и в релизе 2.5.3. Ошибочный перечень от
+        пользователя или прежней документации отвергается как ``invalid_params``.
 
         Возвращает JSON с ``status``, ``operation_id`` и ``progress_report``.
         """
         length_value = _require_enum(length, ("brief", "detailed"), "length")
-        mode_value = _require_enum(load_mode, ("brief", "full"), "load_mode")
+        # Режим извлечения **выводится** из ``length``, а не задаётся отдельно.
+        # В релизе 2.5.3 аргумента загрузки не существовало: CLI считал его сам
+        # (``load_mode = "brief" if length == "brief" else "full"``), и модель
+        # выбрать его не могла. Отдельный параметр разошёл с этим контрактом
+        # и хуже — стал обязательным, но не документированным: значение вне
+        # перечисления отвергалось, а объявленное в документации значение
+        # ``detailed`` в перечисление не входило, и вызов по инструкции отказывал.
+        #
+        # Один параметр вместо двух: режимов столько же, выбирает их один
+        # ``length``, и противоречащаяся пара ``length=brief, load_mode=full``
+        # (которую модель могла отправить раньше) более невозможна.
+        mode_value = "brief" if length_value == "brief" else "full"
 
         handle = workspace.handle(ctx.session_id, create=True)
         _sweep(handle, now=time.time())
@@ -1150,11 +1163,12 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
         "Разобрать юридический документ из вложений этой сессии (files/) и "
         "сохранить состояние разбора в папку сессии: документ заново не "
         "разбирается, уточняющие вопросы задаются операцией "
-        "platform.query_operation по возвращённому operation_id. load_mode "
-        "обязателен (brief режет PDF до 100 страниц и 300 000 символов, full "
-        "разбирает целиком), length — brief или detailed, значение не из "
-        "перечня отвергается. Ответ требует явного confirmed: без него "
-        "приходит confirmation_required с оценкой и вариантами."
+        "platform.query_operation по возвращённому operation_id. Режим "
+        "извлечения текста отдельным параметром не задаётся — он выводится из "
+        "length: brief режет PDF до 100 страниц и 300 000 символов, detailed "
+        "разбирает целиком. length — brief или detailed, значение не из перечня "
+        "отвергается. Ответ требует явного confirmed: без него приходит "
+        "confirmation_required с оценкой и вариантами."
     )
 
     definition = ToolDefinition(
