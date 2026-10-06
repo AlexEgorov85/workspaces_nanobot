@@ -1,43 +1,41 @@
-"""DocumentLoader — единственный canonical loader для legal_summarizer.
+"""DocumentLoader — единственная точка входа цепочки загрузки.
 
-Создаёт ``PhysicalDocument`` за **один проход** по файлу.
+Цепочка: **извлечение** (формат) → **разделение** (общее правило) →
+**анализ** (дальше, вне этого модуля). Здесь она склеивается в одну
+функцию, и ни одна из стадий не знает о существовании другой.
 
-``DocumentLoader.load()`` — единая production
-загрузочная цепочка. Делает один проход для blocks, и оттуда же
-извлекает text для title resolution. Никакого двойного парсинга PDF/DOCX.
+Loader ничего не решает про границы блоков и ничего не знает про форматы,
+кроме имени: извлекатель берётся из реестра, поэтому добавление нового типа
+файла этот модуль не трогает.
 
-Legacy ``load_physical_document`` удалён. Все consumers
-используют ``DocumentLoader().load(path)``.
+Один проход по файлу: извлекатель открывает файл один раз и отдаёт и текст,
+и заголовок из метаданных (тот же объект ``PdfReader`` / ``Document``), так
+что прежний второй проход на title resolution здесь больше не нужен.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from libs.legal_summarizer.document.physical import (
-    SUPPORTED_FORMATS,
-    PhysicalDocument,
-    _iter_docx_blocks,
-    _iter_pdf_blocks,
-    _iter_txt_blocks,
-    _pick_title_from_text,
+from libs.legal_summarizer.document.extraction import (
+    split_units_into_blocks,
+    title_from_text,
 )
-from libs.office import detect_format
+from libs.legal_summarizer.document.physical import PhysicalDocument
+from libs.legal_summarizer.document.registry import get_extractor
+
+__all__ = ["DocumentLoader"]
 
 
 class DocumentLoader:
     """Canonical loader для ``PhysicalDocument``.
 
-    Single-pass loading: ``_iter_*_blocks`` парсит файл один раз,
-    и тот же blocks-iteration даёт текст для title resolution
-    (через ``_pick_title_from_text``). Никакого второго вызова
-    ``extract_text`` или повторного открытия файла.
-
     Usage::
 
-        loader = DocumentLoader()
-        doc = loader.load(path)
+        doc = DocumentLoader().load(path, workspace_root=...)
     """
+
+    __slots__ = ()
 
     def load(
         self,
@@ -48,34 +46,24 @@ class DocumentLoader:
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"Файл не найден: {p}")
-        fmt = detect_format(p)
-        if fmt not in SUPPORTED_FORMATS:
-            raise ValueError(
-                f"Неподдерживаемый формат: '{fmt}'. "
-                f"Поддерживаются: {sorted(SUPPORTED_FORMATS)}"
-            )
 
-        if fmt == "pdf":
-            blocks, page_count = _iter_pdf_blocks(p)
-        elif fmt == "docx":
-            blocks, page_count = _iter_docx_blocks(p)
-        elif fmt == "txt":
-            blocks, page_count = _iter_txt_blocks(p)
-        else:
-            raise ValueError(f"Unsupported format: {fmt}")
+        from libs.office import detect_format
 
+        # Стадия 1: формат отдаёт сырые единицы.
+        extracted = get_extractor(detect_format(p)).extract(p)
+
+        # Стадия 2: общее правило решает, что является блоком.
+        blocks = split_units_into_blocks(extracted.units)
+
+        # Заголовок: метаданные формата, иначе первая содержательная строка.
         text = "\n\n".join(b.content for b in blocks)
-        title = _pick_title_from_text(fmt, text, p)
-        size_bytes = p.stat().st_size
+        title = extracted.title or title_from_text(text)
 
         return PhysicalDocument(
             path=str(p.resolve()),
-            format=fmt,
+            format=detect_format(p),
             title=title,
-            size_bytes=size_bytes,
+            size_bytes=p.stat().st_size,
             blocks=tuple(blocks),
-            page_count=page_count,
+            page_count=extracted.page_count,
         )
-
-
-__all__ = ["DocumentLoader"]

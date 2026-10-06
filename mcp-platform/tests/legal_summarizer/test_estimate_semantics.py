@@ -43,6 +43,34 @@ def _build_doc(sections: int = 6) -> str:
         )
     return "".join(parts)
 
+def _build_flat_doc(paragraphs: int = 40) -> str:
+    """Документ без единого заголовка — стратегия ``map_flat`` по существу.
+
+    Раньше здесь подставлялся ``_build_doc``, чьи пронумерованные строки
+    («1. Раздел 1») детектор заголовков читает как заголовки. Пока .txt
+    разбирался одним блоком, это было незаметно; после того как .txt стал
+    разбираться на абзацы, стратегия стала ``map_hierarchical`` — и тест
+    мерил бы не то, что объявляет его имя. Плоский документ строится честно,
+    отсутствием заголовков, а не запретом на них.
+
+    Две особенности, без которых ``map_flat`` не получается, и обе —
+    следствия того, как устроено решение о стратегии, а не подгонка:
+
+    * абзацы различаются: одинаковые упаковщик сливает в один чанк;
+    * абзацев достаточно, чтобы чанков стало ≥ 2: при одном кандидате
+      стратегия ``direct`` выбирается раньше всех остальных проверок, и
+      объём документа тут не спасает.
+
+    Измерено на этом фикстуре: 40 абзацев → 2 кандидата, стратегия
+    ``map_flat``, 2 батча (20 абзацев → 1 кандидат → ``direct``).
+    """
+    parts = []
+    for i in range(1, paragraphs + 1):
+        body = f"Изложение положения номер {i} без заголовка и без нумерации. " * 50
+        parts.append(f"{body}\n\n")
+    return "".join(parts)
+
+
 def _insp_ctx_est(summarizer, tmp_path, *, sections=6, length="detailed", text=None):
     """Build (text, doc_path, insp, ctx, est) tuple для text-builder fixtures.
 
@@ -217,10 +245,13 @@ def test_actual_llm_calls_bounded_by_estimate(tmp_path, monkeypatch):
     )
 
 def test_actual_llm_calls_bounded_by_estimate_map_flat(tmp_path, monkeypatch):
-    """map_flat (txt → 0 sections, > direct threshold): actual <= estimate.
+    """map_flat (> direct threshold, ноль секций): actual == estimate.
 
-    TXT загружается одним physical block → structure без meaningful
-    sections → strategy ``map_flat``. Upper bound = batches + 1.
+    Стратегия ``map_flat`` — это разбор документа **без** структуры, и
+    верхняя граница здесь = batches + 1. Сравнивать её имеет смысл только на
+    плоском документе. Прежде условием плоского был сам дефект разбиения
+    («TXT загружается одним physical block»); теперь плоский документ
+    строится явно, без заголовков.
     """
     import libs.legal_summarizer.application.service as summarizer
     from libs.legal_summarizer.application.context_builder import build_execution_context
@@ -228,7 +259,7 @@ def test_actual_llm_calls_bounded_by_estimate_map_flat(tmp_path, monkeypatch):
 
     _install_llm_mocks(monkeypatch)
     text, p, _, ctx, est = _insp_ctx_est(
-        summarizer, tmp_path, sections=6, length="detailed",
+        summarizer, tmp_path, length="detailed", text=_build_flat_doc(),
     )
     assert ctx.strategy == "map_flat", f"setup: {ctx.strategy}"
 

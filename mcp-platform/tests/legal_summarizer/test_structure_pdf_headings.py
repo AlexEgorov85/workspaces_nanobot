@@ -51,9 +51,11 @@ from libs.legal_summarizer.document.heading import (  # noqa: E402
     detect_heading_candidates,
     filter_above_threshold,
 )
+from libs.legal_summarizer.document.extraction import (  # noqa: E402
+    split_text_into_paragraphs,
+)
 from libs.legal_summarizer.document.physical import (  # noqa: E402
     DocumentBlock,
-    _split_page_paragraphs,
 )
 
 #: Образец страницы правового документа: колонтитул, затем два заголовка без
@@ -103,7 +105,7 @@ class TestPageIsSplitIntoParagraphs:
     """Страница — не единица чтения для детектора."""
 
     def test_page_yields_several_paragraphs(self) -> None:
-        paragraphs = _split_page_paragraphs(PAGE_TEXT)
+        paragraphs = split_text_into_paragraphs(PAGE_TEXT)
 
         assert len(paragraphs) > 1, (
             f"страница разбилась на {len(paragraphs)} абзацев — разделитель "
@@ -113,27 +115,34 @@ class TestPageIsSplitIntoParagraphs:
         assert all(p for p in paragraphs), "пустой абзац попал в результат"
 
     def test_heading_is_its_own_block(self) -> None:
-        paragraphs = _split_page_paragraphs(PAGE_TEXT)
+        paragraphs = split_text_into_paragraphs(PAGE_TEXT)
 
         assert "Статья 1" in paragraphs, paragraphs[:8]
         assert "Статья 2" in paragraphs, paragraphs[:8]
 
-    def test_page_without_blank_lines_stays_one_block(self) -> None:
-        """Файл без пустых строк не должен рассыпаться.
+    def test_page_without_blank_lines_splits_by_line(self) -> None:
+        """Страница без пустых строк разбирается по строкам.
 
-        Разбиение не имеет права ухудшать то, что раньше работало: страница
-        без разделителя обязана остаться одним блоком, как и была.
+        Раньше здесь стояло обратное ожидание («остаётся одним блоком»), и оно
+        закрепляло поломку, а не правило: текст без пустых строк — обычный
+        вывод ``pdf2txt`` и обычный результат «сохранить как .txt». Одним
+        блоком такой текст доходил до детектора целиком, а детектор требует
+        заголовок в начале блока, поэтому структура схлопывалась в один
+        корневой узел. Правило теперь одно для всех форматов
+        (``_paragraphs_from_plain_text``), и этот случай — тот же самый, что
+        раньше ломал .txt.
         """
-        assert _split_page_paragraphs("первая строка\nвторая строка") == [
-            "первая строка\nвторая строка"
+        assert split_text_into_paragraphs("первая строка\nвторая строка") == [
+            "первая строка",
+            "вторая строка",
         ]
 
     def test_blank_page_yields_nothing(self) -> None:
-        assert _split_page_paragraphs("") == []
-        assert _split_page_paragraphs("   \n\n  \n") == []
+        assert split_text_into_paragraphs("") == []
+        assert split_text_into_paragraphs("   \n\n  \n") == []
 
     def test_crlf_separators_are_handled(self) -> None:
-        assert _split_page_paragraphs("первый\r\n\r\nвторой") == ["первый", "второй"]
+        assert split_text_into_paragraphs("первый\r\n\r\nвторой") == ["первый", "второй"]
 
 
 class TestBareLegalHeadings:
@@ -186,7 +195,7 @@ class TestSplittingIsWhatMakesHeadingsVisible:
 
     def _split_blocks(self) -> tuple[DocumentBlock, ...]:
         return tuple(
-            _block(i, text) for i, text in enumerate(_split_page_paragraphs(PAGE_TEXT))
+            _block(i, text) for i, text in enumerate(split_text_into_paragraphs(PAGE_TEXT))
         )
 
     def test_split_blocks_have_non_zero_length(self) -> None:

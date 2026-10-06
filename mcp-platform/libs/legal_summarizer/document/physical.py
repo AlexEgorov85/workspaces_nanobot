@@ -1,23 +1,15 @@
 """PhysicalDocument: нормализованный список блоков документа с координатами.
 
-Это **adapter** над ``libs.office``, не parser.
+Это **модель данных**, а не загрузчик. Как файл превращается в блоки —
+вопрос цепочки ``извлечение → разделение → анализ``
+(``document/extraction.py``, ``document/registry.py``,
+``document/loader.py``), и формат файла участвует в ней ровно одной
+стадией — извлечением.
 
 Что берём у парсера (``libs.office``):
   * ``extract_text(path)`` → полный текст документа; ``title``,
     ``format``, ``size_bytes`` собираются из него точечными
-    обёртками (``_build_structure_dict``).
-
-Чего парсер не возвращает, и мы добавляем сами (точечные обёртки):
-  * ``PdfReader.pages[i].extract_text()`` → отдельный ``DocumentBlock``
-    с ``page_index=i+1``.
-  * ``Document.paragraphs[i].text`` → отдельный ``DocumentBlock``
-    с ``paragraph_index=i``.
-  * ``Document.tables[i]`` → отдельный ``DocumentBlock``
-    с ``table_index=i``.
-
-Эти обёртки минимальны (буквально 1-2 строки на блок) и **не** пытаются
-перепарсить документ — только сохраняют координаты, потерянные в
-``extract_text``.
+    обёртками.
 
 Граница между Physical и Semantic:
 
@@ -28,28 +20,19 @@
   который **ссылается** на блоки через ordinals, а не копирует текст.
 * ``PhysicalDocument`` намеренно **не знает** ни о каких ``semantic_type``,
   ``heading``, ``section``. Это строго отделено в ``structure/models.py``.
-* ``DocumentBlock.block_type`` (``"paragraph"`` / ``"table"`` / ``"text"``)
-  — это **physical** тип, не семантический. Значения ``"page"`` больше не
-  выдаётся: PDF разбирается до абзацев, см. ``_split_page_paragraphs``.
+* ``DocumentBlock.block_type`` (``"paragraph"`` / ``"table"``)
+  — это **physical** тип, не семантический. Значения ``"page"`` и ``"text"``
+  больше не выдаются: **блок = абзац независимо от формата файла** —
+  это решение стадии разделения, а не формата.
 
-``DocumentIdentity`` — единственный owner identity/fingerprint.
-``PhysicalDocument`` **не** придумывает собственный cache key —
-использует ``DocumentIdentity.from_path``.
+``DocumentIdentity`` — единственный owner identity/fingerprint
+(``document/identity.py``).
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
-
-from libs.legal_summarizer.cache.manifest import manifest_root
-from libs.legal_summarizer.document.identity import (
-    DocumentIdentity,
-)
-
-SUPPORTED_FORMATS: frozenset[str] = frozenset({"pdf", "docx", "txt"})
 
 
 @dataclass(frozen=True)
@@ -58,8 +41,8 @@ class DocumentBlock:
 
     Attributes:
         block_id: стабильный идентификатор вида ``"b_001"``.
-        block_type: ``"paragraph"`` (PDF и DOCX) | ``"table"`` |
-            ``"text"`` (TXT) | ``"slide"`` (PPTX,
+        block_type: ``"paragraph"`` (любой формат — единая единица) |
+            ``"table"`` | ``"slide"`` (PPTX,
             зарезервировано на будущее).
         content: текст блока.
         char_count: ``len(content)``.
@@ -71,7 +54,7 @@ class DocumentBlock:
         table_index: индекс таблицы в DOCX/PDF (None для не-таблицы).
         ordinal: 0..N-1, canonical document order (invariant #3).
         block_metadata: дополнительная мета (например, ``{"row_count": 5}``
-            для таблицы).
+            для таблицы или ``{"style": "Heading 1"}`` для абзаца DOCX).
     """
 
     block_id: str
@@ -97,12 +80,13 @@ class PhysicalDocument:
     Attributes:
         path: исходный путь.
         format: расширение файла (``pdf`` / ``docx`` / ``txt``).
-        title: из ``extract_structure``.
+        title: из метаданных формата либо из первой содержательной строки.
         size_bytes: размер файла.
         blocks: плоский список ``DocumentBlock`` в canonical document order.
             ``blocks[i].ordinal == i`` (invariant #3).
-        page_count: для PDF — число страниц; для DOCX — оценочное
-            (max ``page_index`` среди blocks, не строгое).
+        page_count: сколько страниц у документа по мнению формата. Формат
+            без страниц объявляет ``1``; ``0`` у файла с текстом означал бы
+            не факт, а дефект расчёта.
     """
 
     path: str
@@ -156,324 +140,7 @@ class PhysicalDocument:
         )
 
 
-def _physical_cache_root(workspace_root: Path | str | None) -> Path:
-    # Единый якорь — :func:`manifest_root` (см. описание дубля workspace/workspace).
-    return manifest_root(workspace_root) / "physical"
-
-
-def _identity_for(path: Path) -> DocumentIdentity:
-    """``DocumentIdentity`` для ``path``."""
-    return DocumentIdentity.from_path(path)
-
-
-def _pick_title_from_text(fmt: str, text: str, path: Path) -> str | None:
-    """Получить title из метаданных файла или первой содержательной строки."""
-    if fmt == "docx":
-        try:
-            from docx import Document
-
-            doc = Document(str(path))
-            if doc.core_properties.title:
-                return doc.core_properties.title.strip()
-        except Exception:
-            pass
-    if fmt == "pdf":
-        try:
-            from pypdf import PdfReader
-
-            reader = PdfReader(str(path))
-            title = (reader.metadata or {}).get("/Title")
-            if title:
-                return str(title).strip()
-        except Exception:
-            pass
-    if fmt == "pptx":
-        try:
-            from pptx import Presentation
-
-            pres = Presentation(str(path))
-            if pres.core_properties.title:
-                return pres.core_properties.title.strip()
-        except Exception:
-            pass
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if len(line) >= 3:
-            return line[:200]
-    return None
-
-
-def _build_structure_dict(path: Path, fmt: str) -> dict[str, Any]:
-    """Построить минимальный dict с полями, нужными PhysicalDocument.
-
-    Поля: ``title``, ``text``, ``begin``, ``end``, ``format``, ``size_bytes``.
-    Аналог ранее существовавшего ``extract_structure`` из парсера.
-    """
-    text = ""
-    text_error: str | None = None
-    try:
-        from libs.office import extract_text
-        text = extract_text(path)
-    except Exception as e:
-        text_error = str(e)
-
-    title = _pick_title_from_text(fmt, text, path)
-    size_bytes = path.stat().st_size
-    info: dict[str, Any] = {
-        "title": title,
-        "format": fmt,
-        "size_bytes": size_bytes,
-    }
-    if text_error:
-        info["text_error"] = text_error
-    return info
-
-
-def _table_to_text(table: list[list[str]]) -> str:
-    """Склеить таблицу в текст с ``|``-разделителем ячеек (как в парсере)."""
-    lines: list[str] = []
-    for row in table:
-        cells = [c.strip() if c else "" for c in row]
-        if any(cells):
-            lines.append(" | ".join(cells))
-    return "\n".join(lines)
-
-
-def _split_page_paragraphs(text: str) -> list[str]:
-    """Страница PDF → абзацы по пустой строке.
-
-    Блок на страницу был неверной единицей: детектор заголовков читает блок
-    целиком и требует, чтобы заголовок стоял в его **начале**, а длинный блок
-    срезает score ниже порога. На странице из 2 800 символов заголовок вида
-    «Статья 5» в середине страницы не виден ни одним из двух путей: он не в
-    начале блока, и длина блока запрещает его вообще. PDF без закладок
-    (``outline`` пуст) не даёт третьего пути, и структура схлопывалась в один
-    корневой узел.
-
-    Разделитель — пустая строка, потому что именно её выдаёт pypdf между
-    абзацами. Страница без пустых строк остаётся одним блоком, то есть
-    поведение для таких файлов не меняется.
-    """
-    if not text.strip():
-        return []
-    paragraphs = [part.strip() for part in re.split(r"\r?\n[ \t]*\r?\n", text)]
-    return [part for part in paragraphs if part]
-
-
-def _iter_pdf_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
-    """PDF → blocks (абзацы страниц). Таблицы встроены между абзацами.
-
-    Исторически блок = страница. Это ломало структуру целиком: см.
-    ``_split_page_paragraphs``. ``page_index`` у абзаца остаётся номером
-    страницы, поэтому ``page_start`` / ``page_end`` чанка и provenance
-    считаются как раньше.
-    """
-    from pypdf import PdfReader
-
-    reader = PdfReader(str(path))
-    blocks: list[DocumentBlock] = []
-    ordinal = 0
-    page_count = len(reader.pages)
-
-    page_to_tables: dict[int, list[list[list[str]]]] = {}
-    try:
-        import pdfplumber
-
-        with pdfplumber.open(str(path)) as pdf:
-            for p_idx, page in enumerate(pdf.pages, start=1):
-                tables = page.extract_tables() or []
-                if tables:
-                    page_to_tables[p_idx] = [
-                        [[cell or "" for cell in row] for row in t] for t in tables
-                    ]
-    except Exception:
-        page_to_tables = {}
-
-    for page_idx, page in enumerate(reader.pages, start=1):
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
-        for paragraph in _split_page_paragraphs(text):
-            blocks.append(
-                DocumentBlock(
-                    block_id=f"b_{ordinal:04d}",
-                    block_type="paragraph",
-                    content=paragraph,
-                    char_count=len(paragraph),
-                    page_index=page_idx,
-                    page_start=page_idx,
-                    page_end=page_idx,
-                    paragraph_index=None,
-                    table_index=None,
-                    ordinal=ordinal,
-                    block_metadata={},
-                )
-            )
-            ordinal += 1
-
-        for t_idx, table in enumerate(page_to_tables.get(page_idx, [])):
-            table_text = _table_to_text(table)
-            if not table_text.strip():
-                continue
-            blocks.append(
-                DocumentBlock(
-                    block_id=f"b_{ordinal:04d}",
-                    block_type="table",
-                    content=table_text,
-                    char_count=len(table_text),
-                    page_index=page_idx,
-                    page_start=page_idx,
-                    page_end=page_idx,
-                    paragraph_index=None,
-                    table_index=t_idx,
-                    ordinal=ordinal,
-                    block_metadata={"row_count": len(table)},
-                )
-            )
-            ordinal += 1
-
-    return blocks, page_count
-
-
-def _iter_docx_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
-    """    DOCX → blocks (paragraphs + tables) в document order.
-
-    Обход ``body.iterchildren()`` даёт честный document order (interleaved
-    paragraphs и tables), а не «сначала все paragraphs, потом все tables».
-
-    python-docx ``doc.paragraphs`` и ``doc.tables`` хранят элементы
-    раздельно (не сохраняя относительный порядок). Чтобы получить
-    реальный документный порядок — идём напрямую по XML-body и
-    диспатчим по тегу ``w:p`` / ``w:tbl``.
-
-    ``sectPr`` (секционные свойства) пропускаем — это не контент.
-
-    ``paragraph_index`` и ``table_index`` — позиции в ``doc.paragraphs``
-    / ``doc.tables`` соответственно (нужны для page-mapping и meta).
-    """
-    from docx import Document
-
-    doc = Document(str(path))
-    blocks: list[DocumentBlock] = []
-    ordinal = 0
-
-    para_to_page: dict[int, int | None] = {}
-    n_paras = len(doc.paragraphs)
-    for p_idx in range(n_paras):
-        para_to_page[p_idx] = None
-
-    # Индексы исходных paragraphs/tables по их XML-объектам (для meta).
-    para_by_xml: dict[int, object] = {id(p._p): (i, p) for i, p in enumerate(doc.paragraphs)}
-    table_by_xml: dict[int, object] = {id(t._tbl): (i, t) for i, t in enumerate(doc.tables)}
-
-    p_idx_seen = 0
-    t_idx_seen = 0
-
-    for child in doc.element.body.iterchildren():
-        local_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-
-        if local_tag == "p":
-            para_obj = para_by_xml.get(id(child))
-            if para_obj is None:
-                continue
-            p_idx, para = para_obj
-            p_idx_seen += 1
-            text = (para.text or "").strip()
-            if not text:
-                continue
-            page_idx = para_to_page.get(p_idx)
-            blocks.append(
-                DocumentBlock(
-                    block_id=f"b_{ordinal:04d}",
-                    block_type="paragraph",
-                    content=text,
-                    char_count=len(text),
-                    page_index=page_idx,
-                    page_start=page_idx,
-                    page_end=page_idx,
-                    paragraph_index=p_idx,
-                    table_index=None,
-                    ordinal=ordinal,
-                    block_metadata={"style": para.style.name if para.style else ""},
-                )
-            )
-            ordinal += 1
-
-        elif local_tag == "tbl":
-            table_obj = table_by_xml.get(id(child))
-            if table_obj is None:
-                continue
-            t_idx, table = table_obj
-            t_idx_seen += 1
-            rows: list[list[str]] = []
-            for row in table.rows:
-                rows.append([cell.text.strip() for cell in row.cells])
-            table_text = _table_to_text(rows)
-            if not table_text.strip():
-                continue
-            blocks.append(
-                DocumentBlock(
-                    block_id=f"b_{ordinal:04d}",
-                    block_type="table",
-                    content=table_text,
-                    char_count=len(table_text),
-                    page_index=None,
-                    page_start=None,
-                    page_end=None,
-                    paragraph_index=None,
-                    table_index=t_idx,
-                    ordinal=ordinal,
-                    block_metadata={"row_count": len(rows)},
-                )
-            )
-            ordinal += 1
-
-        # sectPr / другие — пропускаем.
-
-    page_count = max((b.page_index or 0) for b in blocks) if blocks else 1
-    return blocks, page_count
-
-
-# NOTE: fake pagination (каждые N параграфов = новая page) УДАЛЁН в этапе
-# Integration & Simplification. ``para_to_page[p_idx] = None`` теперь
-# возвращает None для всех параграфов — лучше отсутствие pagination, чем
-# ложная точность (использовалось только для DOCX без как page-extracting
-# встроенной — см. разбор архитектуры, фикс #13).
-
-
-def _iter_txt_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
-    """TXT → один block."""
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("utf-8", errors="replace")
-    blocks = [
-        DocumentBlock(
-            block_id="b_0000",
-            block_type="text",
-            content=text,
-            char_count=len(text),
-            page_index=None,
-            page_start=None,
-            page_end=None,
-            paragraph_index=None,
-            table_index=None,
-            ordinal=0,
-            block_metadata={},
-        )
-    ]
-    return blocks, 1
-
-
-# NOTE: ``load_physical_document`` удалён.
-# Единственная production загрузка — ``DocumentLoader().load(path)``
-# (см. ``document_loader.py``).
-
-
 __all__ = [
     "DocumentBlock",
     "PhysicalDocument",
-    "SUPPORTED_FORMATS",
 ]

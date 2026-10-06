@@ -964,7 +964,20 @@ class TestOperationIdentityMatchesDomain:
         # Каждый следующий вызов обязан продвигать разбор, а не начинать его
         # заново: если прогресс не растёт, оплаченный первый батч
         # переплачивается на каждом шаге.
-        for step in range(2, 10):
+        #
+        # Потолок шагов берётся из измеренного объёма работы, а не из
+        # константы. Раньше он был равен 9 и хватало: документ без структуры
+        # разбирался стратегией ``map_flat``. Теперь ``doc.txt`` разбирается
+        # на абзацы, пронумерованные строки читаются как заголовки, и документ
+        # уходит в ``map_hierarchical`` — с большим числом батчей. Лимит
+        # батчей на вызов при ``execution_timeout_sec=40`` равен
+        # ``floor(40 × 0.6 ÷ 20) = 1``, то есть на батч нужен отдельный вызов,
+        # и потолок обязан это знать. Константа здесь означала бы «этот
+        # документ обязан уложиться в 9 вызовов», то есть проверяла бы не
+        # накопление, а объём плана.
+        total_batches = int(first["stats"].get("context_batches_total") or 0)
+        max_steps = total_batches + 3
+        for step in range(2, max_steps + 1):
             paid.clear()
             last = json.loads(
                 tool.handler(_ctx(SESSION, f"r{step}"), confirmed=True, **arguments)
@@ -979,7 +992,10 @@ class TestOperationIdentityMatchesDomain:
             if last["status"] != "requires_continuation":
                 break
         else:
-            pytest.fail(f"разбор не завершился за 9 шагов: {last}")
+            pytest.fail(
+                f"разбор не завершился за {max_steps} шагов при "
+                f"{total_batches} батчах: {last}"
+            )
 
         assert last["status"] == "completed", last
 

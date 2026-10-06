@@ -36,7 +36,8 @@ Layout на диске (под ``document_dir(document_id)``)::
 переиспользования нет.
 
 Snapshot пишется атомарно: staging dir + ``Path.rename``. ``_complete.marker``
-создаётся последним. Без marker snapshot считается неполным (cache miss).
+создаётся последним. Без marker — и при marker иной версии (см.
+``SNAPSHOT_VERSION``) — snapshot считается неполным (cache miss).
 
 API: instance ``DocumentCache(workspace_root, session_key)``. ``workspace_root``
 и ``session_key`` — это конфигурация cache, общая для всех операций в
@@ -63,7 +64,7 @@ from typing import Any
 
 from libs.enterprise_common.session.security import session_dir_name
 
-__all__ = ["DocumentCache"]
+__all__ = ["DocumentCache", "SNAPSHOT_VERSION"]
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -85,6 +86,42 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+#: Версия snapshot'а документа (``_complete.marker`` → ``version``).
+#:
+#: Поле было в маркере с самого начала, но ``is_complete`` проверял только
+#: наличие файла и версию не читал. Поэтому изменение **смысла** payload'а на
+#: уже закэшированном документе оставалось невидимым: снимок, записанный до
+#: правки, продолжал считаться пригодным и отдавался как есть.
+#:
+#: Именно это случилось с единицей блока. Правка «блок = абзац для любого
+#: формата» (вместо блока-страницы у PDF и одного блока на весь файл у TXT)
+#: иначе не дошла бы до документов, разобранных ранее, — а это ровно те
+#: документы, ради которых правка делается.
+#:
+#: Поднять версию — обязанность любого изменения формы или смысла данных
+#: snapshot'а, даже если ключи файлов на диске не меняются.
+#:
+#: v2 — блок = абзац для всех форматов (``_paragraphs_from_plain_text``);
+#: ``block_type`` не бывает ``"text"``.
+SNAPSHOT_VERSION = 2
+
+
+def _marker_version(path: Path) -> int | None:
+    """Версия из ``_complete.marker`` либо ``None``.
+
+    ``None`` — если маркера нет, он не читается или ``version`` не является
+    целым числом. Любое «не разобралось» равносильно старому снимку: читать
+    его нельзя, поэтому вызывающий получает cache miss.
+    """
+    data = _read_json(path)
+    if data is None:
+        return None
+    raw = data.get("version")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw
 
 
 #: Корень платформы. Используется только как каталог данных по умолчанию,
@@ -171,12 +208,22 @@ class DocumentCache:
     # ──────────────────────────────────────────────────────────────────────
 
     def is_complete(self, document_id: str) -> bool:
-        """``True`` если snapshot существует и marker на месте.
+        """``True`` если snapshot существует, marker на месте и его версия
+        совпадает с :data:`SNAPSHOT_VERSION`.
 
-        Дешёвая проверка (stat по marker'у). Не читает payload — это
-        прерогатива :meth:`read_snapshot`.
+        Проверка версии обязательна, а не формальность: ``document_id`` —
+        адрес **содержимого** файла (``DocumentIdentity``), поэтому правка
+        кода разбора не меняет ключ и сама по себе не инвалидирует старый
+        снимок. Без проверки версии правка формы данных была бы не видна на
+        уже разобранных документах.
+
+        Чтение маркера вместо одного ``stat`` — осознанная плата: файл
+        крошечный, зато «snapshot есть» перестаёт означать «snapshot пригоден».
         """
-        return self._marker_path(document_id).is_file()
+        marker = self._marker_path(document_id)
+        if not marker.is_file():
+            return False
+        return _marker_version(marker) == SNAPSHOT_VERSION
 
     # ──────────────────────────────────────────────────────────────────────
     # Snapshot read/write/invalidate.
@@ -259,7 +306,7 @@ class DocumentCache:
             (staging / "_complete.marker").write_text(
                 json.dumps(
                     {
-                        "version": 1,
+                        "version": SNAPSHOT_VERSION,
                         "completed_at": datetime.now(UTC).isoformat(),
                     },
                     ensure_ascii=False,
@@ -268,6 +315,16 @@ class DocumentCache:
             )
 
             target_dir.parent.mkdir(parents=True, exist_ok=True)
+
+            # Устаревший снимок (marker отсутствует или версия не та)
+            # контрактом «complete → protected» не защищён, но заменить его
+            # нельзя: ``os.replace`` поверх **непустого** каталога на Windows
+            # не работает (WinError 5), хотя на POSIX работает. Без этого
+            # первый же разбор после подъёма ``SNAPSHOT_VERSION`` падал бы на
+            # каждом документе, чей прежний снимок остался на диске, — то
+            # есть ровно там, где версионирование должно было помочь.
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
 
             # Атомарный install/replace через ``os.replace`` (POSIX + Windows).
             # Устраняет TOCTOU window, в котором параллельный writer мог
