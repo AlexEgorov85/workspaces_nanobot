@@ -38,7 +38,7 @@
 
 ### Requirement: Единый источник конфигурации
 
-Система ДОЛЖНА читать конфигурацию векторного индекса только из `gateway.vector.index.indexes.*` в `config.json`.
+Система MUST читать конфигурацию векторного индекса только из `gateway.vector.index.indexes.*` в `config.json`.
 
 #### Scenario: Конфигурация индекса
 
@@ -47,7 +47,7 @@
 
 ### Requirement: Storage table зарегистрирован через infra API
 
-Система ДОЛЖНА сохранять векторные embeddings в таблице, зарегистрированной через `lib.core.infra_registration.register_vector_storage`.
+Система MUST сохранять векторные embeddings в таблице, зарегистрированной через `lib.core.infra_registration.register_vector_storage`.
 
 #### Scenario: Таблица векторного хранилища
 
@@ -56,7 +56,7 @@
 
 ### Requirement: FAISS-backed
 
-Система ДОЛЖНА строить векторные индексы используя FAISS, вызываемый через `mcp-platform/libs/vectors/indexing.py:74` (`build_faiss_index`) и сборщик capability `mcp-platform/libs/vectors/builder.py:239` (`VectorBuilder`). Агентские точки входа `tools/build_vectors.py` и `lib/services/vector_index_service.py` **сняты** — в дереве агента их нет.
+Система MUST строить векторные индексы используя FAISS, вызываемый через `mcp-platform/libs/vectors/indexing.py:74` (`build_faiss_index`) и сборщик capability `mcp-platform/libs/vectors/builder.py:239` (`VectorBuilder`). Агентские точки входа `tools/build_vectors.py` и `lib/services/vector_index_service.py` **сняты** — в дереве агента их нет.
 
 #### Scenario: Сборка индекса
 
@@ -65,7 +65,7 @@
 
 ### Requirement: Единый путь доступа
 
-Система ДОЛЖНА предоставлять vector search исключительно через `CacheProvider.search_vector`.
+Система MUST предоставлять vector search исключительно через `CacheProvider.search_vector`.
 
 #### Scenario: Skill выполняет vector search
 

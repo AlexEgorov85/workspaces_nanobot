@@ -13,7 +13,7 @@
 
 ### Requirement: PostgreSQL — источник истины
 
-Система ДОЛЖНА рассматривать PostgreSQL как единственный источник истины для всех кэшируемых таблиц.
+Система MUST рассматривать PostgreSQL как единственный источник истины для всех кэшируемых таблиц.
 
 #### Scenario: обновление данных
 
@@ -71,7 +71,7 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 ### Requirement: единый интерфейс доступа
 
-Система ДОЛЖНА предоставлять доступ к кэшу только через `CacheProvider`. Прямой доступ к DuckDB-файлу из кода Skills запрещён.
+Система MUST предоставлять доступ к кэшу только через `CacheProvider`. Прямой доступ к DuckDB-файлу из кода Skills запрещён.
 
 #### Scenario: Skill запрашивает данные
 
@@ -81,7 +81,7 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 ### Requirement: vector search только через `CacheProvider.search_vector`
 
-Система ДОЛЖНА выполнять vector search исключительно через `CacheProvider.search_vector`. Прямая загрузка FAISS-индексов из Skills запрещена.
+Система MUST выполнять vector search исключительно через `CacheProvider.search_vector`. Прямая загрузка FAISS-индексов из Skills запрещена.
 
 #### Scenario: Skill выполняет vector search
 
@@ -91,7 +91,7 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 ### Requirement: контроль целостности индексов
 
-Система ДОЛЖНА проверять signature индекса (модель эмбеддингов, размерность, колонки, chunk-параметры) перед использованием и поднимать `IndexIntegrityError` при несовпадении.
+Система MUST проверять signature индекса (модель эмбеддингов, размерность, колонки, chunk-параметры) перед использованием и поднимать `IndexIntegrityError` при несовпадении.
 
 #### Scenario: stale индекс
 
