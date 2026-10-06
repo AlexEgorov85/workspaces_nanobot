@@ -355,7 +355,7 @@ context compaction и остаётся основным источником д�
 
 Система SHALL задокументировать в `workspace/TOOLS.md` JSON-схему `payload` для
 действующих типов событий. Перечень SHALL соответствовать словарю типов
-платформы (`libs/enterprise_common/eventing/types.py`).
+платформы (`mcp-platform/libs/enterprise_common/eventing/types.py`).
 
 Префиксы `agent.`, `llm.`, `tool.`, `artifact.`, `quality.` SHALL использоваться
 вместе с конкретным именем (`tool.started`, `agent.compacted`,

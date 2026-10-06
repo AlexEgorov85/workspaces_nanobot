@@ -568,7 +568,7 @@ event_type для «активации Skill». Skill в
 #### Scenario: Skill script execution через tools.exec порождает tool_call, не skill_call
 
 - **WHEN** агент запускает Skill-скрипт через
-  `tools.exec("python skills/audit_analyzer/scripts/cli.py ...")`
+  `tools.exec("python workspace/skills/audit_analyzer/SKILL.md ...")`
 - **THEN** `DbLoggingService` SHALL получить
   `LogEvent` с `event_type="tool_call"`,
   `name="exec"`, `actor="agent"`, payload

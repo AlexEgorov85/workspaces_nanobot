@@ -23,16 +23,18 @@ Lets the runtime safely recover sessions whose JSONL source is older than the Po
 - read-only маркер сессии и запрет `save()` по нему;
 - backup-and-restore с атомарным swap и copy-and-unlink на разных ФС;
 - ограничение размера восстановления (100 МБ) и ротация бэкапов;
-- `tools/recover_stale_sessions.py` — файла нет.
+- admin tool восстановления — путь `tools/recover_stale_sessions.py` **в дереве
+  не найден** и не существует ни в одной ветке.
 
 То есть спека описывает несуществующий **слой действий** поверх уже
 работающего слоя **детектов**.
 
 **Как это произошло.** Change `2026-09-27-session-recovery` лежит в
 `openspec/changes/archive/` со всеми задачами, отмеченными `[x]`, включая
-«Написать admin tool `tools/recover_stale_sessions.py`» и «`SessionRecoveryService`
-создан в `ApplicationContext.create()`». Ни того, ни другого в репозитории нет:
-`git log --all -- tools/recover_stale_sessions.py` пуст — файл не был
+«Написать admin tool `tools/recover_stale_sessions.py`» — **путь снят, в дереве
+не найден** — и «`SessionRecoveryService`
+создан в `ApplicationContext.create()`». Ни того, ни другого в репозитории **не
+существует**: `git log --all -- tools/recover_stale_sessions.py` пуст — файл не был
 закоммичен ни разу, то есть change заархивирован как выполненный без кода.
 
 Следствие для читателя спеки: не считать её требования действующими. До
@@ -124,9 +126,9 @@ The system SHALL observe when the JSONL source is significantly newer than the c
 The admin tool SHALL list every session that would be recovered in the configured mode and SHALL NOT mutate any file when invoked with `--dry-run`. The admin tool SHALL obtain its candidate list from the same staleness detector used by the runtime.
 
 #### Scenario: Dry-run reports candidates only
-- **WHEN** the operator runs `tools/recover_stale_sessions.py --dry-run`
-- **THEN** the tool prints session keys, JSONL and PG timestamps, and the mode that would apply
-- **AND** no JSONL or backup file is created, moved, or deleted
+- **WHEN** оператор запускает admin tool восстановления с `--dry-run` — **путь снят, в дереве не найден** (`tools/recover_stale_sessions.py`): сценарий описывает намерение, а не существующий исполняемый файл
+- **THEN** инструмент печатает ключи сессий, метки времени JSONL и PG, и режим, который применился бы
+- **AND** ни один JSONL- или backup-файл не создаётся, не перемещается и не удаляется
 
 ## Responsibility
 
@@ -173,7 +175,8 @@ The admin tool SHALL list every session that would be recovered in the configure
 - **всё, что требования называют «режимом восстановления»** — три режима
   не объявлены ни в `config.json`, ни в
   `lib/core/project_settings.py`; их негде выбрать;
-- **`tools/recover_stale_sessions.py`** — файла нет (`Test-Path: False`);
+- **admin tool восстановления** — **путь снят, в дереве не найден**:
+  `tools/recover_stale_sessions.py` (`Test-Path: False`, `git log --all` пуст);
   требование «Admin dry-run» ссылается на несуществующий инструмент;
 - **атомарный swap, бэкапы, ротация** — нет ни файла, ни функции;
 - **ограничение 100 МБ** — не объявлено ни в одном файле;
@@ -197,7 +200,8 @@ The admin tool SHALL list every session that would be recovered in the configure
   «создан в `ApplicationContext.create()`», чего не произошло);
 - перечисление режимов `detect-only` / `read-only-fallback` /
   `backup-and-restore` — ни как констант, ни как значений конфигурации;
-- функция `tools/recover_stale_sessions.py` и её точка входа `--dry-run`.
+- admin tool восстановления и его точка входа `--dry-run` — **путь снят, в
+  дереве не найден** (`tools/recover_stale_sessions.py`), функции нет.
 
 Единственная наблюдаемая поверхность, которая относится к предмету по
 существу, — **детект**, и он принадлежит другой спеке

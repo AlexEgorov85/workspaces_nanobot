@@ -6,7 +6,7 @@
   // Этот файл может содержать ТОЛЬКО эти ключи — иначе
   // validate_profile_overlay() выбросит ConfigurationError на старте.
   //
-  // prod-конфиг живёт в project.json (без оверлеев).
+  // Базовый profile — в `config.json`; оверлей этого файла. Операторский prod-оверлей агентом не обявляется: код, указывающий mode != prod.
   // См. docs/PROFILES.md.
 
   "channels": {

@@ -524,8 +524,8 @@ consistency, не строгий момент публикации). Прямо�
 - `nanobot.agent.AgentHook` — базовый класс (`lib/hooks/repeat_guard_hook.py:59`);
 - `lib.services.db_logging_service.try_log_event` + `LogEvent` — журнал,
   импортируется лениво внутри `_publish` (`:270`);
-- `lib.services.runtime_patcher.py::patch_repeat_guard_block` — приём отказа;
-- `lib.core.agent_factory.py` — подключение инстанса (`:174-182`);
+- `lib/services/runtime_patcher.py:1211` (`patch_repeat_guard_block`) — приём отказа;
+- `lib/core/agent_factory.py` — подключение инстанса (`:174-182`);
 - stdlib: `json`, `hashlib`, `deque`, `math`, `PurePath`.
 
 ## Configuration

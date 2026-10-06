@@ -7,10 +7,14 @@
 Термины, чтобы не было двух ответов на один вопрос:
 
 - **воркер** — поток пула, владеющий ровно одним соединением
-  (`libs/enterprise_data/db.py::_Worker`);
-- **аудитория** — признак «кто инициировал работу», объявлен в коде
-  константами `AUDIENCE_MODEL` / `AUDIENCE_RUNTIME`
-  (`servers/enterprise/capabilities/data/service/main.py:49-50`).
+  (`mcp-platform/libs/enterprise_data/db.py:482`, `class _Worker`; соединение
+  заводится в `:493`);
+- **аудитория** — признак «кто инициировал работу». Имена определены ровно
+  в одном месте: `JOB_AUDIENCE_MODEL` / `JOB_AUDIENCE_RUNTIME`
+  (`mcp-platform/libs/enterprise_data/audience.py:28,31`), а
+  `AUDIENCE_MODEL` / `AUDIENCE_RUNTIME` — их псевдонимы в
+  `mcp-platform/servers/enterprise/capabilities/data/service/main.py:63-64`
+  (импорт из `audience.py` — `:41-44`).
   Аудитория **уже** решает вопрос прав (`_require_runtime`); этим change
   она получает второе значение — к какой очереди работа принадлежит;
 - **зарезервированный воркер** — воркер, который берёт только
@@ -33,8 +37,8 @@
 Границы контракта:
 
 - Реестр объявляется в модуле
-  `servers/enterprise/capabilities/data/service/registry.py` под именем
-  `OPERATION_AUDIENCE: dict[str, str]`. Ключ — имя метода `DataService`,
+  `mcp-platform/servers/enterprise/capabilities/data/service/registry.py:33`
+  под именем `OPERATION_AUDIENCE: dict[str, str]`. Ключ — имя метода `DataService`,
   значение — `AUDIENCE_RUNTIME` или `AUDIENCE_MODEL`.
 - **Сигнатура метода, трогающего пул, обязана объявлять аудиторию явно:**
   `audience: str = AUDIENCE_RUNTIME` (или `AUDIENCE_MODEL`). Метод без
@@ -60,7 +64,7 @@
 
 - **КОГДА** добавлен метод `DataService`, вызывающий `self.submit(...)`,
   но не добавлен в `OPERATION_AUDIENCE`
-- **ТОГДА** страж `tests/test_db_job_classes.py` SHALL упасть с указанием
+- **ТОГДА** страж `mcp-platform/tests/test_db_job_classes.py` SHALL упасть с указанием
   имени метода
 - **И** сервер SHALL NOT подниматься с таким реестром (проверка при
   старте, не только в тестах)
@@ -87,12 +91,16 @@
 - `def submit(self, job: Any, *, audience: str) -> Any`
 - `def submit_transaction(self, job: Any, *, audience: str) -> Any`
 
-Причина историческая и конкретная: сегодня дефолт стоит на
-`AUDIENCE_RUNTIME` (`data/service/main.py:663,680`), а вызов сброса
-журнала `_write_events` аудиторию **не передаёт вовсе** — то есть
-сегодня он получает рантайм по счастливой случайности. Как только
-появится третий класс или изменится смысл дефолта, такое молчание
-станет ошибкой. Обязательный параметр делает его невозможным.
+Причина историческая и конкретная: дефолт стоял на
+`AUDIENCE_RUNTIME` в обеих сигнатурах, а вызов сброса журнала
+`_write_events` аудиторию **не передавал вовсе** (функция отдаётся как
+колбэк буфера — `mcp-platform/servers/enterprise/capabilities/data/service/main.py:509`),
+то есть получал рантайм по счастливой случайности. Как только
+появился бы третий класс или изменился смысл дефолта, такое молчание
+стало бы ошибкой. Обязательный параметр делает его невозможным; сейчас
+объявление обязательности стоит в
+`mcp-platform/servers/enterprise/capabilities/data/service/main.py:696`
+(`submit`) и `:726` (`submit_transaction`).
 
 #### Сценарий: Вызов без аудитории невозможен
 
@@ -113,7 +121,7 @@
 
 Обоснование: подбор воркера по признаку работы уже есть в коде — аренда
 берётся только тем воркером, у которого совпал `lease_id`
-(`db.py:585-599`). Обобщение на аудиторию не вводит нового механизма.
+(`db.py:825`, :851-869). Обобщение на аудиторию не вводит нового механизма.
 
 #### Сценарий: Зарезервированный воркер не берёт работу модели
 
@@ -204,7 +212,7 @@
 - Счётчик отказов обязателен и обязан быть виден в `get_stats()`.
 
 Смысл: сейчас `pool.run(...)` ждёт результат без таймаута
-(`db.py:1049`), а `queue_maxsize: 10000` разрешает десять тысяч
+(`db.py:1561` — модульный `run`), а `queue_maxsize: 10000` разрешает десять тысяч
 ожидающих на четыре места. Ожидание без предела не выражает приоритет,
 а прячет его.
 
@@ -251,7 +259,9 @@
 
 `statement_timeout` выставляется на сессии по аудитории работы и
 сбрасывается в `finally`, как это уже делается в
-`DataService._guarded` (`data/service/main.py:752-760`).
+`DataService._guarded`
+(`mcp-platform/servers/enterprise/capabilities/data/service/main.py:804`,
+блок выставления и сброса — `:812-819`).
 
 - Значение для аудитории объявляется в `platform.json → job_classes`.
 - Существующий `data.statement_timeout_ms` остаётся **значением по
@@ -316,7 +326,8 @@
 - Сброс SHALL использовать неблокирующую постановку: нет места — тик
   пропускается, батч возвращается в буфер, счётчик отказов растёт.
   Принцип «переполнение — дроп, а не блокировка» уже объявлен для буфера
-  (`data/service/writer.py:9`) и обязан быть доведён до самого сброса:
+  (`mcp-platform/servers/enterprise/capabilities/data/service/writer.py:9-11`,
+  docstring модуля) и обязан быть доведён до самого сброса:
   неблокирующий вход есть, а запись — блокирующая.
 
 #### Сценарий: Батч журнала уходит одной операцией
@@ -334,23 +345,25 @@
 
 ### Requirement: Обход пула закрыт стражем
 
-Страж `tests/test_architecture_boundaries.py` (правило 8) уже запрещает
-создание ресурса в обход владельца. Это change расширяет его тремя
-правилами:
+Страж `mcp-platform/tests/test_architecture_boundaries.py` (правило 8,
+`:274`) уже запрещает создание ресурса в обход владельца. Это change
+расширяет его тремя правилами:
 
 1. **Приватный API пула закрыт.** Ни один производственный модуль вне
-   `libs/enterprise_data` не должен ссылаться на `_Job`, `DBManager`,
+   `mcp-platform/libs/enterprise_data` не должен ссылаться на `_Job`,
+   `DBManager`,
    `_submit`, `_get_manager`, `_acquire_lease`, `PoolTimeoutError`.
-   Исключение одно и объявленное: `servers/enterprise/server.py` вызывает
-   `set_pool_config` — это штатный запуск.
+   Исключение одно и объявленное:
+   `mcp-platform/servers/enterprise/server.py:157-162` вызывает
+   `set_pool_config` / `set_job_class_config` — это штатный запуск.
 2. **Сырое соединение наружу не отдаётся.** `pool.run(fn)` сегодня
    отдаёт вызывающему сырой `psycopg2`-conn, тогда как аренда отдаёт
    прокси (`_ConnectionProxy`). Публичные точки входа обязаны отдавать
    прокси, и `psycopg2` не должен подниматься выше
-   `libs/enterprise_data`.
+   `mcp-platform/libs/enterprise_data`.
 3. **Классификация не обходится.** Правила 1 и 2 из
-   `test_db_job_classes.py`: покрытие реестра и совпадение класса в
-   сигнатуре с реестром.
+   `mcp-platform/tests/test_db_job_classes.py`: покрытие реестра и
+   совпадение класса в сигнатуре с реестром.
 
 Признание границы: текстовый страж ловит обход **ресурса** и обход
 **приватного API**. Обход **классификации** — это не текст, а семантика,
@@ -375,14 +388,14 @@
 
 Секция `pool` в `platform.json` остаётся полной: неполный набор — ошибка
 конфигурации, а не добор из кода (проверяет
-`tests/test_pool_settings_seam.py`). Этот change добавляет в контракт
+`mcp-platform/tests/test_pool_settings_seam.py`). Этот change добавляет в контракт
 пула один ключ — `reserved_workers`, — и вводит **новую секцию**
 `job_classes`, которая обязана быть полной так же.
 
 Соответствие «контракт пула = список настроек» сохраняется: новый ключ
-появляется одновременно в `_POOL_SPEC` (`db.py:92`),
-`POOL_SETTING_KEYS` (`libs/enterprise_common/settings.py`) и в
-`platform.json`. Значений в коде не появляется — этого требует
+появляется одновременно в `_POOL_SPEC` (`db.py:108`),
+`POOL_SETTING_KEYS` (`mcp-platform/libs/enterprise_common/settings.py:1149`) и в
+`mcp-platform/platform.json`. Значений в коде не появляется — этого требует
 существующий страж `test_no_pool_values_are_declared_in_code`.
 
 #### Сценарий: Неполная секция job_classes
@@ -406,7 +419,7 @@
   пределы `queue_maxsize`/`wait_sec`, отказ по глубине, аренда соединения
   под транзакцию.
 - **Снаружи:** классификация конкретных операций объявляется вызывающей
-  стороной (`servers/enterprise/capabilities/data/service/registry.py`),
+  стороной (`mcp-platform/servers/enterprise/capabilities/data/service/registry.py:33`),
   пул о ней не знает; права по аудитории (`_require_runtime`) — отдельная
   ось; сам PostgreSQL и DSN.
 
@@ -467,9 +480,9 @@
   соединением (`db.py:482-493`).
 - `libs.enterprise_data.audience` — имена и множество аудиторий.
 - `libs.enterprise_common.settings` — `Settings` и оверлей профиля.
-- `servers/enterprise/server.py::_apply_pool_settings` (`server.py:144`) —
-  единственный, кто применяет обе секции; вызывается при старте
-  (`server.py:607`).
+- `mcp-platform/servers/enterprise/server.py::_apply_pool_settings`
+  (`server.py:144`) — единственный, кто применяет обе секции; вызывается
+  при старте (`server.py:607`).
 - Никаких значений настроек из кода: `_POOL_SPEC` и `_JOB_CLASS_SPEC`
   хранят только ключи и типы.
 
@@ -538,7 +551,7 @@
   состоянии пула.
 - Резерв выражен числом воркеров, а не счётчиком «занято моделью»:
   воркер, который не берёт `model`, не может отдать его ни при каком
-  состоянии пула (`db.py:487-491`).
+  состоянии пула (`db.py:898-902`).
 - Значения настроек живут только в `platform.json`; `_POOL_SPEC` и
   `_JOB_CLASS_SPEC` — контракт ключей и типов, а не значения
   (`db.py:202-218`).
@@ -561,12 +574,13 @@
 
 ## Consumers
 
-- `servers/enterprise/server.py::_apply_pool_settings` (`server.py:144`,
-  вызов `:607`) — единственный применяющий обе секции.
-- `servers/enterprise/capabilities/data/service/` — объявляет аудиторию в
-  сигнатуре операций и берёт `_require_runtime`.
-- Аудитории импортируются в `capabilities/data/service/main.py` из
-  `audience.py`, а не определяются там.
+- `mcp-platform/servers/enterprise/server.py::_apply_pool_settings`
+  (`server.py:144`, вызов `:607`) — единственный применяющий обе секции.
+- `mcp-platform/servers/enterprise/capabilities/data/service/` — объявляет
+  аудиторию в сигнатуре операций и берёт `_require_runtime`.
+- Аудитории импортируются в
+  `mcp-platform/servers/enterprise/capabilities/data/service/main.py`
+  (`:41-44`) из `audience.py`, а не определяются там.
 - Оператор — через `get_stats()` (`db.py:1518`): счётчики занятости и
   ожидания по классам.
 

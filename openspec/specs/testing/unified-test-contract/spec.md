@@ -111,7 +111,7 @@
 
 - **WHEN** платформенная джоба CI применяет `-m "not live and not integration"`
 - **THEN** отсекаются `live`-тесты обеих баз; в частности, отсекаются
-  8 тестов `tests/test_live_stdio_contract.py`; если на платформе не
+  8 тестов `mcp-platform/tests/test_live_stdio_contract.py`; если на платформе не
   осталось ни одного `live`-теста, это расхождение со словарём, а не
   повод считать фильтр «работающим вхолостую»
 
@@ -608,10 +608,10 @@ SHALL быть удалены, а не оставлены «на будущее�
 
 | Маркер | Что означает | Гейт | Применяется |
 |---|---|---|---|
-| `live` | реальный gateway / БД / LLM | `NANOBOT_LIVE_E2E=1` | агент: `tests/test_gateway_live_media_e2e.py`, `tests/test_startup_schema_validation_live.py`; платформа: `tests/test_live_stdio_contract.py` |
+| `live` | реальный gateway / БД / LLM | `NANOBOT_LIVE_E2E=1` | агент: `tests/test_gateway_live_media_e2e.py`, `tests/test_mcp_operations_live.py`, `tests/test_startup_schema_validation_live.py`; платформа: `mcp-platform/tests/test_live_stdio_contract.py` |
 | `integration` | worker pool на реальной БД | `NANOBOT_INTEGRATION=1` + `DATABASE_URL` | агент: `tests/integration/test_postgres_channel_lifecycle_stress.py` |
 | `contract` | проверки совместимости (upstream nanobot) | не гейтится, выполняется всегда | агент: `tests/contract/` |
-| `benchmark` | офлайн-базовая линия на синтетических фикстурах | не гейтится, опционален (`-m benchmark`) | агент: `tests/test_history_search_benchmark.py` |
+| `benchmark` | офлайн-базовая линия на синтетических фикстурах | не гейтится, опционален (`-m benchmark`) | маркер объявлен в обоих `pyproject.toml`, но **не применён ни к одному тесту**: `pytest -m benchmark` собирает 0 тестов. Ближайший офлайн-набор — `tests/benchmarks/test_quality_benchmark.py` (4 теста, маркера не несёт, собирается обычным прогоном) |
 
 **Env-гейты:**
 

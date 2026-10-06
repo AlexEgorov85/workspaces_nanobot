@@ -52,8 +52,14 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 #### Scenario: Профили не переопределяют gateway.cache.local_path
 
-- **КОГДА** `profiles/test.jsonc` и `profiles/prod.jsonc` имеют разные значения `gateway.cache.local_path`
+- **КОГДА** профили задают разные значения `gateway.cache.local_path`
 - **ТОГДА** ConfigurationResolver MUST reject это как ошибку конфигурации
+
+Сегодня у сценария нет предмета: `profiles/prod.jsonc` в дереве агента **не
+объявлен** (каталог `profiles/` содержит только `profiles/test.jsonc`, и ключа
+`gateway.cache.local_path` в нём нет), а путь снимка объявляет платформа —
+`mcp-platform/platform.json → data.snapshot_path` (`platform.json:99`). Правило
+сохранено как контракт конфигурации, а не как описание существующих файлов.
 
 #### Scenario: enable_audit=False НЕ отключает cache
 
@@ -258,8 +264,10 @@ Concrete adapter (например, `DuckDbCacheStore`) сам реализуе�
 CacheProvider отвечает за:
 
 - предоставление SQL-кэша для read-mostly данных из PostgreSQL
-- инкрементальную синхронизацию данных из PostgreSQL в DuckDB
-- предоставление единого интерфейса доступа (`query_sql`, `get_schema`, `explain`, `search_vector`, `preload_indexes`, `check_stale`, `refresh`)
+- инкрементальную синхронизацию данных из PostgreSQL в DuckDB — снята
+  (`PgDuckDbSyncService` **не перенесён**), осталась только стадия загрузки
+  снимка силами `SnapshotLoadService`
+- предоставление единого интерфейса доступа (`query_sql`, `get_schema`, `explain`, `search_vector`, `preload_indexes`, `is_ready`, `close`)
 - управление snapshot'ами кэша (атомарная публикация)
 - прогрев FAISS-индексов в память и выполнение vector search
 - контроль целостности векторных индексов (`IndexIntegrityError`)
@@ -296,17 +304,26 @@ CacheProvider отвечает за:
 
 ## Public Contract
 
-`CacheProvider` (ABC в `lib/services/cache_provider.py`) предоставляет:
+`CacheProvider` (ABC в `mcp-platform/libs/enterprise_data/snapshot/contracts.py:195`;
+агентский `lib/services/cache_provider.py` **снят**) предоставляет:
 
 - `is_ready() -> bool` — готов ли кэш к запросам
-- `refresh() -> bool` — создать/обновить SQL-кэш из PostgreSQL
-- `check_stale() -> dict` — сверить метки изменений у таблиц кэша с источником
 - `preload_indexes() -> list[dict]` — прогреть FAISS-индексы в память
 - `search_vector(query, index_name, index_path, top_k, threshold) -> list[SearchResult]` — семантический поиск
 - `query_sql(sql, params) -> dict` — выполнить SELECT-запрос к SQL-кэшу
 - `explain(sql) -> dict` — EXPLAIN без выполнения
 - `get_schema(schema_name, table_names) -> dict` — структура таблиц кэша
 - `close()` — закрыть открытые ресурсы
+
+`refresh()` и `check_stale()` в ABC **нет**: они были методами снятого агентского
+`CacheProvider`, а загрузку снимка теперь делает отдельная стадия —
+`SnapshotLoadService` (`mcp-platform/libs/enterprise_data/loader.py:149`); она же
+фиксирует время актуальности снимка (`SnapshotLoadResult.finished_at`,
+`per_table[*].max_track`, `mcp-platform/libs/enterprise_data/loader.py:128-132`).
+Роль чтения и роль записи разведены:
+`CacheProvider` (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:195`) и
+`CacheIngestion` (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:285`),
+объединённые в `CacheStore` (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:358`).
 
 Дополнительные типы:
 
@@ -324,7 +341,7 @@ CacheProvider отвечает за:
 Хранилище не создаётся само — его открывает единственная фабрика
 `open_snapshot_store(path, mode=READ_ONLY, *, schema="main", tables=None,
 vector_db_table="", index_accessor=None, verify=True)`
-(`libs/enterprise_data/snapshot/store.py`):
+(`mcp-platform/libs/enterprise_data/snapshot/store.py:1414`):
 
 - `path` — **путь к файлу**, а не каталог; разбирается
   `resolve_snapshot_setting()` (`~` → домашний каталог). Пустое значение →
@@ -379,13 +396,30 @@ CacheProvider хранит:
 ## Dependencies
 
 - `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные принципы
-- `lib/services/cache_provider.py:CacheProvider` — ABC интерфейс
-- `lib/services/cache_provider_impl.py` — DuckDB + FAISS реализация
-- `lib/services/duckdb_cache_store.py:DuckDbCacheStore` — низкоуровневый слой DuckDB
-- `lib/services/pg_duckdb_sync_service.py:PgDuckDbSyncService` — инкрементальный sync PG → DuckDB
-- `lib/services/vector_index_service.py:VectorIndexService` — сборка FAISS-индексов
-- `lib/services/table_registry.py:TableRegistry` — реестр таблиц для синхронизации
-- `tools/build_vectors.py` — CLI для сборки FAISS-индексов
+- `mcp-platform/libs/enterprise_data/snapshot/contracts.py:195` (`CacheProvider`) —
+  ABC интерфейс; агентский `lib/services/cache_provider.py` **снят**
+- `mcp-platform/libs/enterprise_data/snapshot/store.py:301` (`DuckDbSnapshotStore`) —
+  DuckDB-реализация, открывается фабрикой `open_snapshot_store`
+  (`mcp-platform/libs/enterprise_data/snapshot/store.py:1414`); агентские
+  `lib/services/duckdb_cache_store.py` (`DuckDbCacheStore`) и
+  `lib/services/cache_provider_impl.py` **сняты**
+- `mcp-platform/libs/vectors/config.py:36` и
+  `mcp-platform/libs/vectors/signature.py:38` — помощники эмбеддингов и подписи
+  индекса; агентский `lib/services/cache_provider_impl.py` **снят**, его
+  помощники перенесены сюда
+- `mcp-platform/libs/enterprise_data/loader.py:149` (`SnapshotLoadService`) —
+  разовая загрузка снимка из PostgreSQL, единственный писатель файла; агентский
+  `lib/services/pg_duckdb_sync_service.py` (`PgDuckDbSyncService`, инкрементальный
+  sync) **снят** вместе с машинерией, а не перенесён
+- `mcp-platform/libs/vectors/builder.py:239` (`VectorBuilder`) — сборка
+  векторных строк; агентский `lib/services/vector_index_service.py`
+  (`VectorIndexService`) **снят**, чтение индексов из снимка идёт через
+  `VectorIndexAccessor` (`mcp-platform/libs/enterprise_data/snapshot/store.py:274`)
+- `mcp-platform/platform.json → audit.tables` — состав снимка; реестр таблиц
+  агента `lib/services/table_registry.py` (`TableRegistry`) **снят**
+- `mcp-platform/servers/enterprise/build_index.py` и
+  `mcp-platform/libs/vectors/builder.py:239` — наполнение векторного хранилища;
+  агентский `tools/build_vectors.py` **снят**
 
 ## Configuration
 
@@ -396,11 +430,17 @@ CacheProvider хранит:
 ## Lifecycle
 
 1. **Инициализация**: проверка пути к хранилищу (fail-fast на NFS).
-2. **Refresh**: `CacheProvider.refresh()` создаёт/обновляет SQL-кэш из PostgreSQL.
-3. **Background sync**: `PgDuckDbSyncService` инкрементально подтягивает изменения по track-колонкам.
+2. **Загрузка**: `SnapshotLoadService` (`mcp-platform/libs/enterprise_data/loader.py:149`)
+   разово перезаписывает снимок из PostgreSQL. Метод `CacheProvider.refresh()` у
+   снятого агентского `CacheProvider` **не перенесён**: читатель не пишет.
+3. **Инкрементальный sync**: снят вместе с `PgDuckDbSyncService`
+   (`lib/services/pg_duckdb_sync_service.py` **снят**) — в системе один writer и он
+   известен заранее, гонок за файл не обрабатывается.
 4. **Preload**: `preload_indexes()` прогревает FAISS-индексы в память.
 5. **Обслуживание**: обработка запросов `query_sql` / `search_vector` / `get_schema` / `explain`.
-6. **Stale check**: `check_stale()` сверяет метки изменений.
+6. **Stale check**: сравнивать метки не с чем — снимок перезаписывается целиком на
+   стадии загрузки, а актуальность его фиксирует загрузчик
+   (`SnapshotLoadService`); метода `check_stale()` у `CacheProvider` **нет**.
 7. **Закрытие**: `close()` освобождает ресурсы (соединения, файлы).
 
 ## Data Ownership
@@ -435,7 +475,7 @@ CacheProvider хранит:
 - **NFS path**: fail fast при старте с явной ошибкой.
 - **Ошибка синхронизации**: логирование, кэш остаётся со stale данными до следующей успешной синхронизации (явная retry-политика `PgDuckDbSyncService`).
 - **Ошибка запроса**: возврат ошибки потребителю; молчаливый fallback на PostgreSQL запрещён.
-- **Stale/invalid index**: `IndexIntegrityError` с статусом `STALE`/`INVALID` и описанием `reason`; вызывающая сторона обязана обработать (например, пересобрать индекс через `tools/build_vectors.py`).
+- **Stale/invalid index**: `IndexIntegrityError` с статусом `STALE`/`INVALID` и описанием `reason`; вызывающая сторона обязана обработать (например, пересобрать индекс сборщиком capability — `mcp-platform/servers/enterprise/build_index.py`).
 - **Config missing**: fail fast при старте (`ConfigurationError`).
 
 ## Invariants
@@ -451,7 +491,7 @@ CacheProvider хранит:
 Система НЕ ДОЛЖНА:
 
 - записывать DuckDB-файл кэша напрямую на NFS mount (эмпирически fails with `PID 0` locking errors)
-- вводить второе хранилище кэша помимо `cache_provider.py`
+- вводить второе хранилище кэша помимо единственной фабрики `open_snapshot_store` (`mcp-platform/libs/enterprise_data/snapshot/store.py:1414`); агентский `cache_provider.py` **снят** и второй точкой входа не является
 - молча fallback на PostgreSQL при невалидном кэше; потребители ДОЛЖНЫ быть уведомлены
 - обходить `CacheProvider` из кода Skills
 - дублировать состояние кэша вне единственного пути к файлу кэша
@@ -461,10 +501,20 @@ CacheProvider хранит:
 ## Consumers
 
 - Skills (через `CacheProvider`) — SQL-запросы и vector search.
-- `VectorIndexService` (через `search_vector`).
-- Инфраструктурные сервисы (`ApplicationContext` для refresh/preload).
-- `tools/build_vectors.py` — сборка FAISS-индексов.
-- Тесты (`tests/test_duckdb_cache_store.py`, `tests/test_pg_duckdb_sync_service.py`).
+- Владелец индексов capability `vectors` (`VectorIndexOwner`,
+  `mcp-platform/libs/vectors/owner.py`) — через `search_vector`; агентский
+  `VectorIndexService` **снят**.
+- Операции capability `data` платформы — чтение через операции платформы; агентский
+  `ApplicationContext` в этой роли **не участвует** (refresh/preload уехали на
+  платформу).
+- Сборщик capability — наполнение векторного хранилища и сборка FAISS-индексов
+  (`mcp-platform/servers/enterprise/build_index.py`,
+  `mcp-platform/libs/vectors/builder.py`); агентский `tools/build_vectors.py`
+  **снят**.
+- Тесты (`mcp-platform/tests/test_snapshot_store.py`,
+  `mcp-platform/tests/test_snapshot_load_service.py`); агентские
+  `tests/test_duckdb_cache_store.py` и `tests/test_pg_duckdb_sync_service.py`
+  **сняты** вместе с предметом.
 
 ## Implementation
 

@@ -56,7 +56,7 @@
 
 ### Requirement: FAISS-backed
 
-Система ДОЛЖНА строить векторные индексы используя FAISS, вызываемый через `tools/build_vectors.py` и `lib/services/vector_index_service.py`.
+Система ДОЛЖНА строить векторные индексы используя FAISS, вызываемый через `mcp-platform/libs/vectors/indexing.py:74` (`build_faiss_index`) и сборщик capability `mcp-platform/libs/vectors/builder.py:239` (`VectorBuilder`). Агентские точки входа `tools/build_vectors.py` и `lib/services/vector_index_service.py` **сняты** — в дереве агента их нет.
 
 #### Scenario: Сборка индекса
 
@@ -74,13 +74,13 @@
 
 ### Requirement: FAISS собирается в памяти из DuckDB-снапшота
 
-Система SHALL build FAISS-индексы через `tools/build_vectors.py` и `lib/services/vector_index_service.py`. Система SHALL NOT персистить FAISS-блобы (ни файлами под `gateway.vector.index.default_root`, ни строками в таблице, заданной `gateway.vector.index.signature_table`); вместо этого FAISS-индекс SHALL собираться в памяти по требованию из DuckDB-снапшота таблицы-источника, заданной `gateway.vector.index.storage_table` (либо — для оффлайн/предопубликованных снапшотов — из той же таблицы в локальном кэше навыка `audit_cache.duckdb`).
+Система SHALL build FAISS-индексы через capability `vectors` (`mcp-platform/libs/vectors/indexing.py:74`, сборщик `mcp-platform/libs/vectors/builder.py:239`); прежняя формулировка называла `tools/build_vectors.py` и `lib/services/vector_index_service.py` — **оба сняты**, в дереве агента их нет. Система SHALL NOT персистить FAISS-блобы (ни файлами под `gateway.vector.index.default_root`, ни строками в таблице, заданной `gateway.vector.index.signature_table`); вместо этого FAISS-индекс SHALL собираться в памяти по требованию из DuckDB-снапшота таблицы-источника, заданной `gateway.vector.index.storage_table` (либо — для оффлайн/предопубликованных снапшотов — из той же таблицы в локальном кэше навыка `audit_cache.duckdb`).
 
 Имена таблиц задаются конфигурацией (`gateway.vector.index.storage_table` и `gateway.vector.index.signature_table`), а не зашиты в код спецификации.
 
-#### Scenario: Сборка индекса через build_vectors.py
+#### Scenario: Сборка индекса сборщиком capability (прежний `build_vectors.py` снят)
 
-- **WHEN** `tools/build_vectors.py` завершил запись строк в таблицу-источник (`gateway.vector.index.storage_table`)
+- **WHEN** сборщик capability (`mcp-platform/servers/enterprise/build_index.py`) завершил запись строк в таблицу-источник (`gateway.vector.index.storage_table`)
 - **THEN** он SHALL вызвать `provider.preload_indexes(db_table)`, чтобы прогреть per-process FAISS-кэш.
 - **AND** он SHALL NOT делать INSERT/UPDATE в таблицу-сигнатуру (`gateway.vector.index.signature_table`) и SHALL NOT писать файлы `<default_root>/<index_name>.faiss`.
 
@@ -130,7 +130,7 @@
 
 ### Requirement: Preload health-summary виден оператору и логируется
 
-После прогона `preload_indexes` система SHALL опубликовать health-summary (declared / loaded / missing / orphan / stale) в **stderr** (multi-line, human-readable) и одним событием в `agent_gateway_logs` (`event_type="vector_index_preload_health"`). Это поведение существующего `PreloadService._emit_health_summary` (`lib/services/preload_service.py:229`), которое должно быть сохранено при удалении persisted-кеша.
+После прогона `preload_indexes` система SHALL опубликовать health-summary (declared / loaded / missing / orphan / stale) в **stderr** (multi-line, human-readable) и одним событием в `agent_gateway_logs` (`event_type="vector_index_preload_health"`). Это поведение существующего `PreloadService._emit_health_summary`, который **не перенесён**: агентский `lib/services/preload_service.py` **снят**, а его диагностическая часть портирована в capability `vectors` как чистые функции `compute_index_health` (`mcp-platform/libs/vectors/preload.py:65`) и `format_index_health_lines` (`mcp-platform/libs/vectors/preload.py:30`) — вызывающей стороны в проде у них пока нет (см. `mcp-platform/libs/vectors/preload.py:1-23`).
 
 #### Scenario: Health-summary после preload
 
@@ -383,8 +383,8 @@ FAISS-индекс, метаданные, время сборки и счётч�
 
 Объявление читается как есть и разворачивается в pythonic-вид
 (`{имя: {table, pk, source_table, content_columns, embedding_columns, track_column,
-chunk_size, chunk_overlap, metric, enabled}}`) — `servers/enterprise/server.py::_vectors_config`
-собирает его из настроек capability, `libs/vectors/config.py::read_vector_index_config`
+chunk_size, chunk_overlap, metric, enabled}}`) — `mcp-platform/servers/enterprise/server.py:507::_vectors_config`
+собирает его из настроек capability, `mcp-platform/libs/vectors/config.py:69::read_vector_index_config`
 приводит форму. Размерность эмбеддинга и таймаут эмбеддера объявлены отдельно
 (`platform.json → llm.embed_dimension`, `llm.embed_timeout`) и входят в подпись
 индекса, но объявлением индекса они не являются.
@@ -404,8 +404,8 @@ chunk_size, chunk_overlap, metric, enabled}}`) — `servers/enterprise/server.py
    capability (`mcp-platform/servers/enterprise/build_index.py`); агент в этом шаге
    не участвует
 3. **Сборка**: FAISS-индекс собирается в памяти на старте сервера, до event
-   loop, — `servers/enterprise/server.py::_prepare_capabilities` зовёт
-   `ensure_index` для каждого объявленного и включённого `index_name`. Холодного
+   loop, — `mcp-platform/servers/enterprise/server.py:893::_prepare_capabilities` зовёт
+   `ensure_index` (`mcp-platform/libs/vectors/owner.py:244`) для каждого объявленного и включённого `index_name`. Холодного
    поиска не остаётся: первый запрос уже работает с готовым индексом. Параллельные
    обращения к одному индексу дают ровно одну сборку, в том числе при прогреве на
    старте. Первичная сборка укладывается в ≤ 5 секунд на эталонной рабочей станции

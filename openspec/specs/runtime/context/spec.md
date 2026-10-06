@@ -48,7 +48,7 @@ Deprecated kwargs через `**kwargs` MUST быть удалены в MINOR р
 
 #### Scenario: Утилиты и тесты могут использовать **kwargs для backward compat
 
-- **КОГДА** `tools/build_vectors.py` или тест вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
+- **КОГДА** `ApplicationContext.create(..., enable_audit=False)` вызывается через `**kwargs`
 - **ТОГДА** система MUST принять этот kwarg, использовать значение и залогировать `DeprecationWarning`
 - **И НЕ ДОЛЖНА** падать с `TypeError: unexpected keyword argument`
 

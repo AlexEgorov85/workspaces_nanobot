@@ -348,7 +348,7 @@
 состояния разъезжаются при первом же чтении.
 
 Платформа (`mcp-platform/libs/enterprise_common/settings.py`,
-`servers/enterprise/server.py`):
+`mcp-platform/servers/enterprise/server.py`):
 
 - путь к файлу блока из argv — оба написания `--agent-settings-file <путь>`
   и `--agent-settings-file=<путь>`; пустое значение — отказ, иначе путь
@@ -530,10 +530,12 @@
 
 Платформа:
 
-- `servers/enterprise/server.py::_agent_settings_path` — разбор argv;
+- `mcp-platform/servers/enterprise/server.py:1154`
+  (`_agent_settings_path_from_argv`) — разбор argv;
   `Settings(..., agent_settings_path=...)` — чтение и слияние блока;
-  баннер `agent_settings_summary(settings)` в стартовом логе;
-- `servers/enterprise/http_transport.py` — читает уже **применённые** значения
+  баннер `agent_settings_summary(settings)` в стартовом логе (`server.py:722`);
+- `mcp-platform/servers/enterprise/http_transport.py:97`
+  (`requested_transport`) — читает уже **применённые** значения
   `ENTERPRISE_TRANSPORT_{MODE,BIND,PORT,NOTIFY_FD}`, и больше ниоткуда.
 
 Проверки:
@@ -567,8 +569,9 @@
 - `mcp-platform/libs/enterprise_common/settings.py:882` — фиксирует, что флаг не был
   объявлен ни в одном файле реестра.
 
-Прежние цитаты этого раздела (`enterprise_mcp_client.py:524–529`,
-`servers/enterprise/server.py:930–953`, `execution/factory.py:111`) указывали на
+Прежние цитаты этого раздела (`lib/services/enterprise_mcp_client.py:510-522`,
+`mcp-platform/servers/enterprise/server.py:930–953`,
+`mcp-platform/libs/enterprise_common/execution/factory.py:111`) указывали на
 `os.set_blocking`, баннер аудита и доктрину `min_level` — то есть на код, который
 никакого отношения к флагу не имеет. Причина расхождения та же: флаг сняли, а
 спеку не переписали.

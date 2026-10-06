@@ -6,13 +6,13 @@
 ## Scope
 
 `agent` — DDL тестового контура и его runner — в агентском репозитории; платформа только повторяет объявленные имена
-Реализация: `sql/*/create_public_*_test.sql`, `tools/apply_test_profile_tables.py`
+Реализация: пять DDL с суффиксом `_test` в каталогах `sql/channels/`, `sql/session/`, `sql/logs/` (перечень — в сценарии «Все пять create-скриптов существуют»), `tools/apply_test_profile_tables.py`
 
 ## Requirements
 
 ### Requirement: Пять test-таблиц структурно эквивалентны prod-собратьям
 
-DDL в `sql/<domain>/create_public_agent_*_test.sql` SHALL повторять prod-DDL с точностью до: имя таблицы (добавлен суффикс `_test`), `COMMENT ON TABLE / COLUMN` (упоминает «test-профиль»), колонки и их типы, индексы (включая `agent_gateway_logs_test_user_id_timestamp_idx` в `agent_gateway_logs_test`). Расхождения в колонках, типах или ограничениях относительно prod-версии ЗАПРЕЩЕНЫ (допустимы лишь семантически эквивалентные различия в дефолтах UUID-функций и именах sequences — см. `sql/README.md`).
+DDL в `sql/channels/create_public_agent_conversation_messages_test.sql`, `sql/session/create_public_agent_session_meta_test.sql`, `sql/session/create_public_agent_session_messages_test.sql`, `sql/logs/create_public_agent_gateway_logs_test.sql`, `sql/logs/create_public_agent_question_runs_test.sql` SHALL повторять prod-DDL с точностью до: имя таблицы (добавлен суффикс `_test`), `COMMENT ON TABLE / COLUMN` (упоминает «test-профиль»), колонки и их типы, индексы (включая `agent_gateway_logs_test_user_id_timestamp_idx` в `agent_gateway_logs_test`). Расхождения в колонках, типах или ограничениях относительно prod-версии ЗАПРЕЩЕНЫ (допустимы лишь семантически эквивалентные различия в дефолтах UUID-функций и именах sequences — см. `sql/README.md`).
 
 #### Scenario: Все пять create-скриптов существуют
 - **КОГДА** проверяется каталог `sql/`
@@ -50,7 +50,7 @@ Runtime-код `lib/`, `workspace/`, `gateway.py`, `cli_agent.py` SHALL NOT со
 
 Компонент состоит из двух частей, и ответственность у них разная.
 
-**DDL-файлы** (`sql/<domain>/create_public_agent_*_test.sql`) отвечают за структуру пяти тестовых таблиц. Их работа — создать таблицу, структурно эквивалентную prod-собете, в той же схеме `public`, в живом виде на 9.4 и на 13.22.
+**DDL-файлы** (перечислены в сценарии «Все пять create-скриптов существуют» — по одному в `sql/channels/`, `sql/session/` и `sql/logs/`) отвечают за структуру пяти тестовых таблиц. Их работа — создать таблицу, структурно эквивалентную prod-собете, в той же схеме `public`, в живом виде на 9.4 и на 13.22.
 
 **Runner** (`tools/apply_test_profile_tables.py`) отвечает ровно за три вещи: разобрать имя каждой таблицы из настроек профиля `test`, применить соответствующий DDL в одной транзакции, честно сообщить результат через код возврата. Больше он ничего не делает — не проверяет схему, не создаёт пользователя, не настраивает пул.
 

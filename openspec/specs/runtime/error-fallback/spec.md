@@ -64,7 +64,7 @@ THEN `OutboundMessage.metadata._error_kind` SHALL быть равен `"internal
 ### Requirement: Поведение observability
 
 > **Reason for MODIFICATION:** Реализация читала `session_key` и `user_id`
-> из `lifecycle_message`, но `InboundMessage` (`bus/events.py:25-37`) не имеет
+> из `lifecycle_message`, но `InboundMessage` (`nanobot/bus/events.py:25-37`) не имеет
 > ни `session_key`, ни `user_id`. Кроме того, `TurnDelivery.fail(self, *,
 > publish_completion: bool)` (`turn_delivery.py:336`) не получает объект
 > исключения в сигнатуре, а захват через `sys.exception()` не был
@@ -74,9 +74,9 @@ THEN `OutboundMessage.metadata._error_kind` SHALL быть равен `"internal
 WHEN система формирует fallback-ответ,
 THEN при `gateway.error_messages.log_to_db=true` (default) система SHALL записать в `agent_gateway_logs` запись `event_type="turn_failed"` с payload, содержащим ВСЕ перечисленные ниже поля, полученные **из авторитетных источников**:
 - `session_key` — из атрибута `TurnDelivery.session_key` (установлен через `TurnDelivery.create(msg, session_key, ...)` в `turn_delivery.py:85-103`). НЕ из `lifecycle_message` (такого поля нет).
-- `channel` — из `lifecycle_message.channel` (`bus/events.py:28`).
-- `chat_id` — из `lifecycle_message.chat_id` (`bus/events.py:30`).
-- `sender_id` — из `lifecycle_message.sender_id` (`bus/events.py:29`). НЕ из `lifecycle_message.user_id` (такого поля нет).
+- `channel` — из `lifecycle_message.channel` (`nanobot/bus/events.py:28`).
+- `chat_id` — из `lifecycle_message.chat_id` (`nanobot/bus/events.py:30`).
+- `sender_id` — из `lifecycle_message.sender_id` (`nanobot/bus/events.py:29`). НЕ из `lifecycle_message.user_id` (такого поля нет).
 - `agent_id` — из `config`, переданный через `RuntimePatcher.apply_all` → `patch_turn_delivery_fail`.
 - `exception_type` — имя класса активного исключения, либо `null` если `exception_available=false`.
 - `exception_message` — `str(exc)` активного исключения, либо `null`.

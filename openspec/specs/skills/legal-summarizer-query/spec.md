@@ -15,7 +15,7 @@
 
 Общий контракт вызовов — личность, конверт `_execution`, коды отказа —
 описан в `workspace/skills/enterprise_mcp/SKILL.md` и в
-`openspec/specs/runtime/call-contract/spec.md`. Здесь описано только то, что
+`workspace/skills/enterprise_mcp/SKILL.md`. Здесь описано только то, что
 операция делает с сохранённым состоянием операции.
 
 ## Scope
@@ -41,7 +41,7 @@ Capability SHALL различать ровно три причины недос�
 `manifest_corrupted` / `manifest_unsupported_version`, а capability SHALL
 переводить их в коды конверта `not_found` / `internal` /
 `upstream_unavailable` по таблице `_ERROR_CODES` в
-`.../legal_summarizer/service/main.py`.
+`mcp-platform/servers/enterprise/capabilities/legal_summarizer/service/main.py`.
 
 Ключи таблицы SHALL совпадать со значениями `cli_query._MANIFEST_ERROR_TYPES`
 буквально: перевод идёт по строке `error_type`, и имя «почти то же самое» молча
@@ -605,7 +605,7 @@ capability касаться `SessionWorkspace`/`ArtifactStore`. Именно п�
 агента невозможен), каталога
 `workspace/skills/legal_summarizer/scripts/`, операции
 `legal_summarizer_query` (снята — `mcp-platform/libs/legal_summarizer/skill/SKILL.md:246-248`),
-модуля `.../legal_summarizer/service/main.py` с реестром операций домена.
+модуля `mcp-platform/servers/enterprise/capabilities/legal_summarizer/service/main.py` с реестром операций домена.
 
 ## Verification
 

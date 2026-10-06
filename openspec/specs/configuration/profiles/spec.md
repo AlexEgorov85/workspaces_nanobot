@@ -28,7 +28,8 @@ through an environment variable, or through re-resolution.
 
 #### Scenario: Профиль разрешён при загрузке конфигурации
 
-- **КОГДА** `config.json`, `session_manager.json` и `.secrets.env` объединены
+- **КОГДА** `session_manager.json` (операторский файл, в дереве не найдено),
+  `config.json` и `.secrets.env` объединены
 - **ТОГДА** активный профиль ДОЛЖЕН быть разрешён и сохранён в `SETTINGS` до запуска любого другого runtime-кода
 
 #### Scenario: Application entrypoint parses --profile
@@ -91,7 +92,7 @@ through an environment variable, or through re-resolution.
 
 ### Requirement: Profile overlays применяются в документированном порядке
 
-Система ДОЛЖНА применять profile-specific overlays к `config.json` согласно документированному порядку слияния. При активном профиле `test` система ДОЛЖНА выбирать test-specific table suffixes (`*_test`) в пяти runtime-ключах (`channels.postgres.{table_name, messages_table, meta_table}`, `logging.db.{table_name, question_runs_table}`), НЕ ДОЛЖНА молча fallback на non-test имена, и для каждого из пяти разрешённых runtime-имён ДОЛЖНА существовать таблица `public.agent_*_test` в БД. Отсутствие таблицы SHALL приводить к ошибке выполнения первого же обращения канала/сервиса/инструмента, а не к тихой подмене на prod-таблицу. Test-таблицы создаются DDL из `sql/<domain>/create_public_agent_*_test.sql` и применяются через `python tools/apply_test_profile_tables.py` (или эквивалентный ручной psql-запуск тех же пяти скриптов). Отдельной миграции для них нет: они не входят в `sql/migrations/`.
+Система ДОЛЖНА применять profile-specific overlays к `config.json` согласно документированному порядку слияния. При активном профиле `test` система ДОЛЖНА выбирать test-specific table suffixes (`*_test`) в пяти runtime-ключах (`channels.postgres.{table_name, messages_table, meta_table}`, `logging.db.{table_name, question_runs_table}`), НЕ ДОЛЖНА молча fallback на non-test имена, и для каждого из пяти разрешённых runtime-имён ДОЛЖНА существовать таблица `public.agent_*_test` в БД. Отсутствие таблицы SHALL приводить к ошибке выполнения первого же обращения канала/сервиса/инструмента, а не к тихой подмене на prod-таблицу. Test-таблицы создаются пятью DDL-скриптами с суффиксом `_test` в каталогах `sql/channels`, `sql/session` и `sql/logs` (например, `sql/channels/create_public_agent_conversation_messages_test.sql`) и применяются через `python tools/apply_test_profile_tables.py` (или эквивалентный ручной psql-запуск тех же пяти скриптов). Отдельной миграции для них нет: они не входят в `sql/migrations/`.
 
 #### Scenario: Test профиль разрешает test таблицы
 - **КОГДА** активный профиль равен `test`
@@ -207,7 +208,6 @@ explicitly ALLOWS a single, well-bounded autouse-fixture in
   (e.g., `tests/test_utils_db.py`, `tests/test_config.py`,
   `tests/test_application_context_logging.py`,
   `tests/test_storage_hybridization_factory.py`,
-  `tests/integration/test_worker_pool_*.py`,
   `tests/integration/test_postgres_channel_lifecycle_stress.py`)
 - **WHEN** pytest runs them without explicit
   `_initialize_settings` in the test body
@@ -344,7 +344,7 @@ any entrypoint.
 
 #### Scenario: Standalone utility does not require --profile
 
-- **WHEN** a standalone utility (e.g. `tools/build_vectors.py`)
+- **WHEN** a standalone utility (e.g. `tools/apply_test_profile_tables.py`)
   is invoked directly
 - **AND WHEN** it does not consume resolved `SETTINGS` at its
   module level
@@ -488,7 +488,7 @@ Profiles отвечают за:
 
 ### May Depend On
 - config.json (базовая конфигурация)
-- session_manager.json (локальные overrides)
+- session_manager.json (локальные overrides; в дереве не найдено)
 - .secrets.env (секреты)
 
 ### Must Not Depend On
@@ -515,7 +515,8 @@ Whitelist — ровно `{"prod", "test"}` (`config._SUPPORTED_PROFILES`);
 1. `config.json` — база: и настройки nanobot, и агентские секции; секция
    `gateway.agent.*` поднимается в корень (`_lift_agent_sections`), неизвестная
    секция внутри неё — `ConfigurationError`.
-2. `session_manager.json` — per-deploy override (пул, таймауты), читается
+2. `session_manager.json` — per-deploy override (в дереве не найдено:
+   операторский файл, `config.py:254,606`) для пула и таймаутов; читается
    только при наличии файла; runtime-таблицы перетирать не может.
 3. `.secrets.env` — секреты для `${VAR}` и провайдерские `api_key`; плоские
    значения экспортируются в `os.environ` через `setdefault`, то есть внешнее
@@ -567,20 +568,11 @@ Resolved profile хранится в SETTINGS как строка (`"prod"` ил
 
 ## Configuration
 
-Профили определяются в `config.json`:
-
-```json
-{
-  "profiles": {
-    "prod": { ... },
-    "test": { ... }
-  }
-}
-```
+Оверлей профиля в `config.json` **нет**: секцию `profiles` в файле нет (проверено), и секция `gateway → profiles` тоже нет. Оверлеи лежат отдельно в самой каталог — `profiles/<mode>.jsonc`, есть `в дереве только `profiles/test.jsonc`:”
 
 Разрешение происходит через:
-1. Базовый profile из config.json
-2. Overrides из session_manager.json
+1. Базовый profile из `config.json` (`lib/core/project_settings.py`)
+2. Overrides из session_manager.json (операторский файл, в дереве не найдено)
 3. Переменные окружения из .secrets.env
 
 ## Lifecycle
@@ -601,13 +593,14 @@ Resolved profile хранится в SETTINGS как строка (`"prod"` ил
   runtime-ключей (`channels.postgres.{table_name,messages_table,meta_table}`,
   `logging.db.{table_name,question_runs_table}`) после шага профиля становятся
   неизменяемыми: оверлей идёт последним, поэтому даже prod-имена в
-  `session_manager.json` им не помешают.
+  `session_manager.json` (в дереве не найдено — операторский файл) им не
+  помешают.
 
 Не владеет:
 
 - исходными файлами: `config.json`, `profiles/<mode>.jsonc`, `.secrets.env` и
-  `session_manager.json` принадлежат оператору и правке через change; агент их
-  читает и ничего в них не сохраняет;
+  `session_manager.json` (в дереве не найдено) принадлежат оператору и правке
+  через change; агент их читает и ничего в них не сохраняет;
 - данными в PostgreSQL: агент выбирает контур и проверяет, что имена таблиц
   соответствуют профилю, но ни схемы, ни содержимого не создаёт;
 - `os.environ` как хранилищем: сюда выводятся только факты о запуске, и

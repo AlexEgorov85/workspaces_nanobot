@@ -54,7 +54,7 @@
 #### Scenario: Встроенный `/compact` заменил наш patch_compact_command
 
 - **WHEN** upstream регистрирует `/compact` через `register_builtin_commands`
-- **THEN** наш `lib/commands/compact_command.py` и `patch_compact_command` MUST ДОЛЖЕН быть удалены, а наш `ContextCompactionService._notify` MUST ДОЛЖЕН срабатывать через `AgentHook.after_run` после upstream-обработчика
+- **THEN** наши `lib/commands/compact_command.py` и `patch_compact_command` уже удалены (каталога `lib/commands/` нет, символ `patch_compact_command` не встречается ни в одном дереве), а наш `ContextCompactionService._notify` MUST ДОЛЖЕН срабатывать через `AgentHook.after_run` после upstream-обработчика
 
 #### Scenario: Auto-compact-idle guard заменён upstream'ом
 
@@ -91,7 +91,7 @@
 
 ### Requirement: Не ломать профильные smoke-тесты
 
-`tests/test_profile_lifecycle.py`, `tests/test_history_search_tool.py` (scope-isolation), `tests/test_pg_session_manager.py` (framework contract) — SHALL НЕ ДОЛЖНЫ падать после upgrade-изменений; если они падают по причинам, не относящимся к upgrade, они MUST ДОЛЖНЫ быть помечены `xfail` с явной причиной и `TODO` ссылкой в `design.md`.
+`tests/test_profile_lifecycle.py`, `tests/test_pg_session_manager.py` (framework contract). Раньше стоил быть `tests/test_history_search_tool.py` (scope-isolation) — файла нет, реализация ушла в `mcp-platform/servers/enterprise/capabilities/data/tools/history_search.py` — SHALL НЕ ДОЛЖНЫ падать после upgrade-изменений; если они падают по причинам, не относящимся к upgrade, они MUST ДОЛЖНЫ быть помечены `xfail` с явной причиной и `TODO` ссылкой в `design.md`.
 
 #### Scenario: Падающий тест не из upgrade-скоупа
 
