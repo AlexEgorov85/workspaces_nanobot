@@ -20,11 +20,12 @@ jobs:
   # закрытого перечня» проверялись только тем, что кто-то запустит скрипт
   # руками: ни одна джоба его не звала.
   spec-validation:
-    name: Spec validation (structure, categories, registry)
+    name: Spec validation (structure, categories, registry, deltas)
     runs-on: ubuntu-latest
-    # Разбор markdown по 28 спекам и реестру — доли секунды на практике.
-    # 5 минут — запас на холодный раннер и обход дерева, не на саму проверку.
-    timeout-minutes: 5
+    # Разбор markdown по 28 спекам и реестру — доли секунды. Второй шаг дороже:
+    # npx тянет node-пакет при первом запуске. 10 минут — запас на холодный
+    # раннер, установку пакета и обход дерева, не на сами проверки.
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +41,26 @@ jobs:
       # faiss и duckdb за проверку, которой они не касаются.
       - name: Validate component specs
         run: python tools/validate_component_specs.py
+
+      # Гейт дельт: `openspec validate --all --strict` ловит нарушение структуры
+      # и spec, и change'ов. Проверка «Archive would refuse» вынесена отдельно
+      # потому, что валидатор отдаёт её как ℹ [INFO] и код возврата не меняет —
+      # change выглядит зелёным, а архивирование отказывается. Таких ловушек
+      # было 5, и ни одна джоба их не видела.
+      #
+      # Версия закреплена: правила валидатора меняются между выпусками, и
+      # красное в CI из-за чужого релиза хуже явного закрепления.
+      - name: Validate OpenSpec deltas
+        run: |
+          out=$(npx --yes @fission-ai/openspec@1.13.0 validate --all --strict 2>&1) || {
+            echo "$out"
+            exit 1
+          }
+          echo "$out"
+          if echo "$out" | grep -q "Archive would refuse"; then
+            echo "::error::дельта откажется при архивировании (Archive would refuse)"
+            exit 1
+          fi
 
   fast-tests:
     name: Fast tests (Python ${{ matrix.python-version }})
