@@ -71,18 +71,28 @@ def test_load_text_unknown_extension_raises(tmp_path):
     with pytest.raises(ValueError):
         load_text(p)
 
-def test_load_text_brief_mode_for_txt(tmp_path):
-    """mode='brief' для .txt = mode='full'."""
+def test_load_text_has_no_extraction_mode(tmp_path):
+    """Режима извлечения нет: извлечение одно для обоих режимов свода.
+
+    Раньше ``mode='brief'`` резал PDF до 100 страниц, и на документе длиннее
+    этого потолка структура строилась по усечённому тексту. Режим убран, а
+    вместе с ним и сам повод для различия.
+    """
+    import inspect
+
     from libs.legal_summarizer.application.service import load_text
+
+    assert "mode" not in inspect.signature(load_text).parameters
+
     p = tmp_path / "contract.txt"
     p.write_text(
         "Договор аренды.\n\nПункт 1.\n\nПункт 2.",
         encoding="utf-8",
     )
-    text = load_text(p, mode="brief")
+    text = load_text(p)
     assert "Договор аренды" in text
-    text_full = load_text(p, mode="full")
-    assert text == text_full
+    with pytest.raises(TypeError):
+        load_text(p, mode="brief")
 
 def test_load_structure_returns_title_and_text(tmp_path):
     """DocumentLoader для DOCX возвращает title + blocks."""

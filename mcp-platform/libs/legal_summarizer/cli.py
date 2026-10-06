@@ -314,10 +314,9 @@ def main() -> None:
                 # пути: полная экстракция + inspect + safety-net confirm.
                 _progress(f"quick_estimate failed ({exc}); falling back to full inspect")
 
-        # brief mode: читаем только первые 100 стр. PDF (быстрая экстракция
-        # через pypdf). detailed/question: полная экстракция через pdfplumber.
-        load_mode = "brief" if length == "brief" else "full"
-        text = load_text(file_path, mode=load_mode)
+        # Извлечение одно для обоих режимов: структура строится без LLM и не
+        # зависит от того, краткий свод просят или подробный.
+        text = load_text(file_path)
 
         if args.estimate_only:
             insp = _inspect(text, document_path=str(args.file))

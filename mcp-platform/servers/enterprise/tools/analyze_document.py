@@ -18,10 +18,14 @@
 строки был бы вторым правилом на той же границе и разошёлся бы с ним при первой
 же правке.
 
-Почему режим загрузки обязателен. ``brief`` у PDF режет документ до 100 страниц
-и 300 000 символов, то есть меняет ``chunks_total``, оценку, порог подтверждения
-и цену. Молчаливый выбор одного из двух означал бы, что модель платит за полный
-разбор, думая, что запросила краткий.
+Почему у режима загрузки нет места на поверхности. Он был обязательным и
+управлял объёмом чтения: ``brief`` у PDF резал документ до 100 страниц и
+300 000 символов. Структура строится **без LLM**, поэтому строить её
+по-разному для краткого и подробного свода означало две разные структуры
+одного файла; на длинном документе outline описывал только прочитанное начало,
+и модель отвечала уверенно про документ, который видела наполовину. Объём
+входа ограничивает сборка brief-чанка (окно модели и ``structure_max_chars`` на
+outline), а не чтение файла.
 """
 
 from __future__ import annotations
@@ -354,7 +358,7 @@ def _require_enum(value: str, allowed: tuple[str, ...], name: str) -> str:
     return cleaned
 
 
-def _load_document_text(path: Path, load_mode: str) -> str:
+def _load_document_text(path: Path) -> str:
     """Текст документа; пять различаемых исходов отказа.
 
     ``document_not_found`` / ``not_a_file`` / ``unsupported_format`` отвергаются
@@ -381,7 +385,7 @@ def _load_document_text(path: Path, load_mode: str) -> str:
     from libs.legal_summarizer.application.document_io import load_text
 
     try:
-        text = load_text(path, mode=load_mode)
+        text = load_text(path)
     except PathDeniedError:
         raise
     except ValueError:
@@ -766,7 +770,10 @@ def _is_orphaned(operation_id: str, manifest: dict[str, Any], handle: SessionHan
     try:
         from libs.legal_summarizer.application.document_io import load_text
 
-        text = load_text(target, mode="brief" if length == "brief" else "full")
+        # Извлечение одно для обоих режимов: пересчёт обязан получить тот же
+        # текст, что и при разборе, иначе предикат сравнивал бы хеши разных
+        # извлечений и объявлял осиротевшим чужую работу.
+        text = load_text(target)
     except Exception:  # noqa: BLE001 - пересчёт не обязан быть удачным
         return True
     return _compute_operation_id(
@@ -966,32 +973,23 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
             confirmed: подтверждение платной работы, полученное от пользователя.
             operation_id: идентификатор состояния; проверяется, не подставляется.
 
-        Режим извлечения текста отдельным параметром **не принимается**: он
-        выводится из ``length`` (``brief`` → краткое извлечение, ``detailed`` →
-        полное), как и в релизе 2.5.3. Ошибочный перечень от
-        пользователя или прежней документации отвергается как ``invalid_params``.
+        Документ читается целиком, структура строится один раз и от режима
+        не зависит: различаются своды, а не объём прочитанного. Отдельного
+        параметра извлечения не было и в релизе 2.5.3 — там он был выведен из
+        ``length``, но для краткого свода это резало PDF до 100 страниц, и
+        outline описывал только начало документа. Краткий свод ограничивает
+        сборка brief-чанка (окно модели плюс ``structure_max_chars`` на
+        outline), а не чтение файла.
 
         Возвращает JSON с ``status``, ``operation_id`` и ``progress_report``.
         """
         length_value = _require_enum(length, ("brief", "detailed"), "length")
-        # Режим извлечения **выводится** из ``length``, а не задаётся отдельно.
-        # В релизе 2.5.3 аргумента загрузки не существовало: CLI считал его сам
-        # (``load_mode = "brief" if length == "brief" else "full"``), и модель
-        # выбрать его не могла. Отдельный параметр разошёл с этим контрактом
-        # и хуже — стал обязательным, но не документированным: значение вне
-        # перечисления отвергалось, а объявленное в документации значение
-        # ``detailed`` в перечисление не входило, и вызов по инструкции отказывал.
-        #
-        # Один параметр вместо двух: режимов столько же, выбирает их один
-        # ``length``, и противоречащаяся пара ``length=brief, load_mode=full``
-        # (которую модель могла отправить раньше) более невозможна.
-        mode_value = "brief" if length_value == "brief" else "full"
 
         handle = workspace.handle(ctx.session_id, create=True)
         _sweep(handle, now=time.time())
 
         document_path = _resolve_document(handle, document)
-        text = _load_document_text(document_path, mode_value)
+        text = _load_document_text(document_path)
 
         question_value = (question or "").strip()
         focus_value = (focus or "").strip()
@@ -1101,7 +1099,6 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
             operation_id=computed_id,
             status=status,
             length=length_value,
-            load_mode=mode_value,
             step=taken.step,
         )
         if status == "confirmation_required":
@@ -1163,12 +1160,13 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
         "Разобрать юридический документ из вложений этой сессии (files/) и "
         "сохранить состояние разбора в папку сессии: документ заново не "
         "разбирается, уточняющие вопросы задаются операцией "
-        "platform.query_operation по возвращённому operation_id. Режим "
-        "извлечения текста отдельным параметром не задаётся — он выводится из "
-        "length: brief режет PDF до 100 страниц и 300 000 символов, detailed "
-        "разбирает целиком. length — brief или detailed, значение не из перечня "
-        "отвергается. Ответ требует явного confirmed: без него приходит "
-        "confirmation_required с оценкой и вариантами."
+        "platform.query_operation по возвращённому operation_id. Документ "
+        "читается целиком, структура строится один раз. length — brief или "
+        "detailed, значение не из перечня отвергается: brief — один "
+        "структурный chunk (схема документа плюс выжимки разделов) и один "
+        "проход, detailed — весь документ по чанкам и полный разбор. Ответ "
+        "требует явного confirmed: без него приходит confirmation_required с "
+        "оценкой и вариантами."
     )
 
     definition = ToolDefinition(

@@ -353,6 +353,11 @@ Capability состоит из:
   ```
 * `len(ctx.chunks) == 1` → `strategy="direct"`, `plan=None`
   (см. `application/context_builder.py`). Никакого map-reduce.
+* «Всего документа» — буквально: извлечение **одно** для обоих режимов
+  (`application/document_io.py::load_text`), поэтому outline покрывает весь
+  файл. Раньше у загрузчика стоял режим `brief`, резавший PDF до 100 страниц,
+  и на длинном документе это представление покрывало только начало. Сжатие
+  задаёт `max_chars`, а не чтение файла.
 * При превышении `max_chars` (рассчитывается динамически от
   `agents.defaults.contextWindowTokens` ×
   `chunking.brief_input_ratio` × `brief_context.chars_per_token`)

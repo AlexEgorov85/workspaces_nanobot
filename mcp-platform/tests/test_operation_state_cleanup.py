@@ -99,7 +99,7 @@ def _read_document(path: Path) -> str:
     расходился бы с пересчётом на ``\\n`` против ``\\r\\n`` и краснел бы без
     причины.
     """
-    return load_text(path, mode="brief")
+    return load_text(path)
 
 
 def _operation_id(
