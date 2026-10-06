@@ -14,7 +14,7 @@ sync service, cache service, channel) обязан превращаться
 ## Scope
 
 `shared` — единственный writer остался в агенте, а запись идёт транспортом в операцию `data.log_events` платформы
-Реализация: `lib/services/log_transport.py` + `mcp-platform/.../data/tools/log_events.py`
+Реализация: `lib/services/log_transport.py` + `mcp-platform/servers/enterprise/capabilities/data/tools/log_events.py`
 
 ## Requirements
 
@@ -3336,3 +3336,154 @@ MUST по-прежнему принимать произвольные ключ�
 - **WHEN** читатель получил запись личности из хранилища
 - **THEN** изменение полей записи MUST отклоняться
 - **AND** значение у владельца MUST остаться прежним
+
+---
+
+# Разделы компонента
+
+Ниже разделы полного шаблона. Они описывают `DbLoggingService` — тот компонент,
+которому посвящён `## Requirements` выше. Второй документ, начинающийся с
+заголовка «Наблюдаемость оборота», к этому компоненту отношения не имеет и разбору
+разделов не подлежит: решение о его разделении вынесено отдельно.
+
+## Responsibility
+
+`DbLoggingService` (`lib/services/db_logging_service.py:608`) отвечает за
+персистенцию structured agent events и **только** за это. Он единственный writer
+`agent_gateway_logs` (`Purpose`) и единственный механизм upsert в
+`agent_question_runs`.
+
+Не отвечает за: формирование самих событий (это делает вызывающий), фильтрацию по
+уровню сверх заданной конфигурации, решение о политике хранения и очистке — это
+владелец данных, а не журнализатор.
+
+## Boundary
+
+- **owns:** сериализация `LogEvent` (`:497`), пакетная отправка, переупорядочивание
+  внутри хода, привязка события к запросу и сессии, счётчики потерь.
+- **does not own:** содержимое события, транспорт до платформы (`lib/services/log_transport.py`),
+  саму запись на стороне платформы (`mcp-platform/servers/enterprise/capabilities/data/tools/log_events.py`).
+- **may depend on:** пул БД агента, транспорт MCP, файловый fallback.
+- **must not depend on:** прямых обращений к таблице в обход транспорта — это
+  прямо запрещено в `## Requirements`.
+
+## Public Contract
+
+Класс `DbLoggingService` (`:608`):
+
+| Метод | Строка | Назначение |
+|---|---|---|
+| `start` / `stop` / `is_running` | `:869`, `:882`, `:931` | lifecycle фонового writer |
+| `log_event` | `:1004` | приём одного события |
+| `register_request` / `get_request_id` / `clear_request` / `finish_request` | `:1075`–`:1175` | личность запроса и сессии |
+| `log_inbound` / `log_outbound` | `:1242`, `:1285` | сообщения шины |
+| `log_tool_call` / `log_tool_result` | `:1338`, `:1361` | вызовы инструментов |
+| `log_llm_call` | `:1415` | обращения к модели |
+| `log_sync_event` | `:1457` | синхронизация |
+| `get_stats` / `report_stats` | `:1500`, `:1513` | наблюдаемость |
+| `purge_empty_outbound` / `purge_old` | `:2164`, `:2189` | очистка |
+| `attach_transport` | `:816` | подмена транспорта |
+
+Модульные: `try_log_event` (`:175`), `next_event_seq` (`:338`),
+`normalize_journal_level` (`:107`), `is_probe_event_type` (`:136`).
+Отказ уровня — `JournalLevelError` (`:97`).
+
+## Inputs
+
+`LogEvent` (`:497`): тип события, актор, `session_key`, `request_id`, `user_id`,
+metadata, произвольные поля полезной нагрузки. Уровень журнала — строка,
+нормализующаяся через `normalize_journal_level` (`:107`); значение вне
+допустимого перечня отвергается `JournalLevelError` (`:97`).
+
+## Outputs
+
+Две таблицы: `agent_gateway_logs` — журнал событий, `agent_question_runs` — прогон
+вопроса. Запись идёт **транспортом в операцию платформы**
+(`_flush_batch_via_mcp`, `:1983`), а не прямым SQL. При недоступности транспорта —
+файловый fallback (`_write_fallback`, `:1963`), и потеря считается, а не скрывается.
+
+## State
+
+В памяти сервиса: карта «`session_key` → личность запроса»
+(`register_request`, `:1075`), счётчик `next_event_seq` (`:338`), очередь
+отложенных пакетов (`_release_deferred_batches`, `:848`) и счётчики потерь
+(`_note_loss`, `:952`). Персистентного состояния сервис не имеет — он writer.
+
+## Dependencies
+
+`lib/services/db_logging_service.py`, транспорт `lib/services/log_transport.py`,
+операция платформы `mcp-platform/servers/enterprise/capabilities/data/tools/log_events.py`, пул БД агента,
+`asyncio` для фонового writer (`_worker`, `:1824`).
+
+## Configuration
+
+`logging.db.min_level` — единственная настройка, объявленная как `JOURNAL_MIN_LEVEL_PATH`
+в `config.py:302`. Политика хранения и очистка приходит аргументом в `purge_old`
+(`:2189`), а не конфигурацией.
+
+## Lifecycle
+
+`start` (`:869`) поднимает фонового writer и включает приём; `stop(timeout_sec=15.0)`
+(`:882`) дренирует очередь и завершает writer. Между `stop` и `start` приём
+событий не ведёт к записи: `is_running` (`:931`) сообщает состояние, и клиент
+решает сам.
+
+## Владение данными
+
+Сервис **не владеет** содержимым таблиц: он их заполняет, а не определяет, что
+в них лежит. Политика хранения, очистка и отбор по профилю — вне его
+ответственности. Прямой доступ к данным в обход транспорта запрещён.
+
+## Error Behavior
+
+Отказ не бросается наружу: бизнес-операция продолжается, потеря считается через
+`_note_loss` (`:952`) и отражается в `get_stats` (`:1500`). Недопустимый уровень —
+единственный случай явного отказа, и он поднимает `JournalLevelError` (`:1665`).
+Транспорт недоступен — пакет уходит в файловый fallback (`:1936`, `:1963`).
+
+## Invariants
+
+- Порядок событий внутри хода сохраняется: `_stamp_event_time` (`:970`) и
+  `event_time_columns` (`:393`) не дают более позднему событию выглядеть ранним.
+- Событие, не прошедшее фильтр уровня, не попадает в очередь.
+- Потеря события всегда учтена в счётчиках, даже при fallback — fallback не
+  «успешная» запись.
+- Прямого INSERT в журнал из кода агента нет.
+
+## Forbidden Behavior
+
+- Писать в `agent_gateway_logs` мимо `DbLoggingService` — прямо запрещено в `## Requirements`.
+- Бросать исключение из фонового writer наружу в event loop.
+- Считать событие записанным при недоступном транспорте без учёта потери.
+- Менять личность запроса после `finish_request` (`:1175`) — личность неизменяема.
+
+## Consumers
+
+- Хуки и `McpIdentityHook` — подставляют личность в аргументы вызовов.
+- Подсистема сжатия контекста (`lib/services/context_compaction.py`) — пишет
+  `agent.compacted`.
+- Каналы — `log_inbound` / `log_outbound`.
+- UI и операция `data.history_search` — читают журнал после сжатия контекста.
+
+## Implementation
+
+| Что | Где |
+|---|---|
+| Сервис и writer | `lib/services/db_logging_service.py` |
+| Транспорт агента | `lib/services/log_transport.py` |
+| Запись на стороне платформы | `mcp-platform/servers/enterprise/capabilities/data/tools/log_events.py` |
+| Путь настроек | `config.py:302` |
+
+## Verification
+
+| Тест | Что держит |
+|---|---|
+| `tests/test_db_logging_service.py` | сервис целиком |
+| `tests/test_unified_event_logging_contract.py` | контракт записи |
+| `tests/test_unified_event_logging_pipeline.py` | путь события до журнала |
+| `tests/test_unified_event_logging_lifecycle.py` | start/stop |
+| `tests/test_logging_bridge.py`, `tests/test_database_logging_bridge.py` | мост к платформе |
+| `tests/test_hooks_database_logging.py` | запись из хуков |
+| `tests/test_subagent_logging.py` | запись из субагентов |
+| `tests/test_application_context_logging.py` | подключение при старте |
+| `tests/contract/test_database_logging_get_model.py` | контракт модели события |
