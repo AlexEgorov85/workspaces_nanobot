@@ -350,6 +350,25 @@ def test_scope_with_two_owners_is_an_issue() -> None:
     assert any("владелец" in m.lower() or "неоднознач" in m.lower() for m in messages)
 
 
+def test_scope_prose_backticks_are_not_owners() -> None:
+    """Проза раздела не превращается во второго владельца.
+
+    Регрессия: брались все строчные слова в обратных кавычках тела ``## Scope``,
+    и ``capability``, ``template``, ``data``, ``vectors``, ``submit``, ``pool``
+    из обычных объяснений читались как второй владелец. На четырёх чистых
+    спеках это давало ложное «неоднозначно объявлен владелец».
+    """
+    text = _BASELINE.replace(
+        "## Scope\n\n`platform`",
+        "## Scope\n\n`platform` — сборка уехала в capability `vectors`, "
+        "шаблон `template` и данные `data` не входят в раздел",
+    )
+    messages = _messages(text)
+    assert not any("владелец" in m.lower() or "неоднознач" in m.lower() for m in messages), (
+        f"проза раздела обязана игнорироваться; сообщения: {messages}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Реестр
 # ---------------------------------------------------------------------------

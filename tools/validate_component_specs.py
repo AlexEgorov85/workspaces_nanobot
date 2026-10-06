@@ -492,9 +492,13 @@ def validate_scope(
         # только разбор присутствующего раздела.
         return
     _, body = found
-    values = list(dict.fromkeys(m.group(1) for m in _SCOPE_VALUE_RE.finditer(body)))
+    # Владелец — ПЕРВЫЙ маркер раздела в обратных кавычках. Раньше брались все
+    # подряд, и обычная проза про capability (`` `capability` ``, `` `template` ``,
+    # `` `submit` ``) читалась как второй владелец: 4 ложных срабатывания на
+    # чистых спеках. Замер по всем 28 спекам: первый маркер — владелец везде.
+    markers = [m.group(1) for m in _SCOPE_VALUE_RE.finditer(body)]
     allowed = ", ".join(SCOPE_VALUES)
-    if not values:
+    if not markers:
         report.add(
             spec_path,
             "## Scope",
@@ -502,21 +506,29 @@ def validate_scope(
             "в обратных кавычках первым маркером раздела",
         )
         return
-    if len(values) > 1:
-        report.add(
-            spec_path,
-            "## Scope",
-            f"неоднозначно объявлен владелец: {', '.join(values)} "
-            f"(допустимо ровно одно из {allowed})",
-        )
-        return
-    value = values[0]
+    value = markers[0]
     if value not in SCOPE_VALUES:
         report.add(
             spec_path,
             "## Scope",
-            f"недопустимый владелец {value!r} (допустимо: {allowed})",
+            f"владелец не указан: первый маркер раздела — {value!r}, "
+            f"ожидается одно из {allowed}",
         )
+        return
+    # Второе упоминание другого владельца — неоднозначность, а не проза.
+    others = [
+        m
+        for m in dict.fromkeys(markers[1:])
+        if m in SCOPE_VALUES and m != value
+    ]
+    if others:
+        report.add(
+            spec_path,
+            "## Scope",
+            f"неоднозначно объявлен владелец: {value}, {', '.join(others)} "
+            f"(допустимо ровно одно из {allowed})",
+        )
+        return
 
 
 def validate_requirements(
