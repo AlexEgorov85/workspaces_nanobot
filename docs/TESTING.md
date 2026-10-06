@@ -14,8 +14,8 @@
 | | Агент | Платформа |
 |---|---|---|
 | Корень pytest | `.` (корень репозитория) | `mcp-platform/` |
-| Набор | `tests/` — 137 файлов `test_*.py` | `mcp-platform/tests/` — 189 файлов `test_*.py` |
-| Собрано тестов | 2862 | 4722 |
+| Набор | `tests/` — 174 файла `test_*.py` | `mcp-platform/tests/` — 225 файлов `test_*.py` |
+| Собрано тестов | 3704 | 6197 |
 | `testpaths` | `["tests"]` | `["tests"]` |
 | `python_files` | `["test_*.py"]` | `["test_*.py"]` |
 | `pythonpath` | `[".", "workspace"]` | `["."]` |
@@ -52,7 +52,7 @@ pytest не должен собирать, называются без преф�
 
 | Маркер | Гейт | Кто применяет |
 |---|---|---|
-| `live` | `NANOBOT_LIVE_E2E=1` (плюс живой БД/провайдер) | агент: `tests/test_gateway_live_media_e2e.py`, `tests/test_startup_schema_validation_live.py`; платформа: `mcp-platform/tests/test_live_stdio_contract.py` (8 тестов) |
+| `live` | `NANOBOT_LIVE_E2E=1` (плюс живой БД/провайдер) | агент: `tests/test_gateway_live_media_e2e.py`, `tests/test_startup_schema_validation_live.py`, `tests/test_mcp_operations_live.py`; платформа: `mcp-platform/tests/test_live_stdio_contract.py` (8 тестов) |
 | `integration` | `DATABASE_URL` | агент: `tests/integration/test_postgres_channel_lifecycle_stress.py` (6 тестов); в платформе не применяется нигде |
 | `contract` | не гейтится, выполняется всегда | 20 файлов совместимости с `nanobot-ai` |
 | `benchmark` | не гейтится, выполняется всегда; `-m benchmark` только отбирает | агент: `tests/benchmarks/test_quality_benchmark.py` (4 теста); платформа: `mcp-platform/tests/legal_summarizer/test_structure_direct_threshold_benchmark.py` (10 тестов) |
@@ -98,18 +98,18 @@ python -m pytest tests -q                                     # AGENTFULL
 cd mcp-platform && python -m pytest tests -q                   # PLATFULL
 
 # Только сборка имён тестов, без исполнения
-python -m pytest tests --collect-only -q                       # 2862 tests collected
-cd mcp-platform && python -m pytest tests --collect-only -q   # 4722 tests collected
+python -m pytest tests --collect-only -q                       # 3704 tests collected
+cd mcp-platform && python -m pytest tests --collect-only -q   # 6197 tests collected
 
 # ── Агент: маркерные прогоны ─────────────────────────────────────────────────
-# Всё, кроме живых гейтов и опт-ин-бенчмарка
-python -m pytest tests -q -m "not live and not integration and not benchmark"   # MARKER1
+# Всё, кроме живых гейтов
+python -m pytest tests -q -m "not live and not integration"   # MARKER1
 
 # Только контракты совместимости
 python -m pytest tests -q -m contract                          # MARKER2
 
-# Бенчмарк по требованию
-python -m pytest -m benchmark tests/test_history_search_benchmark.py -q        # MARKER3
+# Бенчмарк по требованию: маркер НЕ гейтится, -m только отбирает
+python -m pytest -m benchmark -q                                # MARKER3
 
 # ── Агент: точечные наборы ──────────────────────────────────────────────────
 # Сервисный слой, без БД
@@ -207,12 +207,15 @@ python -m pytest tests -q
 
 ## Что гоняет CI
 
-`.github/workflows/ci.yml` — четыре джобы: `fast-tests` (3 версии Python),
-`coverage`, `upgrade-readiness`, `platform-tests` (3 версии Python). Фильтр
-маркеров **одинаков на обеих** тестовых джобах: `-m "not live and not integration"`.
+`.github/workflows/ci.yml` — пять джоб: `spec-validation` (структура спек и дельты
+openspec), `fast-tests` (3 версии Python), `coverage`, `upgrade-readiness`,
+`platform-tests` (3 версии Python). Фильтр маркеров **одинаков на обеих** тестовых
+джобах: `-m "not live and not integration"`.
 
-**Границы времени.** У всех четырёх джоб объявлен `timeout-minutes`:
+**Границы времени.** У всех пяти джоб объявлен `timeout-minutes`: `spec-validation` 10,
 `fast-tests` 20, `coverage` 25, `upgrade-readiness` 15, `platform-tests` 20.
+У `spec-validation` лимит поднят до 10 не из-за проверки, а из-за `npx`: второй её
+шаг тянет node-пакет при первом запуске.
 Ориентир — фактические замеры (агентский набор ≈ 2.5 минуты, платформенный
 ≈ 1.2 минуты) с запасом на медленные раннеры, холодный кеш pip, тяжёлые
 `requirements.txt` и матрицу Python 3.11/3.12/3.13; матрица лимит не
@@ -237,8 +240,10 @@ python -m pytest tests -q
 
 **Покрытие платформы.** Джобы `coverage` для платформы нет, и это решение, а
 не недосмотр: порога покрытия не задано, поэтому метрика не actionable —
-отчёт без порога никто не смотрит. Линт платформы в CI тоже не включён
-(шага не было, код не зачищен); включать вместе с установкой ruff в джобу.
+отчёт без порога никто не смотрит. Линт платформы в CI при этом **есть**: шаг
+`Run ruff` с `python -m ruff check servers libs` стоит в `platform-tests`, рядом с
+установкой `ruff`. Прежняя редакция этого абзаца утверждала обратное («шага не было,
+код не зачищен») — шаг в workflow есть.
 
 ## Стражи границ
 
@@ -276,8 +281,9 @@ python -m pytest tests -q
 
 Пункт 2 — не теория: `test_document_cache_boundaries.py` так и проходил
 вхолостую, сканируя несуществующий `tests/scripts` (0 файлов) после переноса
-домена в платформу. Обход перенаправлен на `libs/legal_summarizer` (77
-файлов), а `test_production_tree_is_actually_collected` падает, если собрано
+домена в платформу. Обход перенаправлен на `libs/legal_summarizer` (83
+модуля по `_collect_production_files()` — самой функции стража), а
+`test_production_tree_is_actually_collected` падает, если собрано
 меньше 30.
 
 Покрытие capability'ов платформы: `test_llm_capability.py`,
