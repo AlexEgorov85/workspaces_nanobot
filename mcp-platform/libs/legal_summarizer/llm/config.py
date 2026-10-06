@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -42,6 +44,7 @@ __all__ = (
     "get_max_retries",
     "get_timeout_sec",
     "reset",
+    "using_identity",
 )
 
 
@@ -119,7 +122,19 @@ DEFAULTS = LegalConfig(
     context_window_tokens=None,
 )
 
-_active: LegalConfig = DEFAULTS
+#: Действующая конфигурация — **контекстная переменная**, а не глобал.
+#:
+#: Глобалом она была, пока домен запускался отдельным процессом на оборот.
+#: Теперь домен живёт в платформе и обслуживает несколько оборотов сразу, а
+#: личность у каждого своя: привязка на время вызова к глобалу смешала бы
+#: личности параллельных разборов ровно там, где журнал разбирать нельзя.
+#:
+#: Почему ``ContextVar``, а не разбор по потокам: батчи домена идут через
+#: ``asyncio.gather`` (``execution/map_reduce.py``), а asyncio-задачи **наследуют**
+#: контекст места создания. Пул потоков контекст не наследует, поэтому на нём
+#: та же привязка молча разъехалась бы; здесь потоков нет — LLM-вызов уезжает
+#: дальше уже **значением** (``llm/client.py`` → ``identity=_identity()``).
+_active: ContextVar[LegalConfig] = ContextVar("legal_summarizer_config", default=DEFAULTS)
 
 
 def configure(config: LegalConfig | None) -> None:
@@ -127,9 +142,42 @@ def configure(config: LegalConfig | None) -> None:
 
     Вызывается на границе capability, когда сервер уже разобрал свои
     настройки. ``None`` возвращает домен к дефолтам.
+
+    Ставит значение в **контекст вызова**, а не в глобал: настройки, объявленные
+    один раз на процесс, обязаны быть видны всем оборотам, а привязка ниже —
+    только своему. Именно поэтому их два вызова, а не один.
     """
-    global _active
-    _active = DEFAULTS if config is None else config
+    _active.set(DEFAULTS if config is None else config)
+
+
+@contextmanager
+def using_identity(identity: Mapping[str, str]) -> Iterator[LegalConfig]:
+    """Подставить личность оборота на время доменной работы.
+
+    Единственный способ, которым операция может передать домену «кто я в этом
+    обороте»: домен читает личность сам, из
+    :func:`get_identity`, и уходит с ней в ``llm.complete`` как ``params._meta``.
+    Без привязки личность пуста, сервер отвечает ``identity_missing``, домен
+    глотает отказ в ``REDUCE_INPUT_EMPTY``, и разбор любого настоящего
+    документа заканчивается ничем — при том, что юнит-пробы на подменённом
+    домене зелёные.
+
+    Ключи обязаны быть **простыми именами** — ``session_id``, ``user_id``,
+    ``request_id``, — потому что читает их ``llm/client.py::_identity`` без
+    префикса. Пространственные ``workspaces/*`` — это форма стороны платформы,
+    где из тех же имён снова собирается ``McpCallContext``; словарь с префиксом
+    выглядел бы привязанным, а на провод ушёл бы пустым. На этом стояла первая
+    версия починки: страж был зелёным, а разбор падал.
+
+    Возвращает применённую конфигурацию, чтобы вызывающий видел, с чем работал
+    домен, и мог бы отличить «личности не было» от «была, но не та».
+    """
+    applied = replace(current(), identity=dict(identity))
+    token = _active.set(applied)
+    try:
+        yield applied
+    finally:
+        _active.reset(token)
 
 
 def reset() -> None:
@@ -138,8 +186,8 @@ def reset() -> None:
 
 
 def current() -> LegalConfig:
-    """Действующая конфигурация."""
-    return _active
+    """Действующая конфигурация оборота."""
+    return _active.get()
 
 
 def with_overrides(**sections: Mapping[str, Any]) -> LegalConfig:
@@ -148,42 +196,42 @@ def with_overrides(**sections: Mapping[str, Any]) -> LegalConfig:
     Только для тестов и для точечной подмены: полная замена делается
     через :func:`configure`.
     """
-    return replace(_active, **sections)
+    return replace(current(), **sections)
 
 
 def get_cli_config() -> dict[str, Any]:
-    return dict(_active.cli)
+    return dict(current().cli)
 
 
 def get_llm_config() -> dict[str, Any]:
-    return dict(_active.llm)
+    return dict(current().llm)
 
 
 def get_max_retries() -> int:
-    return int(_active.cli.get("max_retries", 3))
+    return int(current().cli.get("max_retries", 3))
 
 
 def get_chunking_config() -> dict[str, Any]:
-    return dict(_active.chunking)
+    return dict(current().chunking)
 
 
 def get_brief_context_config() -> dict[str, Any]:
     """Параметры ``BriefContextBuilder``."""
-    return dict(_active.brief_context)
+    return dict(current().brief_context)
 
 
 def get_execution_config() -> dict[str, Any]:
     """Политика длинных операций, safety net и context batching."""
-    return dict(_active.execution)
+    return dict(current().execution)
 
 
 def get_context_window_tokens() -> int | None:
     """Окно модели в токенах либо ``None``, если оно неизвестно."""
-    return _active.context_window_tokens
+    return current().context_window_tokens
 
 
 def get_default_length() -> str:
-    return str(_active.cli.get("default_length", "medium"))
+    return str(current().cli.get("default_length", "medium"))
 
 
 def mr_trace_enabled() -> bool:
@@ -193,12 +241,12 @@ def mr_trace_enabled() -> bool:
     окружение читает только реестр, а флаг - свойство домена, поэтому он
     приходит настройкой.
     """
-    return _active.mr_trace
+    return current().mr_trace
 
 
 def llm_trace_enabled() -> bool:
     """Отладочный флаг трассировки LLM-вызовов (было ``LEGAL_SUMMARIZER_LLM_TRACE``)."""
-    return _active.llm_trace
+    return current().llm_trace
 
 
 def get_cache_root() -> str | None:
@@ -210,7 +258,7 @@ def get_cache_root() -> str | None:
     оказывался в домашнем каталоге пользователя. Читатель обязан решать,
     чем заменить «не объявлено» (п. 11.5).
     """
-    return _active.cache_root
+    return current().cache_root
 
 
 def get_identity() -> dict[str, str]:
@@ -223,8 +271,8 @@ def get_identity() -> dict[str, str]:
     контекста: ``_meta`` не уйдёт вовсе, и сервер ответит
     ``identity_missing``, что точнее выдуманной сессии в журнале.
     """
-    return dict(_active.identity)
+    return dict(current().identity)
 
 
 def get_timeout_sec() -> float:
-    return float(_active.cli.get("timeout_sec", 120))
+    return float(current().cli.get("timeout_sec", 120))

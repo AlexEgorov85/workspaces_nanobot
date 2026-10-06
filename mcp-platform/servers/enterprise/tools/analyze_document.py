@@ -992,6 +992,7 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
         _verify_operation_id(operation_id, computed_id)
 
         from libs.legal_summarizer.application import service as domain
+        from libs.legal_summarizer.llm import config as domain_config
 
         # Признак занятости берётся ДО платной работы: новый вызов обязан
         # отказать, не сделав ни одного LLM-вызова.
@@ -1013,31 +1014,57 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
             # после себя ничего, а уменьшение обязано пережить именно такой
             # вызов. Запись после него стёрла бы саму причину уменьшения.
             _remember_batch_budget(handle, computed_id, batch_limit)
-            outcome = domain.run(
-                text,
-                **_accepted_kwargs(
-                    domain.run,
-                    length=length_value,
-                    focus=focus_value or None,
-                    question=question_value or None,
-                    confirmed=bool(confirmed),
-                    document_path=str(document_path),
-                    workspace_root=state_root(handle),
-                    # Ограничение обязано приходить отсюда, а не оставаться
-                    # None: None — это «выполнить весь разбор», то есть ровно
-                    # то поведение, из-за которого не уложившийся в потолок
-                    # вызов терял оплаченную работу целиком.
-                    batch_limit=batch_limit,
-                    # Потолок вызова передаётся домену тем же способом, что и
-                    # остальные именованные аргументы: по имени, а не по
-                    # подписи конкретной версии. Отбор отбросил бы значение
-                    # молча, только если параметр уберут из ``service.run`` —
-                    # тогда вызов перестанет ограничивать неделимый шаг, и это
-                    # должен заметить страж на подсаженном дефекте, а не
-                    # владелец по счастливой случайности.
-                    call_budget_sec=execution_timeout_sec,
-                ),
-            )
+            # Личность оборота привязывается на время доменной работы и
+            # снимается сразу после. Домен читает её сам, из
+            # ``llm.config.get_identity()``, и уходит с ней в ``llm.complete``
+            # как ``params._meta``; без привязки она пуста, платформа отвечает
+            # ``identity_missing``, домен глотает отказ в
+            # ``REDUCE_INPUT_EMPTY``, и разбор **любого** настоящего документа
+            # заканчивается отказом — при зелёных юнит-пробах, потому что они
+            # домен не подменяют, а значит и в LLM не ходят.
+            #
+            # Привязка контекстная (``using_identity``), а не записью в
+            # конфигурацию: обслуживает оборотов несколько, и глобальная
+            # подстановка смешала бы личности параллельных разборов в журнале.
+            #
+            # Ключи — **простые имена**, а не ``as_meta()``: домен читает их
+            # сам, ``llm/client.py::_identity`` ищет ``session_id`` и
+            # ``user_id`` без префикса, и пространственные ``workspaces/*``
+            # молча не нашлись бы — личность выглядела бы привязанной, а на
+            # провод ушла бы пустой. Префикс нужен только на стороне платформы,
+            # там, где из этих имён снова собирается ``McpCallContext``.
+            with domain_config.using_identity(
+                {
+                    "session_id": ctx.call.session_id,
+                    "user_id": ctx.call.user_id,
+                    "request_id": ctx.call.request_id,
+                }
+            ):
+                outcome = domain.run(
+                    text,
+                    **_accepted_kwargs(
+                        domain.run,
+                        length=length_value,
+                        focus=focus_value or None,
+                        question=question_value or None,
+                        confirmed=bool(confirmed),
+                        document_path=str(document_path),
+                        workspace_root=state_root(handle),
+                        # Ограничение обязано приходить отсюда, а не оставаться
+                        # None: None — это «выполнить весь разбор», то есть ровно
+                        # то поведение, из-за которого не уложившийся в потолок
+                        # вызов терял оплаченную работу целиком.
+                        batch_limit=batch_limit,
+                        # Потолок вызова передаётся домену тем же способом, что и
+                        # остальные именованные аргументы: по имени, а не по
+                        # подписи конкретной версии. Отбор отбросил бы значение
+                        # молча, только если параметр уберут из ``service.run`` —
+                        # тогда вызов перестанет ограничивать неделимый шаг, и это
+                        # должен заметить страж на подсаженном дефекте, а не
+                        # владелец по счастливой случайности.
+                        call_budget_sec=execution_timeout_sec,
+                    ),
+                )
         finally:
             _release(handle, computed_id)
         # Идентичность вычислена выше, поэтому домен не должен был подставить
