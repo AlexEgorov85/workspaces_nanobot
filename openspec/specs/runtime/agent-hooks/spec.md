@@ -17,7 +17,7 @@ Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фикс
 
 ### Requirement: Хуки обязаны наследовать `nanobot.agent.hook.AgentHook`
 
-Все классы хуков в `lib/hooks/*.py` ДОЛЖНЫ прямо или через промежуточный базовый класс наследовать `nanobot.agent.hook.AgentHook`. Только так `CompositeHook._for_each_hook_safe` корректно диспатчит lifecycle-методы (`emit_reasoning`, `emit_reasoning_end`, `on_stream`, `on_stream_end`, `finalize_content`, `on_error`, `on_finally`, `before_run`, `after_run`, `before_iteration`, `after_iteration`, `before_execute_tool`, `after_execute_tool`, `on_execute_tool_error`, `before_execute_tools`, `on_provider_tool_event`, `on_finally`, `on_error`) без `AttributeError`.
+Все классы хуков в `lib/hooks/*.py` MUST прямо или через промежуточный базовый класс наследовать `nanobot.agent.hook.AgentHook`. Только так `CompositeHook._for_each_hook_safe` корректно диспатчит lifecycle-методы (`emit_reasoning`, `emit_reasoning_end`, `on_stream`, `on_stream_end`, `finalize_content`, `on_error`, `on_finally`, `before_run`, `after_run`, `before_iteration`, `after_iteration`, `before_execute_tool`, `after_execute_tool`, `on_execute_tool_error`, `before_execute_tools`, `on_provider_tool_event`, `on_finally`, `on_error`) без `AttributeError`.
 
 #### Сценарий: Хук с lifecycle-методом, унаследованным от AgentHook
 

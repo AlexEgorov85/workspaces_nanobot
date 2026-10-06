@@ -54,7 +54,7 @@ Deprecated kwargs через `**kwargs` MUST быть удалены в MINOR р
 
 ### Requirement: Состояние сессии вне ApplicationContext
 
-Система ДОЛЖНА хранить состояние сессии (сообщения, метаданные, per-turn deltas) в менеджере сессий (`SessionManager` поверх `SanitizingSessionStore`) или канальном слое, но НЕ в `ApplicationContext`.
+Система MUST хранить состояние сессии (сообщения, метаданные, per-turn deltas) в менеджере сессий (`SessionManager` поверх `SanitizingSessionStore`) или канальном слое, но НЕ в `ApplicationContext`.
 
 #### Scenario: Поиск сессии
 

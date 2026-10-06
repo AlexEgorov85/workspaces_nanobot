@@ -201,7 +201,7 @@ context compaction и остаётся основным источником д�
 
 ### Requirement: RequestContext exposes user identity
 
-Источник `user_id` — `nanobot.agent.tools.context.RequestContext` через поле
+Источник `user_id` MUST быть `nanobot.agent.tools.context.RequestContext` через поле
 `sender_id: str | None`. В агенте единственное обращение к нему —
 `McpIdentityHook._sender_id()`: зависимость от конкретной версии nanobot
 изолирована в одной функции, и переименование поля чинит одно место.

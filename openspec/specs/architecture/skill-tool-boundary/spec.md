@@ -17,7 +17,7 @@ Skills и Tools — **параллельные потребители** обще
 
 ### Requirement: Skill layer содержит предметную логику
 
-Система ДОЛЖНА сохранять project-specific domain logic внутри слоя Skills (`workspace/skills/<name>/`).
+Система MUST сохранять project-specific domain logic внутри слоя Skills (`workspace/skills/<name>/`).
 
 #### Scenario: Skill реализует свои скрипты
 
@@ -32,7 +32,7 @@ Skills и Tools — **параллельные потребители** обще
 
 ### Requirement: Tool layer содержит самостоятельные agent-facing capability
 
-Система ДОЛЖНА размещать в `workspace/tools/` только те capability, которые агент выбирает и вызывает самостоятельно, независимо от выбранного домена.
+Система MUST размещать в `workspace/tools/` только те capability, которые агент выбирает и вызывает самостоятельно, независимо от выбранного домена.
 
 #### Scenario: Tool переиспользуется across Skills
 
@@ -41,7 +41,7 @@ Skills и Tools — **параллельные потребители** обще
 
 ### Requirement: Agent-facing capability — критерий Tool'а
 
-Tool'ом MAY становиться только capability, удовлетворяющая всем условиям:
+Tool'ом MAY становиться только capability, которая MUST удовлетворять всем условиям:
 
 - агент выбирает и вызывает её **самостоятельно**, как отдельный шаг своего плана;
 - её полезность не зависит от выбранного домена;
@@ -71,7 +71,7 @@ Tool'ом MAY становиться только capability, удовлетво
 
 ### Requirement: Независимость
 
-Система ДОЛЖНА сохранять Skills и Tools независимо разрабатываемыми: ни один слой не требует compile-time или runtime dependency на другой.
+Система MUST сохранять Skills и Tools независимо разрабатываемыми: ни один слой не требует compile-time или runtime dependency на другой.
 
 #### Scenario: Skill нуждается в capability, доступной как Tool
 
