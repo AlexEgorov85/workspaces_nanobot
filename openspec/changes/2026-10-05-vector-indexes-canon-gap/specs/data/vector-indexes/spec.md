@@ -156,9 +156,9 @@ DbLoggingService») предписывает записать ровно оди�
 
 ### Requirement: Единый источник конфигурации
 
-Система ДОЛЖНА читать состав и параметры векторных индексов **только** из
+Система MUST читать состав и параметры векторных индексов **только** из
 `mcp-platform/platform.json → vectors.indexes`, объявленного capability `vectors`.
-Агент ДОЛЖЕН NOT держать собственный список индексов, ни в `config.json`, ни в
+Агент MUST NOT держать собственный список индексов, ни в `config.json`, ни в
 `gateway.*`, ни в `skills.*`.
 
 Прежняя редакция требовала читать `gateway.vector.index.indexes.*` из
@@ -232,7 +232,7 @@ DbLoggingService») предписывает записать ровно оди�
 
 ### Requirement: Единый путь доступа
 
-Система ДОЛЖНА предоставлять vector search модели исключительно через операцию
+Система MUST предоставлять vector search модели исключительно через операцию
 capability `vectors` (`mcp_enterprise_vector_search`), а коду платформы — через
 владельца индексов `mcp-platform/libs/vectors/`.
 
@@ -297,7 +297,7 @@ SHALL NOT читать эти поля из метаданных, сериали
 
 ### Requirement: Агент не объявляет состав индексов
 
-Секции `gateway.vector.index` и `skills.<name>.vector_indexes` ДОЛЖНЫ быть
+Секции `gateway.vector.index` и `skills.<name>.vector_indexes` MUST
 отсутствовать в `config.json`, а модели конфигурации — исключены из
 `lib/core/project_settings.py`. Пока секция объявлена, но не читается, она выглядит
 владельцем: её значения печатаются как ожидаемые в `tests/test_config_keys.py`, а
