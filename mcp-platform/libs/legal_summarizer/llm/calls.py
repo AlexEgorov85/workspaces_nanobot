@@ -17,6 +17,7 @@ from collections.abc import Iterable
 from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.structure import DocumentStructure
 from libs.legal_summarizer.llm import client as llm
+from libs.legal_summarizer.llm.config import get_llm_config
 from libs.legal_summarizer.llm.prompts import (
     build_batch_user_message,
     parse_batch_response,
@@ -37,6 +38,30 @@ def chat_locked(messages, *, context=None) -> str:
     для manual LLM-вызовов. Реализация делегирует в ``guarded_chat``.
     """
     return guarded_chat(llm.chat, messages, context=context)
+
+
+def _reduce_max_tokens(nominal: int) -> int:
+    """Потолок ответа reduce-вызова: номинал + резерв под рассуждение.
+
+    Номинал — это потолок на **содержимое** ответа (свод раздела, финальный
+    свод). У рассуждающей модели рассуждение расходует тот же бюджет ответа:
+    при номинале 2000 токенов модель могла исчерпать его целиком на
+    ``<think>`` и не оставить ни одного символа свода. Тогда домен получал
+    пустую строку и объявлял ``REDUCE_INPUT_EMPTY`` — «свод действительно
+    пуст», то есть неповторяемый отказ для документа, который через минуту
+    разбирался без всяких правок.
+
+    Резерв объявлен настройкой домена (``llm.reasoning_reserve_tokens``) и
+    ограничен потолком платформы (``llm.max_tokens``): превышать то, что
+    провайдер вообще готов отдать, смысла нет.
+    """
+    declared = get_llm_config()
+    reserve = int(declared.get("reasoning_reserve_tokens", 0) or 0)
+    ceiling = int(declared.get("max_tokens", 0) or 0)
+    value = nominal + max(reserve, 0)
+    if ceiling > 0:
+        value = min(value, ceiling)
+    return value
 
 
 def doc_context(
@@ -111,12 +136,12 @@ def llm_section_reduce(
 
     Single-flight: см. ``llm_batch``.
 
-    ``max_tokens`` override: для section_summary (~4000 chars ≈ 1100 tokens)
-    достаточно 2000 токенов вместо дефолтных 8192. Это ускоряет
-    отклик LLM в 2-3 раза на длинных output'ах (output tokens — главный
-    источник латентности в OpenAI-compatible API). Реальный замер
-    trace detailed-прогона (см. ``[llm-trace] done duration=...``):
-    до override: avg 30-60 сек на section_reduce, после: 10-20 сек.
+    ``max_tokens``: потолок на **содержимое** ответа (~4000 chars ≈ 1100
+    tokens) плюс резерв под рассуждение модели — см. ``_reduce_max_tokens``.
+    Раньше стоял голый номинал 2000, и у рассуждающей модели он уходил на
+    ``<think>`` целиком: контента не оставалось, свод не состоялся. Замер
+    до override: avg 30-60 сек на section_reduce. Латентность выросла, и это
+    цена ответа, который вообще существует.
 
     Безопасно: каждый вызов возвращает ровно одну section_summary,
     ``strip_think_blocks + fit_input`` обрежут в caller'е до
@@ -135,7 +160,7 @@ def llm_section_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return llm.chat(messages, context=None, max_tokens=2000)
+    return llm.chat(messages, context=None, max_tokens=_reduce_max_tokens(2000))
 
 
 def llm_document_reduce(
@@ -150,10 +175,12 @@ def llm_document_reduce(
 
     Single-flight: см. ``llm_batch``.
 
-    ``max_tokens`` override: для финального саммари (~8000 chars ≈ 2300 tokens)
-    достаточно 3000 токенов. Дефолтные 8192 замедляют LLM в 2-3 раза
-    на длинных output'ах (см. trace detailed-прогона: doc_reduce с
-    input 16-26K → output 7-10K → 30-100 сек на вызов).
+    ``max_tokens``: потолок на **содержимое** финального саммари (~8000 chars
+    ≈ 2300 tokens) плюс резерв под рассуждение модели — см.
+    ``_reduce_max_tokens``. Раньше стоял голый номинал 3000: дефолтные 8192
+    замедляли LLM в 2-3 раза на длинных output'ах (trace detailed-прогона:
+    doc_reduce с input 16-26K → output 7-10K → 30-100 сек на вызов), но под
+    рассуждающей моделью 3000 уходило на рассуждение, и свод не состоялся.
 
     Безопасно: каждый вызов возвращает ровно один финальный summary.
     """
@@ -174,7 +201,7 @@ def llm_document_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return llm.chat(messages, context=None, max_tokens=3000)
+    return llm.chat(messages, context=None, max_tokens=_reduce_max_tokens(3000))
 
 
 __all__ = [

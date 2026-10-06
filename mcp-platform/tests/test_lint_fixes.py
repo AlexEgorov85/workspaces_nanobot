@@ -56,15 +56,23 @@ def test_to_heading_candidate_without_anchor_is_none() -> None:
 
 
 def test_chat_references_a_trace_gate_that_exists() -> None:
-    """``chat`` зовёт флаг трассировки, который в модуле реально объявлен.
+    """``chat`` не ссылается на глобал, которого в модуле нет.
 
     Проверяется байт-код, а не исходник: ``co_names`` — это имена, которые
     функция грузит из глобального пространства, то есть ровно те, чьё
     отсутствие даёт ``NameError`` в рантайме. Переписывание строки с
     ``f``-префиксом или перенос выражения тест не задевает.
+
+    Раньше здесь стояло ещё ``assert "_trace_enabled" in referenced``: пустой
+    ответ писался в stderr под этим флагом, и падение того вывода выглядело
+    бы как «диагностика молча пропала». Теперь такой вывод не нужен — ответ
+    без текста поднимается как отказ вызова с названной причиной, а размер
+    ответа и без того виден в ``[llm-trace] done`` — и требование «функция
+    обязана звать флаг» стало бы требованием звать его ради зова. Остаётся то,
+    ради чего проба писалась: ссылок на несуществующие глобалы нет.
     """
     referenced = set(llm_client.chat.__code__.co_names)
 
-    assert "_LLM_TRACE_ENABLED" not in referenced
-    assert "_trace_enabled" in referenced
+    dangling = {name for name in referenced if name.startswith("_LLM_TRACE")}
+    assert not dangling, f"chat ссылается на несуществующие глобалы: {dangling}"
     assert callable(llm_client._trace_enabled)

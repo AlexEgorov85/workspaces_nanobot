@@ -33,6 +33,7 @@ import time as _time
 from pathlib import Path
 
 from libs.legal_summarizer.llm.config import get_cli_config
+from libs.legal_summarizer.llm.sanitize import strip_think_blocks
 
 #: Корень платформы — от этого файла, а не от ``cwd``.
 #:
@@ -66,9 +67,27 @@ from libs.enterprise_common.execution.errors import FAILURE_CODES  # noqa: E402
 __all__ = [
     "chat",
     "classify_llm_failure",
+    "LlmEmptyResponse",
     "LlmOperationError",
     "LlmUnavailable",
 ]
+
+
+class LlmEmptyResponse(Exception):
+    """Провайдер ответил, но **текста в ответе нет**.
+
+    Отдельный тип, а не подкласс ``LlmOperationError``: тот означает «сервер
+    вернул код отказа», а здесь сервер отказа не возвращал — он вернул ответ
+    без содержимого. Причина типовая: рассуждающая модель исчерпала
+    ``max_tokens`` на рассуждение и до контента не дошла (замерено на
+    боевом прогоне 2026-10-06: ``<think>`` без ответа после него).
+
+    Пока ответ был пустой строкой, отказ уходил наверх как ``REDUCE_INPUT_EMPTY``
+    — бизнес-факт «свод действительно пуст», который платформа считает
+    **неповторяемым**. Повторный вызов того же документа не помогал, хотя
+    от был временным: тот же файл через минуту разбирался. Решение «пустой
+    свод — это только про свод» было верным, но код его не обеспечивал.
+    """
 
 
 def classify_llm_failure(exc: BaseException) -> str:
@@ -89,6 +108,17 @@ def classify_llm_failure(exc: BaseException) -> str:
     рано или поздно разойдётся с её словарём, и молча начнёт выдавать коды,
     которых на проводе не бывает.
     """
+    if isinstance(exc, LlmEmptyResponse):
+        # Ответ без текста — свойство **вызова**, а не документа, поэтому код
+        # повторяемый: повтор продолжит с сохранённого состояния, и на живом
+        # прогоне тот же документ через минуту разбирался. ``infrastructure_error``
+        # — тот же код, которым платформа сама отвечает за «capability llm
+        # поднята, а пользоваться ею нечем», и он же в её ``RETRYABLE_CODES``.
+        #
+        # Свой ``LLM_ERROR`` из словаря платформа считает **неповторяемым**,
+        # поэтому им такой отказ не назвать: тот же самый отказ второй раз
+        # повторился бы ровно с тем же результатом.
+        return "infrastructure_error"
     if isinstance(exc, LlmUnavailable):
         # Сессия не поднялась, оборвалась или не ответила вовремя. Платформа
         # считает ``upstream_unavailable`` повторяемым, и это верно: тот же
@@ -225,10 +255,24 @@ def chat(
         duration=f"{_time.monotonic() - start:.2f}s",
         response=response_chars,
     )
-    if _trace_enabled() and response_chars == 0:
-        sys.stderr.write(
-            f"[llm-trace WARNING] LLM returned EMPTY response "
-            f"(user_chars={user_chars})\n"
+
+    # Ответ без текста — это отказ вызова, а не пустой результат.
+    #
+    # Раньше здесь стоял только предупреждающий вывод под флагом трассировки,
+    # а пустая строка уходила дальше: ``strip_think_blocks("")`` давал пустой
+    # свод, домен объявлял ``REDUCE_INPUT_EMPTY``, и вопрос «модель не ответила
+    # или своду нечего summarить?» терялся. Ответ без текста поднимается
+    # **здесь**, потому что дальше отличить его уже нечем: одинаковый пустой
+    # результат получается и от неудачного вызова, и от честного пустого свода.
+    #
+    # ``response`` возвращается как есть (сырым, включая ``<think>``): смена
+    # формы ответа — это отдельное решение, а проверка ниже ничего в нём не
+    # меняет и вызывающих не удивляет.
+    answer = strip_think_blocks(response)
+    if not answer.strip():
+        raise LlmEmptyResponse(
+            f"модель не вернула текста ответа: в ответе {response_chars} симв., "
+            f"из них рассуждения {response_chars - len(answer)}; "
+            f"user_chars={user_chars}; max_tokens={kwargs.get('max_tokens') or 'из настроек платформы'}"
         )
-        sys.stderr.flush()
     return response
