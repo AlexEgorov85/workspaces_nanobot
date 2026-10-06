@@ -34,7 +34,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from libs.enterprise_common.errors import EnterpriseError, InvalidRequestError
 from libs.enterprise_common.execution.context import ToolExecutionContext
@@ -75,6 +75,12 @@ URI_SCHEME = "session://"
 #: давности состояния в репозитории нет.
 INCOMPLETE_TTL_SEC = 24 * 60 * 60
 COMPLETE_TTL_SEC = 7 * 24 * 60 * 60
+
+#: Подкаталог каталогов состояний внутри ``artifacts/legal_summarizer``.
+#:
+#: Объявлен константой, потому что имя входит в путь записи ограничения шага
+#: (:func:`budget_marker`), то есть теперь у него два читателя, а не один.
+OPERATIONS_DIRNAME = "operations"
 
 #: Подкаталог надгробий убранных состояний внутри ``artifacts/`` сессии.
 #:
@@ -117,6 +123,23 @@ BUSY_TTL_FACTOR = 2
 #: идёт внутри потолка, поэтому отдавать его батчам нельзя.
 BATCH_BUDGET_SHARE = 0.6
 
+#: Нижняя граница ограничения шага. Единица — это «сделай один батч», а ноль
+#: означал бы «шаг не поместился», и домен отличал бы его от «шаг не начат», то
+#: есть один и тот же отказ с двумя разными причинами.
+MIN_BATCH_BUDGET = 1
+
+#: Делитель уменьшения ограничения при перехвате протухшего признака занятости.
+#:
+#: Два, а не «минус один батч»: повод уменьшать — факт неукладывания, а не цена
+#: шага. Каждый следующий перехват уводит ограничение ещё вдвое, пока оно не
+#: упрётся в :data:`MIN_BATCH_BUDGET`; ниже единицы уменьшать нечего, и виноват
+#: уже не размер шага, а потолок вызова — об этом вызывающая сторона узнаёт
+#: по коду отказа, а уменьшение обязано молчать.
+BUDGET_BACKOFF_DIVISOR = 2
+
+#: Имя файла ограничения шага внутри каталога состояния операции.
+BUDGET_MARKER_FILENAME = "budget.json"
+
 #: Стоимость одного батча, если домен не отдал свою оценку. Объявлено в домене
 #: (``llm/config.py`` → ``estimated_chunk_duration_sec``), поэтому значение
 #: подставляется только при негодной конфигурации.
@@ -147,7 +170,7 @@ def state_root(handle: SessionHandle) -> Path:
 
 def operations_dir(handle: SessionHandle) -> Path:
     """Каталог состояний операций — то, что примет ``operations/``."""
-    return state_root(handle) / "operations"
+    return state_root(handle) / OPERATIONS_DIRNAME
 
 
 def busy_marker(operation_id: str) -> str:
@@ -168,6 +191,30 @@ def tombstone_marker(operation_id: str) -> str:
     иначе объяснение читалось бы не по тому адресу, куда писал уборщик.
     """
     return f"{SKILL_DIRNAME}/{TOMBSTONES_DIRNAME}/{operation_id}.json"
+
+
+def budget_marker(operation_id: str) -> str:
+    """Относительный путь записи ограничения шага внутри ``artifacts/``.
+
+    Запись лежит **в каталоге состояния операции**, рядом с пошаговыми файлами
+    чанков, и потому умирает вместе с состоянием: уборка сносит каталог целиком,
+    а надгробие объясняет пропажу обоим. Отдельным каталогом рядом с ``busy/``
+    и ``access/`` она стала бы вторым местом, где надо помнить срок жизни, и
+    третьим — в уборке, ради одного целого числа.
+
+    Не в ``manifest.json``, потому что этот файл принадлежит домену:
+    ``save_manifest`` пишет фиксированную схему ``NormalizedManifest.to_dict()``,
+    и чужое поле молча пропало бы при следующей же записи домена, а на первом
+    вызове, когда состояния ещё нет, пришлось бы выдумать манифест — и
+    ``load_manifest`` прочитал бы его как чужое состояние.
+
+    Не в отметке обращения (``access/``), потому что её перезаписывает
+    ``query_operation`` при каждом чтении, записывая туда ``operation_id``,
+    ``last_access_at`` и ``status`` — и больше ничего. Уменьшенное ограничение
+    стёрлось бы первым же follow-up вопросом, то есть ровно тем действием,
+    которое навык прямо предписывает модели делать между вызовами разбора.
+    """
+    return f"{SKILL_DIRNAME}/{OPERATIONS_DIRNAME}/{operation_id}/{BUDGET_MARKER_FILENAME}"
 
 
 def _tombstone_payload(operation_id: str, *, now: float, orphaned: bool) -> dict[str, Any]:
@@ -393,7 +440,8 @@ def _batch_budget(execution_timeout_sec: float) -> int:
     Ноль не возвращается: он означал бы «шаг не поместился», и домен отличал
     бы его от «шаг не начат» — это один и тот же отказ с двумя разными
     причинами. Единица означает, что вызов сделает один батч и вернёт
-    ``requires_continuation`` с остатком.
+    ``requires_continuation`` с остатком. Это и есть :data:`MIN_BATCH_BUDGET` —
+    тот же пол, на котором стоит и уменьшение ограничения.
     """
     try:
         from libs.legal_summarizer.llm.config import get_execution_config
@@ -404,7 +452,7 @@ def _batch_budget(execution_timeout_sec: float) -> int:
     if per_batch <= 0:
         per_batch = FALLBACK_CHUNK_SEC
     usable = max(1.0, float(execution_timeout_sec) * BATCH_BUDGET_SHARE)
-    return max(1, int(usable // per_batch))
+    return max(MIN_BATCH_BUDGET, int(usable // per_batch))
 
 
 # ── идентичность ──────────────────────────────────────────────────────────
@@ -480,17 +528,49 @@ def _write_marker(handle: SessionHandle, relative: str, payload: dict[str, Any])
         ) from exc
 
 
-def _take_or_refuse(handle: SessionHandle, operation_id: str, *, ttl_sec: float, owner: str) -> int:
+class BusyTake(NamedTuple):
+    """Что дал захват работы: счётчик вызовов и признак перехвата.
+
+    Два факта, а не один. По ``step`` видно, сколько раз работа бралась, а
+    ``recovered_after_timeout`` отвечает на вопрос, который изнутри вызова
+    не виден вовсе: уложился ли прежний поток в потолок.
+
+    Почему перехват и есть наблюдаемый недобор. Поток, не уложившийся в потолок,
+    **не прерывается** (``execution/pipeline.py`` — ``future.cancel()`` для идущей
+    задачи не действует), и его возврат отбрасывается целиком, поэтому вызов
+    таймаута не возвращает ничего: ни ответа, ни отказа, ни записи состояния.
+    Зато признак занятости такой поток удерживает до своего ``finally``, и
+    следующий вызов получает ``operation_in_progress`` вместо дублирования
+    идущей работы (спека ``skills/legal-summarizer-query``, сценарий «Поток
+    пережил таймаут»). Дождавшись истечения срока признака
+    (``execution_timeout_sec × :data:`BUSY_TTL_FACTOR` ``), этот следующий вызов
+    берёт работу вместо прежнего владельца — и момент перехвата оказывается
+    единственным следом неукладывания, который вообще остаётся на диске.
+
+    Нечитаемый признак перехватом **не** считается: что именно он был и чей —
+    неизвестно, а счётчик в этом случае начинается с единицы. Уменьшать
+    ограничение по битому файлу значило бы взимать плату за чужую порчу.
+    """
+
+    step: int
+    recovered_after_timeout: bool
+
+
+def _take_or_refuse(
+    handle: SessionHandle, operation_id: str, *, ttl_sec: float, owner: str
+) -> BusyTake:
     """Решение о работе принимается **до** платной работы.
 
     Новый вызов читает ``step`` и ``session_token``; срок жизни признака не
     истёк — отказ ``operation_in_progress``, не сделав ни одного LLM-вызова.
     Истёк — работа берётся, счётчик продолжает расти, и оплаченное не
-    оплачивается повторно.
+    оплачивается повторно; заодно возвращается признак перехвата, по
+    которому :func:`_resolve_batch_budget` уменьшает ограничение.
     """
     now = time.time()
     existing = _read_marker(handle, busy_marker(operation_id))
     step = 0
+    recovered = False
     if existing is not None:
         try:
             expires_at = float(existing.get("expires_at", 0))
@@ -503,6 +583,9 @@ def _take_or_refuse(handle: SessionHandle, operation_id: str, *, ttl_sec: float,
                 f"{existing.get('session_token')!r}); дождитесь её ответа",
                 code="operation_in_progress",
             )
+        # Признак дожил до конца своего срока, не будучи снятым: значит прежний
+        # поток его удерживал и до конца не дошёл, то есть не уложился в потолок.
+        recovered = True
         try:
             step = int(existing.get("step", 0))
         except (TypeError, ValueError):
@@ -519,7 +602,7 @@ def _take_or_refuse(handle: SessionHandle, operation_id: str, *, ttl_sec: float,
             "expires_at": now + ttl_sec,
         },
     )
-    return step
+    return BusyTake(step=step, recovered_after_timeout=recovered)
 
 
 def _release(handle: SessionHandle, operation_id: str) -> None:
@@ -528,6 +611,88 @@ def _release(handle: SessionHandle, operation_id: str) -> None:
         handle.remove(busy_marker(operation_id), subdir=ARTIFACTS_SUBDIR)
     except OSError:  # pragma: no cover - снятие признака не обязано удаться
         logger.warning("признак занятости %s не снят", operation_id)
+
+
+# ── ограничение шага в состоянии операции ─────────────────────────────────
+#
+# Перенос ограничения на следующий вызов — вторая половина «ограничение
+# помещается в потолок». Расчётный бюджет считается заново на каждом вызове
+# (:func:`_batch_budget`), а уменьшение обязано пережить вызов, который не
+# уложился, — иначе отказ повторялся бы по кругу от одного и того же значения.
+# Поэтому применённое ограничение пишется в состояние операции (путь и
+# доводы в :func:`budget_marker`) и читается следующим вызовом.
+
+
+def _stored_batch_budget(handle: SessionHandle, operation_id: str) -> int | None:
+    """Применённое ограничение прошлого вызова; ``None`` — считать заново.
+
+    ``None`` означает «ограничения нет»: записи ещё не было, она сброшена
+    завершением разбора или негодна. Негодная запись — отсутствующая,
+    нечитаемая, не целая или неположительная — не должна ронять вызов: она
+    означает лишь, что считать надо заново, то есть вернуться к потолку.
+    """
+    stored = _read_marker(handle, budget_marker(operation_id))
+    if stored is None:
+        return None
+    try:
+        budget = int(stored["batch_budget"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return budget if budget >= MIN_BATCH_BUDGET else None
+
+
+def _resolve_batch_budget(
+    handle: SessionHandle,
+    operation_id: str,
+    *,
+    execution_timeout_sec: float,
+    recovered_after_timeout: bool,
+) -> int:
+    """Ограничение шага этого вызова.
+
+    Порядок правил, и он не случаен:
+
+    * **сверху** — расчётный потолок вызова. Записанное значение считалось под
+      прежними настройками, а потолок и оценка батча могут уменьшиться, и
+      ограничение, не помещающееся в потолок, хуже его отсутствия: оно
+      выглядит как защита ровно там, где защиты нет;
+    * **снизу и вдвое** — если вызов взял работу по истёкшему сроку признака
+      занятости, то есть прежний поток не уложился (основание — доводы в
+      :class:`BusyTake`). Делитель — :data:`BUDGET_BACKOFF_DIVISOR`, пол —
+      :data:`MIN_BATCH_BUDGET`, тот же, что и у расчётного бюджета: ноль
+      означал бы «шаг не поместился» вместо «шаг не начат».
+
+    Без перехвата записанное ограничение сохраняется как есть и **не растёт**:
+    вызов, который уложился, не даёт повода вернуть потолок, а рост обратно
+    означал бы, что одно неукладывание стоит одного и того же отказа снова и
+    снова. Единственное место, где ограничение снимается, — завершённый
+    разбор: работа закончена, и следующий разбор начинается заново.
+    """
+    ceiling = _batch_budget(execution_timeout_sec)
+    stored = _stored_batch_budget(handle, operation_id)
+    budget = ceiling if stored is None else min(ceiling, stored)
+    if not recovered_after_timeout:
+        return budget
+    return max(MIN_BATCH_BUDGET, budget // BUDGET_BACKOFF_DIVISOR)
+
+
+def _remember_batch_budget(handle: SessionHandle, operation_id: str, budget: int | None) -> None:
+    """Записать применённое ограничение; ``None`` — сбросить его.
+
+    Сброс пишется, а не удаляется файлом: чтение «ограничения нет» не должно
+    зависеть от того, сложилось ли удаление, а явная запись читается и как
+    «сброшено», и как «ещё не применялось» — оба состояния означают одно и то
+    же: считать от потолка.
+    """
+    _write_marker(
+        handle,
+        budget_marker(operation_id),
+        {
+            "operation_id": operation_id,
+            "batch_budget": budget,
+            "recorded_at": time.time(),
+        },
+    )
 
 
 # ── обращения и уборка ────────────────────────────────────────────────────
@@ -544,6 +709,35 @@ def _touch(handle: SessionHandle, operation_id: str, *, status: str | None) -> N
             "status": status,
         },
     )
+
+
+def _document_from_manifest(handle: SessionHandle, document_path: str) -> Path | None:
+    """Путь документа из манифеста — ``None``, если он вне каталога сессии.
+
+    В боевой форме путь в манифесте **абсолютный**: домен пишет
+    ``document_path=str(document_path)``, а операция передаёт ему путь, который
+    разрешила сама (``_resolve_document`` → ``safe_child``). Раньше предикат
+    скормил этот путь в ``safe_child`` и получал ``PathDeniedError``, то есть
+    объявлял осиротевшим **любое** состояние, включая то, чей идентификатор
+    совпадает с пересчитанным. Признак в итоге всегда был ``true``, и по нему
+    перестало быть видно, подменён ли документ или просто истёк срок, — а это
+    ровно то различение, ради которого предикат написан.
+
+    Граница проверяется явно, а не отказом от абсолютного пути: путь внутри
+    ``files/`` законен, путь снаружи — нет. Отказ от формы был бы запретом на
+    боевую форму манифеста, то есть на собственную же запись.
+    """
+    files_root = handle.subdir(FILES_SUBDIR).resolve()
+    candidate = Path(document_path)
+    try:
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(files_root):
+                return None
+            return resolved
+        return safe_child(files_root, document_path)
+    except (PathDeniedError, OSError, ValueError):
+        return None
 
 
 def _is_orphaned(operation_id: str, manifest: dict[str, Any], handle: SessionHandle) -> bool:
@@ -563,9 +757,8 @@ def _is_orphaned(operation_id: str, manifest: dict[str, Any], handle: SessionHan
     document_path = manifest.get("document_path")
     if not document_path:
         return False
-    try:
-        target = safe_child(handle.subdir(FILES_SUBDIR), str(document_path))
-    except PathDeniedError:
+    target = _document_from_manifest(handle, str(document_path))
+    if target is None:
         return True
     if not target.is_file():
         return True
@@ -802,13 +995,24 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
 
         # Признак занятости берётся ДО платной работы: новый вызов обязан
         # отказать, не сделав ни одного LLM-вызова.
-        step = _take_or_refuse(
+        taken = _take_or_refuse(
             handle,
             computed_id,
             ttl_sec=float(execution_timeout_sec) * BUSY_TTL_FACTOR,
             owner=ctx.request_id or ctx.session_id,
         )
         try:
+            batch_limit = _resolve_batch_budget(
+                handle,
+                computed_id,
+                execution_timeout_sec=execution_timeout_sec,
+                recovered_after_timeout=taken.recovered_after_timeout,
+            )
+            # Применённое ограничение записывается **до** платной работы:
+            # вызов, не уложившийся в потолок, не вернётся вовсе и не запишет
+            # после себя ничего, а уменьшение обязано пережить именно такой
+            # вызов. Запись после него стёрла бы саму причину уменьшения.
+            _remember_batch_budget(handle, computed_id, batch_limit)
             outcome = domain.run(
                 text,
                 **_accepted_kwargs(
@@ -823,7 +1027,7 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
                     # None: None — это «выполнить весь разбор», то есть ровно
                     # то поведение, из-за которого не уложившийся в потолок
                     # вызов терял оплаченную работу целиком.
-                    batch_limit=_batch_budget(execution_timeout_sec),
+                    batch_limit=batch_limit,
                     # Потолок вызова передаётся домену тем же способом, что и
                     # остальные именованные аргументы: по имени, а не по
                     # подписи конкретной версии. Отбор отбросил бы значение
@@ -842,6 +1046,13 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
 
         status = str(outcome.get("status") or "unknown")
         _touch(handle, computed_id, status=status)
+        if status == "completed":
+            # Разбор закончен: уменьшенное ограничение впереди не нужно, и
+            # следующий разбор этого документа начинается с полного потолка.
+            # Это единственное место, где ограничение снимается, — при
+            # незавершённом состоянии оно не растёт само, иначе отказ после
+            # одного неукладывания повторялся бы по кругу.
+            _remember_batch_budget(handle, computed_id, None)
         _emit(
             ctx,
             writer,
@@ -851,7 +1062,7 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
             status=status,
             length=length_value,
             load_mode=mode_value,
-            step=step,
+            step=taken.step,
         )
         if status == "confirmation_required":
             _emit(
