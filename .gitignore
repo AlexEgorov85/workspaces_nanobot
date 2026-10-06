@@ -98,7 +98,13 @@ media/
 memory/
 SOUL.md
 USER.md
-sessions/
+# Раньше здесь было голое `sessions/`, и оно глушило `openspec/specs/sessions/`
+# тоже — новая спека в этой категории попадала бы в git молча. Голое правило
+# совпадает с любым каталогом такого имени на любой глубине, поэтому перечислены
+# адресно те места, которые действительно игнорируются.
+/sessions/
+mcp-platform/.sessions/
+workspace/other/cache/sessions/
 webui/
 
 # Per-workspace dynamic state
