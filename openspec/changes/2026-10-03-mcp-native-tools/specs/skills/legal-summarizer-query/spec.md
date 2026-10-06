@@ -192,6 +192,7 @@ SHALL возвращать оба источника независимо и SHA
   список длины `M`, где `N != M`
 - **THEN** система SHALL считать это допустимым состоянием, а не ошибкой
 - **AND** документ платформы SHALL явно называть два источника независимыми
+## ADDED Requirements
 
 ### Requirement: No change to success-path schema
 

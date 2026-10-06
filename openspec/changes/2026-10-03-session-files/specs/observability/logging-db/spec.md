@@ -1,8 +1,23 @@
 # logging-db Specification
 
-## MODIFIED Requirements
+## REMOVED Requirements
 
 ### Requirement: Skill invocation is out of scope
+
+**Reason**: Требование снимается и заменяется: прежняя редакция описывала вызов Skill через
+`tools.exec` и требовала, чтобы он порождал `tool_call`. Новое требование запрещает
+`tools.exec` как несущий путь вызова Skill и ссылается на то, что инструмент
+отключён — `tools.exec.enable = false` в `config.json`. Старый сценарий описывает
+путь, который не может сработать, а его утверждение прямо отрицает главный вывод
+нового требования, поэтому удержать его в новой редакции было бы невозможно.
+
+`MODIFIED` здесь структурно неприменим: правило «MODIFIED не выбрасывает
+сценарий» не различает «сценарий забыли скопировать» и «сценарий отменён новым
+требованием», а здесь сценарий отменён. Поэтому старая редакция объявлена снятой,
+а не переписана.
+## ADDED Requirements
+
+### Requirement: Skill не вызывается через tools.exec
 
 The system SHALL NOT иметь dedicated runtime
 event_type для «активации Skill». Skill в
@@ -86,7 +101,6 @@ event_type для «активации Skill». Skill в
   `skill_loaded`, `skill_discovered`, и т.п.)
 - **И** `agent_gateway_logs` SHALL NOT содержать
   записей, привязанных к этому вызову loader'а
-
 ### Requirement: Один факт — одна строка
 
 Один вызов tool'а MUST порождать ровно одну строку начала и

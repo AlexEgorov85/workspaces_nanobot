@@ -83,11 +83,7 @@ return result, {...}          # возвращается ИСХОДНЫЙ result
 - **AND** патч Nanobot SHALL NOT применяться
 
 ---
-
-## MODIFIED Requirements
-
 ### Requirement: Каталог патчей RuntimePatcher
-
 Каталог из 12 патчей MUST сократиться до **2 полностью необходимых и 2 частичных**.
 Доказательная база — `docs/architecture/nanobot-reuse-catalog.md`.
 

@@ -97,68 +97,6 @@ intersected with the caller user»: источник тот же самый —
 
 ## MODIFIED Requirements
 
-### Requirement: tool identity and scope
-
-Требование существует и в прежней редакции. Набор таблиц и запрет на
-произвольный SQL остаются, но исполняет их теперь платформа, а не tool агента,
-и имя объекта меняется.
-
-Операция `history_search` SHALL читать таблицу журнала, имя и схема которой
-задаются `platform.json`. Операция MUST NOT выполнять произвольный SQL,
-обращаться к другим таблицам или делать `INSERT`/`UPDATE`/`DELETE`. Все
-параметры запроса, включая текстовые, MUST передаваться позиционными
-`%s`-параметрами без интерполяции в SQL-строку.
-
-#### Scenario: parameters are bound via placeholders
-
-- **WHEN** операция исполняется с произвольными `query`, `event_type`,
-  `tool_name`, `since`, `until`, `limit`, `offset`
-- **THEN** результирующий SQL SHALL использовать только `%s`-параметры
-- **AND** SHALL NOT содержать интерполяцию пользовательских значений в строку
-  запроса
-
-#### Scenario: Агент SQL не строит
-
-- **WHEN** модель вызывает `mcp_enterprise_history_search`
-- **THEN** агент SHALL NOT строить SQL
-- **AND** агент SHALL NOT обращаться к таблице журнала напрямую
-
-### Requirement: missing user identity is a hard error
-
-Требование существует и в прежней редакции. Прежний отказ
-(`error_type = "missing_user_identity"` от tool'а агента) сменён двумя
-проверками на разных уровнях, и это разделение существенно: доменная проверка
-и проверка на границе конвейера отвечают на разные вопросы.
-
-**Уровень конвейера.** Вызов без полной личности SHALL быть отвергнут ДО входа в
-домен кодом `identity_missing` (см. `openspec/specs/runtime/call-contract`).
-Для вызовов модели личность подставляет `McpIdentityHook`; неполная — вызов
-уходит без неё и отвергается.
-
-**Уровень сервиса.** Поиск без области видимости SHALL быть отвергнут:
-`DataService.history_search` SHALL отказать, если не заданы **ни** `user_id`,
-**ни** `session_id`. Наличие одного из двух допустимо, отсутствие обоих — нет:
-«покажи всё» в журнале, где лежат вопросы пользователей и внутренние события,
-— это утечка, а не удобный режим.
-
-#### Scenario: Вызов без личности отвергнут на границе
-
-- **WHEN** модель вызывает операцию, а личность оборота неполна
-- **THEN** конвейер SHALL отказать кодом `identity_missing`
-- **AND** доменный обработчик SHALL NOT выполниться
-
-#### Scenario: Поиск без области отвергнут сервисом
-
-- **WHEN** `history_search` вызван без `user_id` и без `session_id`
-- **THEN** сервис SHALL отказать `InvalidRequestError`
-- **AND** SQL к журналу SHALL NOT быть выполнен
-
-#### Scenario: Одной из двух частей области достаточно
-
-- **WHEN** `history_search` вызван с заданным `session_id` и пустым `user_id`
-- **THEN** сервис SHALL построить предикат только по `session_id`
-- **AND** SHALL NOT построить unscoped условие
-
 ### Requirement: no unscoped fallback and no identity derivation
 
 Требование существует и в прежней редакции и остаётся в силе без изменений по
@@ -271,48 +209,6 @@ intersected with the caller user»: источник тот же самый —
   "truncated": false}`
 - **AND** отказа SHALL NOT быть
 
-### Requirement: index for all-scope access
-
-Требование существует и в прежней редакции. Access-pattern меняется: вместо
-`WHERE user_id = ?` поиск идёт по пересечению.
-
-DDL SHALL содержать индекс на `agent_gateway_logs`, обслуживающий
-access-pattern `WHERE user_id = ? AND session_id = ? ORDER BY "timestamp" DESC`.
-Имя индекса и колонки — на усмотрение реализации; требование — индекс
-**существует и совместим** с этим pattern'ом. Индекс по `session_id` SHALL NOT
-использоваться как замена пользовательскому фильтру, и наоборот: наличие
-одного из двух предикатов SHALL NOT позволять обойти другой.
-
-#### Scenario: DDL provides index for the intersection
-
-- **GIVEN** DDL `agent_gateway_logs`
-- **THEN** SHALL существовать индекс, обслуживающий фильтр по `user_id` и
-  `session_id` с сортировкой по `"timestamp" DESC`
-- **AND** его назначение SHALL быть задокументировано через `COMMENT ON INDEX`
-
-### Requirement: tool API has no user_id parameter
-
-Требование существует и в прежней редакции и остаётся в силе; после перехода
-оно выполняется конструктивно, а не запретом.
-
-Операция SHALL NOT принимать `user_id` (ни прямо, ни косвенно через любой
-другой параметр) и SHALL NOT принимать параметр области поиска. `user_id` —
-внутренний security attribute, получаемый из контекста вызова. Модель SHALL NOT
-иметь возможности выбрать security boundary через параметр операции.
-
-#### Scenario: schema has no user_id parameter
-
-- **WHEN** операция публикует свою JSON-схему
-- **THEN** в `properties` SHALL NOT быть поля `user_id` (или эквивалента вида
-  `principal_id` / `actor_id` / `owner_id`)
-- **AND** в `required` SHALL NOT быть такого поля
-
-#### Scenario: Схема не содержит выбора области
-
-- **WHEN** операция публикует свою JSON-схему
-- **THEN** в `properties` SHALL NOT быть параметра, отключающего предикат по
-  `session_id` или по `user_id`
-
 ### Requirement: Параметры запроса
 
 Требование существует и в прежней редакции. Состав параметров меняется: из
@@ -364,40 +260,6 @@ access-pattern `WHERE user_id = ? AND session_id = ? ORDER BY "timestamp" DESC`.
 - **THEN** операция SHALL привести его к границе диапазона
 - **AND** SHALL NOT отказать
 
-### Requirement: Формат ответа и пагинация
-
-Требование существует и в прежней редакции и переписывается под форму
-операции; правила пагинации сохраняются.
-
-Операция SHALL возвращать JSON-объект `{hits, next_offset, truncated}`.
-`next_offset` SHALL быть `offset + limit`, если следующая страница существует,
-и `null` иначе. `truncated` SHALL быть `true`, когда выборка достигла потолка
-`max_rows`. Поле `payload` каждого элемента SHALL быть декодированным JSONB, а
-не JSON-строкой.
-
-#### Scenario: Есть следующая страница
-
-- **WHEN** в выборке больше `limit` строк
-- **THEN** `hits` SHALL содержать ровно `limit` элементов
-- **AND** `next_offset` SHALL равняться `offset + limit`
-- **AND** `truncated` SHALL быть `false`, пока потолок не достигнут
-
-#### Scenario: Следующей страницы нет
-
-- **WHEN** в выборке меньше `limit + 1` строк
-- **THEN** `next_offset` SHALL быть `null`
-
-#### Scenario: Выборка упёрлась в потолок
-
-- **WHEN** число возвращённых строк достигло `max_rows`
-- **THEN** `truncated` SHALL быть `true`
-
-#### Scenario: payload — объект, а не строка
-
-- **WHEN** элемент `hits` содержит JSONB-колонку
-- **THEN** `payload` SHALL быть объектом
-- **AND** SHALL NOT быть JSON-строкой, требующей разбора вызывающей стороной
-
 ### Requirement: Схема payload по event_type
 
 Требование существует и в прежней редакции. Имена типов событий в схеме
@@ -427,8 +289,6 @@ access-pattern `WHERE user_id = ? AND session_id = ? ORDER BY "timestamp" DESC`.
 - **WHEN** агент получает событие типа инструмента
 - **THEN** он может предсказуемо прочитать `payload.tool` и `payload.status`
   напрямую, без `json.loads`
-
-## ADDED Requirements
 
 ### Requirement: Scope is the caller session intersected with the caller user
 
@@ -469,3 +329,150 @@ access-pattern `WHERE user_id = ? AND session_id = ? ORDER BY "timestamp" DESC`.
 - **WHEN** модель передаёт значения, которые прежний tool трактовал как отключение фильтра
 - **THEN** операция SHALL применить предикаты по контексту вызова
 - **AND** значения модели SHALL NOT попасть в предикаты
+
+#### Scenario: Выбор области вызовами невозможен
+
+- **WHEN** модель формирует аргументы `mcp_enterprise_data_history_search`
+- **THEN** в них SHALL NOT быть параметра, задающего область поиска
+- **AND** предикат по `session_id` SHALL применяться всегда
+
+## ADDED Requirements
+
+### Requirement: tool identity and scope
+
+Требование существует и в прежней редакции. Набор таблиц и запрет на
+произвольный SQL остаются, но исполняет их теперь платформа, а не tool агента,
+и имя объекта меняется.
+
+Операция `history_search` SHALL читать таблицу журнала, имя и схема которой
+задаются `platform.json`. Операция MUST NOT выполнять произвольный SQL,
+обращаться к другим таблицам или делать `INSERT`/`UPDATE`/`DELETE`. Все
+параметры запроса, включая текстовые, MUST передаваться позиционными
+`%s`-параметрами без интерполяции в SQL-строку.
+
+#### Scenario: parameters are bound via placeholders
+
+- **WHEN** операция исполняется с произвольными `query`, `event_type`,
+  `tool_name`, `since`, `until`, `limit`, `offset`
+- **THEN** результирующий SQL SHALL использовать только `%s`-параметры
+- **AND** SHALL NOT содержать интерполяцию пользовательских значений в строку
+  запроса
+
+#### Scenario: Агент SQL не строит
+
+- **WHEN** модель вызывает `mcp_enterprise_history_search`
+- **THEN** агент SHALL NOT строить SQL
+- **AND** агент SHALL NOT обращаться к таблице журнала напрямую
+
+
+### Requirement: missing user identity is a hard error
+
+Требование существует и в прежней редакции. Прежний отказ
+(`error_type = "missing_user_identity"` от tool'а агента) сменён двумя
+проверками на разных уровнях, и это разделение существенно: доменная проверка
+и проверка на границе конвейера отвечают на разные вопросы.
+
+**Уровень конвейера.** Вызов без полной личности SHALL быть отвергнут ДО входа в
+домен кодом `identity_missing` (см. `openspec/specs/runtime/call-contract`).
+Для вызовов модели личность подставляет `McpIdentityHook`; неполная — вызов
+уходит без неё и отвергается.
+
+**Уровень сервиса.** Поиск без области видимости SHALL быть отвергнут:
+`DataService.history_search` SHALL отказать, если не заданы **ни** `user_id`,
+**ни** `session_id`. Наличие одного из двух допустимо, отсутствие обоих — нет:
+«покажи всё» в журнале, где лежат вопросы пользователей и внутренние события,
+— это утечка, а не удобный режим.
+
+#### Scenario: Вызов без личности отвергнут на границе
+
+- **WHEN** модель вызывает операцию, а личность оборота неполна
+- **THEN** конвейер SHALL отказать кодом `identity_missing`
+- **AND** доменный обработчик SHALL NOT выполниться
+
+#### Scenario: Поиск без области отвергнут сервисом
+
+- **WHEN** `history_search` вызван без `user_id` и без `session_id`
+- **THEN** сервис SHALL отказать `InvalidRequestError`
+- **AND** SQL к журналу SHALL NOT быть выполнен
+
+#### Scenario: Одной из двух частей области достаточно
+
+- **WHEN** `history_search` вызван с заданным `session_id` и пустым `user_id`
+- **THEN** сервис SHALL построить предикат только по `session_id`
+- **AND** SHALL NOT построить unscoped условие
+
+### Requirement: index for all-scope access
+
+Требование существует и в прежней редакции. Access-pattern меняется: вместо
+`WHERE user_id = ?` поиск идёт по пересечению.
+
+DDL SHALL содержать индекс на `agent_gateway_logs`, обслуживающий
+access-pattern `WHERE user_id = ? AND session_id = ? ORDER BY "timestamp" DESC`.
+Имя индекса и колонки — на усмотрение реализации; требование — индекс
+**существует и совместим** с этим pattern'ом. Индекс по `session_id` SHALL NOT
+использоваться как замена пользовательскому фильтру, и наоборот: наличие
+одного из двух предикатов SHALL NOT позволять обойти другой.
+
+#### Scenario: DDL provides index for the intersection
+
+- **GIVEN** DDL `agent_gateway_logs`
+- **THEN** SHALL существовать индекс, обслуживающий фильтр по `user_id` и
+  `session_id` с сортировкой по `"timestamp" DESC`
+- **AND** его назначение SHALL быть задокументировано через `COMMENT ON INDEX`
+
+### Requirement: tool API has no user_id parameter
+
+Требование существует и в прежней редакции и остаётся в силе; после перехода
+оно выполняется конструктивно, а не запретом.
+
+Операция SHALL NOT принимать `user_id` (ни прямо, ни косвенно через любой
+другой параметр) и SHALL NOT принимать параметр области поиска. `user_id` —
+внутренний security attribute, получаемый из контекста вызова. Модель SHALL NOT
+иметь возможности выбрать security boundary через параметр операции.
+
+#### Scenario: schema has no user_id parameter
+
+- **WHEN** операция публикует свою JSON-схему
+- **THEN** в `properties` SHALL NOT быть поля `user_id` (или эквивалента вида
+  `principal_id` / `actor_id` / `owner_id`)
+- **AND** в `required` SHALL NOT быть такого поля
+
+#### Scenario: Схема не содержит выбора области
+
+- **WHEN** операция публикует свою JSON-схему
+- **THEN** в `properties` SHALL NOT быть параметра, отключающего предикат по
+  `session_id` или по `user_id`
+
+### Requirement: Формат ответа и пагинация
+
+Требование существует и в прежней редакции и переписывается под форму
+операции; правила пагинации сохраняются.
+
+Операция SHALL возвращать JSON-объект `{hits, next_offset, truncated}`.
+`next_offset` SHALL быть `offset + limit`, если следующая страница существует,
+и `null` иначе. `truncated` SHALL быть `true`, когда выборка достигла потолка
+`max_rows`. Поле `payload` каждого элемента SHALL быть декодированным JSONB, а
+не JSON-строкой.
+
+#### Scenario: Есть следующая страница
+
+- **WHEN** в выборке больше `limit` строк
+- **THEN** `hits` SHALL содержать ровно `limit` элементов
+- **AND** `next_offset` SHALL равняться `offset + limit`
+- **AND** `truncated` SHALL быть `false`, пока потолок не достигнут
+
+#### Scenario: Следующей страницы нет
+
+- **WHEN** в выборке меньше `limit + 1` строк
+- **THEN** `next_offset` SHALL быть `null`
+
+#### Scenario: Выборка упёрлась в потолок
+
+- **WHEN** число возвращённых строк достигло `max_rows`
+- **THEN** `truncated` SHALL быть `true`
+
+#### Scenario: payload — объект, а не строка
+
+- **WHEN** элемент `hits` содержит JSONB-колонку
+- **THEN** `payload` SHALL быть объектом
+- **AND** SHALL NOT быть JSON-строкой, требующей разбора вызывающей стороной
