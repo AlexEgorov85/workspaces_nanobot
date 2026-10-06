@@ -32,6 +32,7 @@ import logging
 import shutil
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,37 @@ URI_SCHEME = "session://"
 #: давности состояния в репозитории нет.
 INCOMPLETE_TTL_SEC = 24 * 60 * 60
 COMPLETE_TTL_SEC = 7 * 24 * 60 * 60
+
+#: Подкаталог надгробий убранных состояний внутри ``artifacts/`` сессии.
+#:
+#: Рядом с ``busy/`` и ``access/``, а не внутри ``operations/``: каталог
+#: состояний перебирает :func:`_sweep`, и надгробие, лежащее среди состояний,
+#: было бы вторым видом записи в одном переборе. Здесь оно рядом с признаками
+#: прочие, а ``operations/`` остаётся каталогом состояний и только.
+TOMBSTONES_DIRNAME = "tombstones"
+
+#: Срок жизни надгробия.
+#:
+#: Убранное состояние удаляется безвозвратно, и читатель обязан отличать
+#: «состояния никогда не было» от «было и убрано по сроку» — иначе модель
+#: либо бесконечно повторяет заведомо пропавший ``operation_id``, либо
+#: приписывает несуществовавшей работе свои собственные подробности. Значит
+#: надгробие обязано прожить **не меньше** самого состояния: если оно
+#: протухнет раньше, ссылка, выданная состоянием, ещё живым, приведёт к отказу
+#: без объяснения.
+#:
+#: Два срока состояния — 24 часа и 7 суток, — берётся больший, а он удваивается:
+#: надгробие живёт ещё один полный срок состояния **после** уборки. Этого хватает
+#: читателю, у которого ссылка была выдана, пока состояние ещё жило: к моменту
+#: уборки её возраст от последнего обращения уже не превышает
+#: ``COMPLETE_TTL_SEC``, и после удаления остаётся целый срок на объяснение.
+#: Без этого края объяснение исчезало бы ровно тогда, когда ссылка ещё
+#: осмысленна.
+#:
+#: Без срока жизни каталог надгробий рос бы бесконечно — по одному файлу на
+#: каждое убранное состояние за всю историю сессии. Срок есть, и он не
+#: произвольный.
+TOMBSTONE_TTL_SEC = 2 * COMPLETE_TTL_SEC
 
 #: Множитель потолка вызова в сроке жизни признака занятости. Два, а не один:
 #: вызов, оборванный потолком, снимает признак в ``finally`` не всегда, и
@@ -126,6 +158,112 @@ def busy_marker(operation_id: str) -> str:
 def access_marker(operation_id: str) -> str:
     """Относительный путь отметки последнего обращения внутри ``artifacts/``."""
     return f"{SKILL_DIRNAME}/access/{operation_id}.json"
+
+
+def tombstone_marker(operation_id: str) -> str:
+    """Относительный путь надгробия убранного состояния внутри ``artifacts/``.
+
+    Объявлено рядом с остальными путями и по тому же правилу, а не собрано в
+    читателе строкой: писатель и читатель обязаны приходить к одному пути,
+    иначе объяснение читалось бы не по тому адресу, куда писал уборщик.
+    """
+    return f"{SKILL_DIRNAME}/{TOMBSTONES_DIRNAME}/{operation_id}.json"
+
+
+def _tombstone_payload(operation_id: str, *, now: float, orphaned: bool) -> dict[str, Any]:
+    """Тело надгробия.
+
+    Только **факт и время**: что состояние убрано, когда и почему. Удалённых
+    данных здесь быть не должно — надгробие переживает само состояние, то есть
+    пережило бы и его содержимое, а ответ на протухшую ссылку не должен нести
+    ни куска разобранного документа. Поэтому ни текста, ни сводок, ни пути к
+    документу: только идентификатор, время уборки и признак осиротевания.
+    """
+    return {
+        "operation_id": operation_id,
+        "removed_at": now,
+        "removed_at_iso": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        "reason": "ttl_expired",
+        "orphaned": bool(orphaned),
+        "expires_at": now + TOMBSTONE_TTL_SEC,
+    }
+
+
+def _write_tombstone(handle: SessionHandle, operation_id: str, *, now: float, orphaned: bool) -> bool:
+    """Оставить надгробие убранного состояния. Отказ — не помеха уборке.
+
+    Надгробие — улучшение отказа, а не условие уборки: уборка обязана довести
+    дело до конца даже тогда, когда надгробие записать не удалось (диск полон,
+    каталог на NFS недоступен). Поэтому отказ здесь проглатывается с записью в
+    журнал, а ``_remove_state`` состояние удаляет в любом случае. Обратный
+    порядок — «сначала надгробие, потом удаление» — был бы хуже: сорванная
+    запись надгробия оставила бы живое состояние с объявленным ему сроком,
+    который уже истёк.
+    """
+    try:
+        handle.write_json(
+            tombstone_marker(operation_id),
+            _tombstone_payload(operation_id, now=now, orphaned=orphaned),
+            subdir=ARTIFACTS_SUBDIR,
+        )
+    except OSError as exc:
+        logger.warning(
+            "надгробие %s не записано: %s", operation_id, exc.__class__.__name__
+        )
+        return False
+    return True
+
+
+def load_tombstone(handle: SessionHandle, operation_id: str, *, now: float) -> dict[str, Any] | None:
+    """Надгробие, если оно есть **и** ещё не протухло; иначе ``None``.
+
+    Протухшее надгробие — то же, что его отсутствие: срок жизни кончился, и
+    объяснение «убрано по сроку» больше не на что опереться. Возвращать его всё
+    равно значило бы годами отвечать на ссылку, выданную при жизни сессии.
+    """
+    data = _read_marker(handle, tombstone_marker(operation_id))
+    if data is None:
+        return None
+    try:
+        expires_at = float(data.get("expires_at", 0))
+    except (TypeError, ValueError):
+        # Битое надгробие без срока — не объяснение: срок не проверить, а
+        # отвечать по нему значило бы выдумывать основание.
+        return None
+    if expires_at <= now:
+        return None
+    return data
+
+
+def _purge_tombstones(handle: SessionHandle, *, now: float) -> int:
+    """Убрать протухшие надгробия.
+
+    Без этого каталог надгробий рос бы бесконечно: уборка пишет по файлу на
+    каждое убранное состояние, а вызывается она на каждом разборе. Ошибки
+    чтения и снятия проглатываются по той же причине, что и в остальной
+    уборке, — это гигиена каталога, а не часть контракта вызова.
+    """
+    directory = state_root(handle) / TOMBSTONES_DIRNAME
+    if not directory.is_dir():
+        return 0
+    purged = 0
+    for entry in sorted(directory.glob("*.json")):
+        try:
+            payload = json.loads(entry.read_text(encoding="utf-8"))
+            expires_at = float((payload or {}).get("expires_at", 0))
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            # Нечитаемое надгробие срок не имеет, а значит не может быть
+            # объяснением; оставлять его — значит копить мусор.
+            expires_at = 0.0
+        if expires_at > now:
+            continue
+        try:
+            handle.remove(tombstone_marker(entry.stem), subdir=ARTIFACTS_SUBDIR)
+        except OSError as exc:  # pragma: no cover - снятие не обязано удалиться
+            logger.warning("надгробие %s не снято: %s", entry.stem, exc.__class__.__name__)
+            continue
+        purged += 1
+    return purged
 
 
 # ── разбор аргументов ─────────────────────────────────────────────────────
@@ -453,15 +591,21 @@ def _sweep(handle: SessionHandle, *, now: float) -> dict[str, Any]:
     Трогает **только** состояния старше срока: смена ``focus`` у ещё нужного
     состояния делает его осиротевшим, но не удаляет досрочно — работа по
     старому ``focus`` ещё не закончена.
+
+    Протухшие надгробия убираются здесь же, а не отдельным проходом: уборка
+    вызывается на каждом разборе, то есть это единственная точка, которая
+    точно срабатывает, и отдельный вызов «пора бы почистить» рано или поздно
+    перестал бы вызываться.
     """
     import json as _json
 
+    _purge_tombstones(handle, now=now)
     root = operations_dir(handle)
     if not root.is_dir():
         return {"removed": 0, "orphaned": 0}
 
     removed = 0
-    orphaned = 0
+    orphaned_count = 0
     for operation_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         marker = _read_marker(handle, access_marker(operation_dir.name))
         manifest: dict[str, Any] = {}
@@ -488,15 +632,32 @@ def _sweep(handle: SessionHandle, *, now: float) -> dict[str, Any]:
         ttl = COMPLETE_TTL_SEC if status == "completed" else INCOMPLETE_TTL_SEC
         if age <= ttl:
             continue
-        if _is_orphaned(operation_dir.name, manifest, handle):
-            orphaned += 1
-        if _remove_state(handle, operation_dir):
+        orphaned = _is_orphaned(operation_dir.name, manifest, handle)
+        if orphaned:
+            orphaned_count += 1
+        if _remove_state(handle, operation_dir, now=now, orphaned=orphaned):
             removed += 1
-    return {"removed": removed, "orphaned": orphaned}
+    return {"removed": removed, "orphaned": orphaned_count}
 
 
-def _remove_state(handle: SessionHandle, operation_dir: Path) -> bool:
-    """Удалить каталог состояния операции вместе с её признаками."""
+def _remove_state(
+    handle: SessionHandle,
+    operation_dir: Path,
+    *,
+    now: float,
+    orphaned: bool = False,
+) -> bool:
+    """Удалить каталог состояния операции вместе с её признаками.
+
+    Надгробие пишется **после** успешного удаления и только тогда, когда
+    каталог действительно исчез: надгробие о состоянии, которое осталось на
+    диске, вводило бы в заблуждение сильнее его отсутствия — читатель объяснил
+    бы протухание там, где состояние живо и его нужно продолжать.
+
+    Признаки занятости и обращения снимаются **до** удаления каталога, как и
+    прежде: они лежат в ``busy/`` и ``access/``, а не внутри каталога
+    состояния, и их удаление не зависит от того, состояние это или нет.
+    """
     artifacts = handle.subdir(ARTIFACTS_SUBDIR)
     resolved_artifacts = artifacts.resolve()
     target = operation_dir.resolve()
@@ -508,7 +669,10 @@ def _remove_state(handle: SessionHandle, operation_dir: Path) -> bool:
     for relative in (busy_marker(operation_dir.name), access_marker(operation_dir.name)):
         handle.remove(relative, subdir=ARTIFACTS_SUBDIR)
     shutil.rmtree(target, ignore_errors=True)
-    return not target.exists()
+    if target.exists():
+        return False
+    _write_tombstone(handle, operation_dir.name, now=now, orphaned=orphaned)
+    return True
 
 
 # ── прогресс ──────────────────────────────────────────────────────────────
@@ -660,6 +824,14 @@ def create_tool(workspace: SessionWorkspace, *, execution_timeout_sec: float, wr
                     # то поведение, из-за которого не уложившийся в потолок
                     # вызов терял оплаченную работу целиком.
                     batch_limit=_batch_budget(execution_timeout_sec),
+                    # Потолок вызова передаётся домену тем же способом, что и
+                    # остальные именованные аргументы: по имени, а не по
+                    # подписи конкретной версии. Отбор отбросил бы значение
+                    # молча, только если параметр уберут из ``service.run`` —
+                    # тогда вызов перестанет ограничивать неделимый шаг, и это
+                    # должен заметить страж на подсаженном дефекте, а не
+                    # владелец по счастливой случайности.
+                    call_budget_sec=execution_timeout_sec,
                 ),
             )
         finally:

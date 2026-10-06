@@ -42,6 +42,7 @@ from libs.enterprise_common.session.workspace import SessionWorkspace
 from servers.enterprise.tools.analyze_document import (
     ARTIFACTS_SUBDIR,
     access_marker,
+    load_tombstone,
     state_root,
 )
 
@@ -127,6 +128,46 @@ def _status_of(operation_id: str, root: Path) -> str | None:
     return None if normalized is None else str(normalized.status)
 
 
+def _refuse_if_swept(
+    handle: Any, operation_id: str, root: Path, *, now: float
+) -> None:
+    """Протухшая ссылка — отказ с объяснением, а не молчание.
+
+    Проверка стоит **до** чтения состояния и только при отсутствии состояния:
+    если состояние читается, надгробие рядом с ним означало бы устаревшую
+    запись, и объявлять протухание живого состояния значило бы отказать в
+    чтении того, что есть.
+
+    Надгробие есть только у состояния, которое уборка **удалила по сроку**.
+    Поэтому объяснение здесь не выдумывает причину: «убрано по сроку» — это
+    ровно то, что записала уборка, а причина у неё одна, и иная причина
+    означала бы, что потерян след. Отдельные слова в сообщении дают модели
+    действие, а не только констатацию: состояние не восстановить, следующий
+    шаг — разбор заново.
+
+    Отдельного кода отказа не заводится: код остаётся ``not_found``, как и у
+    состояния, которого не было никогда, потому что отличается здесь
+    объяснение, а не причина отсутствия. Новый код обязан был бы расходиться
+    со словарём :data:`_ERROR_CODES`, который переводит доменные
+    ``error_type`` в коды конверта.
+    """
+    if _status_of(operation_id, root) is not None:
+        return
+    tombstone = load_tombstone(handle, operation_id, now=now)
+    if tombstone is None:
+        return
+    removed_at = str(tombstone.get("removed_at_iso") or "")
+    when = f" ({removed_at})" if removed_at else ""
+    raise EnterpriseError(
+        f"состояние operation_id={operation_id} убрано по истечении срока жизни{when} "
+        "и больше не читается: файл состояния удалён, вернуть его нечем. "
+        "Начните разбор заново — повторный вызов platform.analyze_document "
+        "с тем же документом, length, focus и load_mode создаст новое состояние "
+        "и вернёт новый operation_id.",
+        code="not_found",
+    )
+
+
 def create_tool(workspace: SessionWorkspace, *, fallback_cache_root: str | None = None) -> ToolDefinition:
     """Определение операции чтения состояния операции.
 
@@ -171,6 +212,7 @@ def create_tool(workspace: SessionWorkspace, *, fallback_cache_root: str | None 
         else:
             handle = workspace.handle(ctx.session_id, create=False)
             root = state_root(handle)
+            _refuse_if_swept(handle, operation_id, root, now=time.time())
             _touch_access(handle, operation_id, _status_of(operation_id, root))
             payload = _query(
                 operation_id, field, root, max_chunk_summary_chars=max_chunk_summary_chars
