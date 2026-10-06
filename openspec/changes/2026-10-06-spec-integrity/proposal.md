@@ -110,14 +110,14 @@
 
 Три из них меняют наблюдаемое поведение, и все три — не о словах:
 
-- **имя события сжатия.** `logging-db/spec.md:596-598` требует
+- **имя события сжатия.** `observability/logging-db/spec.md:596-598` требует
   `event_type="context_compacted"`; `runtime/entrypoints/spec.md:344` требует
   `agent.compacted`. Код пишет `agent.compacted`
   (`lib/services/context_compaction.py:377,396`), и словарь платформы объявляет
   именно его (`mcp-platform/libs/enterprise_common/eventing/types.py:32,94`).
   Имя из `logging-db` **не существует в словаре**, поэтому требование «агент найдёт
   факт сжатия через `history_search`» по нему невыполнимо;
-- **путь записи авто-сжатия.** `logging-db/spec.md:617-619` отправляет читателя в
+- **путь записи авто-сжатия.** `observability/logging-db/spec.md:617-619` отправляет читателя в
   `runtime_patcher._wrap_auto_compact_archive` — метода нет нигде в репозитории, а
   в `lib/services/runtime_patcher.py` нет ни одного упоминания `compact`.
   Фактический путь: `postgres_channel.py:1415-1419` → `CompactionEventSubscriber.feed`
@@ -213,6 +213,6 @@ grep завышал его примерно до 70.
 - **Не трогать `changes/archive/`.** История не переписывается; запись о прошлой
   фазе помечается отменённой со ссылкой на актуальную редакцию, но не
   переформулируется.
-- **Не править `logging-db/spec.md` целиком в этом change.** Файл на 27,2% объёма
+- **Не править `observability/logging-db/spec.md` целиком в этом change.** Файл на 27,2% объёма
   всех спек — это отдельная задача с отдельным решением; здесь фиксируется только
   то, что дублирование в нём измерено.
