@@ -15,7 +15,7 @@
 |---|---|---|
 | Корень pytest | `.` (корень репозитория) | `mcp-platform/` |
 | Набор | `tests/` — 174 файла `test_*.py` | `mcp-platform/tests/` — 225 файлов `test_*.py` |
-| Собрано тестов | 3704 | 6197 |
+| Собрано тестов | 3704 | 6214 |
 | `testpaths` | `["tests"]` | `["tests"]` |
 | `python_files` | `["test_*.py"]` | `["test_*.py"]` |
 | `pythonpath` | `[".", "workspace"]` | `["."]` |
@@ -99,7 +99,7 @@ cd mcp-platform && python -m pytest tests -q                   # PLATFULL
 
 # Только сборка имён тестов, без исполнения
 python -m pytest tests --collect-only -q                       # 3704 tests collected
-cd mcp-platform && python -m pytest tests --collect-only -q   # 6197 tests collected
+cd mcp-platform && python -m pytest tests --collect-only -q   # 6214 tests collected
 
 # ── Агент: маркерные прогоны ─────────────────────────────────────────────────
 # Всё, кроме живых гейтов
