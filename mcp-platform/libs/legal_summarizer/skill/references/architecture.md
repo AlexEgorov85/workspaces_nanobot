@@ -5,39 +5,50 @@
 > источники истины.
 
 `legal_summarizer` — самодостаточный Agent Skill (Anthropic Skills
-модель). Skill упакован как набор инструкций (`SKILL.md`), скриптов
-(`scripts/`), runtime-реализации (непосредственно в `scripts/`,
-9 runtime-слоёв), prompts (`prompts/`) и developer-only тестов
-(`tests/`).
+модель). Домен живёт в платформе, в
+`mcp-platform/libs/legal_summarizer/`: entry-points (`cli.py`,
+`cli_query.py`) в корне пакета и 9 runtime-слоёв — в его
+подкаталогах. Payload Skill — инструкции (`SKILL.md`), этот
+`README.md`, prompts (`skill/prompts/`) и подробные документы
+(`skill/references/`) — лежит в подкаталоге `skill/`.
+Developer-only тесты вынесены отдельно от домена, в
+`mcp-platform/tests/legal_summarizer/`.
 
 ## Skill layout
 
 ```text
-legal_summarizer/
-├── SKILL.md                # инструкция агенту
-├── README.md               # developer overview
+mcp-platform/libs/legal_summarizer/
+├── cli.py                       # entry point
+├── cli_query.py                 # follow-up по operation_id
+├── __init__.py
 │
-├── scripts/                # executable runtime Skill
-│   ├── cli.py              # entry point
-│   ├── cli_query.py        # follow-up по operation_id
-│   ├── application/
-│   ├── cache/
-│   ├── chunking/
-│   ├── document/
-│   ├── execution/
-│   ├── llm/
-│   ├── output/
-│   ├── planning/
-│   └── retrieval/
+├── application/                 # orchestration, idempotency, manifest
+├── cache/                       # manifest, DocumentCache, session_key
+├── chunking/                    # DocumentStructure → Chunk[]
+├── document/                    # PhysicalDocument → DocumentStructure
+│   └── extractors/              # pdf / docx / txt
+├── execution/                   # direct / map-reduce / hierarchical
+├── llm/                         # chat wrapper, prompts, single-flight
+├── output/                      # JSON-форматирование
+├── planning/                    # strategy selection
+├── retrieval/                   # query normalization, lexical, fallback
 │
-├── prompts/                # LLM-инструкции
-│
-├── references/             # подробные документы (этот файл и др.)
-│
-└── tests/                  # developer-only код
-    ├── unit/
-    ├── integration/
-    └── architecture/
+└── skill/                       # payload Skill (этот файл лежит здесь)
+    ├── SKILL.md                 # инструкция агенту
+    ├── README.md                # developer overview
+    ├── prompts/                 # LLM-инструкции
+    │   ├── reduce_system.md
+    │   ├── section_reduce_system.md
+    │   └── summarize_system.md
+    └── references/              # подробные документы (этот файл и др.)
+        ├── architecture.md
+        ├── contracts.md
+        └── testing.md
+
+mcp-platform/tests/legal_summarizer/       # developer-only код
+├── unit/
+├── integration/
+└── architecture/
 ```
 
 ## `src/` отсутствует намеренно
@@ -45,10 +56,20 @@ legal_summarizer/
 Skill — **self-contained Agent Skill**, а не отдельный Python distribution
 package.
 
-Runtime расположен непосредственно в `scripts/`, который является
-Python import root для standalone CLI: при запуске
-`python workspace/skills/legal_summarizer/scripts/cli.py` каталог
-`scripts/` явно добавляется в `sys.path` (см. `_SCRIPTS_ROOT` в `cli.py`).
+Отдельного `src/` не нужно: домен — обычный пакет
+`libs.legal_summarizer` внутри платформы, и корнем импорта служит
+корень платформы. `cli.py` добавляет в `sys.path` `_PLATFORM_ROOT`
+(`Path(__file__).resolve().parents[2]`, то есть `mcp-platform/`),
+поэтому его можно запускать и путём к файлу из корня репозитория
+агента: `python mcp-platform/libs/legal_summarizer/cli.py`.
+
+У `cli_query.py` тот же корень (`_PROJECT_ROOT`) и дополнительно
+`_SCRIPTS_ROOT` (каталог самого пакета), но `sys.path` там
+настраивается **после** `from libs.legal_summarizer.cache import
+manifest` (`cli_query.py:28` против `cli_query.py:36`). Поэтому запуск
+по пути к файлу падает с `ModuleNotFoundError`, и канонический
+запуск — только из `mcp-platform/` через `-m`:
+`python -m libs.legal_summarizer.cli_query`.
 
 ## Главный поток
 
@@ -59,7 +80,7 @@ Agent
 SKILL.md
   │
   ▼
-scripts/cli.py
+cli.py
   │
   ▼
 application/service.run()
@@ -142,7 +163,8 @@ leaves (не импортируют внутренние слои).
 
 Импорты **вниз** (например, `document → execution`) запрещены — это
 архитектурное нарушение. Тест `tests/architecture/test_layer_boundaries.py`
-проверяет это правило через AST-обход всех `.py` под `scripts/`.
+проверяет это правило через AST-обход всех `.py` под
+`mcp-platform/libs/legal_summarizer/`.
 
 ### Single-flight — единственное исключение
 
@@ -209,7 +231,7 @@ filenames или layout — это инкапсулировано в `DocumentCa
 
 ### `cache.manifest` — единственный владелец operation-level storage
 
-`scripts/cache/manifest.py` содержит **только** operation-level API:
+`cache/manifest.py` содержит **только** operation-level API:
 `load_manifest`, `save_manifest`, `manifest_path`, `manifest_root`,
 `chunks_dir`, `chunk_result_path`, `write_chunk_result`, `read_chunk_result`,
 `result_path`, `write_result`, `read_result`, `load_cached_partials`,

@@ -18,8 +18,10 @@
 
 ## Как запускать
 
+Команда запускается **из корня репозитория** (агента):
+
 ```bash
-python workspace/skills/legal_summarizer/scripts/cli.py --file <path> [--flags...]
+python mcp-platform/libs/legal_summarizer/cli.py --file <path> [--flags...]
 ```
 
 Полный список флагов — `cli.py --help`. Подробности контракта (JSON
@@ -29,43 +31,49 @@ payloads, operation_id semantics, resume) — в
 ## Где что лежит
 
 ```text
-legal_summarizer/
-├── SKILL.md                    # инструкция агенту
-├── README.md                   # этот файл
+mcp-platform/libs/legal_summarizer/        # домен + payload Skill
+├── cli.py                       # главная CLI
+├── cli_query.py                 # follow-up по operation_id
+├── __init__.py
 │
-├── legal_summarizer/           # runtime Python-пакет
-│   ├── application/            # orchestration, idempotency, manifest
-│   ├── cache/                  # disk-манифест (chunks, result, sections)
-│   ├── chunking/               # DocumentStructure → Chunk[]
-│   ├── document/               # PhysicalDocument → DocumentStructure
-│   ├── execution/              # direct / map-reduce / hierarchical
-│   ├── llm/                    # chat wrapper, prompts, single-flight
-│   ├── output/                 # JSON-форматирование
-│   ├── planning/               # strategy selection
-│   └── retrieval/              # query normalization, lexical, fallback
+├── application/                 # orchestration, idempotency, manifest
+├── cache/                       # manifest, DocumentCache, session_key
+├── chunking/                    # DocumentStructure → Chunk[]
+├── document/                    # PhysicalDocument → DocumentStructure
+│   └── extractors/              # pdf / docx / txt
+├── execution/                   # direct / map-reduce / hierarchical
+├── llm/                         # chat wrapper, prompts, single-flight
+├── output/                      # JSON-форматирование
+├── planning/                    # strategy selection
+├── retrieval/                   # query normalization, lexical, fallback
 │
-├── scripts/                    # entry-points
-│   ├── cli.py                  # главная CLI
-│   └── cli_query.py            # follow-up по operation_id
-│
-├── prompts/                    # LLM-инструкции (отдельно от кода)
-├── references/                 # подробные документы
-│   ├── architecture.md
-│   ├── contracts.md
-│   └── testing.md
-│
-└── tests/                      # developer-only
-    ├── unit/
-    ├── integration/
-    └── architecture/           # boundary + skill_layout guards
+└── skill/                       # payload Skill (этот README лежит здесь)
+    ├── SKILL.md                 # инструкция агенту
+    ├── README.md                # этот файл
+    ├── prompts/                 # LLM-инструкции (отдельно от кода)
+    │   ├── reduce_system.md
+    │   ├── section_reduce_system.md
+    │   └── summarize_system.md
+    └── references/              # подробные документы
+        ├── architecture.md
+        ├── contracts.md
+        └── testing.md
+
+mcp-platform/tests/legal_summarizer/       # developer-only, отдельно от домена
+├── unit/
+├── integration/
+└── architecture/              # boundary + skill_layout guards
 ```
+
+Входы домена — `cli.py` и `cli_query.py` в корне
+`libs/legal_summarizer/`; отдельного каталога для entry-points нет.
 
 ## Архитектура (краткая)
 
 ```text
 Agent
   → SKILL.md
-    → scripts/cli.py
+    → mcp-platform/libs/legal_summarizer/cli.py
       → application/service.run()
         → document → retrieval → planning → execution → llm → single_flight → LLM API
         ↑                                                                            │
@@ -92,10 +100,10 @@ Agent
 ## Как запускать тесты
 
 ```bash
-cd workspace/skills/legal_summarizer
-python -m pytest -q                       # все тесты
-python -m pytest tests/architecture       # boundary guards
-python -m pytest -k single_flight         # single-flight subset
+cd mcp-platform
+python -m pytest -q tests/legal_summarizer                  # все тесты
+python -m pytest -q tests/legal_summarizer/architecture      # boundary guards
+python -m pytest -q tests/legal_summarizer -k single_flight # single-flight subset
 ```
 
 Подробности — [`references/testing.md`](references/testing.md).

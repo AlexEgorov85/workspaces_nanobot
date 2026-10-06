@@ -3,10 +3,12 @@
 Этот документ описывает **стабильные контракты** Skill: CLI, JSON
 payloads, operation_id semantics.
 
-## CLI — `scripts/cli.py`
+## CLI — `cli.py`
+
+Из корня репозитория агента:
 
 ```bash
-python workspace/skills/legal_summarizer/scripts/cli.py \
+python mcp-platform/libs/legal_summarizer/cli.py \
     --file <path> [--length brief|detailed] [--question "..."] \
     [--focus "..."] [--confirm] [--operation-id <id>] \
     [--max-chunks N] [--estimate-only]
@@ -25,14 +27,24 @@ python workspace/skills/legal_summarizer/scripts/cli.py \
 
 `--question` и `--length` — взаимоисключающие.
 
-## CLI — `scripts/cli_query.py`
+## CLI — `cli_query.py`
 
-Follow-up запросы по сохранённой `operation_id` без перепарсинга PDF:
+Follow-up запросы по сохранённой `operation_id` без перепарсинга PDF.
+Запускается **из `mcp-platform/`** через `-m`:
 
 ```bash
-python scripts/cli_query.py --operation-id <id> \
+cd mcp-platform
+python -m libs.legal_summarizer.cli_query --operation-id <id> \
     [--field stats|articles|chunks|sections|tree|all]
 ```
+
+Ограничение: запуск по пути к файлу
+(`python mcp-platform/libs/legal_summarizer/cli_query.py`) **не
+работает** — модуль импортирует `libs.legal_summarizer.cache.manifest`
+до того, как добавляет корень платформы в `sys.path`, и падает с
+`ModuleNotFoundError` (`cli_query.py:28` против `cli_query.py:36`).
+В отличие от `cli.py`, у этого entry-point нет формы запуска из корня
+репозитория агента.
 
 ## JSON contract
 

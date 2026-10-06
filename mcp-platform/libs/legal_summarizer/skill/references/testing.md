@@ -27,10 +27,10 @@ tests/
 ## Как запускать
 
 ```bash
-cd workspace/skills/legal_summarizer
-python -m pytest -q                  # все тесты
-python -m pytest -q -k single_flight # single-flight subset
-python -m pytest tests/architecture  # boundary guards
+cd mcp-platform
+python -m pytest -q tests/legal_summarizer          # все тесты
+python -m pytest -q tests/legal_summarizer -k single_flight # single-flight subset
+python -m pytest -q tests/legal_summarizer/architecture # boundary guards
 ```
 
 ## Mock LLM
@@ -115,6 +115,13 @@ Estimator (`application/estimation.py`) и actual reducer
 ## Smoke-тесты CLI
 
 ```bash
-python scripts/cli.py --help
-python scripts/cli_query.py --operation-id <id> --field stats
+python mcp-platform/libs/legal_summarizer/cli.py --help
+
+cd mcp-platform
+python -m libs.legal_summarizer.cli_query --operation-id <id> --field stats
 ```
+
+Первый вызов — из корня репозитория агента, второй — только из
+`mcp-platform/` через `-m`: запуск `cli_query.py` по пути к файлу
+падает с `ModuleNotFoundError` (`cli_query.py:28` против
+`cli_query.py:36`).
