@@ -9,120 +9,6 @@
 `platform` — подсистема целиком уехала из агента в capability `data`: локального DuckDB-кэша в `lib/services/` больше нет
 Реализация: `mcp-platform/libs/enterprise_data/snapshot/store.py` (`DuckDbSnapshotStore`)
 
-## Responsibility
-
-CacheProvider отвечает за:
-
-- предоставление SQL-кэша для read-mostly данных из PostgreSQL
-- инкрементальную синхронизацию данных из PostgreSQL в DuckDB
-- предоставление единого интерфейса доступа (`query_sql`, `get_schema`, `explain`, `search_vector`, `preload_indexes`, `check_stale`, `refresh`)
-- управление snapshot'ами кэша (атомарная публикация)
-- прогрев FAISS-индексов в память и выполнение vector search
-- контроль целостности векторных индексов (`IndexIntegrityError`)
-
-## Boundary
-
-### Owns
-
-- DuckDB-файлом кэша на локальном ext4 storage
-- snapshot'ами таблиц из PostgreSQL
-- FAISS-индексами, загружаемыми по требованию
-- публичным API `CacheProvider` (ABC + DuckDB/FAISS-реализация)
-- протоколом обнаружения stale/невалидных индексов через `IndexIntegrityError`
-
-### Does Not Own
-
-- бизнес-логикой интерпретации результатов (задача вызывающей стороны)
-- прямым доступом Skills к DuckDB-файлу
-- альтернативными vector storage backends (единственный backend — FAISS)
-- NFS storage (явно запрещён)
-
-### May Depend On
-
-- PostgreSQL как источника истины
-- конфигурации `gateway.cache.local_path` (путь к DuckDB)
-- конфигурации `gateway.vector.*` (параметры эмбеддинга и индексов)
-- `TableRegistry` для синхронизации таблиц PG → DuckDB
-
-### Must Not Depend On
-
-- NFS storage для файла кэша
-- прямого доступа Skills к DuckDB-файлу
-- конкретной реализации Skills
-
-## Public Contract
-
-`CacheProvider` (ABC в `lib/services/cache_provider.py`) предоставляет:
-
-- `is_ready() -> bool` — готов ли кэш к запросам
-- `refresh() -> bool` — создать/обновить SQL-кэш из PostgreSQL
-- `check_stale() -> dict` — сверить метки изменений у таблиц кэша с источником
-- `preload_indexes() -> list[dict]` — прогреть FAISS-индексы в память
-- `search_vector(query, index_name, index_path, top_k, threshold) -> list[SearchResult]` — семантический поиск
-- `query_sql(sql, params) -> dict` — выполнить SELECT-запрос к SQL-кэшу
-- `explain(sql) -> dict` — EXPLAIN без выполнения
-- `get_schema(schema_name, table_names) -> dict` — структура таблиц кэша
-- `close()` — закрыть открытые ресурсы
-
-Дополнительные типы:
-
-- `SearchResult` — результат vector search (content, score, source, table, pk_value, chunk, matched_chunks, row, signature_status, signature_reason)
-- `IndexIntegrityError` — векторный индекс не прошёл проверку signature (STALE/INVALID)
-
-## Inputs
-
-Разделы ниже описывают предмет **на стороне платформы**, куда он переехал
-(см. `## Scope`): он в активном переписывании изменениями
-`2026-10-04-close-cache-provider-canon-gap` и
-`2026-10-05-vector-indexes-canon-gap`. Пути, которые эти изменения снимают
-(агентские `gateway.cache.*`, `lib/services/cache_*`), здесь не утверждаются.
-
-Хранилище не создаётся само — его открывает единственная фабрика
-`open_snapshot_store(path, mode=READ_ONLY, *, schema="main", tables=None,
-vector_db_table="", index_accessor=None, verify=True)`
-(`libs/enterprise_data/snapshot/store.py`):
-
-- `path` — **путь к файлу**, а не каталог; разбирается
-  `resolve_snapshot_setting()` (`~` → домашний каталог). Пустое значение →
-  не ошибка: сервер отдаёт `UnavailableSnapshot`, и операции со снимком
-  отвечают `snapshot_unavailable`. NFS / SMB / сетевые ФС отвергаются
-  `reject_unsupported_filesystem` **до** открытия файла;
-- `mode` — `READ_ONLY` у читателя (обычное состояние процесса) и
-  `READ_WRITE` у стадии пересоздания снимка;
-- `vector_db_table` — `schema.table` векторного хранилища; без него векторных
-  чтений нет;
-- `index_accessor` — владелец FAISS-индексов (`libs/vectors`), а не сам
-  снимок; без него `search_vector` отказывает с кодом `index_not_built`;
-- `verify` — открыть файл сразу и проверить читаемость (fail-fast на старте).
-
-Данные на вход: SQL и параметры вызова, имя схемы и перечень таблиц для
-`get_schema`, аргументы векторного поиска (`query`, `index_name`, `top_k`,
-`threshold`) и порция записей для стадии загрузки (`upsert_records`,
-`replace_records`). Никаких путей, DSN и имён таблиц вызывающая сторона не
-присылает: путь приходит из `platform.json → data.snapshot_path`, состав
-таблиц объявляет capability `data`.
-
-## Outputs
-
-- `query_sql(sql, params)` → `{"status", "row_count", "columns", "rows"}` при
-  успехе и `{"status": "error", ..., "error"}` при ошибке запроса — ошибка
-  возвращается **значением**, чтобы отличать «запрос невалиден» от «снимок
-  недоступен» (второе — исключение);
-- `explain(sql)` → `{"valid": True, "plan": [...]}` либо
-  `{"valid": False, "error": ...}` — синтаксическая проверка без выполнения;
-- `get_schema(...)` → описание таблиц снимка;
-- `search_vector(...)` → список `SearchResult`;
-- `preload_indexes()` → список прогретых индексов; без `index_accessor` —
-  пустой список, и это значит «владелец не подключён», а не «индексов нет»;
-- `is_ready()` → признак готовности; `close()` — освобождение ресурсов;
-- при недоступном снимке — `UnavailableSnapshot`, чей код (`cache_busy`,
-  `cache_open_error`) доезжает до клиента без искажений.
-
-Метода `publish()` нет: снимка «для читателей» не существует, загрузчик пишет
-в файл напрямую. Наружу нормализованные словари и `SearchResult` — деталь
-модуля, за которой потребитель операций платформы не обязан следить: он
-работает с операциями capability `data`.
-
 ## Requirements
 
 ### Requirement: PostgreSQL — источник истины
@@ -367,17 +253,128 @@ Concrete adapter (например, `DuckDbCacheStore`) сам реализуе�
 - **WHEN** вызов `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` (в любом mode)
 - **THEN** MUST поднять `UnsupportedSqlError` (DDL запрещён даже в READ_WRITE)
 
-## Forbidden Behavior
+## Responsibility
 
-Система НЕ ДОЛЖНА:
+CacheProvider отвечает за:
 
-- записывать DuckDB-файл кэша напрямую на NFS mount (эмпирически fails with `PID 0` locking errors)
-- вводить второе хранилище кэша помимо `cache_provider.py`
-- молча fallback на PostgreSQL при невалидном кэше; потребители ДОЛЖНЫ быть уведомлены
-- обходить `CacheProvider` из кода Skills
-- дублировать состояние кэша вне единственного пути к файлу кэша
-- открывать FAISS-индексы из кода Skills напрямую
-- создавать альтернативный vector storage backend рядом с FAISS без явного OpenSpec change
+- предоставление SQL-кэша для read-mostly данных из PostgreSQL
+- инкрементальную синхронизацию данных из PostgreSQL в DuckDB
+- предоставление единого интерфейса доступа (`query_sql`, `get_schema`, `explain`, `search_vector`, `preload_indexes`, `check_stale`, `refresh`)
+- управление snapshot'ами кэша (атомарная публикация)
+- прогрев FAISS-индексов в память и выполнение vector search
+- контроль целостности векторных индексов (`IndexIntegrityError`)
+
+## Boundary
+
+### Owns
+
+- DuckDB-файлом кэша на локальном ext4 storage
+- snapshot'ами таблиц из PostgreSQL
+- FAISS-индексами, загружаемыми по требованию
+- публичным API `CacheProvider` (ABC + DuckDB/FAISS-реализация)
+- протоколом обнаружения stale/невалидных индексов через `IndexIntegrityError`
+
+### Does Not Own
+
+- бизнес-логикой интерпретации результатов (задача вызывающей стороны)
+- прямым доступом Skills к DuckDB-файлу
+- альтернативными vector storage backends (единственный backend — FAISS)
+- NFS storage (явно запрещён)
+
+### May Depend On
+
+- PostgreSQL как источника истины
+- конфигурации `gateway.cache.local_path` (путь к DuckDB)
+- конфигурации `gateway.vector.*` (параметры эмбеддинга и индексов)
+- `TableRegistry` для синхронизации таблиц PG → DuckDB
+
+### Must Not Depend On
+
+- NFS storage для файла кэша
+- прямого доступа Skills к DuckDB-файлу
+- конкретной реализации Skills
+
+## Public Contract
+
+`CacheProvider` (ABC в `lib/services/cache_provider.py`) предоставляет:
+
+- `is_ready() -> bool` — готов ли кэш к запросам
+- `refresh() -> bool` — создать/обновить SQL-кэш из PostgreSQL
+- `check_stale() -> dict` — сверить метки изменений у таблиц кэша с источником
+- `preload_indexes() -> list[dict]` — прогреть FAISS-индексы в память
+- `search_vector(query, index_name, index_path, top_k, threshold) -> list[SearchResult]` — семантический поиск
+- `query_sql(sql, params) -> dict` — выполнить SELECT-запрос к SQL-кэшу
+- `explain(sql) -> dict` — EXPLAIN без выполнения
+- `get_schema(schema_name, table_names) -> dict` — структура таблиц кэша
+- `close()` — закрыть открытые ресурсы
+
+Дополнительные типы:
+
+- `SearchResult` — результат vector search (content, score, source, table, pk_value, chunk, matched_chunks, row, signature_status, signature_reason)
+- `IndexIntegrityError` — векторный индекс не прошёл проверку signature (STALE/INVALID)
+
+## Inputs
+
+Разделы ниже описывают предмет **на стороне платформы**, куда он переехал
+(см. `## Scope`): он в активном переписывании изменениями
+`2026-10-04-close-cache-provider-canon-gap` и
+`2026-10-05-vector-indexes-canon-gap`. Пути, которые эти изменения снимают
+(агентские `gateway.cache.*`, `lib/services/cache_*`), здесь не утверждаются.
+
+Хранилище не создаётся само — его открывает единственная фабрика
+`open_snapshot_store(path, mode=READ_ONLY, *, schema="main", tables=None,
+vector_db_table="", index_accessor=None, verify=True)`
+(`libs/enterprise_data/snapshot/store.py`):
+
+- `path` — **путь к файлу**, а не каталог; разбирается
+  `resolve_snapshot_setting()` (`~` → домашний каталог). Пустое значение →
+  не ошибка: сервер отдаёт `UnavailableSnapshot`, и операции со снимком
+  отвечают `snapshot_unavailable`. NFS / SMB / сетевые ФС отвергаются
+  `reject_unsupported_filesystem` **до** открытия файла;
+- `mode` — `READ_ONLY` у читателя (обычное состояние процесса) и
+  `READ_WRITE` у стадии пересоздания снимка;
+- `vector_db_table` — `schema.table` векторного хранилища; без него векторных
+  чтений нет;
+- `index_accessor` — владелец FAISS-индексов (`libs/vectors`), а не сам
+  снимок; без него `search_vector` отказывает с кодом `index_not_built`;
+- `verify` — открыть файл сразу и проверить читаемость (fail-fast на старте).
+
+Данные на вход: SQL и параметры вызова, имя схемы и перечень таблиц для
+`get_schema`, аргументы векторного поиска (`query`, `index_name`, `top_k`,
+`threshold`) и порция записей для стадии загрузки (`upsert_records`,
+`replace_records`). Никаких путей, DSN и имён таблиц вызывающая сторона не
+присылает: путь приходит из `platform.json → data.snapshot_path`, состав
+таблиц объявляет capability `data`.
+
+## Outputs
+
+- `query_sql(sql, params)` → `{"status", "row_count", "columns", "rows"}` при
+  успехе и `{"status": "error", ..., "error"}` при ошибке запроса — ошибка
+  возвращается **значением**, чтобы отличать «запрос невалиден» от «снимок
+  недоступен» (второе — исключение);
+- `explain(sql)` → `{"valid": True, "plan": [...]}` либо
+  `{"valid": False, "error": ...}` — синтаксическая проверка без выполнения;
+- `get_schema(...)` → описание таблиц снимка;
+- `search_vector(...)` → список `SearchResult`;
+- `preload_indexes()` → список прогретых индексов; без `index_accessor` —
+  пустой список, и это значит «владелец не подключён», а не «индексов нет»;
+- `is_ready()` → признак готовности; `close()` — освобождение ресурсов;
+- при недоступном снимке — `UnavailableSnapshot`, чей код (`cache_busy`,
+  `cache_open_error`) доезжает до клиента без искажений.
+
+Метода `publish()` нет: снимка «для читателей» не существует, загрузчик пишет
+в файл напрямую. Наружу нормализованные словари и `SearchResult` — деталь
+модуля, за которой потребитель операций платформы не обязан следить: он
+работает с операциями capability `data`.
+
+## State
+
+CacheProvider хранит:
+
+- DuckDB-файл кэша по пути `gateway.cache.local_path`.
+- Snapshot'ы таблиц PostgreSQL.
+- FAISS-индексы, загруженные в память (`preload_indexes`).
+- Кэш сигнатур индексов для контроля целостности.
 
 ## Dependencies
 
@@ -405,23 +402,6 @@ Concrete adapter (например, `DuckDbCacheStore`) сам реализуе�
 5. **Обслуживание**: обработка запросов `query_sql` / `search_vector` / `get_schema` / `explain`.
 6. **Stale check**: `check_stale()` сверяет метки изменений.
 7. **Закрытие**: `close()` освобождает ресурсы (соединения, файлы).
-
-## State
-
-CacheProvider хранит:
-
-- DuckDB-файл кэша по пути `gateway.cache.local_path`.
-- Snapshot'ы таблиц PostgreSQL.
-- FAISS-индексы, загруженные в память (`preload_indexes`).
-- Кэш сигнатур индексов для контроля целостности.
-
-## Invariants
-
-- PostgreSQL — источник истины для кэшируемых таблиц.
-- Кэш хранится только на локальном ext4 storage.
-- Единый интерфейс доступа через `CacheProvider`.
-- Все векторные индексы FAISS-backed.
-- Сигнатура индекса проверяется перед каждым использованием.
 
 ## Data Ownership
 
@@ -457,6 +437,26 @@ CacheProvider хранит:
 - **Ошибка запроса**: возврат ошибки потребителю; молчаливый fallback на PostgreSQL запрещён.
 - **Stale/invalid index**: `IndexIntegrityError` с статусом `STALE`/`INVALID` и описанием `reason`; вызывающая сторона обязана обработать (например, пересобрать индекс через `tools/build_vectors.py`).
 - **Config missing**: fail fast при старте (`ConfigurationError`).
+
+## Invariants
+
+- PostgreSQL — источник истины для кэшируемых таблиц.
+- Кэш хранится только на локальном ext4 storage.
+- Единый интерфейс доступа через `CacheProvider`.
+- Все векторные индексы FAISS-backed.
+- Сигнатура индекса проверяется перед каждым использованием.
+
+## Forbidden Behavior
+
+Система НЕ ДОЛЖНА:
+
+- записывать DuckDB-файл кэша напрямую на NFS mount (эмпирически fails with `PID 0` locking errors)
+- вводить второе хранилище кэша помимо `cache_provider.py`
+- молча fallback на PostgreSQL при невалидном кэше; потребители ДОЛЖНЫ быть уведомлены
+- обходить `CacheProvider` из кода Skills
+- дублировать состояние кэша вне единственного пути к файлу кэша
+- открывать FAISS-индексы из кода Skills напрямую
+- создавать альтернативный vector storage backend рядом с FAISS без явного OpenSpec change
 
 ## Consumers
 

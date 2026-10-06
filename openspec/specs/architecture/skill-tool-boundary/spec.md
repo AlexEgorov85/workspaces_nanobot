@@ -13,6 +13,72 @@ Skills и Tools — **параллельные потребители** обще
 `agent` — правило о слоях навыков и инструментов репозитория агента
 Реализация: `workspace/skills/`, `workspace/tools/`, `lib/services/project_tool_loader.py`
 
+## Requirements
+
+### Requirement: Skill layer содержит предметную логику
+
+Система ДОЛЖНА сохранять project-specific domain logic внутри слоя Skills (`workspace/skills/<name>/`).
+
+#### Scenario: Skill реализует свои скрипты
+
+- **КОГДА** Skill нуждается в domain logic (например, SQL composition, output formatting, skill-specific orchestration)
+- **ТОГДА** эта логика ДОЛЖНА жить в `workspace/skills/<name>/scripts/` и НЕ ДОЛЖНА быть переизобретена как generic Tool
+
+#### Scenario: Skill обращается к инфраструктуре напрямую
+
+- **КОГДА** Skill нуждается в возможности, уже предоставляемой shared runtime infrastructure (SQL-кэш, векторный поиск, LLM-клиент, валидация SQL, реестр ресурсов)
+- **ТОГДА** Skill ДОЛЖЕН использовать существующий runtime/application interface напрямую
+- **И** Skill MUST NOT искать или вызывать Tool для этого
+
+### Requirement: Tool layer содержит самостоятельные agent-facing capability
+
+Система ДОЛЖНА размещать в `workspace/tools/` только те capability, которые агент выбирает и вызывает самостоятельно, независимо от выбранного домена.
+
+#### Scenario: Tool переиспользуется across Skills
+
+- **КОГДА** Tool определён под `workspace/tools/`
+- **ТОГДА** он ДОЛЖЕН быть usable в любом домене без domain-routing и без знания конкретных Skills
+
+### Requirement: Agent-facing capability — критерий Tool'а
+
+Tool'ом MAY становиться только capability, удовлетворяющая всем условиям:
+
+- агент выбирает и вызывает её **самостоятельно**, как отдельный шаг своего плана;
+- её полезность не зависит от выбранного домена;
+- она не является внутренним шагом уже существующего доменного workflow.
+
+#### Scenario: Внутренняя операция доменного workflow
+
+- **КОГДА** capability является детерминированным внутренним шагом доменного Skill (например, выполнение заранее определённого SQL-скрипта домена, NL→SQL для конкретной схемы, семантический поиск по доменным индексам)
+- **ТОГДА** она ДОЛЖНА оставаться внутренней операцией Skill
+- **И** Agent-facing Tool для неё MUST NOT создаваться, если агент не должен выбирать её самостоятельно
+
+#### Scenario: Generic, но не agent-facing
+
+- **КОГДА** capability объективно generic, но обслуживает внутренний шаг доменного workflow и не нужна агенту как отдельное действие
+- **ТОГДА** она ДОЛЖНА оставаться в shared infrastructure или в scripts Skill
+- **И** generic-природа capability MUST NOT служить достаточным основанием для создания Tool'а
+
+### Requirement: Shared infrastructure не входит в Tool-слой
+
+Реализации, используемые и Skills, и Tools (SQL-кэш, векторный поиск, валидация SQL, LLM-клиент, реестр ресурсов), ДОЛЖНЫ жить в shared runtime infrastructure (`lib/services`, `lib/core`, `lib/utils`) и MUST NOT считаться частью Tool-слоя.
+
+#### Scenario: Callable capability в lib/
+
+- **КОГДА** в `lib/services` или `lib/core` появляется callable-функция
+- **ТОГДА** она ДОЛЖНА оставаться инфраструктурой
+- **И** её наличие MUST NOT служить основанием заводить одноимённый Agent-facing Tool
+
+### Requirement: Независимость
+
+Система ДОЛЖНА сохранять Skills и Tools независимо разрабатываемыми: ни один слой не требует compile-time или runtime dependency на другой.
+
+#### Scenario: Skill нуждается в capability, доступной как Tool
+
+- **КОГДА** Skill нуждается в функциональности, реализованной как Tool
+- **ТОГДА** Skill ДОЛЖЕН использовать существующий runtime/application interface напрямую
+- **И** Skill MUST NOT вызывать Tool и MUST NOT импортировать `workspace.tools.*`
+
 ## Responsibility
 
 Skill/Tool Boundary отвечает за:
@@ -87,84 +153,9 @@ CI), а не результат работы компонента. Что име
 `## Requirements` и `## Invariants`; запрещённые варианты — в
 `## Forbidden Behavior`.
 
-## Requirements
+## State
 
-### Requirement: Skill layer содержит предметную логику
-
-Система ДОЛЖНА сохранять project-specific domain logic внутри слоя Skills (`workspace/skills/<name>/`).
-
-#### Scenario: Skill реализует свои скрипты
-
-- **КОГДА** Skill нуждается в domain logic (например, SQL composition, output formatting, skill-specific orchestration)
-- **ТОГДА** эта логика ДОЛЖНА жить в `workspace/skills/<name>/scripts/` и НЕ ДОЛЖНА быть переизобретена как generic Tool
-
-#### Scenario: Skill обращается к инфраструктуре напрямую
-
-- **КОГДА** Skill нуждается в возможности, уже предоставляемой shared runtime infrastructure (SQL-кэш, векторный поиск, LLM-клиент, валидация SQL, реестр ресурсов)
-- **ТОГДА** Skill ДОЛЖЕН использовать существующий runtime/application interface напрямую
-- **И** Skill MUST NOT искать или вызывать Tool для этого
-
-### Requirement: Tool layer содержит самостоятельные agent-facing capability
-
-Система ДОЛЖНА размещать в `workspace/tools/` только те capability, которые агент выбирает и вызывает самостоятельно, независимо от выбранного домена.
-
-#### Scenario: Tool переиспользуется across Skills
-
-- **КОГДА** Tool определён под `workspace/tools/`
-- **ТОГДА** он ДОЛЖЕН быть usable в любом домене без domain-routing и без знания конкретных Skills
-
-### Requirement: Agent-facing capability — критерий Tool'а
-
-Tool'ом MAY становиться только capability, удовлетворяющая всем условиям:
-
-- агент выбирает и вызывает её **самостоятельно**, как отдельный шаг своего плана;
-- её полезность не зависит от выбранного домена;
-- она не является внутренним шагом уже существующего доменного workflow.
-
-#### Scenario: Внутренняя операция доменного workflow
-
-- **КОГДА** capability является детерминированным внутренним шагом доменного Skill (например, выполнение заранее определённого SQL-скрипта домена, NL→SQL для конкретной схемы, семантический поиск по доменным индексам)
-- **ТОГДА** она ДОЛЖНА оставаться внутренней операцией Skill
-- **И** Agent-facing Tool для неё MUST NOT создаваться, если агент не должен выбирать её самостоятельно
-
-#### Scenario: Generic, но не agent-facing
-
-- **КОГДА** capability объективно generic, но обслуживает внутренний шаг доменного workflow и не нужна агенту как отдельное действие
-- **ТОГДА** она ДОЛЖНА оставаться в shared infrastructure или в scripts Skill
-- **И** generic-природа capability MUST NOT служить достаточным основанием для создания Tool'а
-
-### Requirement: Shared infrastructure не входит в Tool-слой
-
-Реализации, используемые и Skills, и Tools (SQL-кэш, векторный поиск, валидация SQL, LLM-клиент, реестр ресурсов), ДОЛЖНЫ жить в shared runtime infrastructure (`lib/services`, `lib/core`, `lib/utils`) и MUST NOT считаться частью Tool-слоя.
-
-#### Scenario: Callable capability в lib/
-
-- **КОГДА** в `lib/services` или `lib/core` появляется callable-функция
-- **ТОГДА** она ДОЛЖНА оставаться инфраструктурой
-- **И** её наличие MUST NOT служить основанием заводить одноимённый Agent-facing Tool
-
-### Requirement: Независимость
-
-Система ДОЛЖНА сохранять Skills и Tools независимо разрабатываемыми: ни один слой не требует compile-time или runtime dependency на другой.
-
-#### Scenario: Skill нуждается в capability, доступной как Tool
-
-- **КОГДА** Skill нуждается в функциональности, реализованной как Tool
-- **ТОГДА** Skill ДОЛЖЕН использовать существующий runtime/application interface напрямую
-- **И** Skill MUST NOT вызывать Tool и MUST NOT импортировать `workspace.tools.*`
-
-## Forbidden Behavior
-
-Система НЕ ДОЛЖНА:
-
-- импортировать конкретные Tool implementations изнутри Skill кода (`workspace/skills/<name>/scripts/`, `workspace/skills/<name>/SKILL.md`)
-- импортировать конкретную Skill logic изнутри Tool кода (`workspace/tools/<tool>.py`)
-- объявлять Skill → Tool зависимостью (в т.ч. «Skill вызывает Tool через standard tool-call mechanism»)
-- превращать любую callable-функцию в Tool только на основании её generic-природы или того, что она «уже реализована»
-- считать shared runtime infrastructure (`lib/services`, `lib/core`, `lib/utils`) частью Tool-слоя
-- создавать fallback path, который bypass эту границу (нет «legacy Skill import» или «secondary Tool call» механизма)
-- создавать второй реестр Skills или Tools вне объявленного в `config.json::skills.*`
-- добавлять альтернативный execution path (например, Tool напрямую callable без tool-call interface)
+Отсутствует. Boundary является архитектурным правилом, не runtime состоянием.
 
 ## Dependencies
 
@@ -213,9 +204,11 @@ Tools **не** перечисляются в реестре `config.json`: он�
 владение тем и другим здесь не заявляется, потому что правило только
 ссылается на них.
 
-## State
+## Error Behavior
 
-Отсутствует. Boundary является архитектурным правилом, не runtime состоянием.
+- Попытка прямого импорта или вызова Tool из Skill → архитектурная регрессия (code review / CI)
+- Создание Tool'а под внутреннюю операцию доменного workflow → архитектурная регрессия (code review / CI)
+- Отсутствие runtime interface, нужного Skill'у → runtime error
 
 ## Invariants
 
@@ -225,11 +218,18 @@ Tools **не** перечисляются в реестре `config.json`: он�
 - Нет cross-layer imports и cross-layer вызовов
 - Единый реестр Skills; Tools — auto-discovery
 
-## Error Behavior
+## Forbidden Behavior
 
-- Попытка прямого импорта или вызова Tool из Skill → архитектурная регрессия (code review / CI)
-- Создание Tool'а под внутреннюю операцию доменного workflow → архитектурная регрессия (code review / CI)
-- Отсутствие runtime interface, нужного Skill'у → runtime error
+Система НЕ ДОЛЖНА:
+
+- импортировать конкретные Tool implementations изнутри Skill кода (`workspace/skills/<name>/scripts/`, `workspace/skills/<name>/SKILL.md`)
+- импортировать конкретную Skill logic изнутри Tool кода (`workspace/tools/<tool>.py`)
+- объявлять Skill → Tool зависимостью (в т.ч. «Skill вызывает Tool через standard tool-call mechanism»)
+- превращать любую callable-функцию в Tool только на основании её generic-природы или того, что она «уже реализована»
+- считать shared runtime infrastructure (`lib/services`, `lib/core`, `lib/utils`) частью Tool-слоя
+- создавать fallback path, который bypass эту границу (нет «legacy Skill import» или «secondary Tool call» механизма)
+- создавать второй реестр Skills или Tools вне объявленного в `config.json::skills.*`
+- добавлять альтернативный execution path (например, Tool напрямую callable без tool-call interface)
 
 ## Consumers
 

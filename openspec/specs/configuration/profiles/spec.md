@@ -9,94 +9,6 @@
 `shared` — профиль разрешается агентом, а оверлей имён таблиц применяет платформа; расхождение имён валит старт
 Реализация: `profiles/test.jsonc` + `mcp-platform/platform.json → profiles.test`
 
-## Responsibility
-
-Profiles отвечают за:
-- определение механизма разрешения активного профиля (prod/test)
-- установку правил применения profile-specific overlays
-- запрет ветвления бизнес-логики по профилю
-
-## Boundary
-
-### Owns
-- механизмом разрешения профиля на этапе загрузки конфигурации
-- применением profile-specific overlays к config.json
-- предоставлением resolved profile через SETTINGS для infrastructure
-
-### Does Not Own
-- бизнес-логикой, которая ветвится по профилю
-- runtime-переключением профиля
-- созданием новых профилей без OpenSpec change
-
-### May Depend On
-- config.json (базовая конфигурация)
-- session_manager.json (локальные overrides)
-- .secrets.env (секреты)
-
-### Must Not Depend On
-- runtime-компонентов (ApplicationContext, channels, services)
-- бизнес-логики Skills/Tools
-
-## Public Contract
-
-Profile resolution предоставляет:
-- разрешение активного профиля (prod/test) до инициализации runtime
-- применение profile-specific overlays в документированном порядке
-- доступ к resolved profile через SETTINGS для infrastructure code
-
-## Inputs
-
-Профиль — обязательный явный аргумент, а не читаемая переменная:
-`resolve_application_config(profile)` → `_initialize_settings(profile)`
-(`config.py`), значение приходит из argv `--profile` у application entrypoint.
-Whitelist — ровно `{"prod", "test"}` (`config._SUPPORTED_PROFILES`);
-произвольное значение, включая `dev`/`staging`, отвергается.
-
-Порядок merge (поздний перекрывает ранний) — четыре источника:
-
-1. `config.json` — база: и настройки nanobot, и агентские секции; секция
-   `gateway.agent.*` поднимается в корень (`_lift_agent_sections`), неизвестная
-   секция внутри неё — `ConfigurationError`.
-2. `session_manager.json` — per-deploy override (пул, таймауты), читается
-   только при наличии файла; runtime-таблицы перетирать не может.
-3. `.secrets.env` — секреты для `${VAR}` и провайдерские `api_key`; плоские
-   значения экспортируются в `os.environ` через `setdefault`, то есть внешнее
-   окружение имеет приоритет.
-4. `profiles/<mode>.jsonc` — оверлей профиля, только при `mode != prod`; для
-   `test` отсутствие файла — `ConfigurationError`.
-
-Плюс окружение как вход резолва: `${ПЕРЕМЕННАЯ}` читается из `os.environ`, и
-туда же выводятся факты о запуске (`NANOBOT_PYTHON`, `NANOBOT_PROJECT_ROOT`,
-`NANOBOT_WORKSPACE`).
-
-`profiles/<mode>.jsonc` проверяется симметрично (`validate_profile_overlay`):
-все 5 profile-owned runtime-ключей обязаны присутствовать, посторонних быть не
-должно.
-
-## Outputs
-
-- `SETTINGS` — `_LazySettings` (mapping-proxy поверх `AttrDict`), единственная
-  публикация конфигурации; `SETTINGS["profile"]` — разрешённый профиль. До
-  инициализации обращение к `SETTINGS` бросает `ConfigurationError`: дефолтов
-  и module-level `SETTINGS = ...` нет.
-- Имена runtime-таблиц по роли — `runtime_table(role, profile)`; неизвестный
-  профиль или роль — `ConfigurationError`. Единственная функция в коде,
-  возвращающая имя таблицы: литералы в коде и тестах молча поедут мимо нового
-  имени.
-- Жёсткая сверка результата: `validate_runtime_isolation(cfg, mode)` требует
-  точного соответствия таблиц профилю, иначе старт падает.
-- Экспорт для дочернего процесса платформы: `NANOBOT_ENTERPRISE_MCP_PROFILE`
-  (пустая строка — «флага нет», платформа читает её как `None` и берёт базовый
-  контур) и `NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS` (путь к файлу блока).
-  Присваиваются **без** `setdefault`, поэтому внешнее окружение их не
-  переопределяет, а `NANOBOT_PROFILE` не воскрешается.
-- Отказ — `ConfigurationError` на любое нарушение: неизвестный профиль,
-  посторонний или отсутствующий ключ оверлея, битый JSON, несоответствие
-  runtime-таблиц.
-
-Значения имён таблиц платформе **не** передаются: едет только имя контура,
-а оверлей имён применяет платформа (`platform.json → profiles.<имя>`).
-
 ## Requirements
 
 ### Requirement: Разрешение до инициализации runtime
@@ -555,15 +467,97 @@ Gateway entrypoint `gateway.py` MAY принимать `--profile`; это тр�
 - **THEN** gateway MUST принять `--profile` (текущее поведение сохраняется)
 - **AND** `SETTINGS["profile"]` MUST соответствовать переданному значению
 
-## Forbidden Behavior
+## Responsibility
 
-Система НЕ ДОЛЖНА:
+Profiles отвечают за:
+- определение механизма разрешения активного профиля (prod/test)
+- установку правил применения profile-specific overlays
+- запрет ветвления бизнес-логики по профилю
 
-- содержать ветки `if profile == "prod"` / `if profile == "test"` в бизнес-логике
-- fallback на "профиль по умолчанию" если разрешение профиля не удалось (fail fast на misconfiguration)
-- позволять переключение профиля на runtime (после разрешения конфигурации)
-- молча игнорировать неизвестные profile keys
-- создавать третий профиль (`dev`, `staging`, etc.) без явного OpenSpec change
+## Boundary
+
+### Owns
+- механизмом разрешения профиля на этапе загрузки конфигурации
+- применением profile-specific overlays к config.json
+- предоставлением resolved profile через SETTINGS для infrastructure
+
+### Does Not Own
+- бизнес-логикой, которая ветвится по профилю
+- runtime-переключением профиля
+- созданием новых профилей без OpenSpec change
+
+### May Depend On
+- config.json (базовая конфигурация)
+- session_manager.json (локальные overrides)
+- .secrets.env (секреты)
+
+### Must Not Depend On
+- runtime-компонентов (ApplicationContext, channels, services)
+- бизнес-логики Skills/Tools
+
+## Public Contract
+
+Profile resolution предоставляет:
+- разрешение активного профиля (prod/test) до инициализации runtime
+- применение profile-specific overlays в документированном порядке
+- доступ к resolved profile через SETTINGS для infrastructure code
+
+## Inputs
+
+Профиль — обязательный явный аргумент, а не читаемая переменная:
+`resolve_application_config(profile)` → `_initialize_settings(profile)`
+(`config.py`), значение приходит из argv `--profile` у application entrypoint.
+Whitelist — ровно `{"prod", "test"}` (`config._SUPPORTED_PROFILES`);
+произвольное значение, включая `dev`/`staging`, отвергается.
+
+Порядок merge (поздний перекрывает ранний) — четыре источника:
+
+1. `config.json` — база: и настройки nanobot, и агентские секции; секция
+   `gateway.agent.*` поднимается в корень (`_lift_agent_sections`), неизвестная
+   секция внутри неё — `ConfigurationError`.
+2. `session_manager.json` — per-deploy override (пул, таймауты), читается
+   только при наличии файла; runtime-таблицы перетирать не может.
+3. `.secrets.env` — секреты для `${VAR}` и провайдерские `api_key`; плоские
+   значения экспортируются в `os.environ` через `setdefault`, то есть внешнее
+   окружение имеет приоритет.
+4. `profiles/<mode>.jsonc` — оверлей профиля, только при `mode != prod`; для
+   `test` отсутствие файла — `ConfigurationError`.
+
+Плюс окружение как вход резолва: `${ПЕРЕМЕННАЯ}` читается из `os.environ`, и
+туда же выводятся факты о запуске (`NANOBOT_PYTHON`, `NANOBOT_PROJECT_ROOT`,
+`NANOBOT_WORKSPACE`).
+
+`profiles/<mode>.jsonc` проверяется симметрично (`validate_profile_overlay`):
+все 5 profile-owned runtime-ключей обязаны присутствовать, посторонних быть не
+должно.
+
+## Outputs
+
+- `SETTINGS` — `_LazySettings` (mapping-proxy поверх `AttrDict`), единственная
+  публикация конфигурации; `SETTINGS["profile"]` — разрешённый профиль. До
+  инициализации обращение к `SETTINGS` бросает `ConfigurationError`: дефолтов
+  и module-level `SETTINGS = ...` нет.
+- Имена runtime-таблиц по роли — `runtime_table(role, profile)`; неизвестный
+  профиль или роль — `ConfigurationError`. Единственная функция в коде,
+  возвращающая имя таблицы: литералы в коде и тестах молча поедут мимо нового
+  имени.
+- Жёсткая сверка результата: `validate_runtime_isolation(cfg, mode)` требует
+  точного соответствия таблиц профилю, иначе старт падает.
+- Экспорт для дочернего процесса платформы: `NANOBOT_ENTERPRISE_MCP_PROFILE`
+  (пустая строка — «флага нет», платформа читает её как `None` и берёт базовый
+  контур) и `NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS` (путь к файлу блока).
+  Присваиваются **без** `setdefault`, поэтому внешнее окружение их не
+  переопределяет, а `NANOBOT_PROFILE` не воскрешается.
+- Отказ — `ConfigurationError` на любое нарушение: неизвестный профиль,
+  посторонний или отсутствующий ключ оверлея, битый JSON, несоответствие
+  runtime-таблиц.
+
+Значения имён таблиц платформе **не** передаются: едет только имя контура,
+а оверлей имён применяет платформа (`platform.json → profiles.<имя>`).
+
+## State
+
+Resolved profile хранится в SETTINGS как строка (`"prod"` или `"test"`).
 
 ## Dependencies
 
@@ -597,22 +591,6 @@ Gateway entrypoint `gateway.py` MAY принимать `--profile`; это тр�
 4. **Фиксация**: resolved profile сохраняется в SETTINGS
 5. **Использование**: infrastructure читает SETTINGS.profile при необходимости
 
-## State
-
-Resolved profile хранится в SETTINGS как строка (`"prod"` или `"test"`).
-
-## Invariants
-
-- Профиль разрешается ровно один раз при старте
-- После разрешения профиль не изменяется
-- Бизнес-логика не ветвится по профилю
-- Infrastructure использует профиль только для конфигурации
-
-## Error Behavior
-
-- Ошибка разрешения профиля → fail fast, система не запускается
-- Неизвестный профиль → ошибка валидации конфигурации
-
 ## Data Ownership
 
 Владеет:
@@ -636,6 +614,28 @@ Resolved profile хранится в SETTINGS как строка (`"prod"` ил
   приоритет у внешнего окружения;
 - оверлеем имён таблиц на стороне платформы — он объявлен в
   `mcp-platform/platform.json → profiles` и применяется там.
+
+## Error Behavior
+
+- Ошибка разрешения профиля → fail fast, система не запускается
+- Неизвестный профиль → ошибка валидации конфигурации
+
+## Invariants
+
+- Профиль разрешается ровно один раз при старте
+- После разрешения профиль не изменяется
+- Бизнес-логика не ветвится по профилю
+- Infrastructure использует профиль только для конфигурации
+
+## Forbidden Behavior
+
+Система НЕ ДОЛЖНА:
+
+- содержать ветки `if profile == "prod"` / `if profile == "test"` в бизнес-логике
+- fallback на "профиль по умолчанию" если разрешение профиля не удалось (fail fast на misconfiguration)
+- позволять переключение профиля на runtime (после разрешения конфигурации)
+- молча игнорировать неизвестные profile keys
+- создавать третий профиль (`dev`, `staging`, etc.) без явного OpenSpec change
 
 ## Consumers
 

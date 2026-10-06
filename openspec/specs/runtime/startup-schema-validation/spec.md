@@ -14,103 +14,6 @@
 `agent` — pre-startup проверка runtime-таблиц принадлежит агенту; у платформы своя, для её собственных таблиц
 Реализация: `lib/services/schema_validation.py`
 
-## Responsibility
-
-- Pre-startup проверка наличия 5 runtime-таблиц в БД.
-- Жёсткая блокировка старта (`exit 2` + `stderr`) при отсутствии любой
-  из таблиц.
-- Резолв списка ожидаемых таблиц ТОЛЬКО из merged SETTINGS
-  (`channels.postgres.*` + `logging.db.*`) — без зашитых в код имён.
-- Уважение опционального gate `gateway.startup.schema_validation.enabled`.
-
-## Boundary
-
-### Owns
-
-- Метод `ApplicationContext._validate_runtime_schema()` —
-  вызывается из `start()` сразу после `_start_db_pool()`.
-- Класс `lib.services.schema_validation.SchemaValidationService`.
-- Исключение `SchemaValidationError` (наследник `ConfigurationError`).
-- Тип `MissingTable`.
-
-### Does not own
-
-- Имена runtime-таблиц (живут в `config.EXPECTED_RUNTIME_TABLE_NAMES`
-  + `SETTINGS` после `_initialize_settings`).
-- Применение миграций (`tools/migrate.py`,
-  `tools/apply_test_profile_tables.py`).
-- Auto-create таблиц.
-- Health-check / runtime-readiness — это отдельный компонент
-  (`runtime/runtime-events-subscription` + `data/vector-indexes`).
-- Проверка других таблиц (`oarb.*`, skill-таблицы, benchmarks,
-  legacy `agent_vector_index_*`) — не входит в объём.
-
-### May depend on
-
-- `config.ConfigurationError` (для boundary с gateway/cli entrypoint).
-- `utils.db.fetch` (psycopg2-пул) — адаптер для SELECT.
-- `lib.core.project_settings.StartupSchemaValidationSettings` —
-  pydantic-валидация `gateway.startup.schema_validation.*`.
-
-### Must not depend on
-
-- Upstream nanobot (никакой логики оттуда).
-- Конкретных имён таблиц в коде проверки.
-- Сетевых ресурсов вне пула `utils.db`.
-
-## Public Contract
-
-- `SchemaValidationService.expected_table_names(settings) -> list[tuple[str, str]]`
-  — извлекает 5 ожидаемых имён из merged SETTINGS (порядок и схема
-  `public` фиксированы).
-- `SchemaValidationService.check_tables(fetch, expected, *, timeout_sec)`
-  — выполняет один SELECT к `information_schema.tables`,
-  возвращает `list[MissingTable]` (пустой, если всё на месте).
-- `SchemaValidationService.validate(settings, *, fetch, timeout_sec)`
-  — верхний уровень: ожидаемые → проверка → `raise SchemaValidationError`.
-- `utils.db.fetch_with_timeout(sql, *args, *, timeout_sec)` — адаптер,
-  которым `ApplicationContext` подменяет «голый» `fetch`. Механизм
-  предела живёт здесь, а не в сервисе проверки: соединение принадлежит
-  пулу, и держать открытый доступ к соединениям в потребителе нечего.
-  Плоский `utils.db.fetch` тоже годен — он просто ничего не ограничивает.
-- `SchemaValidationTimeoutError(ConfigurationError)` — отказ по превышении
-  предела. Намеренно **не** подкласс `SchemaValidationError`: таймаут не
-  означает «нет таблиц», и отправлять оператора применять миграции там,
-  где нужен DBA, — враньё.
-- `ApplicationContext._validate_runtime_schema(self) -> None` —
-  приватный метод, вызывается из `start()`.
-
-## Inputs
-
-- `SETTINGS` — merged-конфигурация агента (сырой `dict` или `_LazySettings`
-  proxy; последний разворачивается через `_unwrap_settings`). Из неё берутся
-  пять ожидаемых имён по ключам `channels.postgres.{table_name,
-  messages_table, meta_table}` и `logging.db.{table_name,
-  question_runs_table}`, плюс `profile` для текста отказа. Литералов имён в
-  коде проверки нет: переименование таблицы меняет конфигурацию, а не код;
-- `fetch` — адаптер с сигнатурой `(sql, *params) -> list[dict]`, обычно
-  `utils.db.fetch_with_timeout`. Предел времени реализует адаптер, потому что
-  соединение принадлежит пулу, а не этому модулю;
-- `timeout_sec` — предел, который попадает в текст отказа: решение читает
-  сообщение и видит конкретную цифру, а не «неизвестный таймаут»;
-- флаг включения и сам предел — из конфигурации (см. `## Configuration`),
-  то есть тоже через `SETTINGS`.
-
-Схема проверки в коде зафиксирована как `public`: имя таблицы приходит из
-конфигурации, имя схемы — нет.
-
-## Outputs
-
-- `None` при успехе: проверка ничего не возвращает, а не «список таблиц»,
-  потому что вызывающей стороне нужно только «можно начинать»;
-- `list[tuple[str, str]]` из `expected_table_names()` — ожидаемые пары
-  `(schema, table_name)`, детерминированно в порядке `_EXPECTED_KEYS`;
-- `list[MissingTable]` из `check_tables()` — недостающие таблицы в том же
-  порядке; пустой список означает «всё на месте»;
-- `SchemaValidationError.missing` и `.profile` — на отказе оператор получает
-  и перечень, и контур;
-- запись об отказе в лог: `profile=` и список отсутствующих полных имён.
-
 ## Requirements
 
 ### Requirement: Pre-startup runtime schema gate
@@ -285,16 +188,107 @@ SHALL формировать сообщение на русском, содер�
   на русском, содержащее имя профиля, список недостающих ключей
   и подсказку про секцию `config.json`
 
-## Forbidden Behavior
+## Responsibility
 
-- Захардкоженные имена таблиц в коде проверки.
-- Авто-создание недостающих таблиц.
-- Маскировка ошибок БД (`OperationalError`, `InterfaceError`)
-  под «отсутствие таблиц».
-- Регистрация `SchemaValidationService` как `RuntimeReadiness`
-  компонента.
-- Параметризация SQL через f-string или `%` (только
-  `%s`-placeholder'ы с tuple-параметрами).
+- Pre-startup проверка наличия 5 runtime-таблиц в БД.
+- Жёсткая блокировка старта (`exit 2` + `stderr`) при отсутствии любой
+  из таблиц.
+- Резолв списка ожидаемых таблиц ТОЛЬКО из merged SETTINGS
+  (`channels.postgres.*` + `logging.db.*`) — без зашитых в код имён.
+- Уважение опционального gate `gateway.startup.schema_validation.enabled`.
+
+## Boundary
+
+### Owns
+
+- Метод `ApplicationContext._validate_runtime_schema()` —
+  вызывается из `start()` сразу после `_start_db_pool()`.
+- Класс `lib.services.schema_validation.SchemaValidationService`.
+- Исключение `SchemaValidationError` (наследник `ConfigurationError`).
+- Тип `MissingTable`.
+
+### Does not own
+
+- Имена runtime-таблиц (живут в `config.EXPECTED_RUNTIME_TABLE_NAMES`
+  + `SETTINGS` после `_initialize_settings`).
+- Применение миграций (`tools/migrate.py`,
+  `tools/apply_test_profile_tables.py`).
+- Auto-create таблиц.
+- Health-check / runtime-readiness — это отдельный компонент
+  (`runtime/runtime-events-subscription` + `data/vector-indexes`).
+- Проверка других таблиц (`oarb.*`, skill-таблицы, benchmarks,
+  legacy `agent_vector_index_*`) — не входит в объём.
+
+### May depend on
+
+- `config.ConfigurationError` (для boundary с gateway/cli entrypoint).
+- `utils.db.fetch` (psycopg2-пул) — адаптер для SELECT.
+- `lib.core.project_settings.StartupSchemaValidationSettings` —
+  pydantic-валидация `gateway.startup.schema_validation.*`.
+
+### Must not depend on
+
+- Upstream nanobot (никакой логики оттуда).
+- Конкретных имён таблиц в коде проверки.
+- Сетевых ресурсов вне пула `utils.db`.
+
+## Public Contract
+
+- `SchemaValidationService.expected_table_names(settings) -> list[tuple[str, str]]`
+  — извлекает 5 ожидаемых имён из merged SETTINGS (порядок и схема
+  `public` фиксированы).
+- `SchemaValidationService.check_tables(fetch, expected, *, timeout_sec)`
+  — выполняет один SELECT к `information_schema.tables`,
+  возвращает `list[MissingTable]` (пустой, если всё на месте).
+- `SchemaValidationService.validate(settings, *, fetch, timeout_sec)`
+  — верхний уровень: ожидаемые → проверка → `raise SchemaValidationError`.
+- `utils.db.fetch_with_timeout(sql, *args, *, timeout_sec)` — адаптер,
+  которым `ApplicationContext` подменяет «голый» `fetch`. Механизм
+  предела живёт здесь, а не в сервисе проверки: соединение принадлежит
+  пулу, и держать открытый доступ к соединениям в потребителе нечего.
+  Плоский `utils.db.fetch` тоже годен — он просто ничего не ограничивает.
+- `SchemaValidationTimeoutError(ConfigurationError)` — отказ по превышении
+  предела. Намеренно **не** подкласс `SchemaValidationError`: таймаут не
+  означает «нет таблиц», и отправлять оператора применять миграции там,
+  где нужен DBA, — враньё.
+- `ApplicationContext._validate_runtime_schema(self) -> None` —
+  приватный метод, вызывается из `start()`.
+
+## Inputs
+
+- `SETTINGS` — merged-конфигурация агента (сырой `dict` или `_LazySettings`
+  proxy; последний разворачивается через `_unwrap_settings`). Из неё берутся
+  пять ожидаемых имён по ключам `channels.postgres.{table_name,
+  messages_table, meta_table}` и `logging.db.{table_name,
+  question_runs_table}`, плюс `profile` для текста отказа. Литералов имён в
+  коде проверки нет: переименование таблицы меняет конфигурацию, а не код;
+- `fetch` — адаптер с сигнатурой `(sql, *params) -> list[dict]`, обычно
+  `utils.db.fetch_with_timeout`. Предел времени реализует адаптер, потому что
+  соединение принадлежит пулу, а не этому модулю;
+- `timeout_sec` — предел, который попадает в текст отказа: решение читает
+  сообщение и видит конкретную цифру, а не «неизвестный таймаут»;
+- флаг включения и сам предел — из конфигурации (см. `## Configuration`),
+  то есть тоже через `SETTINGS`.
+
+Схема проверки в коде зафиксирована как `public`: имя таблицы приходит из
+конфигурации, имя схемы — нет.
+
+## Outputs
+
+- `None` при успехе: проверка ничего не возвращает, а не «список таблиц»,
+  потому что вызывающей стороне нужно только «можно начинать»;
+- `list[tuple[str, str]]` из `expected_table_names()` — ожидаемые пары
+  `(schema, table_name)`, детерминированно в порядке `_EXPECTED_KEYS`;
+- `list[MissingTable]` из `check_tables()` — недостающие таблицы в том же
+  порядке; пустой список означает «всё на месте»;
+- `SchemaValidationError.missing` и `.profile` — на отказе оператор получает
+  и перечень, и контур;
+- запись об отказе в лог: `profile=` и список отсутствующих полных имён.
+
+## State
+
+После успешного старта компонент **не имеет состояния**: проверка
+одноразовая, idempotent.
 
 ## Dependencies
 
@@ -305,29 +299,6 @@ SHALL формировать сообщение на русском, содер�
   pydantic-валидация конфигурации.
 - `lib.core.application_context.ApplicationContext` — место вызова
   `_validate_runtime_schema` в `start()`.
-
-## Implementation
-
-- `lib/services/schema_validation.py` — `SchemaValidationService`,
-  `MissingTable`, `SchemaValidationError`.
-- `lib/core/project_settings.py` —
-  `StartupSchemaValidationSettings`, `StartupSettings` (поля
-  `gateway.startup.schema_validation.{enabled, timeout_sec}`).
-- `lib/core/application_context.py` — приватный метод
-  `_validate_runtime_schema` + вызов из `start()`.
-- Тесты: `tests/test_schema_validation.py` (20 unit),
-  `tests/test_application_context_schema_validation.py` (7 unit),
-  `tests/test_gateway_entrypoint_schema_validation.py` (1 boundary).
-
-## Verification
-
-- `python -m pytest tests/test_schema_validation.py -q` — 20
-  unit-тестов.
-- `python -m pytest tests/test_application_context_schema_validation.py -q` — 7
-  unit-тестов.
-- `python -m pytest tests/test_gateway_entrypoint_schema_validation.py -q` — 1
-  boundary-тест.
-- `openspec.cmd validate startup-schema-validation` — зелёный.
 
 ## Configuration
 
@@ -352,22 +323,6 @@ SHALL формировать сообщение на русском, содер�
    `ApplicationContext._started = False`, последующие шаги не
    выполняются. `gateway.main()` ловит `ConfigurationError` →
    `exit 2` + `stderr`.
-
-## State
-
-После успешного старта компонент **не имеет состояния**: проверка
-одноразовая, idempotent.
-
-## Invariants
-
-- Любой startup-error (отсутствие таблиц, отсутствие ключей в
-  settings, ошибка БД) идёт через `ConfigurationError` →
-  `exit 2` + `stderr`.
-- Имена 5 runtime-таблиц ВСЕГДА резолвятся из
-  `SETTINGS["channels"]["postgres"]` + `SETTINGS["logging"]["db"]`,
-  не из кода проверки.
-- `SchemaValidationError.missing: list[MissingTable]` отсортирован
-  в порядке `_EXPECTED_KEYS` (детерминированный вывод).
 
 ## Data Ownership
 
@@ -403,7 +358,52 @@ SHALL формировать сообщение на русском, содер�
 | `OperationalError` / `RuntimeError` от пула | Поднимается наверх, **не маскируется** |
 | `gateway.startup.schema_validation.enabled = false` | No-op + WARNING в логе |
 
+## Invariants
+
+- Любой startup-error (отсутствие таблиц, отсутствие ключей в
+  settings, ошибка БД) идёт через `ConfigurationError` →
+  `exit 2` + `stderr`.
+- Имена 5 runtime-таблиц ВСЕГДА резолвятся из
+  `SETTINGS["channels"]["postgres"]` + `SETTINGS["logging"]["db"]`,
+  не из кода проверки.
+- `SchemaValidationError.missing: list[MissingTable]` отсортирован
+  в порядке `_EXPECTED_KEYS` (детерминированный вывод).
+
+## Forbidden Behavior
+
+- Захардкоженные имена таблиц в коде проверки.
+- Авто-создание недостающих таблиц.
+- Маскировка ошибок БД (`OperationalError`, `InterfaceError`)
+  под «отсутствие таблиц».
+- Регистрация `SchemaValidationService` как `RuntimeReadiness`
+  компонента.
+- Параметризация SQL через f-string или `%` (только
+  `%s`-placeholder'ы с tuple-параметрами).
+
 ## Consumers
 
 - `gateway.py:main()` — startup-boundary.
 - `cli_agent.py:main()` — startup-boundary.
+## Implementation
+
+- `lib/services/schema_validation.py` — `SchemaValidationService`,
+  `MissingTable`, `SchemaValidationError`.
+- `lib/core/project_settings.py` —
+  `StartupSchemaValidationSettings`, `StartupSettings` (поля
+  `gateway.startup.schema_validation.{enabled, timeout_sec}`).
+- `lib/core/application_context.py` — приватный метод
+  `_validate_runtime_schema` + вызов из `start()`.
+- Тесты: `tests/test_schema_validation.py` (20 unit),
+  `tests/test_application_context_schema_validation.py` (7 unit),
+  `tests/test_gateway_entrypoint_schema_validation.py` (1 boundary).
+
+## Verification
+
+- `python -m pytest tests/test_schema_validation.py -q` — 20
+  unit-тестов.
+- `python -m pytest tests/test_application_context_schema_validation.py -q` — 7
+  unit-тестов.
+- `python -m pytest tests/test_gateway_entrypoint_schema_validation.py -q` — 1
+  boundary-тест.
+- `openspec.cmd validate startup-schema-validation` — зелёный.
+

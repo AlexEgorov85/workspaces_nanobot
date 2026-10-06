@@ -9,85 +9,6 @@
 `agent` — точка сборки сервисов агента
 Реализация: `lib/core/application_context.py`
 
-## Responsibility
-
-Runtime Context отвечает за:
-- предоставление единого корня сборки runtime-сервисов через ApplicationContext
-- изоляцию состояния сессии от общей инфраструктуры
-- определение детерминированного жизненного цикла context
-
-## Boundary
-
-### Owns
-- сборкой общих runtime-сервисов
-- координацией жизненного цикла контекста
-- предоставлением доступа к инфраструктурным сервисам
-
-### Does Not Own
-- состоянием пользовательской сессии
-- сообщениями разговора
-- состоянием на один вопрос
-- бизнес/domain данными
-
-### May Depend On
-- инфраструктурных сервисов (кеш, логирование, БД)
-- фабрик компонентов
-
-### Must Not Depend On
-- конкретной реализации Skills
-- session-specific данных
-- конфигурации профиля (profile resolution происходит на уровне config)
-
-## Public Contract
-
-ApplicationContext предоставляет:
-- единый корень сборки runtime-сервисов
-- доступ к ConfigService
-- детерминированный lifecycle (start/stop)
-- изоляцию от session state
-
-## Inputs
-
-`ApplicationContext.create(script_dir, workspace_dir, *, role, storage_override=None, session_override=None, **kwargs)`:
-
-- `script_dir` — корень проекта, где лежит `config.json`;
-- `workspace_dir` — корень workspace;
-- `role` — keyword-only, `Literal["gateway", "cli"]`; им определяется composition
-  инфраструктуры (`PostgresChannel` и `CronService` только в gateway);
-- `storage_override`, `session_override` — режим хранилища и имя сессии из
-  CLI;
-- `**kwargs` — граница совместимости: `enable_db_logging`, `enable_audit`,
-  `enable_cron`, `print_llm_calls` принимаются с `DeprecationWarning` и
-  применяются как override над `SETTINGS["gateway"].*`. Ключ вне этого набора,
-  включая `profile=`, — `TypeError`.
-
-Профиль входом не является: `create()` не выбирает и не принимает его, а
-читает уже разрешённый `config.SETTINGS["profile"]`. Обращение к
-неинициализированному proxy материализует `ConfigurationError` — это
-требование `_initialize_settings`, а не проверка самого контекста.
-
-## Outputs
-
-`create()` возвращает собранный `ApplicationContext` — dataclass без
-`__slots__`, поэтому потребитель может добавить атрибут экземпляра (так
-остались рабочими вызовы, присваивавшие снятые поля).
-
-Наружу отдаются ссылки на собранную инфраструктуру:
-
-- конфигурация: `config_service`, `config`, `settings`, `project_settings`,
-  `profile`;
-- шина и агент: `bus`, `agent`, `tool_audit_hook`, `hooks`, `hook_factories`;
-- инструменты: `tool_registry`, `mcp_provider`;
-- сессии и хранилище: `session_manager`, `storage_mode`, `session_mirror`,
-  `usage_store`;
-- журнал и наблюдение: `db_logging_service`, `runtime_health`,
-  `runtime_events_subscriber`, `turn_identities`;
-- сжатие контекста: `compaction_service`, `compaction_event_subscriber`;
-- клиент к платформе: `enterprise_mcp`.
-
-Отдельные выходы `start()` / `stop()` — приведение фоновых сервисов в
-рабочее состояние и обратно, а не значения.
-
 ## Requirements
 
 ### Requirement: Единый корень общей инфраструктуры
@@ -250,15 +171,95 @@ patches: `start()` их не применяет, ни прямо, ни косв�
 - **WHEN** агент вызывает `compact_context` tool или пользователь подаёт `/compact` slash-команду
 - **THEN** система MUST ДОЛЖЕН вызвать `loop.consolidator.compact_idle_session(ctx.key, runtime=runtime, events=delivery.events)` (upstream API через `cmd_compact`); наш `_notify` срабатывает через фильтр `postgres_channel`, MUST NOT НЕ ДОЛЖЕН через `AgentHook.after_run` (хуки не видят `OutboundMessage.event`)
 
-## Forbidden Behavior
+## Responsibility
 
-Система НЕ ДОЛЖНА:
+Runtime Context отвечает за:
+- предоставление единого корня сборки runtime-сервисов через ApplicationContext
+- изоляцию состояния сессии от общей инфраструктуры
+- определение детерминированного жизненного цикла context
 
-- хранить per-session данные в `ApplicationContext` (его время жизни превышает время жизни любой отдельной сессии)
-- хранить runtime-wide конфигурацию в объекте сессии или сообщения
-- создавать параллельный application context (нет `ApplicationContext2`, нет shadow registry, нет override механизма)
-- добавлять fallback путь для application-context (нет `try_new` затем `legacy_new`)
-- добавлять profile-specific ветки в `ApplicationContext` (согласно `openspec/specs/configuration/profiles/spec.md`, профиль разрешается на этапе конфигурации, бизнес-логика НЕ ДОЛЖНА ветвиться по профилю)
+## Boundary
+
+### Owns
+- сборкой общих runtime-сервисов
+- координацией жизненного цикла контекста
+- предоставлением доступа к инфраструктурным сервисам
+
+### Does Not Own
+- состоянием пользовательской сессии
+- сообщениями разговора
+- состоянием на один вопрос
+- бизнес/domain данными
+
+### May Depend On
+- инфраструктурных сервисов (кеш, логирование, БД)
+- фабрик компонентов
+
+### Must Not Depend On
+- конкретной реализации Skills
+- session-specific данных
+- конфигурации профиля (profile resolution происходит на уровне config)
+
+## Public Contract
+
+ApplicationContext предоставляет:
+- единый корень сборки runtime-сервисов
+- доступ к ConfigService
+- детерминированный lifecycle (start/stop)
+- изоляцию от session state
+
+## Inputs
+
+`ApplicationContext.create(script_dir, workspace_dir, *, role, storage_override=None, session_override=None, **kwargs)`:
+
+- `script_dir` — корень проекта, где лежит `config.json`;
+- `workspace_dir` — корень workspace;
+- `role` — keyword-only, `Literal["gateway", "cli"]`; им определяется composition
+  инфраструктуры (`PostgresChannel` и `CronService` только в gateway);
+- `storage_override`, `session_override` — режим хранилища и имя сессии из
+  CLI;
+- `**kwargs` — граница совместимости: `enable_db_logging`, `enable_audit`,
+  `enable_cron`, `print_llm_calls` принимаются с `DeprecationWarning` и
+  применяются как override над `SETTINGS["gateway"].*`. Ключ вне этого набора,
+  включая `profile=`, — `TypeError`.
+
+Профиль входом не является: `create()` не выбирает и не принимает его, а
+читает уже разрешённый `config.SETTINGS["profile"]`. Обращение к
+неинициализированному proxy материализует `ConfigurationError` — это
+требование `_initialize_settings`, а не проверка самого контекста.
+
+## Outputs
+
+`create()` возвращает собранный `ApplicationContext` — dataclass без
+`__slots__`, поэтому потребитель может добавить атрибут экземпляра (так
+остались рабочими вызовы, присваивавшие снятые поля).
+
+Наружу отдаются ссылки на собранную инфраструктуру:
+
+- конфигурация: `config_service`, `config`, `settings`, `project_settings`,
+  `profile`;
+- шина и агент: `bus`, `agent`, `tool_audit_hook`, `hooks`, `hook_factories`;
+- инструменты: `tool_registry`, `mcp_provider`;
+- сессии и хранилище: `session_manager`, `storage_mode`, `session_mirror`,
+  `usage_store`;
+- журнал и наблюдение: `db_logging_service`, `runtime_health`,
+  `runtime_events_subscriber`, `turn_identities`;
+- сжатие контекста: `compaction_service`, `compaction_event_subscriber`;
+- клиент к платформе: `enterprise_mcp`.
+
+Отдельные выходы `start()` / `stop()` — приведение фоновых сервисов в
+рабочее состояние и обратно, а не значения.
+
+## State
+
+ApplicationContext хранит ссылки на:
+- ConfigService
+- другие infrastructure сервисы
+
+НЕ хранит:
+- session state
+- conversation messages
+- per-question state
 
 ## Dependencies
 
@@ -276,24 +277,6 @@ patches: `start()` их не применяет, ни прямо, ни косв�
 2. **Инициализация**: `ctx.start()` инициализирует все сервисы в детерминированном порядке
 3. **Использование**: сервисы доступны через accessor'ы контекста
 4. **Остановка**: `ctx.stop()` освобождает ресурсы в обратном порядке
-
-## State
-
-ApplicationContext хранит ссылки на:
-- ConfigService
-- другие infrastructure сервисы
-
-НЕ хранит:
-- session state
-- conversation messages
-- per-question state
-
-## Invariants
-
-- ApplicationContext существует в единственном экземпляре
-- Session state никогда не хранится в ApplicationContext
-- Lifecycle ordering детерминирован независимо от caller
-- Profile не влияет на бизнес-логику внутри ApplicationContext
 
 ## Data Ownership
 
@@ -323,6 +306,23 @@ ApplicationContext хранит ссылки на:
 
 - Ошибка инициализации сервиса → `ctx.start()` выбрасывает исключение, система не запускается
 - Ошибка остановки сервиса → `ctx.stop()` логирует ошибку, продолжает остановку остальных сервисов
+
+## Invariants
+
+- ApplicationContext существует в единственном экземпляре
+- Session state никогда не хранится в ApplicationContext
+- Lifecycle ordering детерминирован независимо от caller
+- Profile не влияет на бизнес-логику внутри ApplicationContext
+
+## Forbidden Behavior
+
+Система НЕ ДОЛЖНА:
+
+- хранить per-session данные в `ApplicationContext` (его время жизни превышает время жизни любой отдельной сессии)
+- хранить runtime-wide конфигурацию в объекте сессии или сообщения
+- создавать параллельный application context (нет `ApplicationContext2`, нет shadow registry, нет override механизма)
+- добавлять fallback путь для application-context (нет `try_new` затем `legacy_new`)
+- добавлять profile-specific ветки в `ApplicationContext` (согласно `openspec/specs/configuration/profiles/spec.md`, профиль разрешается на этапе конфигурации, бизнес-логика НЕ ДОЛЖНА ветвиться по профилю)
 
 ## Consumers
 
