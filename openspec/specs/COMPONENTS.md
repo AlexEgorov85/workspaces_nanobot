@@ -18,12 +18,15 @@
 | Категория | Всего | Complete | Partial | Draft | Missing |
 |-----------|-------|----------|---------|-------|---------|
 | architecture | 2 | 0 | 2 | 0 | 0 |
-| runtime | 3 | 0 | 3 | 0 | 0 |
+| runtime | 11 | 0 | 11 | 0 | 0 |
 | configuration | 1 | 0 | 1 | 0 | 0 |
 | data | 4 | 1 | 3 | 0 | 0 |
+| infrastructure | 1 | 0 | 1 | 0 | 0 |
+| skills | 1 | 0 | 1 | 0 | 0 |
+| testing | 1 | 0 | 1 | 0 | 0 |
 | documentation | 1 | 0 | 0 | 1 | 0 |
 | validation | 1 | 0 | 0 | 1 | 0 |
-| **Итого** | **12** | **1** | **9** | **2** | **0** |
+| **Итого** | **23** | **1** | **20** | **2** | **0** |
 
 ## Компоненты
 
@@ -39,6 +42,14 @@
 | Компонент | Реализация | Спецификация | Статус |
 |-----------|------------|--------------|--------|
 | ApplicationContext | `lib/core/application_context.py:ApplicationContext` | [`runtime/context`](runtime/context/spec.md) | partial |
+| AgentHooks | `lib/core/agent_factory.py:AgentFactory` | [`runtime/agent-hooks`](runtime/agent-hooks/spec.md) | partial |
+| AntiLoopGuard | `lib/hooks/repeat_guard_hook.py:RepeatGuardHook` | [`runtime/anti-loop`](runtime/anti-loop/spec.md) | partial |
+| DbQueueClasses | `mcp-platform/libs/enterprise_data/db.py:DBManager` | [`runtime/db-queue-classes`](runtime/db-queue-classes/spec.md) | partial |
+| RuntimeEntrypoints | `gateway.py:main` | [`runtime/entrypoints`](runtime/entrypoints/spec.md) | partial |
+| ErrorFallback | `lib/services/turn_delivery_factory.py:FallbackTurnDeliveryFactory` | [`runtime/error-fallback`](runtime/error-fallback/spec.md) | partial |
+| OperatorConsole | `lib/services/operator_console.py` | [`runtime/operator-console`](runtime/operator-console/spec.md) | partial |
+| AgentSettingsBlock | `lib/services/agent_settings.py:AgentSettingsBlock` | [`runtime/platform-settings`](runtime/platform-settings/spec.md) | partial |
+| RuntimeEventsSubscriber | `lib/services/runtime_events_subscriber.py:RuntimeEventsSubscriber` | [`runtime/runtime-events-subscription`](runtime/runtime-events-subscription/spec.md) | partial |
 | RuntimePatcher | `lib/services/runtime_patcher.py:RuntimePatcher` | [`runtime/runtime-patcher`](runtime/runtime-patcher/spec.md) | partial |
 | StartupSchemaValidation | `lib/services/schema_validation.py:SchemaValidationService` | [`runtime/startup-schema-validation`](runtime/startup-schema-validation/spec.md) | partial |
 
@@ -62,6 +73,24 @@
 | VectorIndexBuilder | `mcp-platform/libs/vectors/builder.py:VectorBuilder` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
 | VectorIndexOwner | `mcp-platform/libs/vectors/owner.py:VectorIndexOwner` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
 | OperationSchema | `mcp-platform/libs/enterprise_common/registry.py:build_input_schema` | [`data/operation-schema`](data/operation-schema/spec.md) | complete |
+
+### Infrastructure
+
+| Компонент | Реализация | Спецификация | Статус |
+|-----------|------------|--------------|--------|
+| TestProfileTables | `tools/apply_test_profile_tables.py:main` | [`infrastructure/test-profile-tables`](infrastructure/test-profile-tables/spec.md) | partial |
+
+### Skills
+
+| Компонент | Реализация | Спецификация | Статус |
+|-----------|------------|--------------|--------|
+| QueryOperation | `mcp-platform/servers/enterprise/tools/query_operation.py:create_tool` | [`skills/legal-summarizer-query`](skills/legal-summarizer-query/spec.md) | partial |
+
+### Testing
+
+| Компонент | Реализация | Спецификация | Статус |
+|-----------|------------|--------------|--------|
+| UnifiedTestContract | `pyproject.toml::[tool.pytest.ini_options]` | [`testing/unified-test-contract`](testing/unified-test-contract/spec.md) | partial |
 
 ### Documentation
 

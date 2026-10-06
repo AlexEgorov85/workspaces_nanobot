@@ -223,12 +223,18 @@ class TestToolAuditJournal:
         assert service.get_stats()["dropped"] == 0, service.get_stats()
 
     def test_coverage_table_names_both_writers(self) -> None:
-        """Строка 8 таблицы покрытия больше не утверждает «агент не пишет»."""
-        spec = (
-            Path(__file__).resolve().parent.parent
-            / "openspec/specs/logging-db/spec.md"
+        """Строка 8 таблицы покрытия больше не утверждает «агент не пишет».
+
+        Таблица покрытия переехала из спеки компонента в
+        `docs/journal-observability.md`: канон требует один H1 на файл, а
+        документ наблюдаемости описывает не `logging-db`, а подсистему журнала
+        целиком. Страж проверяет содержимое таблицы, а не её дом — поэтому
+        адрес здесь и только здесь.
+        """
+        doc = (
+            Path(__file__).resolve().parent.parent / "docs/journal-observability.md"
         ).read_text(encoding="utf-8")
-        row = [line for line in spec.splitlines() if line.startswith("| 8 | Ошибка tool")]
+        row = [line for line in doc.splitlines() if line.startswith("| 8 | Ошибка tool")]
         assert row, "строка 8 таблицы покрытия исчезла — вернуться нечему"
         assert "агент не пишет" not in row[0], (
             "строка 8 утверждает, что отказ пишет только платформа: после "
