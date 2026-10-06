@@ -620,16 +620,18 @@ chunk_overlap, metric).
 
 | Файл | Строк | Зачем существует |
 |---|---:|---|
-| `tools/release_v251.py` / `release_v252.py` | 120 / 169 | Одноразовые скрипты релизов уже вышедших тегов |
-| `tools/test_audit.py` | 735 | AST-аудит тестов, выгружает json. Дублирует `tests/` + CI |
-| `tools/legacy_audit.py` | 484 | Сторож от регрессий легаси. Умирает вместе с рефакторингом |
-| `tools/demo_internal_fallback.py` | 142 | Демо внутреннего fallback AgentLoop |
-| `tools/smoke_post_cleanup.py` | 176 | Смоук под один change |
-| `tools/validate_component_specs.py` | 274 | Валидация структуры `openspec/` — процессный артефакт |
-| `tools/architecture_guard.py` | 78 | Сторож от трёх преждевременных абстракций |
-| `workspace/hooks/debug_stream_diag.py` | 70 | Сам помечен как временный диагностический |
-| `workspace/tools/example.py` | 131 | Шаблон, **но зарегистрирован как живой tool `ExampleTool`** |
-| `scripts/backfill_media_aw.py` | — | Одноразовый бэкфилл media-JSONB |
+| `tools/legacy_audit.py` | 493 | Сторож от регрессий легаси. Умирает вместе с рефакторингом |
+| `tools/validate_component_specs.py` | 984 | Валидация структуры `openspec/` — процессный артефакт |
+| `tools/architecture_guard.py` | 79 | Сторож от трёх преждевременных абстракций |
+| `workspace/hooks/debug_stream_diag.py` | 72 | Сам помечен как временный диагностический |
+| `scripts/backfill_media_aw.py` | 148 | Одноразовый бэкфилл media-JSONB |
+
+Пять строк прежнего списка закрыты удалением, а не правкой: `tools/release_v251.py`,
+`tools/release_v252.py`, `tools/demo_internal_fallback.py` и
+`tools/smoke_post_cleanup.py` — коммит `65f8be0`; `tools/test_audit.py` и
+`workspace/tools/example.py` — `dcce296`. Строка про `example.py` предупреждала, что
+шаблон зарегистрирован как живой tool `ExampleTool`, — удаление состоялось несмотря на
+это, и регистрацию стоит проверить отдельно.
 
 ### 4.5 Остаётся в агенте
 
