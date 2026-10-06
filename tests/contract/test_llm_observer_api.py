@@ -1,7 +1,7 @@
 """Contract tests on observer-pipeline API (nanobot 0.3.5).
 
 Фиксирует публичный API, используемый в storage-hybridization
-(см. ``openspec/changes/storage-hybridization/specs/storage/usage-store``
+(см. ``openspec/changes/storage-hybridization/specs/observability/usage-store``
 и design D3):
 
 - ``LLMProvider.set_llm_call_observer(observer: LLMCallObserver | None)``;

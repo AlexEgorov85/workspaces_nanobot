@@ -154,7 +154,7 @@
   невыполнимое в текущем виде, но сам расчёт в `libs/vectors/preload.py` остаётся и
   не должен быть удалён вместе со спецификацией: возвращать его публикацию —
   отдельное решение, с владельцем и адресатом. Отдельно: то же событие требует
-  **второй канон** — `openspec/specs/logging-db/spec.md:689-704` (сценарий
+  **второй канон** — `openspec/specs/observability/logging-db/spec.md:689-704` (сценарий
   «preload health-summary через DbLoggingService») предписывает `LogEvent` с
   `event_type="vector_index_preload_health"` и payload `declared` / `loaded` /
   `missing` / `orphan` / `stale`, ссылаясь на реализацию

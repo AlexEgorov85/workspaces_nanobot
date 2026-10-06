@@ -17,8 +17,8 @@
 Если тесты падают — это сигнал, что новый код нарушил инвариант.
 См. также:
 
-- ``openspec/specs/storage/session-hybridization/spec.md``;
-- ``openspec/specs/storage/usage-store/spec.md``;
+- ``openspec/specs/sessions/session-hybridization/spec.md``;
+- ``openspec/specs/observability/usage-store/spec.md``;
 - ``docs/architecture/storage-layers.md``.
 """
 

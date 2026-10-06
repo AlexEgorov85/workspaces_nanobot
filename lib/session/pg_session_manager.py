@@ -1,7 +1,7 @@
 """Хранилище сессий агента: upstream ``SessionManager`` + наш ``SessionStore``.
 
 После ``storage-hybridization`` (см. спеку
-``openspec/specs/storage/session-hybridization/spec.md``) сессии НЕ пишутся
+``openspec/specs/sessions/session-hybridization/spec.md``) сессии НЕ пишутся
 в ``agent_session_meta`` / ``agent_session_messages`` напрямую. Единственный
 writer — upstream ``SessionManager`` (JSONL), а PostgreSQL остаётся
 cold-storage mirror'ом в отдельной подсистеме шлюза

@@ -3,7 +3,7 @@
 Этот документ описывает модель хранения сессий после
 `storage-hybridization` (см. OpenSpec change
 `storage-hybridization`, спека
-`openspec/specs/storage/session-hybridization/spec.md`).
+`openspec/specs/sessions/session-hybridization/spec.md`).
 
 ## Архитектурная диаграмма
 

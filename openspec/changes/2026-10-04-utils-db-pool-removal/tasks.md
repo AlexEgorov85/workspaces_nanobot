@@ -94,7 +94,7 @@ python tools/validate_component_specs.py --strict
 - [x] 3.3 Опасность снята сама: сосед перезаписал мой `tasks.md` в своём
       каталоге в 23:45, и его change теперь целостен
       (`proposal.md`, `tasks.md`, `specs/data/operation-schema/spec.md`,
-      `specs/logging-db/spec.md`). Удалять там больше нечего, и я ничего в
+      `specs/observability/logging-db/spec.md`). Удалять там больше нечего, и я ничего в
       его каталоге не трогал.
 
 ## 4. Итоговые прогоны

@@ -1,7 +1,7 @@
 """Contract tests on upstream `SessionManager` API (nanobot 0.3.5).
 
 Фиксирует публичный API, используемый в storage-hybridization
-(см. ``openspec/changes/storage-hybridization/specs/storage/session-hybridization``):
+(см. ``openspec/changes/storage-hybridization/specs/sessions/session-hybridization``):
 имена методов, сигнатуры, поведение default-стора (``JsonlSessionStore``).
 
 Тесты MUST падать при несовместимом изменении upstream API —

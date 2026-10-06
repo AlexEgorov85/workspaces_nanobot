@@ -3,7 +3,7 @@
 Этот документ описывает модель LLM-usage tracking после
 `storage-hybridization` (см. OpenSpec change
 `storage-hybridization`, спека
-`openspec/specs/storage/usage-store/spec.md`).
+`openspec/specs/observability/usage-store/spec.md`).
 
 ## Архитектурная диаграмма
 

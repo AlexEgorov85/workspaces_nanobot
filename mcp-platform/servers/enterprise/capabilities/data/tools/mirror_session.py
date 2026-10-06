@@ -10,7 +10,7 @@
 
 Почему вызов несёт столько полей и почему решение «писать или нет» принимает
 платформа, а не вызывающий, — в ``DataService.mirror_session`` и в
-``openspec/specs/storage/session-hybridization``.
+``openspec/specs/sessions/session-hybridization``.
 """
 
 from __future__ import annotations

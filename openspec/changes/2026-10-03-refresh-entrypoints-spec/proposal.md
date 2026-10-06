@@ -185,7 +185,7 @@
 - **Одноразовые инструменты:** `_count_stale.py` и `_check_refs.py` в корне
   репозитория — созданы для машинной проверки этой правки и удалены по
   завершении работы.
-- **Чужая территория не затронута:** `openspec/specs/logging-db/**`,
+- **Чужая территория не затронута:** `openspec/specs/observability/logging-db/**`,
   `openspec/changes/2026-10-02-journal-observability/**`,
   `openspec/changes/2026-10-02-startup-dependency-contract/**`, `lib/`,
   `mcp-platform/`, `tests/` — не изменялись.

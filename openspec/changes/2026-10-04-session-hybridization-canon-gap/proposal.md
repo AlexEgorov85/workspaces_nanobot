@@ -5,7 +5,7 @@
 Change `2026-10-03-session-mirror-mcp` сегодня архивирован с `--skip-specs`: у
 него не было дельты, поэтому канон он не тронул. А код он тронул — и перевёл
 зеркало сессий на платформу. Итог: в
-`openspec/specs/storage/session-hybridization/spec.md` нет ни одного упоминания
+`openspec/specs/sessions/session-hybridization/spec.md` нет ни одного упоминания
 трёх вещей, которые уже работают.
 
 Проверено поиском по канону (`session_mirror_state` — 0 совпадений,
@@ -41,7 +41,7 @@ Change `2026-10-03-session-mirror-mcp` сегодня архивирован с 
   нечего, добавлять новое. `ADDED`.
 - **Требование 2 (`delete_after_missed_cycles`)** — сам порог в каноне **есть**,
   сценарий «Удалённая сессия удаляется не с первого пропуска»
-  (`openspec/specs/storage/session-hybridization/spec.md:245-254`) описывает и
+  (`openspec/specs/sessions/session-hybridization/spec.md:245-254`) описывает и
   порог, и страж пустого списка. Поэтому `MODIFIED` здесь означало бы
   переписать верное требование ради новой формулировки. Новым является не
   поведение, а **контракт операции**: кто считает пропуски и как порог
@@ -125,7 +125,7 @@ Change `2026-10-03-session-mirror-mcp` сегодня архивирован с 
 
 - **Код:** не меняется. Изменение касается только спецификации.
 - **Спецификация:** `storage/session-hybridization` в
-  `openspec/changes/2026-10-04-session-hybridization-canon-gap/specs/storage/session-hybridization/spec.md`.
+  `openspec/changes/2026-10-04-session-hybridization-canon-gap/specs/sessions/session-hybridization/spec.md`.
   Новая capability не заявляется, поэтому `openspec/specs/OWNERSHIP.md` не
   меняется.
 - **Проверка:** `python tools/validate_component_specs.py --strict` —

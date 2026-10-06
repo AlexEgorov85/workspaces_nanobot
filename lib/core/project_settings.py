@@ -147,7 +147,7 @@ class UsageStoreSettings(_StrictOptional):
     ``<get_runtime_subdir("usage")>/usage.db``). ``enabled=False``
     отключает запись LLM-usage (graceful degradation).
 
-    См. спеку ``openspec/specs/storage/usage-store/spec.md``.
+    См. спеку ``openspec/specs/observability/usage-store/spec.md``.
     """
 
     sqlite_path: str | None = None
@@ -162,7 +162,7 @@ class SessionColdSyncSettings(_StrictOptional):
     переименование ключа. Реализация — ``lib/gateway/mirror/``.
 
     Cold-storage mirror upstream JSONL → PG. Все ключи опциональны.
-    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
+    См. спеку ``openspec/specs/sessions/session-hybridization/spec.md``
     и design D23 (stale-detection + reverse-lag detection).
     """
 

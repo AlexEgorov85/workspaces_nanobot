@@ -46,7 +46,7 @@ loop. Но обращение к данным теперь идёт через �
 Поэтому сервис стал задачей loop'а, а единственное действительно блокирующее —
 чтение файлов сессий — ушло в ``asyncio.to_thread``.
 
-Спека: ``openspec/specs/storage/session-hybridization/spec.md``.
+Спека: ``openspec/specs/sessions/session-hybridization/spec.md``.
 """
 
 from __future__ import annotations

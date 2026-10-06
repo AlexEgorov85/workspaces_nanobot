@@ -141,7 +141,7 @@ capability `vectors`, а не блоку агента.
 
 **Второй канон, требующий это же событие.** Требование снимается не потому, что
 событие не нужно, а потому что его требует ещё один нормативный документ:
-`openspec/specs/logging-db/spec.md:689-704` (сценарий «preload health-summary через
+`openspec/specs/observability/logging-db/spec.md:689-704` (сценарий «preload health-summary через
 DbLoggingService») предписывает записать ровно один `LogEvent` с
 `event_type="vector_index_preload_health"` и payload `declared` / `loaded` /
 `missing` / `orphan` / `stale` — со ссылкой на «snapshot текущей реализации

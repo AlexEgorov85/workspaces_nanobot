@@ -73,7 +73,7 @@
   `__all__`), производственного вызова нет — это подтверждено обходом дерева.
   Возврат публикации остаётся отдельным решением с владельцем и адресатом,
   и тянуть его сюда нельзя: оно тянет за собой второй канон
-  (`openspec/specs/logging-db/spec.md`, сценарий `vector_index_preload_health`).
+  (`openspec/specs/observability/logging-db/spec.md`, сценарий `vector_index_preload_health`).
 - **Не трогает `PreloadService` и `preload_indexes`.** Файлов в дереве нет.
 - **Не меняет владельца и источник объявления.** Состав индексов по-прежнему
   объявляет `platform.json → vectors.indexes`; это не предмет этого change'а.

@@ -168,7 +168,7 @@ Push-Location mcp-platform; python -m pytest -q 2>&1 | Select-Object -Last 5; Po
   | Спека | Что сделано |
   |---|---|
   | `openspec/specs/skills/legal-summarizer-query/spec.md` | 193 строки, 6 требований → 196 строк, 4 требования. Снят IPC-контракт subprocess'а и wrapper-уровневые коды (`cli_failed`, `cli_not_found`, `subprocess_error`, `empty_response`, `invalid_json`); три требования про manifest переписаны на коды конверта (`not_found` / `internal` / `upstream_unavailable`) |
-  | `openspec/specs/tools-history-search/spec.md` | 759 строк, 22 требования → 506 строк, 17 требований. Снят параметр `session_scope` и оба его режима; изоляция теперь пересечение `session_id ∧ user_id` из контекста вызова; форма ответа `{hits, next_offset, truncated}`; enum типов событий заменён на пространство имён платформы |
+  | `openspec/specs/interfaces/tools-history-search/spec.md` | 759 строк, 22 требования → 506 строк, 17 требований. Снят параметр `session_scope` и оба его режима; изоляция теперь пересечение `session_id ∧ user_id` из контекста вызова; форма ответа `{hits, next_offset, truncated}`; enum типов событий заменён на пространство имён платформы |
 
   Ни одно из 22 требований старой спеки не потеряно: `session_scope`-пара
   (2 требования) схлопнута в одно «Scope is the caller session intersected

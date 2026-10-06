@@ -18,7 +18,7 @@
       `ApplicationContext._record_sync_skipped`) — курируемый, по образцу
       `_REMOVED_AGENT_SYMBOLS` в `tests/test_docs_consistency.py`.
       **Гард начнёт проходить только после архивации change:** до неё канон
-      `openspec/specs/logging-db/spec.md` по праву ещё называет этих
+      `openspec/specs/observability/logging-db/spec.md` по праву ещё называет этих
       producer'ов, потому что дельта туда ещё не слита. Падение до архивации —
       ожидаемое состояние, а не регресс.
 - [ ] 2.2 Гард: `logging-db` не содержит `event_type` из бывшего набора

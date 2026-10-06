@@ -583,7 +583,7 @@
 
 - [x] 8.1 **Канон** — 80 упоминаний в 12 файлах `openspec/specs`. Нормативные
   требуют решения на момент архивации, а не переименования строк: например
-  `logging-db/spec.md` (37 упоминаний) описывает события по именам операций, и
+  `observability/logging-db/spec.md` (37 упоминаний) описывает события по именам операций, и
   после переезда его требования описывают несуществующие операции. Файлы:
   `OWNERSHIP.md`, `skills/legal-summarizer-query`, `logging-db`,
   `configuration/profiles`, `tools-history-search`, `storage/session-hybridization`,

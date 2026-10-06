@@ -324,7 +324,7 @@ PG→DuckDB sync-путь пишет события (`sync_service_started`,
 `(metadata->>'occurred_at')::timestamptz` не индексируется (текст→timestamptz
 это STABLE, а индекс требует IMMUTABLE), а сортировка ISO-строкой не
 сохраняет хронологию (`…33.261Z` встаёт после `…33.261000Z`). Метод и
-цифры — `openspec/specs/logging-db/spec.md`, требование «Хранение момента
+цифры — `openspec/specs/observability/logging-db/spec.md`, требование «Хранение момента
 события и идентификатора оборота выбрано замером плана запроса».
 
 - каноническое выражение порядка объявлено **ровно в одном месте** —
@@ -399,7 +399,7 @@ runtime `event_type`; загрузка `SKILL.md` в context не порожда
 вызов Skill-скриптов через `tools.exec` логируется как штатная пара
 `tool_call`/`tool_result`; `DbLoggingService.log_skill_call` НЕ
 вводится; `event_type="skill_call"` НЕ эмитится. См.
-`openspec/specs/logging-db/spec.md` requirement «Skill invocation
+`openspec/specs/observability/logging-db/spec.md` requirement «Skill invocation
 is out of scope».
 
 **Зачем единый конвейер (историческая проблема).** Раньше события

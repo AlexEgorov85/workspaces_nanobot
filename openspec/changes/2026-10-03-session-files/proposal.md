@@ -176,11 +176,11 @@ change; после архивации `enterprise-mcp-platform` раскладк
 месте. Правку в его дельту не вносим — архивный change не редактируется.
 
 **Применённые спеки.** Отключение `exec` задевает нормативный текст
-`openspec/specs/logging-db/spec.md`: требование «Skill invocation is out of
+`openspec/specs/observability/logging-db/spec.md`: требование «Skill invocation is out of
 scope» и сценарий в нём закрепляют вызов Skill-скрипта именно через
 `tools.exec` (`:482-490`, `:515-528`), а требование «Один факт — одна строка»
 ссылается на него же (`:1943-1946`). Поэтому change несёт дельту
-`specs/logging-db/spec.md` с `## MODIFIED Requirements` — формулировка
+`specs/observability/logging-db/spec.md` с `## MODIFIED Requirements` — формулировка
 обобщается до «вызов функциональности Skill инструментом агента», без привязки
 к отключаемому инструменту.
 

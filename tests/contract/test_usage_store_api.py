@@ -1,7 +1,7 @@
 """Contract tests on upstream `LLMUsageStore` API (nanobot 0.3.5).
 
 Фиксирует публичный API, используемый в storage-hybridization
-(см. ``openspec/changes/storage-hybridization/specs/storage/usage-store``):
+(см. ``openspec/changes/storage-hybridization/specs/observability/usage-store``):
 конструктор ``(path: Path)``, методы ``record`` / ``record_many`` /
 ``recent_calls`` / ``usage_payload`` / ``count`` / ``close``,
 а также форму ``LLMCallRecord`` (frozen dataclass).

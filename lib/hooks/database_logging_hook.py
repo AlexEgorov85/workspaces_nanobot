@@ -582,7 +582,7 @@ class DatabaseLoggingHook(AgentHook):
         usage пишутся в metadata, чтобы исход читался без payload'а.
 
         Текст ответа сюда НЕ кладётся: по спецификации журнала
-        (``openspec/specs/logging-db/spec.md``, «agent.responded сохраняет
+        (``openspec/specs/observability/logging-db/spec.md``, «agent.responded сохраняет
         текст финального ответа») формирование ответа, исход оборота и
         доставка — три разных факта и три разных строки. Текст несёт
         ``agent.responded`` (ранее ``run_finished``); смешивать их

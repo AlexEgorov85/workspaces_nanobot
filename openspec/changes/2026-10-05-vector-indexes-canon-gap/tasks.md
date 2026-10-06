@@ -320,7 +320,7 @@
   которого сводка обязана быть видна. **НЕ ПРОВЕРЕНО:** решение по адресату не
   принималось.
 - [ ] 5.1a **[O]** **Второй канон, требующий то же событие — не забыть при
-  архивации.** `openspec/specs/logging-db/spec.md:689-704` (сценарий «preload
+  архивации.** `openspec/specs/observability/logging-db/spec.md:689-704` (сценарий «preload
   health-summary через DbLoggingService») требует ровно один `LogEvent` с
   `event_type="vector_index_preload_health"` и payload `declared` / `loaded` /
   `missing` / `orphan` / `stale`, записанный через

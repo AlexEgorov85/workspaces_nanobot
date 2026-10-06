@@ -1707,7 +1707,7 @@ def _make_session_mirror(ctx: ApplicationContext) -> Any | None:
     холодного хранилища незамеченными. Агент о зеркале не знает: оно не в его
     инвентаре, и к нему нет ни одного вызова из оборота.
 
-    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
+    См. спеку ``openspec/specs/sessions/session-hybridization/spec.md``
     requirement «Cold-storage mirror в PostgreSQL».
     """
     if ctx.session_manager is None:
@@ -1959,7 +1959,7 @@ def _make_usage_store(ctx: ApplicationContext) -> Any | None:
     путь, только если он задан явно, и тогда сам создаёт каталог: в отличие
     от синглтона, мы обязаны учесть ``sqlite_path`` из конфига.
 
-    См. спеку ``openspec/specs/storage/usage-store/spec.md``.
+    См. спеку ``openspec/specs/observability/usage-store/spec.md``.
     """
     try:
         usage_cfg = ctx.config_service.settings_section("gateway").get(

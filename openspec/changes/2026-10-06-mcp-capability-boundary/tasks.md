@@ -150,7 +150,7 @@
   постановки: не объединять по одной таблице)
 - [ ] 4.6 `capabilities/history/tools/search.py` — `history.search`. Перенос
   `data.history_search` без изменения поведения, по дельте
-  `specs/tools-history-search/spec.md`
+  `specs/interfaces/tools-history-search/spec.md`
 - [ ] 4.7 `servers/enterprise/tools/schema_check.py` — `platform.schema_check`.
   Кладётся **вне** capability-каталога, и это снимает сверку с каталогом
   (`loader.py:123` — свойство пути) и требование стражей о наличии capability в
@@ -230,7 +230,7 @@
   `data.history_search` → `history.search`. Перечень брать из объявлений: иначе
   правка оставит в белом списке имя, которого нет, и модель потеряет инструмент
   молча
-- [ ] 6.3 `openspec/specs/tools-history-search/spec.md`: **вручную** править
+- [ ] 6.3 `openspec/specs/interfaces/tools-history-search/spec.md`: **вручную** править
   `## Purpose` (`:12`) и `## Scope` (`:23-26`). При archive обрабатываются
   только `Purpose` и `Requirements`, а `Purpose` дельты игнорируется, если у
   канона свой, — без ручной правки канон продолжит называть
@@ -245,7 +245,7 @@
   `2026-10-05-tool-capability-namespace` — здесь он применяется к новой половине
   предмета
 - [ ] 6.4 Переименования в остальных канонах, поимённо, по совпадениям:
-  `logging-db/spec.md` (37 совпадений), `storage/session-hybridization/spec.md`
+  `observability/logging-db/spec.md` (37 совпадений), `sessions/session-hybridization/spec.md`
   (5), `runtime/entrypoints/spec.md` (3), `runtime/db-queue-classes/spec.md` (1).
   Каждое совпадение классифицировать **по месту**: нормативный текст, история,
   архив, чужая работа. Совпадение в истории не переписывается — оно помечается

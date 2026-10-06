@@ -330,8 +330,8 @@ Push-Location mcp-platform; python -m pytest -q 2>&1 | Select-Object -Last 5; Po
   выглядеть как недосмотр.
 - **7.6** Только теперь `tools.exec.enable = false` в `config.json`, отдельным
   коммитом.
-- **7.7** Применить дельту `specs/logging-db/spec.md`: применённая спека
-  нормативно закрепляет вызов Skill через `tools.exec` (`logging-db/spec.md:482-490`,
+- **7.7** Применить дельту `specs/observability/logging-db/spec.md`: применённая спека
+  нормативно закрепляет вызов Skill через `tools.exec` (`observability/logging-db/spec.md:482-490`,
   сценарий `:515-528`, перекрёстная ссылка `:1943-1946`) — после отключения
   это описание несуществующего пути. Дельта обобщает формулировку до «вызов
   функциональности Skill инструментом агента».
