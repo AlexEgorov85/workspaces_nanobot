@@ -1,0 +1,11 @@
+schema: spec-driven
+created: 2026-10-06
+# Процедура переноса 19 коммитов Категории 1 (nanobot 0.3.0 -> 0.3.5) на ветку
+# release/v2.5.3: cherry-pick по списку SHA, venv, прогоны тестов, smoke.
+# Нормативных требований change не вводит: в TASK.md нет ни Requirements, ни
+# Capabilities, и канон openspec/specs/** он не меняет. Проверено
+# `git show --name-only` по всем 19 SHA из Шага 3 -- ни один не трогает
+# openspec/specs/**. Файлы спек в списке (9c94609, c20c3a6, 6615c51, 43414e5)
+# принадлежат другому change'у post-0.3.5-patches-cleanup и лежат в
+# openspec/changes/**, а не в каноне.
+skip_specs: true
