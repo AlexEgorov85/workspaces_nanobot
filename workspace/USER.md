@@ -35,7 +35,8 @@ Information about the user to help personalize interactions.
 
 - Prefers **stage-driven development with numbered stages (e.g., Stage 1, Stage 2)**
 - Requires **stage verification reports with file links** after each stage
-- Uses **`exec` integration with nanobot for automation**
+- Automation через операции платформы (`mcp_enterprise_*`), а не через `exec`:
+  в `config.json → tools.exec.enable = false`, оболочка у нано-агента выключена
 - Prefers Markdown for documentation and reports
 
 ## Work Context

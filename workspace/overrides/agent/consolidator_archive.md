@@ -3,8 +3,9 @@
 # через lib/services/consolidator_locale.py при старте приложения
 # (ApplicationContext.start(); monkeypatch prompt_templates._environment —
 # ChoiceLoader с приоритетом workspace/overrides/).
-# Это единственный источник инструкции для Consolidator — nanobot не
-# поддерживает явный override (см. default_dream_pattern).
+# Это единственный источник инструкции для Consolidator: nanobot не даёт
+# штатного способа подменить шаблон, поэтому подмена делается через
+# ChoiceLoader, как описано выше.
 
 Extract key facts from this conversation. For each fact, annotate its memory attributes.
 

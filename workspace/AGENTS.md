@@ -39,8 +39,12 @@ here. Work with relative paths.
 
 - офисные форматы: `python-docx`, `openpyxl`, `xlrd`, `pypdf`,
   `pdfplumber`, `python-pptx`, `Pillow`, `chardet`;
-- инфраструктура: `psycopg2-binary`, `duckdb`, `faiss-cpu`, `numpy`,
-  `pyarrow`, `redis`, `httpx`, `loguru`, `PyYAML`, `sqlglot`, `nanobot`.
+- инфраструктура: `psycopg2-binary`, `httpx`, `loguru`, `PyYAML`, `mcp`,
+  `nanobot-ai`. Тяжёлых пакетов (`duckdb`, `faiss-cpu`, `numpy`, `pyarrow`,
+  `redis`, `sqlglot`) в корневом `requirements.txt` **нет**: они живут в
+  `mcp-platform/requirements.txt` и в `.venv` платформы. Ориентируйся на то, что
+  реально лежит в `requirements.txt`, а не на этот список — список протухает
+  отдельно от него.
 
 **Установить пакет агент не может** — оболочки нет, а установка на лету всё равно была
 бы неверным шагом: если пакета нет в `requirements.txt`, это запрос на расширение
