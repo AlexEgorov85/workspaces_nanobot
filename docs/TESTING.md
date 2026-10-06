@@ -55,7 +55,7 @@ pytest не должен собирать, называются без преф�
 | `live` | `NANOBOT_LIVE_E2E=1` (плюс живой БД/провайдер) | агент: `tests/test_gateway_live_media_e2e.py`, `tests/test_startup_schema_validation_live.py`; платформа: `mcp-platform/tests/test_live_stdio_contract.py` (8 тестов) |
 | `integration` | `DATABASE_URL` | агент: `tests/integration/test_postgres_channel_lifecycle_stress.py` (6 тестов); в платформе не применяется нигде |
 | `contract` | не гейтится, выполняется всегда | 20 файлов совместимости с `nanobot-ai` |
-| `benchmark` | опт-ин через `-m benchmark` | `tests/test_history_search_benchmark.py` |
+| `benchmark` | не гейтится, выполняется всегда; `-m benchmark` только отбирает | агент: `tests/benchmarks/test_quality_benchmark.py` (4 теста); платформа: `mcp-platform/tests/legal_summarizer/test_structure_direct_threshold_benchmark.py` (10 тестов) |
 
 Маркер `live` ставят **обе** стороны — и это меняет смысл фильтра. Проверка
 решает всё: без маркера `-m "not live"` не отсекает ровно ничего (тест молча
