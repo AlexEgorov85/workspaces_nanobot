@@ -38,13 +38,11 @@ python -m libs.legal_summarizer.cli_query --operation-id <id> \
     [--field stats|articles|chunks|sections|tree|all]
 ```
 
-Ограничение: запуск по пути к файлу
-(`python mcp-platform/libs/legal_summarizer/cli_query.py`) **не
-работает** — модуль импортирует `libs.legal_summarizer.cache.manifest`
-до того, как добавляет корень платформы в `sys.path`, и падает с
-`ModuleNotFoundError` (`cli_query.py:28` против `cli_query.py:36`).
-В отличие от `cli.py`, у этого entry-point нет формы запуска из корня
-репозитория агента.
+Обе формы запуска работают: `python mcp-platform/libs/legal_summarizer/cli_query.py`
+из корня репозитория агента и `python -m libs.legal_summarizer.cli_query` из
+`mcp-platform/`. Раньше первая падала с `ModuleNotFoundError`: модуль импортировал
+`libs.legal_summarizer.cache.manifest` до того, как добавлял корень платформы в
+`sys.path`. Порядок исправлен — `sys.path` настраивается до импорта.
 
 ## JSON contract
 

@@ -64,12 +64,12 @@ package.
 агента: `python mcp-platform/libs/legal_summarizer/cli.py`.
 
 У `cli_query.py` тот же корень (`_PROJECT_ROOT`) и дополнительно
-`_SCRIPTS_ROOT` (каталог самого пакета), но `sys.path` там
-настраивается **после** `from libs.legal_summarizer.cache import
-manifest` (`cli_query.py:28` против `cli_query.py:36`). Поэтому запуск
-по пути к файлу падает с `ModuleNotFoundError`, и канонический
-запуск — только из `mcp-platform/` через `-m`:
-`python -m libs.legal_summarizer.cli_query`.
+`_SCRIPTS_ROOT` (каталог самого пакета). Блок настройки `sys.path` обязан стоять
+**до** `from libs.legal_summarizer.cache import manifest`: иначе запуск по пути к
+файлу падал с `ModuleNotFoundError` — путь ещё не был готов, а импорт уже шёл
+(`cli_query.py:28` против `cli_query.py:36`). Сейчас обе формы работают: и
+`python mcp-platform/libs/legal_summarizer/cli_query.py` из корня репозитория, и
+`python -m libs.legal_summarizer.cli_query` из `mcp-platform/`.
 
 ## Главный поток
 

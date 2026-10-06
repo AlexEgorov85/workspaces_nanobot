@@ -13,7 +13,7 @@ entry-points gateway/cli_agent).
 
 Использование::
 
-    python workspace/skills/legal_summarizer/scripts/cli_query.py \
+    cd mcp-platform && python -m libs.legal_summarizer.cli_query \
         --operation-id <op_id> [--field stats|articles|chunks|sections|tree|all]
 """
 
@@ -25,18 +25,23 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from libs.legal_summarizer.cache import manifest
-
 #: Корень платформы - в ``sys.path``, чтобы ``libs.legal_summarizer.*``
 #: резолвились при запуске файла как скрипта. Раньше здесь стоял ``parents[4]``,
 #: верный в агенте; на новом месте он указывал на каталог над репозиторием, то
 #: есть в ``sys.path`` попадал домашний каталог пользователя.
+#:
+#: Блок обязан стоять **до** импорта ``manifest``. Изначально он шёл после, и
+#: ``python mcp-platform/libs/legal_summarizer/cli_query.py`` падал с
+#: ``ModuleNotFoundError``: путь ещё не был готов, а импорт уже шёл. Рабочая
+#: форма отсюда — ``python -m libs.legal_summarizer.cli_query`` из ``mcp-platform/``.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
+
+from libs.legal_summarizer.cache import manifest  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:

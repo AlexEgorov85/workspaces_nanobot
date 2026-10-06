@@ -121,7 +121,6 @@ cd mcp-platform
 python -m libs.legal_summarizer.cli_query --operation-id <id> --field stats
 ```
 
-Первый вызов — из корня репозитория агента, второй — только из
-`mcp-platform/` через `-m`: запуск `cli_query.py` по пути к файлу
-падает с `ModuleNotFoundError` (`cli_query.py:28` против
-`cli_query.py:36`).
+Первый вызов — из корня репозитория агента, второй — из `mcp-platform/` через `-m`.
+Раньше запуск `cli_query.py` по пути к файлу падал с `ModuleNotFoundError`, потому что
+`sys.path` настраивался после импорта; порядок исправлен, и теперь работают обе формы.
