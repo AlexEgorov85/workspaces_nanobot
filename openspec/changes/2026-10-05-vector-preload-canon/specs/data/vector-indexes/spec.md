@@ -82,3 +82,13 @@ NOT подменять собой отказ прогрева.
 - **AND** для индекса 20 000 векторов размерности 1024 ориентир SHALL
   оставаться прежним — не более 5 секунд на сборку: величина не изменилась,
   изменился момент её уплаты
+
+#### Scenario: Тёплый старт
+
+- **WHEN** процесс gateway запускается
+- **THEN** для каждого `index_name`, объявленного в `gateway.vector.index.indexes.*` и не помеченного `enabled=false`, FAISS-индекс SHALL присутствовать в `self._index_cache` к моменту, когда runtime-health сигнализирует `READY`.
+
+#### Scenario: Запрос без прогрева — ошибка
+
+- **WHEN** `CacheProvider.search_vector` вызван с `index_name`, которого нет в `self._index_cache` (cold miss)
+- **THEN** система SHALL NOT собирать FAISS на лету и SHALL вернуть ошибку `_search_error` с указанием, что startup-flow не прогрел индекс — это нарушение контракта startup'а, не пользовательский retry.

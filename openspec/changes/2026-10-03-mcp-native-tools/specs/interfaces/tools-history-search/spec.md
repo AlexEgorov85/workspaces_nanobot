@@ -200,6 +200,37 @@ intersected with the caller user»: источник тот же самый —
 - **WHEN** операция выполняет SQL с двумя и более событиями с одинаковым `timestamp`
 - **THEN** порядок SHALL быть детерминирован по `id DESC`
 
+#### Scenario: Есть следующая страница
+
+- **WHEN** в выборке больше `limit` строк
+- **THEN** `hits` SHALL содержать ровно `limit` элементов
+- **AND** `next_offset` SHALL равняться `offset + limit`
+- **AND** `truncated` SHALL быть `false`, пока потолок не достигнут
+
+#### Scenario: Следующей страницы нет
+
+- **WHEN** в выборке меньше `limit + 1` строк
+- **THEN** `next_offset` SHALL быть `null`
+
+#### Scenario: Выборка упёрлась в потолок
+
+- **WHEN** число возвращённых строк достигло `max_rows`
+- **THEN** `truncated` SHALL быть `true`
+
+#### Scenario: Детерминированный порядок страниц
+
+- **WHEN** в одном батче записано 5 событий с одинаковым `timestamp`; `limit=2`;
+  вызов с `offset=0` возвращает события A и B
+- **THEN** вызов с `offset=2` SHALL вернуть события C и D, а не «D и B снова»
+  — **для неизменного набора подходящих строк**
+
+#### Snapshot-consistency
+
+Система SHALL NOT гарантировать snapshot-consistency между независимыми
+вызовами при появлении новых записей между запросами: `offset`-пагинация может
+сдвинуться, и страница, начатая ранее, может пересечься с только что вставленными
+событиями. Строгая консистентность — отдельный future change (cursor-пагинация).
+
 ### Requirement: response shape and no user_id leak
 
 Требование существует и в прежней редакции. Форма ответа меняется целиком;
@@ -232,6 +263,13 @@ intersected with the caller user»: источник тот же самый —
 - **THEN** ни на одном уровне (корень, элементы `hits`, `payload`) SHALL NOT
   быть поля `user_id`
 - **AND** `session_scope` SHALL NOT быть полем ответа
+
+#### Scenario: Пустой результат — честный success
+
+- **WHEN** совпадений нет
+- **THEN** операция SHALL вернуть `{"hits": [], "next_offset": null,
+  "truncated": false}`
+- **AND** отказа SHALL NOT быть
 
 ### Requirement: index for all-scope access
 

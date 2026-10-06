@@ -76,7 +76,7 @@ event_type для «активации Skill». Skill в
 - **И** `skill_call` (или любой другой
   skill-typed event) SHALL NOT быть эмитирован
 
-#### Сценарий: Загрузка SKILL.md в context не порождает event
+#### Scenario: Загрузка SKILL.md в context не порождает event
 
 - **КОГДА** `SkillsLoader.load_skills_for_context(...)`
   или `build_skills_summary(...)` выполняется

@@ -71,6 +71,27 @@
   счётчику `consecutive_failures`
   (`::TestEventsOnlyOnChange::test_degradation_publishes_once_not_per_probe`)
 
+#### Scenario: Проба идёт по протоколу и не пишет событие сама
+
+- **WHEN** наблюдатель опрашивает платформу (`McpHealthMonitor.check_once`)
+- **THEN** разговор MUST ограничиваться подъёмом сессии и `session.send_ping()`, а
+  бизнес-операция (`client.call(...)`) MUST NOT вызываться: тело `_probe_once()` —
+  это ровно две строки, `_ensure_session()` и `send_ping()`
+  (`lib/services/enterprise_mcp_client.py:905-913`)
+- **AND** вердикт MUST выводиться из ответа протокола, а НЕ из `is_connected`:
+  объект сессии переживает смерть процесса и остаётся не-`None` до первого
+  неудачного вызова, поэтому проба, доверяющая ему, объявляла бы «платформа жива»
+  у мёртвого процесса
+  (`lib/services/enterprise_mcp_client.py:854-858`;
+  `tests/test_mcp_health_wiring.py::TestProbeIsHonest::test_client_probe_pings_the_protocol`
+  требует `send_ping` в `_probe_once` и запрещает `is_connected`)
+- **AND** успешная проба при неизменном состоянии MUST обновить снимок и НЕ
+  публиковать событие: `_emit` вызывается только из двух веток смены состояния —
+  деградации и восстановления (`lib/gateway/mcp_health.py:262-271`, `:290-298`),
+  а обычная ветка прошедшей пробы молчит (`:301-308`);
+  первая успешная проба — это молчание как норма, а не выход из отказа
+  (`tests/test_mcp_health_monitor.py::TestEventsOnlyOnChange::test_first_success_is_not_a_recovery`)
+
 ### Requirement: Обнаружение ограничено интервалом, переподключение — отдельным
 
 Интервал опроса и пауза между попытками **поднять** платформу MUST быть разными
@@ -123,6 +144,26 @@
   поднимается, иначе конфигурация превращала бы наблюдение в шип
   (`lib/gateway/mcp_health.py:151`)
 
+#### Scenario: Недоступная платформа опрашивается реже, чем поднимается
+
+- **WHEN** последняя проба платформы провалилась
+- **THEN** цикл MUST ждать `max(interval_sec, reconnect_interval_sec)`, а не
+  интервал опроса: подъём с рукопожатием занимает секунды, и повторять его на
+  каждой пробе значит греть процесс зря (`lib/gateway/mcp_health.py:223-226`);
+  после прошедшей пробы пауза равна именно интервалу опроса (`:221-222`)
+- **AND** конструктор MUST NOT позволить переподключению стать чаще опроса и
+  MUST поднять интервал до нижней границы в 1 с, даже если конфигурация этого
+  просит (`lib/gateway/mcp_health.py:154-155`)
+- **AND** оба числа MUST приходить из того же раздела
+  `gateway.agent.enterprise_mcp`, который объявляет сам процесс
+  (`health_interval_sec`, `reconnect_interval_sec`;
+  `lib/core/project_settings.py:338-345`), а дефолты MUST импортироваться у
+  самого механизма и НЕ переписываться вторым числом в фабрике
+  (`lib/core/application_context.py:1786-1798`)
+- **AND** опрос при этом MUST продолжаться — следующая проба приходит сама, а не
+  по чужому обороту
+  (`tests/test_mcp_health_monitor.py::TestLoopSurvivesAndRecovers::test_loop_keeps_probing_while_platform_is_down`)
+
 ### Requirement: Подсистемы шлюза, которым нужен клиент платформы, собираются после него
 
 Зеркало сессий, наблюдатель и любые будущие подсистемы шлюза MUST собираться
@@ -159,3 +200,20 @@
 - **AND** причина MUST быть названа именно потому, что выключенная по ней
   подсистема иначе неотличима от исправной по молчанию: подсистема, которая
   ничего не пишет, обязана сообщить почему
+
+#### Scenario: Подсистемы собираются после клиента, а не вместо него
+
+- **WHEN** `ApplicationContext.create()` собирает подсистемы шлюза
+- **THEN** `ctx.enterprise_mcp` MUST присваиваться раньше `ctx.session_mirror` и
+  `ctx.mcp_health_monitor` (`lib/core/application_context.py:555`, `:569`, `:570`)
+- **AND** наблюдатель MUST собираться только при непустом клиенте: без клиента
+  фабрика возвращает `None`, а не следит за `None`
+  (`lib/core/application_context.py:1774-1776`)
+- **AND** обратный порядок MUST быть виден машинно, а не только на глаз: страж
+  разбирает исходник, находит номера строк трёх фабрик и требует
+  `client_line < mirror_line` и `client_line < monitor_line` — иначе зеркало снова
+  собирается до клиента и выключается с текстом «платформа недоступна» при живой
+  платформе (`::TestWiring::test_mirror_and_monitor_are_built_after_the_client`)
+- **AND** подсистема, выключенная по отсутствию клиента, MUST называть причину
+  (`lib/gateway/mirror/mirror_poller.py:178-183`) — иначе молчащая подсистема
+  неотличима от исправной
