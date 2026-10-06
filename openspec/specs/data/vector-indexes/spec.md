@@ -11,6 +11,31 @@
 
 ## Requirements
 
+> **Блок ниже — не текущая норма: он описывает снятую агентскую подсистему и будет
+> заменён при архивации change'ов. Читать его как живое предписание нельзя.**
+> Владение индексами объявлено в `mcp-platform/platform.json → vectors.indexes`,
+> реализация — в `mcp-platform/libs/vectors/`, и именно это описывают остальные
+> разделы спеки (`## Scope`, `## Boundary`, `## Inputs`, `## Outputs`,
+> `## Configuration`, `## Lifecycle`, `## Data Ownership`, `## Invariants`).
+> Перечисленные ниже адреса **в дереве отсутствуют**, и вводить их не следует:
+> `tools/build_vectors.py`, `lib/services/vector_index_service.py`,
+> `lib/core/infra_registration.py`, `lib/services/preload_service.py`,
+> `lib/services/cache_provider.py` (`CacheProvider.search_vector`),
+> `provider.preload_indexes(...)` из уже удалённого `vector_index_service.py`,
+> сигнал `READY` от `runtime-health` агента, а также секция
+> `gateway.vector.index.*` — такой секции в `config.json` нет вовсе.
+>
+> Замена объявлена в
+> `openspec/changes/2026-10-05-vector-indexes-canon-gap` (4 `REMOVED`,
+> 3 `MODIFIED`, 1 `ADDED`) и
+> `openspec/changes/2026-10-05-vector-preload-canon` (`MODIFIED` требования
+> «Прогрев индексов при старте»). Все 8 требований этого блока покрыты ими
+> ровно по одному разу и по дословному имени, то есть пересечений нет.
+> Каноническая спека правится **после** архивации change'а
+> (`openspec/specs/COMPONENTS.md:9-14`: workflow change → archive → canonical spec
+> → entry в реестре), поэтому переписывание тел здесь было бы третьей редакцией
+> и сломало бы сопоставление требований по имени при архивации.
+
 ### Requirement: Единый источник конфигурации
 
 Система ДОЛЖНА читать конфигурацию векторного индекса только из `gateway.vector.index.indexes.*` в `config.json`.

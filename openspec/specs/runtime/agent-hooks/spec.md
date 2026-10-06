@@ -31,7 +31,7 @@ Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фикс
 
 ### Requirement: `usage` адаптер для `LLMUsage` dataclass
 
-`DatabaseLoggingHook` и любой другой хук, использующий `context.usage`/`response.usage`, ДОЛЖЕН конвертировать `LLMUsage` (frozen dataclass из `nanobot.llm_usage.models`, поля `input_tokens`/`output_tokens`/`total_tokens`/`cache_read_tokens`/...) в dict через публичный метод `to_turn_dict()` или `to_dict()`. Прямое `dict(usage)` или `usage.get("prompt_tokens")` запрещены — они падают с `TypeError` на dataclass.
+`DatabaseLoggingHook` и любой другой хук, использующий `context.usage`/`response.usage`, MUST конвертировать `LLMUsage` (frozen dataclass из `nanobot.llm_usage.models`, поля `input_tokens`/`output_tokens`/`total_tokens`/`cache_read_tokens`/...) в dict через публичный метод `to_turn_dict()` или `to_dict()`. Прямое `dict(usage)` или `usage.get("prompt_tokens")` запрещены — они падают с `TypeError` на dataclass.
 
 #### Сценарий: Получение prompt/completion token count
 
@@ -41,7 +41,7 @@ Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фикс
 
 ### Requirement: Завершение работы `AgentLoop`
 
-Код завершения работы (`gateway.py::_run`, `lib/cli/console_loop.py`) ДОЛЖЕН вызывать `await agent.aclose()`, а НЕ `agent.close_mcp()`. Метод `close_mcp` удалён в nanobot 0.3.5; корректный shutdown API — `aclose()` (без параметров, async).
+Код завершения работы (`gateway.py::_run`, `lib/cli/console_loop.py`) MUST вызывать `await agent.aclose()`, а НЕ `agent.close_mcp()`. Метод `close_mcp` удалён в nanobot 0.3.5; корректный shutdown API — `aclose()` (без параметров, async).
 
 #### Сценарий: Cleanup MCP на shutdown
 
@@ -51,7 +51,7 @@ Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фикс
 
 ### Requirement: Wrapper `patch_save_turn` принимает новые kwargs
 
-`RuntimePatcher.patch_save_turn._wrap` (proxy вокруг `AgentLoop._save_turn`) ДОЛЖЕН принимать и проксировать kwarg-only параметры, добавленные в nanobot 0.3.5: `summary_checkpoint: SessionSummaryCheckpoint | None = None` и `input_persisted_early: bool = False`. Без них wrapper падает с `TypeError: unexpected keyword argument 'summary_checkpoint'` при первом `_persist_turn`.
+`RuntimePatcher.patch_save_turn._wrap` (proxy вокруг `AgentLoop._save_turn`) MUST принимать и проксировать kwarg-only параметры, добавленные в nanobot 0.3.5: `summary_checkpoint: SessionSummaryCheckpoint | None = None` и `input_persisted_early: bool = False`. Без них wrapper падает с `TypeError: unexpected keyword argument 'summary_checkpoint'` при первом `_persist_turn`.
 
 #### Сценарий: _save_turn вызывается с новыми kwargs
 
