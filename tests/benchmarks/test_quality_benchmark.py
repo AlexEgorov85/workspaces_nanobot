@@ -16,6 +16,7 @@ legal_summarizer — правильный путь
 """
 
 from __future__ import annotations
+import pytest
 
 import re
 from typing import Any
@@ -87,6 +88,7 @@ def _extract_required_facts(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.benchmark
 def test_golden_dataset_has_unique_names():
     """Все golden documents имеют уникальные имена."""
     names = [d["name"] for d in GOLDEN_DOCUMENTS]
@@ -95,6 +97,7 @@ def test_golden_dataset_has_unique_names():
     )
 
 
+@pytest.mark.benchmark
 def test_golden_dataset_all_have_required_facts():
     """Каждый golden document имеет required_facts."""
     for d in GOLDEN_DOCUMENTS:
@@ -105,6 +108,7 @@ def test_golden_dataset_all_have_required_facts():
         )
 
 
+@pytest.mark.benchmark
 def test_golden_dataset_texts_contain_required_facts():
     """Каждый required_fact присутствует в тексте документа."""
     for d in GOLDEN_DOCUMENTS:
@@ -114,6 +118,7 @@ def test_golden_dataset_texts_contain_required_facts():
             )
 
 
+@pytest.mark.benchmark
 def test_golden_dataset_extracted_facts_match():
     """Extracted FACT_NNN из текста совпадают с required_facts."""
     for d in GOLDEN_DOCUMENTS:

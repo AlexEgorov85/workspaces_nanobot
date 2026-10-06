@@ -19,7 +19,7 @@ markers = [
     "live: live e2e (real gateway / live DB / live LLM); needs NANOBOT_LIVE_E2E=1",
     "integration: worker pool on real DB; needs NANOBOT_INTEGRATION=1 (+ DATABASE_URL)",
     "contract: nanobot-ai compatibility checks; runs in CI always (not gated)",
-    "benchmark: offline baseline benchmark (synthetic fixtures); opt-in via -m benchmark",
+    "benchmark: offline baseline benchmark (synthetic fixtures); select via -m benchmark, also run in the default suite",
 ]
 # Верхняя граница времени ОДНОГО теста. Объявлена в обоих корнях одинаково:
 # наборы — две кодовые базы, правило безопасного прогона должно быть одно.

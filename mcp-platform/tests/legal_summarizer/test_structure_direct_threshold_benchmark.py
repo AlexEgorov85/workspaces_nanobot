@@ -21,6 +21,7 @@ planner'а:
 """
 
 from __future__ import annotations
+import pytest
 
 from libs.legal_summarizer.chunking.chunks import Chunk
 from libs.legal_summarizer.document.structure import (
@@ -95,21 +96,25 @@ def _build_large_doc():
     chunks = tuple(_chunk(f"{i:03d}", "x" * 1000) for i in range(200))
     return s, chunks
 
+@pytest.mark.benchmark
 def test_small_doc_direct_strategy():
     s, chunks = _build_small_doc()
     strategy = select_strategy(s, chunks)
     assert strategy == "direct"
 
+@pytest.mark.benchmark
 def test_medium_doc_map_flat():
     s, chunks = _build_medium_doc()
     strategy = select_strategy(s, chunks)
     assert strategy == "map_flat"
 
+@pytest.mark.benchmark
 def test_large_doc_map_hierarchical():
     s, chunks = _build_large_doc()
     strategy = select_strategy(s, chunks)
     assert strategy == "map_hierarchical"
 
+@pytest.mark.benchmark
 def test_direct_call_count_one():
     """Small doc → exactly 1 LLM call."""
     s, chunks = _build_small_doc()
@@ -117,17 +122,20 @@ def test_direct_call_count_one():
     assert plan.estimated_llm_calls == 1
     assert plan.total_batches == 1
 
+@pytest.mark.benchmark
 def test_medium_doc_call_count():
     s, chunks = _build_medium_doc()
     plan = build_execution_plan(s, chunks, document_id="d")
     assert plan.estimated_llm_calls >= 2
     assert plan.strategy == "map_flat"
 
+@pytest.mark.benchmark
 def test_large_doc_hierarchical():
     s, chunks = _build_large_doc()
     plan = build_execution_plan(s, chunks, document_id="d")
     assert plan.strategy == "map_hierarchical"
 
+@pytest.mark.benchmark
 def test_token_estimator_consistent():
     """Estimator даёт конкретное предсказуемое значение по контракту.
 
@@ -143,6 +151,7 @@ def test_token_estimator_consistent():
     expected = max(1, math.ceil(len(text) / 3.5))
     assert estimator.estimate(text) == expected
 
+@pytest.mark.benchmark
 def test_execution_plan_budget_constant_for_repeated_plans():
     """Один и тот же документ → один план (deterministic)."""
     s, chunks = _build_medium_doc()
@@ -152,6 +161,7 @@ def test_execution_plan_budget_constant_for_repeated_plans():
     assert p1.total_chunks == p2.total_chunks
     assert p1.strategy == p2.strategy
 
+@pytest.mark.benchmark
 def test_direct_threshold_lower_reduces_call_count():
     """Снижение direct_threshold должно переводить medium в map."""
     s, chunks = _build_medium_doc()
@@ -162,6 +172,7 @@ def test_direct_threshold_lower_reduces_call_count():
     assert plan_high.strategy == "direct"
     assert plan_low.strategy in ("map_flat", "map_hierarchical")
 
+@pytest.mark.benchmark
 def test_adjacent_packing_reduces_batches_vs_legacy():
     """Adjacent packing уменьшает число batches vs naive section-locality."""
     from libs.legal_summarizer.chunking.packing import (
