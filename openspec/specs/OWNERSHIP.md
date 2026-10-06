@@ -45,8 +45,8 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 |---|---|---|
 | `configuration/profiles/spec.md` | `profiles/test.jsonc`, `config.json` | `platform.json → profiles.test`, `PROFILE_OWNED_KEYS` |
 | `runtime/platform-settings/spec.md` | блок собирает `enterprise_mcp_client.py` | принимает `libs/enterprise_common/settings.py` (`owner=OWNER_AGENT`), разбирает `servers/enterprise/server.py` |
-| `logging-db/spec.md` | `lib/services/db_logging_service.py`, `log_transport.py` | операции `data.log_events`, `data.log_event`, `data.purge_logs` |
-| `tools-history-search/spec.md` | агентской обёртки не осталось: `workspace/tools/history_search_tool.py` снят (change `2026-10-03-mcp-native-tools`, п. D6), личность вызова подставляет `lib/hooks/mcp_identity_hook.py` | SQL и изоляция по `session_id`/`user_id` в `data.history_search` — берутся из контекста вызова, а не из аргументов модели |
+| `observability/logging-db/spec.md` | `lib/services/db_logging_service.py`, `log_transport.py` | операции `data.log_events`, `data.log_event`, `data.purge_logs` |
+| `interfaces/tools-history-search/spec.md` | агентской обёртки не осталось: `workspace/tools/history_search_tool.py` снят (change `2026-10-03-mcp-native-tools`, п. D6), личность вызова подставляет `lib/hooks/mcp_identity_hook.py` | SQL и изоляция по `session_id`/`user_id` в `data.history_search` — берутся из контекста вызова, а не из аргументов модели |
 | `testing/unified-test-contract/spec.md` | `tests/`, `pyproject.toml`, `.github/workflows/ci.yml` | `mcp-platform/tests/`, `mcp-platform/pyproject.toml` |
 
 ## `agent` — предмет реализован в агенте
@@ -66,9 +66,9 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | `runtime/runtime-events-subscription/spec.md` | `lib/services/runtime_events_subscriber.py` |
 | `runtime/runtime-patcher/spec.md` | `lib/services/runtime_patcher.py` |
 | `runtime/startup-schema-validation/spec.md` | `lib/services/schema_validation.py` |
-| `storage/session-hybridization/spec.md` | `lib/session/pg_session_manager.py` |
-| `storage/usage-store/spec.md` | `lib/core/agent_factory.py` |
-| `upgrade-compatibility/spec.md` | `requirements.txt`, `tests/contract/` |
+| `sessions/session-hybridization/spec.md` | `lib/session/pg_session_manager.py` |
+| `observability/usage-store/spec.md` | `lib/core/agent_factory.py` |
+| `infrastructure/upgrade-compatibility/spec.md` | `requirements.txt`, `tests/contract/` |
 | `validation/component-spec-validation/spec.md` | `tools/validate_component_specs.py` |
 
 `COMPONENTS.md` — реестр компонентов, не спека: раздела `## Scope` в ней нет по
@@ -76,7 +76,7 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 
 ## Требует решения
 
-- **`storage/session-recovery/spec.md`** помечена `agent` по замыслу, но
+- **`sessions/session-recovery/spec.md`** помечена `agent` по замыслу, но
   **реализации нет ни в одном дереве**. Поиск `SessionRecovery` /
   `session_recovery` по `lib/`, `workspace/`, `gateway.py`, `cli_agent.py`,
   `config.json`, `tools/` даёт ноль совпадений. Архивный change

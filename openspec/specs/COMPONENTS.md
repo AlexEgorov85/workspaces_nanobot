@@ -18,15 +18,18 @@
 | Категория | Всего | Complete | Partial | Draft | Missing |
 |-----------|-------|----------|---------|-------|---------|
 | architecture | 2 | 0 | 2 | 0 | 0 |
-| runtime | 11 | 0 | 11 | 0 | 0 |
 | configuration | 1 | 0 | 1 | 0 | 0 |
 | data | 4 | 1 | 3 | 0 | 0 |
+| documentation | 1 | 0 | 0 | 1 | 0 |
 | infrastructure | 1 | 0 | 1 | 0 | 0 |
+| interfaces | 2 | 0 | 2 | 0 | 0 |
+| observability | 2 | 0 | 2 | 0 | 0 |
+| runtime | 11 | 0 | 11 | 0 | 0 |
+| sessions | 2 | 0 | 1 | 1 | 0 |
 | skills | 1 | 0 | 1 | 0 | 0 |
 | testing | 1 | 0 | 1 | 0 | 0 |
-| documentation | 1 | 0 | 0 | 1 | 0 |
 | validation | 1 | 0 | 0 | 1 | 0 |
-| **Итого** | **23** | **1** | **20** | **2** | **0** |
+| **Итого** | **29** | **1** | **25** | **3** | **0** |
 
 ## Компоненты
 
@@ -103,6 +106,27 @@
 | Компонент | Реализация | Спецификация | Статус |
 |-----------|------------|--------------|--------|
 | ComponentSpecValidation | N/A (правила валидации) | [`validation/component-spec-validation`](validation/component-spec-validation/spec.md) | draft |
+
+### Observability
+
+| Компонент | Реализация | Спецификация | Статус |
+|---|---|---|---|
+| DbLoggingService | `lib/services/db_logging_service.py`, `lib/services/log_transport.py` | [`observability/logging-db`](observability/logging-db/spec.md) | partial |
+| UsageStore | `lib/core/agent_factory.py`, `lib/core/application_context.py` | [`observability/usage-store`](observability/usage-store/spec.md) | partial |
+
+### Sessions
+
+| Компонент | Реализация | Спецификация | Статус |
+|---|---|---|---|
+| SessionMirror | `lib/gateway/mirror/session_mirror.py`, `lib/gateway/mirror/mirror_poller.py` | [`sessions/session-hybridization`](sessions/session-hybridization/spec.md) | partial |
+| SessionRecovery | N/A (содержат один из сюй требований закрыт в дереве) | [`sessions/session-recovery`](sessions/session-recovery/spec.md) | draft |
+
+### Interfaces
+
+| Компонент | Реализация | Спецификация | Статус |
+|---|---|---|---|
+| HistorySearch | `mcp-platform/servers/enterprise/capabilities/data/tools/history_search.py` | [`interfaces/tools-history-search`](interfaces/tools-history-search/spec.md) | partial |
+| UpgradeCompatibility | `lib/services/runtime_patcher.py`, `pyproject.toml` | [`infrastructure/upgrade-compatibility`](infrastructure/upgrade-compatibility/spec.md) | partial |
 
 ## План заполнения
 
