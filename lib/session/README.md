@@ -7,7 +7,7 @@
 ## Что здесь есть
 
 Модуль `pg_session_manager.py` экспортирует три вещи
-(`lib/session/pg_session_manager.py:109`):
+(`lib/session/pg_session_manager.py:110`):
 
 | Символ | Роль |
 |--------|------|

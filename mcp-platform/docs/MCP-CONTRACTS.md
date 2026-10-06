@@ -2,8 +2,8 @@
 
 **Сервер:** `enterprise-mcp` — один процесс, capability-каталоги внутри.
 **Ветка:** `refactor/mcp-platform` · **Коммит:** `776593e`
-**Связанные документы:** `TARGET-ARCHITECTURE.md` (что и почему), `design.md`
-(решения), `../openspec/changes/enterprise-mcp-platform/specs/` (WHEN/THEN).
+**Связанные документы:** `TARGET-ARCHITECTURE.md` (что и почему),
+`../openspec/changes/enterprise-mcp-platform/specs/` (WHEN/THEN).
 
 ---
 
@@ -71,10 +71,13 @@ capabilities/<name>/tools/*.py
 > ```
 >
 > Обработчик идентичность **не** объявляет и получает доменные аргументы плюс
-> `ToolExecutionContext`. `_meta` обязателен для всех операций, включая те, кому
-> пользовательская изоляция не нужна. Собирает его агент в одной точке —
-> `EnterpriseMcpClient.call()`, который передаёт `meta=` в `session.call_tool`.
-> Нарушение — `identity_missing` до входа в домен.
+> `ToolExecutionContext`. `_meta` — предпочтительный канал идентичности, а не
+> безусловное требование: при `require_call_meta: false` (`platform.json:52`) его
+> отсутствие — не отказ, а переходное чтение идентичности из `arguments`
+> (`libs/enterprise_common/execution/pipeline.py:307-319`). Собирает его агент в
+> одной точке — `EnterpriseMcpClient.call()`, который передаёт `meta=` в
+> `session.call_tool`. Отказ — `identity_missing` до входа в домен, но только когда
+> идентичности нет ни в `_meta`, ни в `arguments`.
 >
 > **Почему `_meta`, а не свой конверт `{request,session,user}_id` внутри
 > `arguments`.** Свой конверт ломал бы форму вызова всех операций: доменные
@@ -832,7 +835,8 @@ Python-реестра нет: весь реестр читается запро�
 `REGISTRY` по всему skill'у не даёт совпадений. Снимок остаётся в проекте,
 поэтому переносить реестр на PostgreSQL не требуется: capability `audit`
 получает его операцией capability `data` и файл не открывает. Решение
-зафиксировано в `specs/data/duckdb-cache/spec.md`.
+зафиксировано в `openspec/specs/data/cache-provider/spec.md` (дельта —
+`openspec/changes/enterprise-mcp-platform/specs/data/duckdb-cache/spec.md`).
 
 Python-фолбэка нет, и это не то же самое, что «читаем живой PostgreSQL».
 Отсутствие фолбэка означает «единственный источник — этот loader». Момент

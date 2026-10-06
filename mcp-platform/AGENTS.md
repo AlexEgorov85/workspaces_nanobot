@@ -66,24 +66,30 @@ git grep -l '`platform`' -- 'openspec/specs/*/spec.md' 'openspec/specs/*/*/spec.
 Первая команда даёт все 28 спек. Вторая ловит и `shared`-спеки, в тексте которых
 упомянута платформа, поэтому **завышает** и для ответа «чей это код» не годится.
 Автоматической проверки соответствия между `## Scope` и реальным расположением
-реализации в проекте пока нет — она заведена задачей 1.12 в
-`openspec/changes/2026-10-06-spec-integrity/tasks.md`.
+реализации в проекте нет, и задачи на неё там тоже нет: в
+`openspec/changes/2026-10-06-spec-integrity/tasks.md` про `## Scope` есть 1.6
+(внести раздел в канонический перечень) и закрытая 2.2, а 1.12 — это «Паритет
+реестра и спек» (`COMPONENTS.md` ↔ дерево спек).
 
 ## Change, которые трогают это дерево
 
-Из 32 незакрытых change **26 упоминают `mcp-platform/`** в файлах change, и 23 из
-них — уже в `proposal.md`. Найти свои:
+Из 33 незакрытых change **26 упоминают `mcp-platform/`** в файлах change, и 21 —
+уже в `proposal.md` (23 получалось при подсчёте вместе с `archive/`: 21 + 2 оттуда).
+Найти свои:
 
 ```bash
 git grep -l 'mcp-platform/' -- 'openspec/changes/*/proposal.md'
 ```
 
-По числу упоминаний в proposal (проверено на 2026-10-06):
-`2026-10-04-close-cache-provider-canon-gap` (71), `enterprise-mcp-platform` (57),
-`2026-10-04-enterprise-mcp-http-transport` (43),
-`2026-10-05-tool-capability-namespace` (38),
-`2026-10-05-vector-indexes-canon-gap` (34),
-`2026-10-05-legal-summarizer-session-scope` (34), `2026-10-03-session-files` (34).
+По числу упоминаний `mcp-platform/` в `proposal.md` (проверено на 2026-10-06):
+`2026-10-04-queue-as-anchor-identity` и `2026-10-04-close-cache-provider-canon-gap`
+(по 13), `2026-10-03-session-files` (9), `implement-platform-settings-block` и
+`2026-10-05-tool-capability-namespace` (по 8), `2026-10-05-vector-indexes-canon-gap`
+(5), `2026-10-06-spec-integrity`, `2026-10-05-legal-summarizer-session-scope`,
+`2026-10-05-call-boundary-invariants`, `2026-10-04-session-hybridization-canon-gap`
+и `2026-10-03-refresh-entrypoints-spec` (по 4), остальные — 3 и меньше.
+`enterprise-mcp-platform` в этот список не попадает: в его `proposal.md` этого
+слова нет вовсе, дерево упомянуто в дельтах и задачах.
 
 Часто change правит спеку агента, а меняет код здесь. Это нормально и не повод
 переносить спеку: договорённость «владелец объявлен `## Scope`» как раз и нужна,
@@ -94,7 +100,8 @@ git grep -l 'mcp-platform/' -- 'openspec/changes/*/proposal.md'
 Команды взяты из `.github/workflows/ci.yml`, `working-directory: mcp-platform`.
 
 ```bash
-# быстрые тесты платформы: 6099 собрано, 8 отсеяно маркерами
+# быстрые тесты платформы: 6214 собрано, 8 отсеяно маркерами
+# число пересчитывается: cd mcp-platform && python -m pytest tests --collect-only -q
 python -m pytest tests -q --tb=short -m "not live and not integration"
 
 # отдельно — 8 тестов живой stdio-контракта, они дешёвые, но требуют живой сессии
