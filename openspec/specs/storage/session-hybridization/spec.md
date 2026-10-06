@@ -669,3 +669,599 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
   с `DbLoggingService`, которая тоже пишет в этот пул).
 - **AND** размер батча ≤ `gateway.session_cold_sync.batch_size`
   (default `50`).
+
+## Responsibility
+
+Спека отвечает за **распределение двух слоёв хранения сессий** и за
+границу между ними. Ключевое, что следует из чтения кода: предмет — это не
+«агент пишет сессии в PostgreSQL», а строго обратное утверждение.
+
+Hot path принадлежит upstream-библиотеке: единственный writer сессий —
+`nanobot.session.manager.SessionManager`, а наш вклад — `SessionStore`,
+который санитизирует NUL на границе записи
+(`lib/session/pg_session_manager.py:71-82`). PostgreSQL — **cold-storage
+mirror** в отдельной подсистеме шлюза `lib/gateway/mirror/`, которая
+работает вне оборота.
+
+Четыре обязанности:
+
+1. hot path сессий — только upstream `SessionManager`;
+2. зеркало сессий в PostgreSQL как единственный потребитель
+   cold-storage;
+3. изоляция реплик через `replica_id` в ключе — данными, а не блокировкой;
+4. single-writer per layer: ни одного прямого `INSERT`/`UPDATE` в таблицы
+   сессий из агентского кода.
+
+Владелец по `## Scope` — `agent`. Но запись в PostgreSQL выполняет **не
+агент**, а платформа: зеркало ходит в операции `data.mirror_session`,
+`data.cleanup_session_mirror`, `data.session_mirror_state`
+(`lib/gateway/mirror/session_mirror.py:77-80`). Ни одного прямого SQL в
+зеркале нет — это следствие, которое стоит знать до чтения любого
+требования про «зеркалирование в PG».
+
+## Boundary
+
+**Граница — процесс агента (шлюз).** Зеркало — фоновая задача этого
+процесса, и агент о ней не знает: у него нет ни одного вызова из оборота,
+зеркала нет в его инвентаре
+(`lib/core/application_context.py:1707-1708`).
+
+Внутри границы:
+
+- сборка и одновременный hot path — `lib/session/pg_session_manager.py`;
+- зеркало — `lib/gateway/mirror/mirror_poller.py` (механизм) и
+  `lib/gateway/mirror/session_mirror.py` (ресурс «сессии»);
+- жизненный цикл — `gateway.py:607-616`;
+- сборка из конфигурации — `lib/core/application_context.py:1713-1754`;
+- DDL — `sql/migrations/V010__agent_session_mirror_replica_key.sql`,
+  `sql/migrations/V011__agent_session_mirror_indexes.sql`.
+
+Вне границы:
+
+- **операции записи в PostgreSQL.** Зеркало вызывает
+  `data.mirror_session` / `data.cleanup_session_mirror` /
+  `data.session_mirror_state` (`session_mirror.py:77-80`); транзакции,
+  `upsert`, `missing_cycles` и уборка выполняет платформа;
+- **сами таблицы** `agent_session_meta` / `agent_session_messages` — их
+  владелец платформа, агент только объявляет форму через аргументы;
+- **`agent_gateway_logs` и `agent_conversation_messages`** — соседние
+  таблицы; аудит-тень в них независима от зеркала (см. требование
+  «Audit shadow в PG независим от session mirror»);
+- **разбор документа** и прочие capability — не сессии.
+
+## Public Contract
+
+**Два наблюдаемых интерфейса.**
+
+**1. Хот-путь** — `build_session_manager(workspace)`
+(`lib/session/pg_session_manager.py:85`). Возвращает класс библиотеки
+`SessionManager`, а не подкласс. Возвращаемый объект публичен по
+upstream-API: `get_or_create`, `save`, `add_message`, `delete_session`,
+`update_session_metadata`, `read_session_snapshot`, `list_sessions`,
+`save_runtime_checkpoint`, `restore_sessions_to_workspace`.
+
+Единственная своя семантика — `SanitizingSessionStore`
+(`pg_session_manager.py:71-82`): `save()` сперва вычищает контент всех
+сообщений, потом отдаёт запись базовому классу. Остальные примитивы
+протокола (`load`/`delete`/`read`/`read_metadata`/`update_metadata`/
+`list_sessions`) наследуются без изменений.
+
+**2. Зеркало** — `SessionMirror` (`session_mirror.py:121`), наследник
+`MirrorPoller` (`mirror_poller.py:126`). Публичная поверхность:
+
+| Элемент | Где | Смысл |
+|---|---|---|
+| `list_entries()` | `session_mirror.py:174` | сессии, которые сейчас есть на диске |
+| `digest_of(entry)` | `session_mirror.py:190` | SHA-256 файла-сессии |
+| `read_source(key)` | `session_mirror.py:195` | снимок сессии целиком |
+| `build_write_arguments(...)` | `session_mirror.py:198` | девять аргументов операции `mirror_session` |
+| `after_write(key, result)` | `session_mirror.py:218` | счётчики по вердикту платформы |
+| `extra_stats()` | `session_mirror.py:230` | ресурсные счётчики в `get_stats()` |
+| `get_stats()` | `mirror_poller.py:553` | 17 ключей наблюдаемости |
+| `start()` / `stop(timeout_sec=30.0)` | `mirror_poller.py:272` / `281` | жизненный цикл |
+| `enabled` / `replica_id` / `disabled_reason` | `mirror_poller.py:258-268` | свойства |
+
+Три class-level константы, объявленные как единственный источник правды о
+том, какие операции платформы использует зеркало
+(`session_mirror.py:77-80`):
+
+```
+OP_MIRROR   = "data.mirror_session"
+OP_CLEANUP  = "data.cleanup_session_mirror"
+OP_STATE    = "data.session_mirror_state"
+MIRROR_OPERATIONS = (OP_MIRROR, OP_CLEANUP, OP_STATE)
+```
+
+## Inputs
+
+**Хот-путь:** сообщения оборота → upstream `SessionManager.save(...)` →
+`SanitizingSessionStore.save()` → JSONL-файл на диске. Санитизация
+выполняется на контенте всех сообщений
+(`pg_session_manager.py:61-68`); мусор (не-`dict` сообщения, отсутствие
+атрибута `messages`) пропускается.
+
+**Зеркало:**
+
+- список сессий — `self._session_manager.list_sessions()`
+  (`session_mirror.py:183`);
+- дайджест файла — `file_digest(locator)`; `None`, если файл сейчас
+  пригоден (`session_mirror.py:190-193`);
+- снимок сессии — `read_session_snapshot(key)`
+  (`session_mirror.py:196`);
+- девять аргументов записи (`session_mirror.py:205-216`):
+  `session_key`, `replica_id`, `source_digest`, `updated_at`,
+  `created_at`, `last_consolidated`, `metadata`, `messages`,
+  плюс пороги `stale_tolerance_seconds` и
+  `sync_lag_threshold_seconds`;
+- аргументы уборки (`mirror_poller.py:420-424`): `replica_id`,
+  `present_keys`, `delete_after_missed_cycles`.
+
+**Личность служебного вызова** — отдельный вход, который легко пропустить:
+зеркало подписывает свои вызовы платформы служебной личностью, а не
+пользовательской (`mirror_poller.py:433-448`):
+`session_id = "session-mirror:<replica_id>"`, `user_id = SERVICE_USER`.
+Без подписи сервер ответил бы отказом `identity_missing`, потому что
+зеркало работает вне оборота.
+
+## Outputs
+
+**Хот-путь:** JSONL-файл сессии. PostgreSQL в этот путь **не входит**.
+
+**Зеркало:**
+
+- строки в `agent_session_meta` / `agent_session_messages` — через
+  операцию платформы `data.mirror_session`, с вердиктом в ответе;
+- удалённые строки зеркала при уборке — по
+  `delete_after_missed_cycles` (дефолт 2, `mirror_poller.py:167`);
+- события журнала через `_publish` (`mirror_poller.py:485`): отказ цикла
+  (`agent.degraded`, `mirror_poller.py:534`), удаление строки
+  (`mirror_poller.py:545`), пропуск уборки на пустом источнике
+  (`mirror_poller.py:408-417`).
+
+**Наблюдаемость** — `get_stats()` (`mirror_poller.py:553-582`) с
+17+ ключами: `resource`, `enabled`, `disabled_reason`, `replica_id`,
+`cycles_total`, `cycles_failed_total`, `consecutive_failures`,
+`last_cycle_seconds`, `last_success_ts`, `last_success_lag_seconds`,
+`source_count`, `mirror_count`, `written_total`,
+`skipped_unchanged_total`, `unreadable_total`, `source_missing_total`,
+`cleanup_guarded_total`, `deleted_total`, `sync_interval_sec`,
+`missing_cycles_threshold`, плюс `extra_stats()` ресурса —
+`messages_written_total`, `skipped_stale_total`,
+`stale_tolerance_seconds`, `sync_lag_threshold_seconds`
+(`session_mirror.py:230-235`).
+
+Что важно про форму счётчиков: `skipped_unchanged_total` растёт на
+каждом проходе без изменений — это самый частый исход, и он специально
+сделан дешёвым: проверка дайджеста происходит **до** чтения источника и
+до обращения к данным (`mirror_poller.py:382-387`).
+
+## State
+
+Состояние предмета разнесено по трём уровням, и это важно для чтения
+инвариантов.
+
+**1. Хот-путь** — JSONL-файлы сессий под управлением библиотеки. Своё
+состояние у агента отсутствует: агент не кеширует сессии и не держит
+открытых дескрипторов.
+
+**2. Cold-storage** — таблицы `agent_session_meta` /
+`agent_session_messages`. Ключ — **`(replica_id, session_key)`**, а не
+`session_key`: первичный ключ переопределён в `V010`, а `replica_id`
+сделан `NOT NULL`. Причина зафиксирована в шапке миграции: составной ключ
+упорядочивает строки и разводит реплики по разным страницам индекса, то
+есть упирается не в «последнюю запись победит», а в блокировки и
+очередь обслуживания.
+
+Неочевидное свойство схемы, взятое из комментариев `V010` к колонкам и
+следующее из них как требование:
+
+- `source_digest` — **основной** признак неизменности, а не `updated_at`:
+  upstream не поднимает `updated_at` при изменении только `metadata`
+  (`JsonlSessionStore.update_metadata` переписывает лишь поля первой
+  строки);
+- `message_count` — счётчик строк зеркала, проверенный по факту: расхождение
+  обнаруживается **до** и после, и полное переписывание запускается при
+  нём;
+- `missing_cycles` — счётчик подряд пропущенных списков; ноль приводит к
+  первому пропуску без удаления, что спасает от каталога, который создаётся
+  заново при каждом запуске (сеть, каталог на NFS);
+- `synced_at` — момент последней записи. Поле намеренно **не** значит
+  «данные не менялись»: пока обновлён `updated_at`, счётчик не
+  различается.
+
+**3. В памяти процесса** — счётчики `MirrorPoller` (строки 189-201
+`mirror_poller.py`) и `_cycle_lock: asyncio.Lock`
+(`mirror_poller.py:186`). Блокировка одна на весь цикл, и она
+single-flight: второй цикл, стартовавший параллельно, ждёт, а не
+дублирует запись.
+
+## Dependencies
+
+Прямые, в дереве агента:
+
+- `nanobot.session.manager.SessionManager`, `JsonlSessionStore`,
+  `Session` — хот-путь и стор (`pg_session_manager.py:44`);
+- `nanobot` `SessionStore` — `Protocol`, объявленный библиотекой
+  (`nanobot/session/manager.py:526`), и `store=` в конструкторе
+  `SessionManager` (строка 1647 по комментарию модуля);
+- `workspace.utils.clean_text.clean_text` — санитизация NUL
+  (`pg_session_manager.py:46`);
+- `lib.gateway.mirror.MirrorPoller` — механизм зеркала;
+- `lib.services.enterprise_mcp_client.CallIdentity` — личность служебного
+  вызова (`mirror_poller.py:443`, импорт ленивый);
+- `lib.core.application_context.ApplicationContext` — сборка и владение
+  (`ctx.session_manager`, `ctx.enterprise_mcp`,
+  `ctx.db_logging_service`);
+- пул PostgreSQL — общий, через DI; зеркало берёт его на платформе, а не
+  создаёт свой.
+
+Платформенные зависимости (вызываемые операции): `data.mirror_session`,
+`data.cleanup_session_mirror`, `data.session_mirror_state`. Их состав
+объявлен одной константой `MIRROR_OPERATIONS`
+(`session_mirror.py:80`), и сверка её с тем, что платформа реально
+регистрирует, — работа теста `tests/test_session_mirror_wire.py`
+(`session_mirror.py:76`).
+
+Принципиальная асимметрия: `SessionManager.save_runtime_checkpoint`
+деградирует до полной перезаписи транскрипта, если `self._store is not
+self._jsonl_store`. Наш `build_session_manager` поэтому одной строкой
+возвращает идентичность: `manager._jsonl_store = store`
+(`pg_session_manager.py:106`). Без неё каждая безопасная точка
+восстановления молча переписывала бы транскрипт целиком.
+
+## Configuration
+
+Секция `gateway.session_cold_sync`, разбирается в
+`SessionColdSyncSettings` (`lib/core/project_settings.py:157-173`) и
+собирается в `_build_session_mirror`
+(`lib/core/application_context.py:1716-1754`).
+
+| Ключ | Дефолт в коде | Значение в `config.json` | Используется? |
+|---|---|---|---|
+| `enabled` | `True` | `true` (строка 708) | да |
+| `sync_interval_sec` | `30.0` | `30.0` (709) | да, приводится к `≥ 1.0` |
+| `stale_tolerance_seconds` | `120` | `120` (711) | да |
+| `sync_lag_threshold_seconds` | `3600` | `3600` (712) | да |
+| `missing_cycles_threshold` | `2` | **не задан** | да, приводится к `≥ 1` |
+| `replica_id` | `None` → имя хоста | **не задан** | да |
+| `batch_size` | — | `50` (710) | **нет** |
+
+Валидация при сборке: `sync_lag_threshold_seconds` обязан быть
+`≥ stale_tolerance_seconds`, иначе `ValueError` на старте
+(`session_mirror.py:166-170`). Это единственная проверка, которая
+выполняется до фоновой работы.
+
+Расхождение, найденное при сверке с кодом и требующее внимания:
+**`batch_size` объявлен и настроен, но не читается.** Поиск по `lib/`
+показывает, что единственное чтение `batch_size` — это
+`channels.postgres.batch_size` для `DbLoggingService`
+(`lib/core/application_context.py:1608`); зеркало его не читает, а метода
+`_sync_batches` в коде нет. Синхронизация идёт по одной сессии
+(`_sync_one`, `mirror_poller.py:373`), порядок детерминирован сортировкой
+по ключу (`mirror_poller.py:367-371`). Требование «размер батча ≤
+`batch_size`» в текущем коде не имеет точки исполнения; это зафиксировано
+в `## Forbidden Behavior` и `## Invariants`.
+
+## Lifecycle
+
+**Сборка** — `_build_session_mirror(ctx)`
+(`lib/core/application_context.py:1713-1754`). Возвращает `None`, если
+`ctx.session_manager is None`. Собирается **после** клиента платформы
+(шаг 7a-0), потому что от него зависит; раньше это было ошибкой сборки.
+
+**Выключение по умолчанию** при отсутствии клиента: если
+`enterprise_mcp is None`, зеркало выключается с причиной
+«платформа недоступна (enterprise_mcp не задан)»
+(`mirror_poller.py:178-180`). Это отказ «мягкий»: процесс поднимается и
+работает, а не падает.
+
+**Старт** — `gateway.py:607-616`, строго после подъёма каналов и после
+рукопожатия с платформой: клиент, чья сессия только что поднялась, и
+есть тот, кто зеркало использует. При `enabled == False` печатается
+строка `session_mirror: выключено (<причина>)` (`gateway.py:611-614`).
+Исключение при старте ловится и логируется предупреждением
+(`gateway.py:615-616`) — неуспех зеркала не роняет шлюз.
+
+**Цикл** (`_run`, `mirror_poller.py:306-316`): `_cycle()` под
+`_cycle_lock`, затем сон `_compute_delay()`. Исключение внутри цикла не
+убивает задачу: `_consecutive_failures` растёт, отказ логируется, цикл
+продолжается.
+
+**Задержка между проходами** (`_compute_delay`, `mirror_poller.py:318-338`)
+— экспоненциальный backoff: `_BACKOFF_BASE_SEC * 2 ** min(failures, 32)`,
+прижатый между `sync_interval_sec` и `_BACKOFF_CAP_SEC` (16 минут,
+`mirror_poller.py:56`). Направление намеренное: отказ **отодвигает**
+следующую попытку. Раньше стоял `min`, и при отказе цикл стучался чаще
+обычного (2 с против штатных 30) — год отказа выглядел бы как усердная
+работа.
+
+**Финальный проход** (`stop`, `mirror_poller.py:281-304`): задача
+отменяется, затем выполняется **ещё один** `_cycle()` с тем же таймаутом.
+Финальный проход обязателен и идёт **до** закрытия источника: это
+последний шанс догнать то, что изменилось за время работы. Ошибка при
+остановке логируется и не роняет выход.
+
+## Data Ownership
+
+Владение здесь главный предмет спеки, и оно разделено строго.
+
+| Данные | Единственный writer | Что делает зеркало |
+|---|---|---|
+| JSONL-файлы сессий (hot path) | upstream `SessionManager` | читает, **не пишет** |
+| `agent_session_meta` | платформа, операция `data.mirror_session` | инициирует запись аргументами |
+| `agent_session_messages` | платформа, тот же вызов | инициирует запись |
+| `agent_gateway_logs` | `DbLoggingService` | публикует свои события через `_publish` |
+
+Правило, которое спека делает нормативным: **ни одного прямого
+`INSERT`/`UPDATE` в таблицы сессий из агентского кода.** Проверяется
+стражем `tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables`
+(назван в докстринге `pg_session_manager.py:31-32`).
+
+Второе правило — про разграничение реплик: оно обеспечивается **данными**,
+а не блокировкой. Ключ `(replica_id, session_key)` и `NOT NULL` на
+`replica_id` означают, что реплики не конкурируют за одну строку вообще,
+поэтому гонки за файл не существует и обрабатывать её не нужно.
+
+Третье правило — про раздельность хранения и аудита: зеркало сессий и
+аудит-тень независимы. `agent_conversation_messages` (заметки о сжатии
+контекста) и `agent_gateway_logs` (событие `context_compacted`) пишутся
+не зеркалом, а `ContextCompactionService`; удаление сессии из хот-пути не
+обязано удалять аудит, и наоборот.
+
+## Error Behavior
+
+Отказы зеркала **не поднимаются в агент и не видны модели**: это фоновая
+подсистема, у которой нет вызова из оборота. Все они логируются и
+пересчитываются.
+
+**1. Платформа недоступна** → зеркало выключено с причиной
+(`mirror_poller.py:178-180`), процесс работает без cold-storage.
+
+**2. Отказ цикла** (`_run`, `mirror_poller.py:312-315`): исключение
+ловится, `_consecutive_failures` и `cycles_failed_total` растут, отказ
+логируется (`agent.degraded`, `mirror_poller.py:531-534`), цикл
+продолжается с backoff. Цикл не умирает.
+
+**3. Отказ отдельной записи** (`_sync_one`): исключение поднимается в
+цикл, то есть трактуется как отказ цикла, — платформа может отказать по
+своим причинам, и это должно быть видно.
+
+**4. Нечитаемый источник** (`mirror_poller.py:376-380`): `digest is None` →
+`_unreadable_total += 1` и возврат без угадывания. Единица прямо сейчас
+переписывается либо недоступна; гадать нельзя.
+
+**5. Источник исчез между списком и чтением**
+(`mirror_poller.py:389-392`): `source is None` →
+`_source_missing_total += 1`, возврат.
+
+**6. Нечитаемый ответ платформы** (`_call`, `mirror_poller.py:470-480`):
+`json.loads` не дал словаря → `ValueError` с указанием операции и
+причины, а не молчание. Нечитаемый ответ хуже отсутствия ответа,
+потому что выглядит как пустой успех.
+
+**7. Отказ при остановке** (`stop`, `mirror_poller.py:297-304`):
+таймаут финального прохода или исключение логируются; выход не роняется.
+
+**8. Некорректная конфигурация** — единственный отказ, который
+**поднимается на старте**: `sync_lag_threshold_seconds <
+stale_tolerance_seconds` → `ValueError`
+(`session_mirror.py:166-170`). Молча чинить нельзя: два порога задают
+противоречивый смысл «устарело» и «отстало по времени».
+
+**9. Пустой список источника** (`_cleanup_absent`,
+`mirror_poller.py:403-418`): уборка **пропускается**, если список пуст и
+`guard_empty_source()` истинно, при этом публикуется `agent.degraded` с
+прежним количеством строк зеркала. Каталог может оказаться пустым не
+потому, что данные исчезли, а потому, что он не подмонтирован или сорван;
+«удалить всё» из такого состояния — потеря данных.
+
+## Invariants
+
+1. **Hot path принадлежит библиотеке.** Единственный writer сессий —
+   upstream `SessionManager`; агент не пишет в `agent_session_meta` /
+   `agent_session_messages` напрямую.
+2. **Нет прямого SQL к таблицам сессий** из агентского кода — все записи
+   идут операциями платформы.
+3. **Ключ холодного хранения — `(replica_id, session_key)`**, а
+   `replica_id` — `NOT NULL` (`V010`). Изоляция реплик обеспечена
+   данными, а не lock'ом.
+4. **`replica_id` не выводится из ничего не значащего.** Без явного
+   значения берётся `default_replica_id()` — имя хоста
+   (`mirror_poller.py:172`); выдуманное значение писало бы в журнал чужую
+   машину.
+5. **Служебный вызов подписывается служебной личностью**
+   (`mirror_poller.py:433-448`), а не личностью пользователя, и реплика
+   входит **в имя сессии**, а не теряется в ней: следы двух машин должны
+   различаться в журнале.
+6. **Дайджест — основной признак неизменности, а не `updated_at`**
+   (комментарий к колонке в `V010`). Равные `updated_at` при разных
+   дайджестах — это расхождение, а не «ничего не изменилось».
+7. **Размер выборки детерминирован** по `updated_at`, а `message_count`
+   используется для обнаружения расхождения.
+8. **Один цикл за раз** — `_cycle_lock` (`mirror_poller.py:186`,
+   `344`). Перекрывающиеся циклы запрещены.
+9. **Порядок обработки детерминирован** — сортировка по ключу до обхода
+   (`mirror_poller.py:367-371`). Это исключает ABBA-порядок блокировок с
+   `DbLoggingService`, которая пишет в тот же пул.
+10. **Уборка не удаляет по первому пропуску** — `missing_cycles`
+    отсчитывает подряд пропуски, а `delete_after_missed_cycles` передаётся
+    платформе.
+11. **Уборка запрещена на пустом источнике** (`guard_empty_source`,
+    `mirror_poller.py:243-250`): пустой список — не «всё удалили».
+12. **Проверка дайджеста предшествует чтению источника**
+    (`mirror_poller.py:382-387`): неизменившаяся сессия не должна стоить ни
+    чтения, ни обращения к данным.
+13. **Отказ отодвигает следующую попытку**, а не приближает её
+    (`_compute_delay`, `mirror_poller.py:318-338`).
+14. **Финальный проход при остановке обязателен** и идёт до закрытия
+    источника (`mirror_poller.py:281-304`).
+15. **`batch_size` не участвует в работе зеркала.** Ключ объявлен
+    (`project_settings.py:171`) и настроен (`config.json:710`), но
+    зеркалом не читается, метода `_sync_batches` нет; обработка идёт по
+    одной сессии. Любая будущая реализация батчинга обязана сохранить
+    инварианты 8 и 9.
+16. **Санитизация стоит на границе записи, а не в патче.** NUL вычищается
+    в `SanitizingSessionStore.save()`, рядом с потребителем; PostgreSQL не
+    принимает NUL в text-литералах (`pg_session_manager.py:15-21`).
+
+## Forbidden Behavior
+
+1. **Писать в `agent_session_meta` / `agent_session_messages` из агента**
+   (прямой SQL, `INSERT`, `UPDATE`, свой writer). Нарушение
+   single-writer, который держит страж
+   `tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables`.
+2. **Возвращать к прямой записи в PostgreSQL как в хот-путь.** PostgreSQL —
+   cold-storage; выигрыш в скорости даёт JSONL.
+3. **Хранить сессии в PostgreSQL, отказав в JSONL.** Утверждается, что
+   миграция выполнена без UX-пробела («UX-gap без legacy-зеркала»); отказ
+   от неё означает потерю транскриптов.
+4. **Делать `batch_size` фактором поведения без реализации батчинга.**
+   Ключ настроен (`config.json:710`), но не читается; объявлять его
+   действующим — то же, что обвинить его в том, чего он не делает.
+5. **Делать уборку на пустом списке источника.** Неподмонтированный каталог
+   выглядит как «удалено всё».
+6. **Удалять строку зеркала с первого пропуска** — счётчик
+   `missing_cycles` существует именно для этого.
+7. **Сортировать порядок обхода недетерминированно** (порядок каталога,
+   `list` без сортировки): это возврат ABBA-риска с общим пулом.
+8. **Запускать два цикла одновременно** — single-flight обязателен.
+9. **Читать источник до проверки дайджеста** — самый частый исход обязан
+   стоить почти ничего.
+10. **Приближать интервал при отказе** (`min` вместо `max` в
+    `_compute_delay`): год отказа зеркала выглядел бы как усердная
+    работа.
+11. **Подписывать служебные вызовы личностью пользователя** — следы зеркала
+    попали бы в область видимости чужого сеанса.
+12. **Терять `replica_id` внутри имени сессии служебного вызова** —
+    `mirror` чужой реплики перестал бы отличаться от своего.
+13. **Угадывать при отсутствии дайджеста** («наверное, не изменилось»).
+14. **Проглатывать нечитаемый ответ платформы** — вместо этого
+    `ValueError` с указанием операции.
+15. **Пропускать финальный проход при остановке.**
+16. **Приводить `stale_tolerance_seconds` выше
+    `sync_lag_threshold_seconds` «по значению»:** это
+    противоречивая конфигурация и она обязана падать на старте, а не
+    молча переопределяться.
+17. **Смешивать зеркало сессий с аудитом:** удаление сессии не должно
+    трогать `agent_conversation_messages` или `agent_gateway_logs`.
+18. **Возвращать санитизацию в патч** `patch_session_content_cleanup`:
+    санитизация живёт в `SessionStore`, рядом с потребителем.
+
+## Consumers
+
+| Потребитель | Что использует | Где |
+|---|---|---|
+| upstream `AgentLoop` и каналы | `build_session_manager(...)` → хот-путь | `lib/session/pg_session_manager.py:85` |
+| `ApplicationContext` | `ctx.session_manager` как источник зеркала | `lib/core/application_context.py:1713` |
+| `gateway.py` | `mirror.start()` / выключено-строка | `gateway.py:607-616` |
+| Платформа `enterprise-mcp` | операции `data.mirror_session`, `data.cleanup_session_mirror`, `data.session_mirror_state` | `session_mirror.py:77-80` |
+| `runtime_health` | `get_stats()` зеркала | `lib/services/runtime_health.py:134-137` |
+| `docs/architecture/storage-layers.md` | модель хранения | упомянут в `pg_session_manager.py:37` |
+| Администратор | счётчики `get_stats()` в живности | — |
+
+Потребитель, который стоит выделить отдельно: **модель агента зеркалом не
+пользуется.** У него нет ни одного вызова из оборота, и зеркала нет в его
+инвентаре (`lib/core/application_context.py:1707-1708`). Это осознанное
+решение, а не пробел: обратное означало бы, что агент может читать
+холодное хранилище иначе, чем через штатные операции платформы.
+
+## Implementation
+
+Все пути проверены `Test-Path`; все существуют.
+
+**Хот-путь:**
+
+- `lib/session/pg_session_manager.py` — `build_session_manager` (85),
+  `SanitizingSessionStore` (71), `clean_session_content` (49);
+- `workspace/utils/clean_text.py` — санитизация.
+
+**Зеркало:**
+
+- `lib/gateway/mirror/mirror_poller.py` — `MirrorPoller` (126),
+  `default_replica_id` (94), `MirrorEntry` (108), константы
+  `_BACKOFF_BASE_SEC` (55) и `_BACKOFF_CAP_SEC` (56),
+  `SERVICE_SESSION_PREFIX` (74), `SERVICE_USER` (80);
+- `lib/gateway/mirror/session_mirror.py` — `SessionMirror` (121),
+  `OP_MIRROR`/`OP_CLEANUP`/`OP_STATE`/`MIRROR_OPERATIONS` (77-80),
+  `file_digest` (83), `_isoformat` (113);
+- `lib/gateway/mirror/__init__.py` — публичный экспорт пакета.
+
+**Сборка и жизненный цикл:**
+
+- `lib/core/application_context.py` — `_build_session_mirror`
+  (1713-1754), вызов на шаге 7a-0, `ctx.session_mirror` (196);
+- `./gateway.py` — старт зеркала (607-616);
+- `lib/core/project_settings.py` — `SessionColdSyncSettings` (157-173);
+- `./config.json` — секция `gateway.session_cold_sync` (707-713).
+
+**DDL:**
+
+- `sql/migrations/V010__agent_session_mirror_replica_key.sql` —
+  `replica_id`, backfill, `NOT NULL`, новый первичный ключ, комментарии к
+  колонкам, управляемое удаление `legacy`-строк через
+  `nanobot.cleanup_legacy_session_mirror`;
+- `sql/migrations/V011__agent_session_mirror_indexes.sql` — индексы под
+  access-pattern зеркала;
+- `sql/migrations/V013__test_profile_session_mirror_replica_key.sql` —
+  тот же ключ в тестовом профиле.
+
+**Документация:** `docs/architecture/storage-layers.md` — общая модель
+хранения, упомянута в докстринге `lib/session/pg_session_manager.py:37`.
+
+Чего в дереве **не существует**:
+`lib/services/session_cold_sync_service.py` (в комментарии миграции `V010`
+упомянуто имя `SessionColdSyncService._cleanup_missing`
+как историческое — реализация называется `MirrorPoller`), а также
+`lib/session/pg_session_manager.py`-подобного файла, который писал бы
+сессии в PG напрямую.
+
+## Verification
+
+Все пути проверены `Test-Path`; все существуют.
+
+**Инвариант «нет прямого SQL»:**
+
+- `tests/test_storage_hybridization.py` — основной страж слоёв хранения;
+  класс `TestNoDirectSQLToSessionTables` закрывает запрет прямых
+  `INSERT`/`UPDATE` в таблицы сессий;
+- `tests/test_pg_session_manager.py` — поведение `SanitizingSessionStore`
+  и `build_session_manager`;
+- `tests/test_session_storage.py` — хот-путь целиком;
+- `tests/contract/test_session_manager.py`,
+  `tests/contract/test_session_manager_api.py`,
+  `tests/contract/test_session_manager_contract.py` — контракт
+  upstream-API `SessionManager` и `JsonlSessionStore`;
+- `tests/contract/test_session_dir_name_contract.py` — имя каталога
+  сессий.
+
+**Зеркало:**
+
+- `tests/test_session_mirror_wire.py` — сверка `MIRROR_OPERATIONS` с тем,
+  что платформа реально регистрирует
+  (`lib/gateway/mirror/session_mirror.py:76`). Это страж против операции,
+  описанной в коде, но отсутствующей в реестре: такой
+  случай проходит чтение кода, компиляцию и все тесты с подставным
+  клиентом, а падает в рантайме на каждом цикле;
+- `tests/test_session_cold_sync_service.py` — циклы, детекты, уборка;
+- `tests/test_storage_hybridization_lifecycle.py` — жизненный цикл
+  зеркала: старт, финальный проход, выключение;
+- `tests/test_storage_hybridization_factory.py` — сборка из
+  `ApplicationContext`, включая зависимость от клиента платформы;
+- `tests/test_config_keys.py` — разбор `gateway.session_cold_sync`;
+- `tests/test_runtime_health.py` — появление счётчиков зеркала в отчёте
+  живости.
+
+**Обвязка и документация:**
+
+- `tests/test_service_identity.py` — служебная личность вызовов зеркала;
+- `tests/test_docs_consistency.py` — согласованность документации;
+- `docs/architecture/storage-layers.md` — модель хранения, на которую
+  ссылается модуль.
+
+Честная граница покрытия, найденная при сверке: **требование о размере
+батча не имеет стража, потому что нет самого батчинга.** Ни один тест не
+может провалить `batch_size`, потому что зеркало его не читает: ключ
+настроен в `./config.json:710`, объявлен в
+`lib/core/project_settings.py:171` и молча не используется. Соответствие
+`./config.json` и читаемого кода в этой части автоматической проверки не
+имеет.

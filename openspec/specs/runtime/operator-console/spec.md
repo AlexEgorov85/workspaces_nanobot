@@ -396,3 +396,194 @@ stdout намеренно, а не через `logger.info` — уровень �
 - **THEN** тот же факт MUST быть записан в журнал; наличие строки в консоли
   MUST NOT считаться достаточным
   (проверяется `TestOperatorConsole::test_console_line_never_replaces_the_journal_record`)
+
+## Responsibility
+
+Представление «одна строка консоли = один факт = одно имя события = два
+стока». Владелец — `lib/services/operator_console.py`: писатели фактов
+отдают объект, рендерер печатает его, тот же объект уходит в журнал. Модуль
+также владеет глубиной вывода процесса и её отбором.
+
+## Boundary
+
+- **Внутри:** формат строки, глубины `quiet|turn|trace`, отбор по глубине,
+  переход с булевых флагов, сбор факта из события журнала.
+- **Снаружи:** словарь имён событий журнала (принадлежит `runtime/db-logging`);
+  настройка loguru — `lib/utils/logging_utils.py`; `rich` остаётся для
+  таблиц и баннера, но не для построчной печати; terminal/CLI.
+
+## Public Contract
+
+- Глубины и ключ: `CONSOLE_LEVEL_QUIET` (`lib/services/operator_console.py:68`),
+  `CONSOLE_LEVEL_TURN` (`:69`), `CONSOLE_LEVEL_TRACE` (`:70`),
+  `CONSOLE_LEVELS` (`:72`), `CONSOLE_LEVEL_KEY = "console_level"` (`:79`),
+  `DEFAULT_CONSOLE_LEVEL = CONSOLE_LEVEL_TURN` (`:84`).
+- `CONSOLE_FACT_EXTRA_KEY = "_console_depth"` (`:111`) — ключ в loguru-extra,
+  по которому sink решает, печатать ли строку; единственное место отбора.
+- `LINE_FORMAT` (`:93`), `PLACEHOLDER = "-"` (`:88`), `LIFECYCLE_MARKER` (`:100`),
+  `STARTUP_MARKER = "startup"` (`:106`).
+- `ConsoleFact` (`:289-303`): `marker`, `detail`, `who`, `task`, `depth`,
+  `event_level`, `event`.
+- Функции: `normalize_console_level` (`:165`), `console_level_of` (`:186`),
+  `legacy_flag_warnings` (`:198`), `set_console_level` (`:233`),
+  `effective_console_level` (`:244`), `depth_visible` (`:249`),
+  `required_depth` (`:262`), `fact_from_event` (`:391`), `worker_fact` (`:418`),
+  `startup_fact` (`:453`), `render` (`:465`), `emit` (`:477`),
+  `emit_event` (`:495`), `set_legacy_warnings` (`:154`),
+  `pending_legacy_warnings` (`:160`).
+
+## Inputs
+
+- `gateway_settings` — секция `gateway`; читается ключ `console_level`
+  (`:186-195`).
+- Старые булевы ключи `print_worker_activity`, `print_llm_calls`,
+  `print_db_activity`, `print_tools` — только для формирования
+  предупреждений о переходе (`:128-138`, `:198-230`).
+- Событие журнала (`LogEvent`) — источник полей `fact_from_event` (`:391`).
+- `who` и `task` — явно именованные поля факта (`:297-300`).
+- Действующая глубина процесса `_effective_level` (`:145`), ставится
+  `set_console_level` из `configure_loguru`
+  (`lib/utils/logging_utils.py:279`).
+
+## Outputs
+
+- Строка `f"{marker} · {detail}"` либо сам `marker`, если деталь пуста
+  (`:465-474`).
+- Запись в loguru с привязанными `who`, `task` и `_console_depth`
+  (`:488-492`).
+- Предупреждения о старых булевых ключах — по строке на ключ
+  (`:198-230`).
+- `ConfigurationError` при значении глубины вне `quiet|turn|trace` (`:178-183`).
+
+## State
+
+Модульные: `_effective_level` (`:145`), `_pending_legacy_warnings` (`:151`),
+`_DEPTH_RANK` (`:140`). Sink читает `_effective_level` на каждой записи,
+поэтому переключение уровня не требует переустановки sink'а (`:142-145`).
+Состояния факта, сессии или очереди модуль не держит.
+
+## Dependencies
+
+- `loguru.logger` — единственный сток печати (`emit`, `:486`);
+- `lib.services.db_logging_service` — второй сток: `emit_event` зовётся из
+  `DbLoggingService.log_event` сразу после постановки события в очередь
+  (`lib/services/db_logging_service.py:1056-1058`);
+- `lib.utils.logging_utils` — формат sink'а и вызов `set_console_level`
+  (`lib/utils/logging_utils.py:279`) и `set_legacy_warnings` (`:323`);
+- Писатели фактов: `lib/hooks/terminal_tool_print_hook.py:147`,
+  `gateway.py:334-336`, `lib/core/application_context.py:1019-1036`.
+
+## Configuration
+
+- `gateway.console_level` — единственный объявленный ключ глубины;
+  отсутствие ключа — не ошибка, дефолт объявлен один раз (`:189-195`),
+  неверное значение — `ConfigurationError` (`:178`).
+- `config.json` объявляет `console_level` (`config.json:696`).
+- Старые булевы ключи больше не читаются и объявлены **для перехода**:
+  молчаливый игнор изменил бы вывод у того, кто их выставил, без единого
+  слова (`:124-138`). `print_tools` отображается в `None` — у него и до
+  перехода не было потребителей, выдумывать соответствие значило бы соврать
+  оператору (`:135-137`).
+- Уровень фильтрации задаётся фильтрами sink'а, а не уровнем loguru
+  (`lib/utils/logging_utils.py:32`).
+
+## Lifecycle
+
+1. `configure_loguru` зовёт `set_console_level(console_level)`
+   (`lib/utils/logging_utils.py:279`) — один раз на точке старта.
+2. `set_legacy_warnings` кладёт предупреждения о старых ключах в очередь
+   (`lib/services/operator_console.py:154-157`, `lib/utils/logging_utils.py:323`).
+3. Баннер печатает их в `ApplicationContext.start`
+   (`lib/core/application_context.py:1034-1035`) — не на шаге настройки sink'а,
+   чтобы не зависеть от того, успел ли он встать (`:147-151`).
+4. Писатели фактов зовут `emit`/`emit_event` в течение работы; отбор по
+   глубине делает sink по `CONSOLE_FACT_EXTRA_KEY`
+   (`lib/utils/logging_utils.py:183-185`).
+5. Gateway печатает вердикты через `emit(startup_fact(...))`
+   (`gateway.py:334-336`).
+
+## Data Ownership
+
+Модуль не владеет данными: он владеет представлением. Объект факта ссылается
+на исходное `LogEvent` в поле `event`, и журнал пишет **тот же** объект
+(`:292-294`), поэтому расхождение консоли и журнала невозможно по
+построению. Ничего не копируется в файл и не хранится между строками.
+
+## Error Behavior
+
+- Неизвестное значение глубины — `ConfigurationError`, а не молчаливый возврат
+  дефолта: оператор объявил одно, а получил бы другое и узнал бы из молчания
+  консоли (`:166-183`).
+- Ошибка чтения глубины у потребителя трактуется как «глубина не видна»:
+  `depth_visible` возвращает `False` при неизвестном ранге
+  (`:255-259`; `lib/core/application_context.py:66-72`).
+- Печать факта не бросает исключений наружу: `emit` идёт через loguru, у
+  которого свой sink.
+
+## Invariants
+
+- Один формат на всё построчное: `render` — единственная функция рендера
+  строки, формат объявлен один раз (`:465-469`).
+- Отбор по глубине — единственное место; оно не поднимает уровень loguru
+  (`:108-111`, `:480-484`).
+- `ERROR`, `CRITICAL`, `WARNING`, `WARN` видны всегда (`:120-122`,
+  `:269-270`): ошибку проглотать нельзя, иначе оператор увидит тишину вместо
+  отказа.
+- `startup` и `TASK lifecycle` обязаны отсутствовать в словаре имён событий
+  журнала (`:104-106`).
+- Строка печатается **после** того, как журнал принял событие: напечатать
+  раньше означало бы, что строка заменяет запись в журнале (`:500-503`).
+- `WARN` приводится к `WARNING` loguru при записи, иначе факт молча ронял бы
+  запись значением, которого у loguru нет (`:277-285`).
+
+## Forbidden Behavior
+
+- Писателю факта печатать строку самому: ни `console.print`, ни `print`
+  для построчного факта (`:480-481`).
+- Рендерить строку где-либо ещё, кроме `render` (`:465-466`).
+- Поднимать уровень loguru ради отбора по глубине — это ломает файл журнала
+  (`:108-111`).
+- Молча заменять неверную глубину дефолтом (`:166-170`).
+- Читать старые булевы ключи как флаги вывода после перехода (`:124-127`).
+- Указывать в `metadata`/`who` поле `channel` вместо явно именованных
+  `who`/`task` (`:297-300`).
+- Заводить новое имя события консоли, которого нет в словаре журнала: `grep`
+  в терминале должен равняться SQL в журнале.
+- Печатать в консоль то, что принадлежит баннеру или таблице — там работает
+  `rich`.
+
+## Consumers
+
+- `lib/utils/logging_utils.py:279` — `set_console_level`; `:183-185` — фильтр
+  sink'а по `depth_visible`; `:323` — `set_legacy_warnings`; формат берётся из
+  `LINE_FORMAT` (`:28`).
+- `lib/services/db_logging_service.py:1056-1058` — `emit_event` из
+  `log_event`.
+- `lib/hooks/terminal_tool_print_hook.py:147` — живой вывод результатов
+  tool'ов.
+- `gateway.py:334-336` — вердикты и стартовый баннер; `:729-735` — печать
+  активности воркеров через `depth_visible(CONSOLE_LEVEL_TURN)`, а не через
+  прежний флаг.
+- `lib/core/application_context.py:1019-1036` — баннер и предупреждения о
+  старых ключах.
+
+## Implementation
+
+Существующие на диске пути:
+
+- `lib/services/operator_console.py` — формат, глубины, факт, рендер, печать;
+- `lib/utils/logging_utils.py` — sink, формат и переключение уровня;
+- `lib/services/db_logging_service.py` — второй сток и словарь имён;
+- `lib/hooks/terminal_tool_print_hook.py` — писатель фактов tool'ов;
+- `lib/core/application_context.py` — баннер и предупреждения;
+- `./gateway.py` — вердикты и активность воркеров;
+- `./config.json` — объявленный ключ `console_level`.
+
+## Verification
+
+- `tests/test_operator_console_levels.py` — глубины, отбор, нормализация,
+  предупреждения о старых ключах;
+- `tests/test_operator_console_lines.py` — формат строки и соответствие
+  консоли журналу;
+- `tests/test_terminal_tool_print_hook.py` — живой вывод результатов идёт
+  через общий рендер и следует за исходом.

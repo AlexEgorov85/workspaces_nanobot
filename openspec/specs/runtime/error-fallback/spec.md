@@ -151,3 +151,171 @@ THEN `OutboundMessage` SHALL сохранить все обязательные 
 
 - **WHEN** fallback-ответ публикуется в `bus.publish_outbound`
 - **THEN** PostgresChannel.send корректно обрабатывает его как финальный outbound, переводит задачу в `completed`, удаляет claim — никаких изменений в коде канала не требуется
+
+## Responsibility
+
+Замена захардкоженного текста отказа на настраиваемый: один ответ
+пользователю при необработанном исключении в `AgentLoop._process_message` и
+запись деталей в долговечный журнал. Владелец —
+`lib/services/turn_delivery_factory.py`; механизм подключения — публичная
+точка расширения nanobot `turn_delivery_factory`, а не патч
+(`lib/core/agent_factory.py:259-264`).
+
+## Boundary
+
+- **Внутри:** текст ответа, признаки `_error_kind`/`_final_turn`, одна
+  публикация outbound, запись `agent.failed`, runtime-событие `turn_completed`.
+- **Снаружи:** обработка исключения — `AgentLoop`; маршрутизация сообщений —
+  `TurnDeliveryFactory` upstream; схема и запись в журнал — `runtime/db-logging`.
+
+## Public Contract
+
+- `build_turn_delivery_factory(bus, *, settings=None, db_logging_service=None, agent_id=None) -> FallbackTurnDeliveryFactory | None`
+  (`lib/services/turn_delivery_factory.py:225-231`).
+- `FallbackTurnDeliveryFactory(bus, *, internal_error=..., log_to_db=..., db_logging_service=None, agent_id=None)`
+  (`:185-193`) — наследует `TurnDeliveryFactory`.
+- `FallbackTurnDelivery.fail(*, publish_completion)` (`:75`) — переопределение
+  upstream-метода.
+- `DEFAULT_INTERNAL_ERROR_TEXT` (`:53-57`), `DEFAULT_LOG_TO_DB = True` (`:58`).
+- Отдельного доменного типа ошибки нет: подсистема живёт на пути успеха
+  отказа, а не добавляет ветку в обработку.
+
+## Inputs
+
+- `settings` — merged `SETTINGS`; читаются `gateway.error_messages.internal_error`
+  и `gateway.error_messages.log_to_db` через `_get`
+  (`:253-265`). `settings=None` — дефолтный текст и `log_to_db=True`.
+- `bus` — **обязательно тот же объект**, что у `AgentLoop`: тот проверяет
+  `factory.bus is bus` (`:194-196`).
+- `db_logging_service` — `DbLoggingService` или `None` (запись пропускается);
+  `agent_id` — для колонки в журнале.
+- Активное исключение — `sys.exception()` внутри `fail()`
+  (`:126-130`).
+
+## Outputs
+
+- Ровно один `OutboundMessage` с `content = self._fallback_text` и
+  metadata `{_error_kind: "internal", _final_turn: True}` (`:81-113`).
+- При `publish_completion` — runtime-событие `turn_completed` с
+  `outcome="failed"`, `failure_kind="internal"` (`:91-100`).
+- Событие журнала `event_type="agent.failed"`, `level="ERROR"`,
+  `actor=None`, `summary=<failure_error_kind>`, payload `{kind, failure_error_kind,
+  agent_id, sender_id, chat_id, exception_type, exception_message,
+  exception_available}`, metadata `{fallback_text_len, publish_completion}`
+  (`:141-173`).
+- Строка WARNING при сбое публикации или записи (`:116`, `:175`).
+
+## State
+
+Долговременного состояния нет. Экземпляр `FallbackTurnDelivery` несёт на
+себе поля класса `_fallback_text`, `_log_to_db`, `_db_logging_service`,
+`_agent_id` (`:70-73`), проставленные фабрикой в `_adopt` (`:216-222`).
+
+## Dependencies
+
+- `nanobot.agent.turn_delivery.TurnDelivery`, `TurnDeliveryFactory` —
+  базовые классы; недоступность переводит флаг `UPSTREAM_AVAILABLE`
+  (`:34`, `:246`);
+- `nanobot.bus.events.OutboundMessage` — лениво, внутри публикации (`:104`);
+- `lib.services.db_logging_service.LogEvent`, `try_log_event` — лениво
+  (`:124`), producer `"turn_delivery_factory"`;
+- `lib/core/agent_factory.py:144`, `:264-271` — единственный вызывающий.
+
+## Configuration
+
+`config.json` → `gateway.error_messages` (`lib/core/project_settings.py:104-131`):
+
+- `internal_error` — текст вместо upstream-строки; модель допускает
+  `None` и отдаёт дефолт;
+- `log_to_db` — писать ли `agent.failed` в журнал; по умолчанию `True`.
+
+Валидация значения в коде: не строка или строка из одних пробелов →
+`DEFAULT_INTERNAL_ERROR_TEXT` (`lib/services/turn_delivery_factory.py:256-259`),
+иначе пользователь получил бы сообщение, читающееся как «агент молчит».
+Не-`bool` в `log_to_db` → `DEFAULT_LOG_TO_DB` (`:264-265`).
+
+## Lifecycle
+
+1. `AgentFactory.create` вызывает `build_turn_delivery_factory(bus, settings=…, db_logging_service=…, agent_id=…)`
+   (`lib/core/agent_factory.py:264-269`).
+2. При `UPSTREAM_AVAILABLE is False` возвращается `None`, и `AgentLoop`
+   собирает фабрику сам — пользователь увидит upstream-текст, как и до
+   переноса (`lib/services/turn_delivery_factory.py:241-251`).
+3. Иначе `kwargs["turn_delivery_factory"]` передаётся в
+   `AgentLoop.from_config` (`lib/core/agent_factory.py:270-271`, `:279`).
+4. `create`/`unrouted` вызываются через `super()`, и подменяется только
+   класс уже собранного экземпляра (`lib/services/turn_delivery_factory.py:213-217`).
+5. При исключении в `_process_message` вызывается `fail(*, publish_completion=…)`.
+
+## Data Ownership
+
+Ответ пользователю — не данные подсистемы, а текст настройки. Детали
+исключения уходят в журнал и в payload; traceback пользователю не
+передаётся. В `metadata` публикации попадает только
+`fallback_text_len` — длина, а не сам текст настройки
+(`lib/services/turn_delivery_factory.py:166`).
+
+## Error Behavior
+
+- Сбой публикации fallback не роняет оборот: исключение гасится с
+  WARNING (`:106-116`).
+- Сбой записи в журнал fail-open: обёрнуто в `try/except` с WARNING
+  (`:174-175`).
+- Вне активного `except` (юнит-тест) `sys.exception()` вернёт `None`, и это
+  отражено флагом `exception_available`, а не выдуманным текстом (`:126-130`,
+  `:163`).
+- Недоступность upstream-модуля — WARNING и `None`, а не падение старта
+  (`:246-251`).
+
+## Invariants
+
+- Ровно одна публикация outbound на отказ: `super().fail()` **не**
+  вызывается — он опубликовал бы второй, upstream-текст (`:78-79`).
+- `factory.bus is bus`: идентичность шины сохраняется, потому что объект
+  тот же, что пришёл в конструктор (`:194-196`).
+- Класс подменяется у уже собранного экземпляра, поэтому конструктор
+  `FallbackTurnDelivery` не переопределяется, а поля проставляются после
+  подмены (`:61-67`, `:216-222`).
+- Маршрутизация остаётся upstream: `create`/`unrouted` вызываются через
+  `super()` (`:209-214`).
+- Путь один — публичная точка расширения, а не патч: забытый при сборке
+  путь показал бы пользователю upstream-литерал
+  (`lib/core/agent_factory.py:259-263`).
+
+## Forbidden Behavior
+
+- Вызывать `super().fail()` из `FallbackTurnDelivery.fail` — пользователь
+  получит два ответа (`lib/services/turn_delivery_factory.py:78-79`).
+- Публиковать `content="Sorry, I encountered an error."` из этого пути.
+- Передавать в `OutboundMessage` текст traceback'а или иные внутренние
+  детали: пользователю отдаётся текст настройки без деталей.
+- Подставлять `fallback` при `publish_completion=False` иначе, чем одна
+  публикация: оборот должен закрыться этой публикацией.
+- Пробельный `internal_error` считать валидным текстом (`:256-259`).
+- Добавлять параллельный патч-путь отказа: это возвращает двойную
+  публикацию, ради устранения которой подсистема и вынесена в фабрику
+  (`:15-19`, комментарий модуля).
+
+## Consumers
+
+- `lib/core/agent_factory.py:264-271` — единственный вызывающий; результат
+  идёт в `AgentLoop.from_config` (`:279`).
+- `nanobot.agent.loop.AgentLoop` — потребитель фабрики: сам создаёт
+  `TurnDelivery` и зовёт `fail` при исключении.
+- Оператор — по событию `agent.failed` в `agent_gateway_logs` и по
+  сообщению в чате.
+
+## Implementation
+
+Существующие на диске пути:
+
+- `lib/services/turn_delivery_factory.py` — вся подсистема: дефолты, класс
+  delivery, фабрика, сборка из конфигурации;
+- `lib/core/agent_factory.py` — подключение фабрики к `AgentLoop`;
+- `lib/core/project_settings.py` — модель `ErrorMessagesSettings`;
+- `lib/services/db_logging_service.py` — `LogEvent` и `try_log_event`.
+
+## Verification
+
+- `tests/test_turn_delivery_factory.py` — текст ответа, отсутствие второго
+  `super().fail()`, запись `agent.failed`, fail-open публикации и записи.

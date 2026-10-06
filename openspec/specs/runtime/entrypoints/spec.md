@@ -823,3 +823,197 @@ MUST NOT считаться отказом. Выход SHALL быть явным
 (`SubprocessManager.spawn_streamlit`, `streamlit_app.py`) в таблице composition
 не стояли, но упоминались в `Purpose` прежней редакции; запрет на Streamlit
 сохранён как требование, каналов транспорта остался один — PostgreSQL.
+
+## Responsibility
+
+Контракт двух точек входа в систему — `gateway.py` и `cli_agent.py` — поверх
+единого composition root `lib/core/application_context.py::ApplicationContext`.
+Различие между входами сведено к `role` и опциональным CLI-флагам; всё
+остальное собирается одним и тем же кодом.
+
+## Boundary
+
+- **Внутри:** разбор argv, вызов `ApplicationContext.create`, порядок
+  подъёма обязательных зависимостей, код возврата, shutdown.
+- **Снаружи:** сбор сервисов — `ApplicationContext`; поведение AgentLoop —
+  `runtime/agent-loop`; логика каналов и cron; рендер REPL —
+  `runtime/operator-console`. Entrypoint не знает про устройство capability
+  платформы, кроме имён проб в сводке здоровья.
+
+## Public Contract
+
+`ApplicationContext.create(script_dir, workspace_dir, *, role: Literal["gateway", "cli"], storage_override=None, session_override=None, **kwargs)`
+(`lib/core/application_context.py:248-257`).
+
+- `role` — keyword-only и обязательный; им определяется composition
+  инфраструктуры (`ctx.role = role`, `:310`), например `CronService` только
+  при `role == "gateway"` (`:427`).
+- Deprecated compatibility boundary в `**kwargs`: `enable_db_logging`,
+  `enable_audit`, `enable_cron`, `print_llm_calls` — принимаются с
+  `DeprecationWarning` и применяются как override над `SETTINGS["gateway"].*`
+  (`:270-279`).
+- `profile` **не** принимается: определён ДО вызова и читается из
+  `SETTINGS["profile"]`; передача `profile=` даёт `TypeError` (`:281-283`).
+- Gateway: `main` (`gateway.py:882`), `_entrypoint_main` (`:105`).
+- CLI: `main` (`cli_agent.py:494`), `_entrypoint_main` (`:110`), ветви
+  `_run_vanilla` (`:158`) и `_run_patched` (`:163`), `CliStartupError`
+  (`:32`).
+- Обязательная зависимость поднимается рукопожатием на старте:
+  `_connect_enterprise_mcp(ctx)` (`gateway.py:210`, `cli_agent.py:324`),
+  `_connect_mcp_provider(ctx)` (`gateway.py:275`, `cli_agent.py:286`).
+
+## Inputs
+
+- `argv` — разбирается `_parse_args` (`gateway.py:39`, `cli_agent.py:54`).
+- `script_dir` и `workspace_dir` — корень проекта и корень workspace;
+  `script_dir_for_runtime()` есть у обоих входов (`gateway.py:675`,
+  `cli_agent.py:479`).
+- `config.json` через `SETTINGS` — отсюда профиль, транспорт, параметры
+  платформы.
+- CLI-only: `storage_override`, `session_override`.
+
+## Outputs
+
+- Код возврата `main()` (`gateway.py:882`, `cli_agent.py:494`).
+- Вердикт и сводка по capability на старте:
+  `_report_enterprise_mcp_health` (`gateway.py:339`).
+- CLI: строки REPL через `_run_cli_repl` (`cli_agent.py:207`).
+
+## State
+
+Entrypoint-специфичного состояния нет: оба только собирают контекст и
+передают владение `ApplicationContext`. Локальные переменные живут в рамках
+одного процесса; долговременное состояние принадлежит сервисам контекста
+(`ctx.shutdown` — `ShutdownCoordinator`,
+`lib/core/application_context.py:244`; `ctx.runtime_events_subscriber` —
+`:245`).
+
+## Dependencies
+
+- `lib/core/application_context.py` — composition root;
+- `lib/lifecycle/gateway_runner.py` — перезапуск gateway с backoff;
+- `lib/lifecycle/shutdown_coordinator.py` — порядок остановки;
+- `lib/services/enterprise_mcp_client.py` — stdio-сессия к платформе;
+- `lib/services/mcp_provider.py` — модельная поверхность операций;
+- `lib/services/operator_console.py` — печать вердиктов и глубина вывода;
+- `lib/cli/console_loop.py` — REPL CLI.
+
+## Configuration
+
+- Профиль (`SETTINGS["profile"]`) — **не** аргумент `create`: он прочитан до
+  вызова (`lib/core/application_context.py:281-283`). Production-входы не
+  передают его в composition root.
+- CLI-специфичные runtime-параметры: режим хранилища и имя сессии
+  (`storage_override`, `session_override`).
+- Блок платформы объявляет себя сам: клиент добавляет `--profile <имя>`
+  только для не-`prod`; ни путь снимка, ни имена таблиц журнала в argv не
+  едут.
+- `gateway.error_messages` / `gateway.repeat_guard` — блоки, которые читает
+  контекст (`lib/core/project_settings.py:183`, `:189`).
+
+## Lifecycle
+
+1. `main` разбирает argv и зовёт `_entrypoint_main`
+   (`gateway.py:105`, `cli_agent.py:110`).
+2. `_create_cli_context` (`cli_agent.py:181`) или аналог в gateway собирает
+   контекст через `create(..., role=...)`.
+3. Подъём обязательной платформы — рукопожатием, до старта каналов и до
+   работы агента: `_connect_enterprise_mcp(ctx)`
+   (`gateway.py:210`; в CLI вызывается первым шагом в живом loop —
+   `cli_agent.py:324`). Причина неудачи печатается **до** `raise`.
+4. Сводка по capability и сверка таблиц профиля:
+   `_report_enterprise_mcp_health` (`gateway.py:339`),
+   `_verify_platform_table_alignment` (`:426`), в CLI —
+   `_verify_platform_tables` (`cli_agent.py:419`).
+5. Подсистемы шлюза, которым нужен клиент платформы, собираются после
+   него; `_run` (`gateway.py:564`) стартует каналы.
+6. Проверка WebSocket-порта — server-only: `_check_websocket_port_available`
+   вызывается только из gateway (`gateway.py:183`, определение `:775`).
+7. Shutdown: `await ctx.agent.aclose()` (`gateway.py:639`),
+   `await ctx.enterprise_mcp.aclose()` (`gateway.py:669`).
+
+## Data Ownership
+
+Entrypoint не владеет данными: ни таблиц, ни файлов, ни снимка. Всё долговременное
+принадлежит сервисам, которые собрал `ApplicationContext`; локальный путь
+конфигурации определяется при разборе argv и передаётся вниз, а не
+записывается.
+
+## Error Behavior
+
+- Отказ подъёма обязательной зависимости — отказ запуска, а не тихая
+  деградация: причина печатается до `raise`, иначе `GatewayRunner`
+  сообщил бы только «Gateway exited unexpectedly, restarting in 1.0s», и
+  причину в логе было бы не найти.
+- Неудачная проба capability не роняет старт: платформа отвечает,
+  неполнота одного capability разбирается отдельно.
+- Расхождение имён таблиц профиля — `ConfigurationError`: оверлей объявлен
+  в двух файлах, и заметить его можно только по содержимому
+  (`gateway.py:426`).
+- `CliStartupError` (`cli_agent.py:32`) — отказ интерактивного входа.
+- Код возврата `main()` не равен нулю при отказе.
+
+## Invariants
+
+- Сигнатура `create` одна для обоих входов; различие только в `role` и
+  опциональных CLI-флагах.
+- `AgentLoop` transport-agnostic: транспорт (in-memory bus в CLI,
+  `PostgresChannel` в gateway) живёт ниже AgentLoop, не в нём.
+- `role` определяет composition инфраструктуры, а не поведение AgentLoop
+  (`lib/core/application_context.py:263-267`).
+- Порядок касается **старта** каналов, а не их конструирования: конструирование
+  допустимо раньше, подъём — нет.
+- Проба платформы не имеет побочных эффектов и не нагружает базу.
+- Проверка WebSocket-порта не выполняется в CLI-ветке.
+
+## Forbidden Behavior
+
+- Передавать `profile=` в `ApplicationContext.create` — `TypeError`
+  (`lib/core/application_context.py:281-283`); профиль читается из
+  `SETTINGS["profile"]` до вызова.
+- Тихо переживать неудачу подъёма платформы и продолжать работу.
+- Запускать `AgentLoop` до рукопожатия с платформой.
+- Тянуть transport в `AgentLoop`.
+- Включать `CronService` при `role == "cli"` (`lib/core/application_context.py:427`).
+- Вызывать проверку WebSocket-порта из CLI-ветки.
+- Поднимать Streamlit или `RedisChannel` в runtime-коде.
+- Вычислять путь снимка или имена таблиц журнала в агенте: это объявления
+  платформы.
+
+## Consumers
+
+- `lib/core/application_context.py` — composition root, вызывается обоими
+  входами.
+- `lib/lifecycle/gateway_runner.py` — перезапуск процесса gateway с backoff
+  и передача причины в лог.
+- Оператор — по вердикту и сводке на старте (`gateway.py:339`), по строке
+  профиля и по коду возврата.
+- `tests/test_gateway_enterprise_mcp_startup.py` — отдельный страж порядка
+  рукопожатия в CLI.
+
+## Implementation
+
+Существующие на диске пути:
+
+- `./gateway.py` — вход шлюза: разбор argv, рукопожатие, сводка здоровья,
+  сверка таблиц, старт каналов, shutdown;
+- `./cli_agent.py` — вход CLI: те же стадии в живом loop, затем REPL;
+- `lib/core/application_context.py` — `ApplicationContext.create`;
+- `lib/lifecycle/gateway_runner.py` — перезапуск с backoff;
+- `lib/lifecycle/shutdown_coordinator.py` — порядок остановки;
+- `lib/services/enterprise_mcp_client.py` — stdio-сессия к платформе;
+- `lib/services/mcp_provider.py` — модельная поверхность операций;
+- `lib/cli/console_loop.py` — REPL;
+- `lib/services/operator_console.py` — печать вердиктов.
+
+## Verification
+
+- `tests/test_gateway.py` — gateway-путь;
+- `tests/test_gateway_runner.py` — перезапуск и причины;
+- `tests/test_gateway_enterprise_mcp_startup.py` — рукопожатие на старте и
+  порядок в CLI;
+- `tests/test_cli_agent.py` — CLI-путь;
+- `tests/test_cli_agent_profile.py` — профиль не передаётся в composition root;
+- `tests/test_gateway_entrypoint_schema_validation.py` — валидация схемы
+  на старте;
+- `tests/test_application_context.py` — сборка контекста и роль.

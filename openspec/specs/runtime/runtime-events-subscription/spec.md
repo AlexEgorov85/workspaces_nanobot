@@ -136,3 +136,185 @@ MUST ДОЛЖЕН быть идемпотентным. Это требовани
   (он подписан на `TurnRuntimeAdmitted`, не на `ContextCompactionEvent`).
 - **AND** `postgres_channel.send` по-прежнему зовёт
   `compaction_event_subscriber.feed(msg)` для compaction-событий.
+
+## Responsibility
+
+Единая точка подписки на runtime-события шины: регистрация обработчиков,
+перенос личности оборота на его событие и запись `agent.completed` в журнал.
+Владелец — `lib/services/runtime_events_subscriber.py`; подписка начинается
+в `ApplicationContext.start` и снимается в остановке
+(`lib/core/application_context.py:774`, `:779`, `:901`).
+
+## Boundary
+
+- **Внутри:** подписка/отписка, захват личности оборота, запись
+  `agent.completed`, seed лимита окна в мост.
+- **Снаружи:** публикация событий — `RuntimeEventPublisher`; мост окна и его
+  словарь — `lib/hooks/database_logging_hook.py`; запись в БД —
+  `DbLoggingService`; владение личностью оборота — `TurnIdentityStore`
+  рантайма.
+
+## Public Contract
+
+- `RuntimeEventsSubscriber(bus, db_logging_service=None, turn_identities=None)`
+  (`lib/services/runtime_events_subscriber.py:150-155`).
+- `start()` (`:274`) — регистрирует подписки и включает публикацию subagent;
+  `stop()` (`:315`) — дерегистрирует в LIFO и чистит снимки личности.
+- Обработчики: `_handle_turn_runtime_admitted` (`:339`),
+  `_handle_turn_completed` (`:366`), `_handle_subagent_turn_completed`.
+- `unidentified_turn_events() -> int` (`:174-181`) — счётчик событий, ушедших
+  без полной личности.
+- Модулевые переключатели subagent-публикации:
+  `_set_subagent_default_bus` (`:101`), `_set_subagent_subscriber_registered`
+  (`:122`).
+- `__all__ = ["RuntimeEventsSubscriber"]` (`:533`).
+
+## Inputs
+
+- `bus` — `MessageBus`; подписка идёт через `bus.subscribe(handler, EventType)`
+  (`:291-299`).
+- Типы событий: `TurnRuntimeAdmitted`, `TurnCompleted`,
+  `SubagentTurnCompleted`.
+- `event.context.session_key` (str), `event.runtime.context_window_tokens` (int),
+  `event.runtime.model` (str) (`:351-357`).
+- `db_logging_service` — `DbLoggingService` или `None`;
+  `turn_identities` — `TurnIdentityStore` или `None`.
+
+## Outputs
+
+- Seed окна в мост: `seed_context_window(session_key, limit=int(limit), model=str(model))`
+  (`:357`).
+- `LogEvent(event_type="agent.completed")` в `agent_gateway_logs` с метриками
+  оборота: latency, outcome, failure_kind, usage_tokens, runtime_model
+  (`:366-373`).
+- Событие завершения subagent-оборота.
+- WARNING при неудачном seed (`:359-364`), при отсутствии журнала
+  (`:204-208`), при неудачной отписке (`:325-328`).
+
+## State
+
+`_turn_identities_seen: dict[session_key, _TurnIdentity]` под
+`threading.Lock` (`lib/services/runtime_events_subscriber.py:168-169`) —
+копия снимка личности, а не сам снимок: снимок остаётся финальной доставке
+ответа. Плюс счётчик `_unidentified_turn_events` (`:172`) и список
+`_unsubscribers` (`:162`). Снимки не переживают остановку — `stop()`
+очищает словарь (`:336-337`).
+
+## Dependencies
+
+- `nanobot.bus.queue.MessageBus.subscribe` / `unsubscribe` (`:291-324`);
+- типы событий рантайма nanobot;
+- `lib.hooks.database_logging_hook.seed_context_window`
+  (`lib/hooks/database_logging_hook.py:82`) — мост окна, общий словарь
+  `_CONTEXT_BRIDGE` под локом (`:78-79`);
+- `lib.events.subagent` — событие и публикация subagent-оборотов;
+- `lib.services.db_logging_service` — журнал;
+- `lib/core/application_context.py:771-787` — сборка и старт.
+
+## Configuration
+
+Отдельной секции настроек нет. Настройками здесь служат состав
+экземпляра (`db_logging_service`, `turn_identities`) и то, какие события
+объявлены в `_unsubscribers` при `start()`. Уровни журнала и глубина вывода
+приходят из своих подсистем, а не отсюда.
+
+## Lifecycle
+
+1. `ApplicationContext` создаёт подписчик и зовёт `start()`
+   (`lib/core/application_context.py:774`, `:779`); неудача старта
+   логируется, а не роняет контекст (`:782-787`).
+2. `start()` подписывает три обработчика (`:291-299`), передаёт шину
+   subagent-публикации (`:304`) и выставляет флаг «подписчик активен»
+   (`:308`).
+3. Повторный `start()` без `stop()` — no-op с WARNING, дублирующая подписка
+   не создаётся (`:285-290`).
+4. `stop()` дерегистрирует в LIFO (`:321-328`), снимает флаг subagent
+   (`:332`) и чистит снимки личности (`:336-337`).
+5. Порядок остановки: `stop()` подписчика — **после** `drain()` шины, чтобы
+   in-flight обработчики корректно дерегистрировались
+   (`lib/services/runtime_events_subscriber.py:317-319`,
+   `lib/core/application_context.py:897-901`).
+
+## Data Ownership
+
+Мост окна принадлежит хуку журнала: `_CONTEXT_BRIDGE` и его функции
+(`lib/hooks/database_logging_hook.py:78-176`). Подписчик его только наполняет
+и кладёт личность на событие — он не владеет ни словарём окна, ни снимком
+личности (`lib/services/runtime_events_subscriber.py:166-168`). Запись
+принадлежит журналу; уникальные поля события (`user_id`, `request_id`)
+переносятся, а не выдумываются.
+
+## Error Behavior
+
+- Исключение от `seed_context_window` поглощается с WARNING и traceback в
+  loguru; наружу не пробрасывается
+  (`lib/services/runtime_events_subscriber.py:359-364`).
+- Пустой `session_key` — выход без записи и без побочных эффектов (`:352-353`).
+- `db_logging_service is None` на `TurnCompleted` — тихий выход (`:387-388`);
+  на захвате личности вместо этого WARNING с объяснением: молчащий ранний
+  выход глушил бы объяснения остальных проверок (`:199-209`).
+- Неудачная отписка не прерывает остановку: WARNING и продолжение цикла
+  (`:325-328`).
+- Отсутствие личности не выдумывается: событие всё равно уходит в очередь,
+  потеря становится видимой через WARNING и рост
+  `unidentified_turn_events` (`:380-385`).
+
+## Invariants
+
+- `seed_context_window` вызывается **до** любых других побочных эффектов
+  (`:357-358`).
+- Подписка ровно одна на каждое событие: повторный `start()` без `stop()`
+  ничего не добавляет (`:285-290`).
+- Флаг «подписчик активен» поднимается вместе с подписками и снимается в
+  `stop()`, иначе были бы дубли: и handler пишет через pub-sub, и `_finalize`
+  пишет напрямую (`:305-308`, `:329-332`).
+- Переносится только непустой `sender_id`: подставленное значение записало бы
+  событие в чужую личность (`:192-196`).
+- `session_key` нормализуется обрезкой пробелов (`:351`).
+- Снимки личности не переживают `stop()` — следующий `start()` обслуживает
+  уже другие обороты (`:334-337`).
+
+## Forbidden Behavior
+
+- Пробрасывать исключение из обработчика события наружу.
+- Выдумывать `user_id`/`request_id`, когда снимка нет: транспорт всё равно
+  отбросил бы группу, но записал бы её под чужой личностью (`:382-385`).
+- Брать личность из contextvar задачи оборота: подписчик живёт в своей
+  задаче, контекст привязан к задаче оборота, поэтому такой источник
+  гарантированно слеп (`:219-220`).
+- Ходить за личностью в словарь журнала — журнал ею не владеет
+  (`:158-160`).
+- Подписываться дважды без `stop()`.
+- Останавливать подписчик **до** `MessageBus.drain()` (`:317-319`).
+- Молча выходить при `db_logging_service is None` в захвате личности: этот
+  случай неотличим от «личность не нашлась» (`:200-208`).
+
+## Consumers
+
+- `lib/core/application_context.py:771-787` — сборка и старт; `:897-901` —
+  остановка.
+- `lib/hooks/database_logging_hook.py:82` — приём seed'а окна.
+- `lib/events/subagent.py` — событие `SubagentTurnCompleted` и его публикация.
+- `nanobot.bus.queue.MessageBus` — источник событий и место отписки.
+- Оператор — по `agent.completed` в `agent_gateway_logs` и по ненулевому
+  `unidentified_turn_events`.
+
+## Implementation
+
+Существующие на диске пути:
+
+- `lib/services/runtime_events_subscriber.py` — подписка, личность оборота,
+  запись `agent.completed`;
+- `lib/hooks/database_logging_hook.py` — мост `_CONTEXT_BRIDGE`,
+  `seed_context_window` (`:82`), чтение и снятие записи;
+- `lib/events/subagent.py` — событие и публикация subagent-оборотов;
+- `lib/services/runtime_patcher.py` — патч `_SubagentHook`, чьи инстансы
+  автоматически получают шину;
+- `lib/core/application_context.py` — старт и остановка подписчика;
+- `lib/services/db_logging_service.py` — запись в журнал.
+
+## Verification
+
+- `tests/test_runtime_events_subscriber.py` — подписка, отписка, seed, личность
+  оборота, счётчик неопознанных событий;
+- `tests/test_turn_identity.py` — владение и перенос личности оборота.

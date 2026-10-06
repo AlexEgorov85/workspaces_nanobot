@@ -449,3 +449,191 @@ consistency, не строгий момент публикации). Прямо�
   `SELECT * FROM agent_gateway_logs WHERE event_type IN ('tool_repeat_blocked', 'tool_repeat_warned') ORDER BY created_at DESC LIMIT 50`
 - **THEN** возвращаются записи срабатываний с указанием инструмента,
   режима, attempt и параметров окна
+
+## Responsibility
+
+Детект вырожденного цикла «модель зовёт один и тот же инструмент с одними и
+теми же аргументами» внутри одного оборота и реакция по режиму. Владелец
+поведения — `RepeatGuardHook` (`lib/hooks/repeat_guard_hook.py:178`);
+владелец способа отказать в вызове — патч
+`RuntimePatcher.patch_repeat_guard_block` (`lib/services/runtime_patcher.py:1211`),
+потому что hook-API upstream не умеет «мягко» отклонить вызов.
+
+## Boundary
+
+- **Внутри:** окно последних вызовов оборота, канонизация аргументов,
+  подсчёт повторов, одно событие на crossing, режимы `warn`/`block`.
+- **Снаружи:** лимиты итераций upstream (`max_tool_iterations`,
+  `repeated_*_error`) — детектор их не заменяет и о них не знает; сбор и
+  подключение хука — `runtime/agent-hooks`; подстановка синтетического
+  результата — патч в `lib/services/runtime_patcher.py`.
+
+## Public Contract
+
+- `RepeatGuardHook(settings, db_logging_service=None)` — общий инстанс на
+  все обороты; состояние изолировано по `session_key`
+  (`lib/hooks/repeat_guard_hook.py:185-210`). `settings=None` трактуется как
+  `mode="off"`; `db_logging_service=None` отключает журнал, но не детект
+  (`:196`).
+- `RepeatGuardHook(reraise=True)` — обязательный режим: без него
+  `HookRegistry._for_each_hook_safe` проглотит отказ и режим `block`
+  станет no-op, который при этом выглядит работающим (`:198-201`).
+- `RepeatGuardBlocked(RuntimeError)` (`:154`) — единственный тип, который
+  перехватывает патч; несёт `context`, `tool_call`, `tool`, `params`.
+- Lifecycle-точки: `before_iteration` (сброс), `before_execute_tool`
+  (детект), `on_execute_tool_error` (no-op), `after_run` (чистка
+  fingerprints).
+
+## Inputs
+
+- `GatewayRepeatGuardSettings` — `mode`, `window_size`,
+  `max_repeats_in_window`, `exempt_tools`
+  (`lib/core/project_settings.py:253-256`), прочитанные в конструкторе
+  (`lib/hooks/repeat_guard_hook.py:202-208`).
+- Контекст вызова: `session_key` и `iteration` (`_bucket_key` `:215-217`,
+  `before_iteration` `:315`).
+- Вызов: `tool_call.name` и `tool_call.arguments`; при `arguments is None`
+  берётся `params` (`:333-335`).
+- `_MAX_TRACKED_SESSIONS = 512` — потолок одновременно отслеживаемых
+  сессий (`:72`).
+
+## Outputs
+
+- Ровно одно событие на crossing с `event_type="tool.suppressed"`
+  (`:384`), `level="WARN"` (`:278`), `actor="RepeatGuardHook"`, и payload
+  `{tool, fingerprint_hash, attempt, window_size, max_repeats_in_window, mode}`
+  (`:283-290`).
+- Строка `repeat-guard: N identical <tool> calls in last <W> iterations…`
+  в loguru уровнем WARNING (`:246-251`, `:389`).
+- В режиме `block` — `RepeatGuardBlocked` вместо выполнения вызова
+  (`:391-398`), перехватываемый патчем.
+
+## State
+
+`self._state: dict[session_key, bucket]` (`lib/hooks/repeat_guard_hook.py:210`),
+где bucket — `deque(maxlen=window_size)` последних пар `(tool_name, canonical)`,
+множество `published` fingerprint'ов и отметка `touched`
+(`:222-226`). Состояние персистентно между вызовами и обслуживает
+конкурентные обороты изолированно; потолок — 512 сессий с вытеснением по
+времени последнего касания (`:232-244`). Сброс окна — в
+`before_iteration` при `iteration == 0` (`:317`), то есть в начале нового
+оборота, а не нового `run`.
+
+## Dependencies
+
+- `nanobot.agent.AgentHook` — базовый класс (`lib/hooks/repeat_guard_hook.py:59`);
+- `lib.services.db_logging_service.try_log_event` + `LogEvent` — журнал,
+  импортируется лениво внутри `_publish` (`:270`);
+- `lib.services.runtime_patcher.py::patch_repeat_guard_block` — приём отказа;
+- `lib.core.agent_factory.py` — подключение инстанса (`:174-182`);
+- stdlib: `json`, `hashlib`, `deque`, `math`, `PurePath`.
+
+## Configuration
+
+Блок `gateway.repeat_guard` (`lib/core/project_settings.py:223-256`):
+
+- `mode`: `off` | `warn` | `block`, дефолт `off` (`:253`);
+- `window_size`: `ge=1, le=1000`, дефолт `20` (`:254`) — потолок памяти
+  на сессию;
+- `max_repeats_in_window`: `ge=2, le=100`, дефолт `3` (`:255`) — срабатывание
+  на N-м идентичном вызове, текущий считается;
+- `exempt_tools`: список имён; сопоставление точным равенством, шаблоны
+  запрещены валидатором (`:258-280`).
+
+В `config.json` блок по умолчанию не объявлен — деплой без правок ведёт себя
+как раньше.
+
+## Lifecycle
+
+1. Инстанс создаётся `AgentFactory` всегда, включая `mode="off"`
+   (`lib/core/agent_factory.py:174-182`), чтобы канонический список
+   `runtime_inventory` совпадал с фактом.
+2. На каждом обороте первая итерация (`iteration == 0`) сбрасывает bucket
+   сессии (`lib/hooks/repeat_guard_hook.py:305-317`).
+3. Каждый `before_execute_tool` дописывает пару в окно и считает вхождения
+   (`:350-355`).
+4. `after_run` вычищает из `published` fingerprints, выпавшие из окна
+   (`:411-421`) — состояние сессии при этом не удаляется, ключа в этом
+   контексте нет.
+
+## Data Ownership
+
+Детектор не владеет ничем долговременным: его буфер — оперативное состояние
+одного инстанса, освобождаемое вытеснением. Аргументы tool-вызовов не
+копируются в хранилище — в журнал уходит только 8-символьный
+`fingerprint_hash` (`:141-151`, `:285`).
+
+## Error Behavior
+
+- Отказ записи в журнал глотается с WARNING и не влияет на детект: контракт
+  producer'а — «enqueue + результат», а не гарантия появления в БД
+  (`lib/hooks/repeat_guard_hook.py:263-267`, `:295-301`).
+- Аргументы, которые не удалось привести к детерминированному виду
+  (`_SKIP`), вызов пропускают с DEBUG-записью, а не считают «не
+  повтором» (`:337-345`).
+- `db_logging_service=None` — штатный режим: детект работает, записи нет
+  (`:196`).
+- Патч `patch_repeat_guard_block` при изменившемся API upstream возвращает
+  `(False, причина)` и не применяется: режимы `off`/`warn` продолжают
+  работать, `block` деградирует до обрыва оборота — это громче отказа, но
+  не тише (`lib/services/runtime_patcher.py:1231-1235`).
+
+## Invariants
+
+- `mode == "off"` → выход до любых вычислений: ни сравнения, ни журнала
+  (`lib/hooks/repeat_guard_hook.py:313`, `:327`).
+- Один fingerprint публикует не более одного события за окно; повторный
+  `block` всё равно бросает исключение, но молча (`:360-371`).
+- Счётчик `count` уже включает текущий вызов, поэтому порог срабатывает
+  ровно на N-м совпадении — лишний `+1` сдвинул бы его на
+  `max_repeats - 1` (`:352-355`).
+- `after_run` не удаляет bucket сессии: `AgentRunHookContext` не несёт
+  `session_key`, адресная чистка там физически невозможна (`:411-418`).
+- Патч ловит только `RepeatGuardBlocked`; любая другая ошибка хука остаётся
+  видимой и не маскируется под отказ защитника
+  (`lib/services/runtime_patcher.py:1228-1229`).
+
+## Forbidden Behavior
+
+- Строить инстанс с `reraise=False` — блокировка станет молчаливым no-op.
+- Сбрасывать состояние в `before_run`: глобальный сброс стёр бы буфер
+  параллельных оборотов (`lib/hooks/repeat_guard_hook.py:37-43`).
+- Сравнивать аргументы как есть, без `sort_keys`: `{"b":2,"a":1}` и
+  `{"a":1,"b":2}` — это один вызов, а не два (`:119-122`).
+- Считать недетерминированный вызов «не повтором» — это спрятало бы
+  настоящий цикл (`:338-339`).
+- Публиковать новое событие на каждый последующий повтор сверх порога —
+  зациклившийся агент зальёт журнал (`:361-362`).
+- Ловить в патче исключение шире `RepeatGuardBlocked` (`:1228`).
+- Поддерживать glob/regex в `exempt_tools` — сопоставление только точное,
+  шаблоны отвергаются на старте (`lib/core/project_settings.py:261-279`).
+
+## Consumers
+
+- `lib/core/agent_factory.py:174-182` — создание и подключение.
+- `lib/services/runtime_patcher.py:1211` — приём отказа; патч заявлен в
+  `_PATCH_SPECS` как `repeat_guard_block`
+  (`lib/services/runtime_patcher.py:315`).
+- `lib/services/runtime_inventory.py:85-86` — `RepeatGuardHook` в
+  каноническом списке фреймворковых хуков.
+- Оператор — по событию `tool.suppressed` и строке WARNING в журнале.
+
+## Implementation
+
+Существующие на диске пути:
+
+- `lib/hooks/repeat_guard_hook.py` — хук, канонизация, детект;
+- `lib/services/runtime_patcher.py` — приём отказа
+  (`patch_repeat_guard_block`);
+- `lib/core/agent_factory.py` — подключение инстанса;
+- `lib/core/project_settings.py` — `GatewayRepeatGuardSettings`;
+- `lib/services/db_logging_service.py` — `try_log_event`, `LogEvent`;
+- `lib/services/runtime_inventory.py` — канонический список хуков.
+
+## Verification
+
+- `tests/test_repeat_guard_hook.py` — режимы, окно, канонизация,
+  исключение на блокировку;
+- `tests/test_runtime_patcher.py` — наложение патча `repeat_guard_block`,
+  синтетический результат при отказе;
+- `tests/test_runtime_inventory.py` — наличие хука в каноническом списке.

@@ -69,6 +69,60 @@ CacheProvider отвечает за:
 - `SearchResult` — результат vector search (content, score, source, table, pk_value, chunk, matched_chunks, row, signature_status, signature_reason)
 - `IndexIntegrityError` — векторный индекс не прошёл проверку signature (STALE/INVALID)
 
+## Inputs
+
+Разделы ниже описывают предмет **на стороне платформы**, куда он переехал
+(см. `## Scope`): он в активном переписывании изменениями
+`2026-10-04-close-cache-provider-canon-gap` и
+`2026-10-05-vector-indexes-canon-gap`. Пути, которые эти изменения снимают
+(агентские `gateway.cache.*`, `lib/services/cache_*`), здесь не утверждаются.
+
+Хранилище не создаётся само — его открывает единственная фабрика
+`open_snapshot_store(path, mode=READ_ONLY, *, schema="main", tables=None,
+vector_db_table="", index_accessor=None, verify=True)`
+(`libs/enterprise_data/snapshot/store.py`):
+
+- `path` — **путь к файлу**, а не каталог; разбирается
+  `resolve_snapshot_setting()` (`~` → домашний каталог). Пустое значение →
+  не ошибка: сервер отдаёт `UnavailableSnapshot`, и операции со снимком
+  отвечают `snapshot_unavailable`. NFS / SMB / сетевые ФС отвергаются
+  `reject_unsupported_filesystem` **до** открытия файла;
+- `mode` — `READ_ONLY` у читателя (обычное состояние процесса) и
+  `READ_WRITE` у стадии пересоздания снимка;
+- `vector_db_table` — `schema.table` векторного хранилища; без него векторных
+  чтений нет;
+- `index_accessor` — владелец FAISS-индексов (`libs/vectors`), а не сам
+  снимок; без него `search_vector` отказывает с кодом `index_not_built`;
+- `verify` — открыть файл сразу и проверить читаемость (fail-fast на старте).
+
+Данные на вход: SQL и параметры вызова, имя схемы и перечень таблиц для
+`get_schema`, аргументы векторного поиска (`query`, `index_name`, `top_k`,
+`threshold`) и порция записей для стадии загрузки (`upsert_records`,
+`replace_records`). Никаких путей, DSN и имён таблиц вызывающая сторона не
+присылает: путь приходит из `platform.json → data.snapshot_path`, состав
+таблиц объявляет capability `data`.
+
+## Outputs
+
+- `query_sql(sql, params)` → `{"status", "row_count", "columns", "rows"}` при
+  успехе и `{"status": "error", ..., "error"}` при ошибке запроса — ошибка
+  возвращается **значением**, чтобы отличать «запрос невалиден» от «снимок
+  недоступен» (второе — исключение);
+- `explain(sql)` → `{"valid": True, "plan": [...]}` либо
+  `{"valid": False, "error": ...}` — синтаксическая проверка без выполнения;
+- `get_schema(...)` → описание таблиц снимка;
+- `search_vector(...)` → список `SearchResult`;
+- `preload_indexes()` → список прогретых индексов; без `index_accessor` —
+  пустой список, и это значит «владелец не подключён», а не «индексов нет»;
+- `is_ready()` → признак готовности; `close()` — освобождение ресурсов;
+- при недоступном снимке — `UnavailableSnapshot`, чей код (`cache_busy`,
+  `cache_open_error`) доезжает до клиента без искажений.
+
+Метода `publish()` нет: снимка «для читателей» не существует, загрузчик пишет
+в файл напрямую. Наружу нормализованные словари и `SearchResult` — деталь
+модуля, за которой потребитель операций платформы не обязан следить: он
+работает с операциями capability `data`.
+
 ## Requirements
 
 ### Requirement: PostgreSQL — источник истины
@@ -369,6 +423,33 @@ CacheProvider хранит:
 - Все векторные индексы FAISS-backed.
 - Сигнатура индекса проверяется перед каждым использованием.
 
+## Data Ownership
+
+Владеет:
+
+- **файлом снимка DuckDB** — тем самым путём, который объявлен в
+  `platform.json → data.snapshot_path`. Путь объявляет платформа, агент его не
+  вычисляет и не присылает;
+- содержимым снимка в пределах стадии загрузки: `upsert_records` и
+  `replace_records` принадлежат загрузчику capability `data`, который и
+  является **единственным писателем** этого файла;
+- открытием файла на время вызова: соединение не удерживается между
+  операциями, а читать может только проверенное хранилище (`_is_ready`).
+
+Не владеет:
+
+- FAISS-индексами: они принадлежат capability `vectors`
+  (`libs/vectors`), а снимок получает к ним доступ только через
+  `VectorIndexAccessor`. «Прогрев индексов» в этом слое — делегация, а не
+  владение;
+- PostgreSQL: база остаётся источником истины, загрузка идёт отдельной
+  стадией, а файла снимка в базе не существует;
+- жизненным циклом снимка для читателей: атомарной публикации нет,
+  «снимок для читателей» не создаётся, и метод `publish()` отсутствует;
+- владением файлом между процессами и fencing-логикой — слой владения снят
+  (change `drop-local-cache-read-from-pg`): в системе один gateway, writer
+  один и известен заранее.
+
 ## Error Behavior
 
 - **NFS path**: fail fast при старте с явной ошибкой.
@@ -387,29 +468,83 @@ CacheProvider хранит:
 
 ## Implementation
 
-Основная реализация:
+Все пути ниже — от корня репозитория. Кластер локального кэша агента **снят**
+(change `drop-local-cache-read-from-pg`, фаза 5 миграции
+`enterprise-mcp-platform`, 2026-10-01), поэтому его файлы перечислены как
+**снятые**: ни одного из них в репозитории нет, а предмет живёт в capability
+`data` и `vectors` платформы.
 
-- `lib/services/cache_provider.py:CacheProvider` (ABC)
-- `lib/services/cache_provider_impl.py` — DuckDB + FAISS реализация интерфейса
-- `lib/services/duckdb_cache_store.py:DuckDbCacheStore`
-- `lib/services/pg_duckdb_sync_service.py:PgDuckDbSyncService`
-- `lib/services/vector_index_service.py:VectorIndexService`
+Снято в дереве агента, где предмет живёт теперь:
+
+- `lib/services/cache_provider.py` (`CacheProvider`, ABC) — **снят**; контракт
+  переехал на платформу:
+  `mcp-platform/libs/enterprise_data/snapshot/contracts.py:195` (`CacheProvider`),
+  там же `:285` (`CacheIngestion`) и `:358` (`CacheStore`);
+- `lib/services/cache_provider_impl.py` (общие помощники эмбеддингов и сигнатур,
+  а не реализация интерфейса) — **снят**; помощники живут в
+  `mcp-platform/libs/vectors/config.py:36` и
+  `mcp-platform/libs/vectors/signature.py:38`;
+- `lib/services/duckdb_cache_store.py` (`DuckDbCacheStore`) — **снят**;
+  реализация переехала в
+  `mcp-platform/libs/enterprise_data/snapshot/store.py:301`, где класс переименован
+  в `DuckDbSnapshotStore`, а фабрика открытия — `open_snapshot_store`
+  (`mcp-platform/libs/enterprise_data/snapshot/store.py:1414`); разбор пути —
+  `resolve_snapshot_path`
+  (`mcp-platform/libs/enterprise_data/snapshot/store.py:259`), отказ сетевой ФС
+  до открытия файла — `reject_unsupported_filesystem`
+  (`mcp-platform/libs/enterprise_data/snapshot/store.py:145`);
+- `lib/services/pg_duckdb_sync_service.py` (`PgDuckDbSyncService`) — **снят**;
+  загрузку снимка делает `mcp-platform/libs/enterprise_data/loader.py:149`
+  (`SnapshotLoadService`): разовая синхронная загрузка, единственный писатель
+  файла. Инкрементальный опрос, колбэки и периодический full-resync сняты вместе
+  с машинерией, а не перенесены;
+- `lib/services/vector_index_service.py` (`VectorIndexService`) — **снят**: FAISS-индексы
+  принадлежат capability `vectors` (`mcp-platform/libs/vectors/builder.py:239`,
+  `VectorBuilder`), а чтение их из снимка идёт через протокол
+  `VectorIndexAccessor` (`mcp-platform/libs/enterprise_data/snapshot/store.py:274`);
+- `lib/services/table_registry.py` (`TableRegistry`) — **снят**: состав снимка
+  объявляет платформа, `mcp-platform/platform.json → audit.tables`;
+- `lib/core/infra_registration.py` (`register_vector_storage`) — **снят**: состав
+  индексов объявляет `mcp-platform/platform.json → vectors.indexes`;
+- `tools/build_vectors.py` — **снят**: операция сборки индексов
+  `mcp-platform/servers/enterprise/build_index.py`, сборщик —
+  `mcp-platform/libs/vectors/builder.py:239`.
 
 Связанные компоненты:
 
-- `lib/services/table_registry.py:TableRegistry`
-- `lib/core/infra_registration.py:register_vector_storage`
-- `tools/build_vectors.py`
+- `mcp-platform/platform.json` — `data.snapshot_path` (путь файла снимка),
+  `audit.tables` (состав снимка), `vectors.indexes` (состав индексов)
 - `docs/ARCHITECTURE.md` — описание реализации
 - `docs/DATABASE.md` — слой данных и границы P0
 - `docs/VECTOR_INDEXES.md` — детали vector-инфраструктуры
 
 ## Verification
 
-Валидация включает:
+Все пути ниже — от корня репозитория. Стражи переехали вместе с предметом в
+`mcp-platform/tests/`, агентские тесты кэша сняты вместе с ним.
 
-1. Архитектурные тесты: проверка отсутствия прямого доступа к DuckDB/FAISS из Skills (`tests/test_core_infrastructure_independence.py`).
-2. Тесты синхронизации: проверка актуальности данных кэша (`tests/test_pg_duckdb_sync_service.py`).
-3. Тесты cache store: проверка контракта `DuckDbCacheStore` (`tests/test_duckdb_cache_store.py`).
-4. Code review: проверка отсутствия NFS paths в конфигурации.
-5. Тесты IndexIntegrityError: проверка контроля целостности индексов.
+1. Границы capability: файл снимка принадлежит capability `data`, индексы строит
+   и читает capability `vectors`
+   (`mcp-platform/tests/test_architecture_boundaries.py`). Это то, чем заменена
+   проверка «Skill не ходит в DuckDB/FAISS напрямую» — на стороне агента её
+   больше носить нечему.
+2. Контракт хранилища снимка: фабрика, `query_sql`, `explain`, `get_schema`,
+   векторные чтения (`mcp-platform/tests/test_snapshot_store.py`) — порт
+   `tests/test_duckdb_cache_store.py`, который снят.
+3. Разовая загрузка снимка, отказ вместо тишины и пересоздание файла
+   (`mcp-platform/tests/test_snapshot_load_service.py`,
+   `mcp-platform/tests/test_load_snapshot_entry.py`). `tests/test_pg_duckdb_sync_service.py`
+   снят вместе с инкрементальной синхронизацией, и покрытие удалено с машинерией,
+   а не перенесено.
+4. Контракт ABC и исключений снимка, включая `IndexIntegrityError`
+   (`mcp-platform/tests/test_snapshot_contracts.py`).
+5. Отказ сетевой ФС до открытия файла и правило «файл не удерживается между
+   операциями» (`mcp-platform/tests/test_snapshot_no_file_hold.py`). Путь снимка
+   в конфигурации объявляет платформа (`mcp-platform/platform.json → data.snapshot_path`);
+   ключа `gateway.cache.local_path` в дереве агента нет — ни в `./config.json`,
+   ни в `lib/`.
+6. В дереве агента: `lib/services` и `lib/utils` не импортируют skills, не ветвятся
+   по вызывающему и не хранят доменную схему по умолчанию
+   (`tests/test_core_infrastructure_independence.py`). После снятия локального
+   кэша этот страж про DuckDB и FAISS не проверяет ничего и не должен читаться
+   как их страж.

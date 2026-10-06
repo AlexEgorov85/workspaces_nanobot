@@ -44,6 +44,59 @@ Profile resolution предоставляет:
 - применение profile-specific overlays в документированном порядке
 - доступ к resolved profile через SETTINGS для infrastructure code
 
+## Inputs
+
+Профиль — обязательный явный аргумент, а не читаемая переменная:
+`resolve_application_config(profile)` → `_initialize_settings(profile)`
+(`config.py`), значение приходит из argv `--profile` у application entrypoint.
+Whitelist — ровно `{"prod", "test"}` (`config._SUPPORTED_PROFILES`);
+произвольное значение, включая `dev`/`staging`, отвергается.
+
+Порядок merge (поздний перекрывает ранний) — четыре источника:
+
+1. `config.json` — база: и настройки nanobot, и агентские секции; секция
+   `gateway.agent.*` поднимается в корень (`_lift_agent_sections`), неизвестная
+   секция внутри неё — `ConfigurationError`.
+2. `session_manager.json` — per-deploy override (пул, таймауты), читается
+   только при наличии файла; runtime-таблицы перетирать не может.
+3. `.secrets.env` — секреты для `${VAR}` и провайдерские `api_key`; плоские
+   значения экспортируются в `os.environ` через `setdefault`, то есть внешнее
+   окружение имеет приоритет.
+4. `profiles/<mode>.jsonc` — оверлей профиля, только при `mode != prod`; для
+   `test` отсутствие файла — `ConfigurationError`.
+
+Плюс окружение как вход резолва: `${ПЕРЕМЕННАЯ}` читается из `os.environ`, и
+туда же выводятся факты о запуске (`NANOBOT_PYTHON`, `NANOBOT_PROJECT_ROOT`,
+`NANOBOT_WORKSPACE`).
+
+`profiles/<mode>.jsonc` проверяется симметрично (`validate_profile_overlay`):
+все 5 profile-owned runtime-ключей обязаны присутствовать, посторонних быть не
+должно.
+
+## Outputs
+
+- `SETTINGS` — `_LazySettings` (mapping-proxy поверх `AttrDict`), единственная
+  публикация конфигурации; `SETTINGS["profile"]` — разрешённый профиль. До
+  инициализации обращение к `SETTINGS` бросает `ConfigurationError`: дефолтов
+  и module-level `SETTINGS = ...` нет.
+- Имена runtime-таблиц по роли — `runtime_table(role, profile)`; неизвестный
+  профиль или роль — `ConfigurationError`. Единственная функция в коде,
+  возвращающая имя таблицы: литералы в коде и тестах молча поедут мимо нового
+  имени.
+- Жёсткая сверка результата: `validate_runtime_isolation(cfg, mode)` требует
+  точного соответствия таблиц профилю, иначе старт падает.
+- Экспорт для дочернего процесса платформы: `NANOBOT_ENTERPRISE_MCP_PROFILE`
+  (пустая строка — «флага нет», платформа читает её как `None` и берёт базовый
+  контур) и `NANOBOT_ENTERPRISE_MCP_AGENT_SETTINGS` (путь к файлу блока).
+  Присваиваются **без** `setdefault`, поэтому внешнее окружение их не
+  переопределяет, а `NANOBOT_PROFILE` не воскрешается.
+- Отказ — `ConfigurationError` на любое нарушение: неизвестный профиль,
+  посторонний или отсутствующий ключ оверлея, битый JSON, несоответствие
+  runtime-таблиц.
+
+Значения имён таблиц платформе **не** передаются: едет только имя контура,
+а оверлей имён применяет платформа (`platform.json → profiles.<имя>`).
+
 ## Requirements
 
 ### Requirement: Разрешение до инициализации runtime
@@ -560,6 +613,30 @@ Resolved profile хранится в SETTINGS как строка (`"prod"` ил
 - Ошибка разрешения профиля → fail fast, система не запускается
 - Неизвестный профиль → ошибка валидации конфигурации
 
+## Data Ownership
+
+Владеет:
+
+- разрешённой конфигурацией `SETTINGS` — одним слитым снимком, отданным
+  наружу только для чтения;
+- порядком применения оверлея, а из него — тем, что 5 profile-owned
+  runtime-ключей (`channels.postgres.{table_name,messages_table,meta_table}`,
+  `logging.db.{table_name,question_runs_table}`) после шага профиля становятся
+  неизменяемыми: оверлей идёт последним, поэтому даже prod-имена в
+  `session_manager.json` им не помешают.
+
+Не владеет:
+
+- исходными файлами: `config.json`, `profiles/<mode>.jsonc`, `.secrets.env` и
+  `session_manager.json` принадлежат оператору и правке через change; агент их
+  читает и ничего в них не сохраняет;
+- данными в PostgreSQL: агент выбирает контур и проверяет, что имена таблиц
+  соответствуют профилю, но ни схемы, ни содержимого не создаёт;
+- `os.environ` как хранилищем: сюда выводятся только факты о запуске, и
+  приоритет у внешнего окружения;
+- оверлеем имён таблиц на стороне платформы — он объявлен в
+  `mcp-platform/platform.json → profiles` и применяется там.
+
 ## Consumers
 
 - ConfigService — разрешение конфигурации
@@ -569,11 +646,18 @@ Resolved profile хранится в SETTINGS как строка (`"prod"` ил
 
 ## Implementation
 
+Пути ниже — от корня репозитория; `./` означает файл в его корне.
+
 Основная реализация:
-- `lib/services/config_service.py:ConfigService`
+- `./config.py:878` — `resolve_application_config()` (единственная точка входа),
+  `./config.py:292` — `_SUPPORTED_PROFILES` (whitelist `prod`/`test`),
+  `./config.py:756` — `validate_profile_overlay()`
+- `lib/services/config_service.py:26` — `ConfigService`
 
 Связанные компоненты:
-- `config.json` — определение профилей
+- `profiles/test.jsonc` — оверлей профиля `test` (для `prod` файл не читается);
+  сам профиль в файле не объявляется, он выбирается `--profile` у входа
+- `./config.json` — базовая конфигурация, к которой оверлей применяется
 - `docs/PROFILES.md` — описание реализации
 
 ## Verification

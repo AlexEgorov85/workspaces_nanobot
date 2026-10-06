@@ -69,6 +69,24 @@ Boundary предоставляет:
 - Skill **не вызывает** Tool; Tool выбирает и вызывает агент
 - shared infrastructure — **не** Tool-слой: наличие callable-функции в `lib/` не делает её Tool'ом
 
+## Inputs
+
+Неприменимо. Boundary — архитектурное правило, а не компонент: у него нет
+вызывающей стороны и нет рантайма, который передаёт ему что-то «извне».
+Материал, к которому правило применяется, перечислен не как вход, а как
+носители границы — см. `## Boundary` и `## Public Contract`; перечень
+проверяемых файлов — в `## Implementation`. Объявлять вход здесь означало бы
+либо выдумать потребителя, которого нет, либо продублировать `## Boundary`
+под другим заголовком.
+
+## Outputs
+
+Неприменимо. Правило не производит артефактов, не возвращает значений и не
+пишет в журнал: его наблюдаемый эффект — вердикт проверки (code review или
+CI), а не результат работы компонента. Что именно проверяется, объявлено в
+`## Requirements` и `## Invariants`; запрещённые варианты — в
+`## Forbidden Behavior`.
+
 ## Requirements
 
 ### Requirement: Skill layer содержит предметную логику
@@ -185,6 +203,16 @@ Tools **не** перечисляются в реестре `config.json`: он�
 3. **Вызов**: агент выбирает capability; Tool вызывается агентом, Skill работает через свои scripts и runtime interfaces — Skill не вызывает Tool
 4. **Обновление**: новые Skills/Tools добавляются через change в `config.json` / `workspace/tools/`
 
+## Data Ownership
+
+Неприменимо. Правило не владеет ни файлом, ни таблицей, ни записью. Владение
+каждым артефактом остаётся у своего домена — Skills в
+`workspace/skills/<name>/`, Tools в `workspace/tools/`, shared infrastructure
+в `lib/` — и объявлено в `## Boundary`. Нормативный текст правила хранится в
+этой спецификации, решения о переносе фиксируются в `PENDING-DELETIONS.md`;
+владение тем и другим здесь не заявляется, потому что правило только
+ссылается на них.
+
 ## State
 
 Отсутствует. Boundary является архитектурным правилом, не runtime состоянием.
@@ -211,12 +239,14 @@ Tools **не** перечисляются в реестре `config.json`: он�
 
 ## Implementation
 
+Пути ниже — от корня репозитория; `./` означает файл в его корне.
+
 Основная реализация:
 - `docs/skill-tool-architecture.md` — описание реализации
 - `docs/SKILL_AUTHORING.md` — руководство по authoring
 
 Связанные компоненты:
-- `config.json` — конфигурация skills
+- `./config.json` — конфигурация skills (`gateway.agent.skills`)
 - `workspace/skills/` — директория Skills
 - `workspace/tools/` — директория Tools (auto-discovery)
 - `lib/services/project_tool_loader.py` — регистрация project tools

@@ -46,6 +46,48 @@ ApplicationContext предоставляет:
 - детерминированный lifecycle (start/stop)
 - изоляцию от session state
 
+## Inputs
+
+`ApplicationContext.create(script_dir, workspace_dir, *, role, storage_override=None, session_override=None, **kwargs)`:
+
+- `script_dir` — корень проекта, где лежит `config.json`;
+- `workspace_dir` — корень workspace;
+- `role` — keyword-only, `Literal["gateway", "cli"]`; им определяется composition
+  инфраструктуры (`PostgresChannel` и `CronService` только в gateway);
+- `storage_override`, `session_override` — режим хранилища и имя сессии из
+  CLI;
+- `**kwargs` — граница совместимости: `enable_db_logging`, `enable_audit`,
+  `enable_cron`, `print_llm_calls` принимаются с `DeprecationWarning` и
+  применяются как override над `SETTINGS["gateway"].*`. Ключ вне этого набора,
+  включая `profile=`, — `TypeError`.
+
+Профиль входом не является: `create()` не выбирает и не принимает его, а
+читает уже разрешённый `config.SETTINGS["profile"]`. Обращение к
+неинициализированному proxy материализует `ConfigurationError` — это
+требование `_initialize_settings`, а не проверка самого контекста.
+
+## Outputs
+
+`create()` возвращает собранный `ApplicationContext` — dataclass без
+`__slots__`, поэтому потребитель может добавить атрибут экземпляра (так
+остались рабочими вызовы, присваивавшие снятые поля).
+
+Наружу отдаются ссылки на собранную инфраструктуру:
+
+- конфигурация: `config_service`, `config`, `settings`, `project_settings`,
+  `profile`;
+- шина и агент: `bus`, `agent`, `tool_audit_hook`, `hooks`, `hook_factories`;
+- инструменты: `tool_registry`, `mcp_provider`;
+- сессии и хранилище: `session_manager`, `storage_mode`, `session_mirror`,
+  `usage_store`;
+- журнал и наблюдение: `db_logging_service`, `runtime_health`,
+  `runtime_events_subscriber`, `turn_identities`;
+- сжатие контекста: `compaction_service`, `compaction_event_subscriber`;
+- клиент к платформе: `enterprise_mcp`.
+
+Отдельные выходы `start()` / `stop()` — приведение фоновых сервисов в
+рабочее состояние и обратно, а не значения.
+
 ## Requirements
 
 ### Requirement: Единый корень общей инфраструктуры
@@ -252,6 +294,30 @@ ApplicationContext хранит ссылки на:
 - Session state никогда не хранится в ApplicationContext
 - Lifecycle ordering детерминирован независимо от caller
 - Profile не влияет на бизнес-логику внутри ApplicationContext
+
+## Data Ownership
+
+Владеет:
+
+- **ссылками** на собранный граф инфраструктурных сервисов, а не их данными:
+  каждый сервис владеет своим состоянием сам, контекст удерживает лишь
+  владельца (см. `## State`);
+- порядком остановки: `start()` регистрирует фоновые сервисы в
+  `ShutdownCoordinator`, и `stop()` останавливает их через `shutdown_all()`,
+  поэтому последовательность задаёт контекст, а не каждый вызывающий;
+- каталогом хранилища использования LLM: при объявленном `sqlite_path`
+  родительский каталог создаётся в `create()`
+  (`sqlite_path.parent.mkdir(parents=True, exist_ok=True)`).
+
+Не владеет:
+
+- состоянием сессии, сообщениями разговора и состоянием на один вопрос —
+  это явная граница компонента (см. `## Boundary`);
+- разрешённой конфигурацией: `SETTINGS` публикует `config`, контекст её
+  только читает и прокидывает в сборку;
+- файлом снимка платформенной capability `data`: поля `cache_store`,
+  `cache_provider` и `cache_loader` сняты в фазе 5, и второй writer того же
+  файла означал бы, что снимок читают не оттуда, откуда его пишут.
 
 ## Error Behavior
 
