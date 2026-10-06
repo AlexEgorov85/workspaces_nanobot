@@ -115,7 +115,7 @@ class TestCompactionEventSubscriber:
 
 class TestNotifySessionCompactedPublicAPI:
     """Публичный API ``ContextCompactionService.notify_session_compacted``
-    пишет ``event_type=\"context_compacted\"`` в ``agent_gateway_logs``;
+    пишет ``event_type=\"agent.compacted\"`` в ``agent_gateway_logs``;
     history-notice в ``agent_conversation_messages`` — только для
     ``succeeded`` (при ``notify_in_history=True``).
     """

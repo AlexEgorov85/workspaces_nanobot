@@ -654,9 +654,20 @@ CLI, пустой вызов tool'а) всегда ``force=True``; только 
 в десятки тысяч. Fallback-значение идёт и в ``tokens_before``/``tokens_after``,
 и в заметку ``metadata.compact``.
 
-**Единый путь записи.** Ручной запуск зовёт `compact()`, авто —
-`record_external_compaction(...)`. Оба заканчиваются вызовом
-`ContextCompactionService._notify(report)`:
+**Два пути записи.** Ручной запуск зовёт `compact()`, который собирает
+замеры и заканчивается вызовом
+`ContextCompactionService._notify(report)`. Авто-сжатие приходит извне
+событием `ContextCompactionEvent`, его наблюдает
+`CompactionEventSubscriber.feed()`, и запись делает
+`notify_session_compacted(session_key, phase, compaction_id)`. Второй путь
+`_notify` **не** зовёт: событие не содержит замеров, поэтому он пишет
+`_record_event_log` напрямую и добавляет `_write_history_notice` только для
+фазы `succeeded` при `notify_in_history=True`. Общего у них только
+`event_type="agent.compacted"`.
+
+Метод `record_external_compaction`, который раньше стоял на этом месте,
+удалён: вызывающих у него не было ни одного, а его собственная документация
+утверждала обратное.
 
 ```python
 async def _notify(self, session_key, report):

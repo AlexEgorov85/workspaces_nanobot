@@ -632,60 +632,6 @@ class TestCompactContextToolRegistered:
 from pathlib import Path
 
 
-class TestRecordExternalCompaction:
-    """record_external_compaction — единый путь записи для ручного и авто-сжатия."""
-
-    @pytest.mark.asyncio
-    async def test_calls_write_history_notice(self):
-        agent = MagicMock()
-        agent.sessions = MagicMock()
-        svc = ContextCompactionService(agent, settings=_settings())
-        svc._write_history_notice = AsyncMock()
-        await svc.record_external_compaction(
-            session_key="postgres:1", mode="idle", summary="svodka",
-            archived_msgs=10, kept_msgs=20,
-            tokens_before=2000, tokens_after=800,
-        )
-        svc._write_history_notice.assert_awaited_once()
-        call = svc._write_history_notice.await_args
-        key, report = call.args
-        assert key == "postgres:1"
-        assert report["mode"] == "idle"
-        assert report["archived_msgs"] == 10
-        assert report["summary"] == "svodka"
-
-    @pytest.mark.asyncio
-    async def test_skips_zero_archived(self):
-        agent = MagicMock()
-        agent.sessions = MagicMock()
-        svc = ContextCompactionService(agent, settings=_settings())
-        svc._write_history_notice = AsyncMock()
-        await svc.record_external_compaction(
-            session_key="postgres:1", mode="token", summary="x",
-            archived_msgs=0, kept_msgs=5,
-            tokens_before=100, tokens_after=100,
-        )
-        svc._write_history_notice.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_record_external_still_emits_event_log_when_notify_disabled(self, monkeypatch):
-        """notify_in_history=False больше не глушит observability-trail."""
-        agent = MagicMock()
-        agent.sessions = MagicMock()
-        svc = ContextCompactionService(agent, settings=_settings(
-            enabled=True, notify_in_history=False,
-        ))
-        svc._write_history_notice = AsyncMock()
-        svc._record_event_log = AsyncMock()
-        await svc.record_external_compaction(
-            session_key="postgres:1", mode="idle", summary="x",
-            archived_msgs=10, kept_msgs=20,
-            tokens_before=2000, tokens_after=800,
-        )
-        svc._write_history_notice.assert_not_called()
-        svc._record_event_log.assert_awaited_once()
-
-
 class TestNotifyRecordsEventLog:
     """_notify пишет и в agent_conversation_messages, и в agent_gateway_logs.
 

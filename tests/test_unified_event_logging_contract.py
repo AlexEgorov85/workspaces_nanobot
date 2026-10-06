@@ -9,9 +9,11 @@
       + ``_record_event_log`` через ``try_log_event``);
     - ``notify_in_history=False`` → только ``_record_event_log`` (нет
       UI-уведомления);
-    - ``record_external_compaction`` при ``notify_in_history=False`` тоже
-      пишет в event log (закрывает design D8 — ``patch_compaction_tracking``
-      остаётся активным при выключенном UI-уведомлении).
+    - тот же инвариант для авто-сжатия закрыт на живом пути
+      ``notify_session_compacted`` в ``tests/test_compaction_event_subscriber.py``
+      (``test_notify_in_history_false_skips_history_notice``): метод
+      ``record_external_compaction`` удалён как не имеющий вызывающих, и его
+      тесты убраны вместе с ним.
 
 * ``TestDbLoggingServiceUnavailableBehavior`` — единый WARNING-уровень
   при недоступности ``DbLoggingService``:
@@ -224,34 +226,6 @@ class TestContextCompactionNotifyBehavior:
             "raw_dump": False,
         }
         await svc._notify("postgres:1", report)
-
-        svc._write_history_notice.assert_not_called()
-        svc._record_event_log.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_record_external_compaction_no_history_still_writes_event_log(self):
-        """``record_external_compaction`` при ``notify_in_history=False``
-        всё равно пишет ``_record_event_log`` — это закрывает design D8
-        (auto-compact patch остаётся активным при выключенном UI)."""
-        from lib.services.context_compaction import ContextCompactionService
-
-        agent = MagicMock()
-        agent.sessions = MagicMock()
-        svc = ContextCompactionService(
-            agent, settings=_settings(notify_in_history=False),
-        )
-        svc._write_history_notice = AsyncMock()
-        svc._record_event_log = AsyncMock()
-
-        await svc.record_external_compaction(
-            session_key="postgres:1",
-            mode="token",
-            summary="x",
-            archived_msgs=10,
-            kept_msgs=20,
-            tokens_before=2000,
-            tokens_after=800,
-        )
 
         svc._write_history_notice.assert_not_called()
         svc._record_event_log.assert_awaited_once()

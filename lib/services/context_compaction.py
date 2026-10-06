@@ -401,52 +401,6 @@ class ContextCompactionService:
                 session_key, exc,
             )
 
-    async def record_external_compaction(
-        self,
-        *,
-        session_key: str,
-        mode: str,
-        summary: str | None,
-        archived_msgs: int,
-        kept_msgs: int,
-        tokens_before: int,
-        tokens_after: int,
-    ) -> None:
-        """Записать факт сжатия, выполненного штатным кодом nanobot.
-
-        Вызывается из ``CompactionEventSubscriber.feed()`` по событию
-        ``ContextCompactionEvent`` на ``OutboundMessage``: после того как
-        нативный код сделал архивацию и сдвинул ``last_consolidated``,
-        обёртка собирает замеры и зовёт этот метод — он пишет заметку
-        в ``agent_conversation_messages`` ровно тем же кодом, что и
-        ручной ``compact()`` (общий ``_notify`` + ``_write_history_notice``).
-        Никакого двойного замера и отдельной ветки логирования.
-
-        Все три concerns (``_record_event_log``, ``_write_history_notice``,
-        ``print_to_terminal``) разруливаются внутри ``_notify``. Здесь
-        только подготовка ``report`` — ранний return при
-        ``notify_in_history=false`` удалён (раньше он гасил observability
-        даже при ``enabled=true``; теперь разделение concerns —
-        ответственность ``_notify``).
-        """
-        if not archived_msgs or archived_msgs <= 0:
-            return
-        report = {
-            "session_key": session_key,
-            "mode": mode,
-            "ok": True,
-            "archived_msgs": int(archived_msgs),
-            "kept_msgs": int(kept_msgs),
-            "tokens_before": int(tokens_before),
-            "tokens_after": int(tokens_after),
-            "summary": summary,
-            "raw_dump": bool(archived_msgs > 0 and not summary),
-        }
-        try:
-            await self._notify(session_key, report)
-        except Exception as exc:
-            logger.warning("Auto history notice for {} failed: {}", session_key, exc)
-
     async def notify_session_compacted(
         self,
         *,
@@ -463,11 +417,14 @@ class ContextCompactionService:
         subscriber из своего ``send``; CLI-gateway вызывает метод
         напрямую (минуя шину).
 
-        Фаза ``succeeded`` соответствует фактической архивации: пишется
-        ``event_type="agent.compacted"`` в ``agent_gateway_logs`` и
-        history-notice в ``agent_conversation_messages`` (через единый
-        ``_notify`` путь). Для прочих фаз — только ``agent_gateway_logs``
-        (observability-trail без UI-стикера).
+        Фаза ``succeeded`` соответствует фактической архивации. Событие
+        ``event_type="agent.compacted"`` пишется в ``agent_gateway_logs``
+        **при любой фазе и независимо от** ``notify_in_history``; заметка в
+        ``agent_conversation_messages`` добавляется только для ``succeeded``
+        и только при ``notify_in_history=True``. Обращения прямые —
+        ``_record_event_log`` и ``_write_history_notice``, а не через
+        ``_notify``: у upstream-события нет замеров, и собирать ``report``
+        для ``_notify`` тут не из чего.
 
         Параметры ``tokens_before``/``tokens_after``/``archived_msgs``
         неизвестны из upstream-события (содержит только ``compaction_id``
