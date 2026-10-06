@@ -1,2 +1,9 @@
 schema: spec-driven
 created: 2026-10-03
+# Требования этого change применены в канон напрямую при его заведении: нормативный
+# текст живёт в openspec/specs/runtime/platform-settings/spec.md — ровно 10 требований
+# и 20 сценариев, что совпадает с числами, заявленными в proposal.md:54 и :198, и
+# дополнено строкой реестра AgentSettingsBlock в openspec/specs/COMPONENTS.md.
+# Каталога specs/ у change нет и не было. Пустая дельта ради прохождения валидатора
+# создала бы ложное впечатление, что канон ждёт применения.
+skip_specs: true
