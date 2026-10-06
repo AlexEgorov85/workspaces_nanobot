@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Порядок работ: целостность спецификаций</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f7f5f0; --card:#ffffff; --line:#e9e3d6; --line-soft:#f0ebe0;
+    --ink:#14171e; --body:#3a4256; --muted:#7c7a72;
+    --accent:#2f6f5e; --accent-soft:rgba(47,111,94,.08);
+    --warn:#b06367; --warn-soft:rgba(176,99,103,.09);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--body);
+    font-family:'Outfit',sans-serif; font-size:16px; line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+    background:
+      radial-gradient(560px 320px at 12% -6%, rgba(47,111,94,.06), transparent 70%),
+      radial-gradient(520px 300px at 92% 4%, rgba(176,99,103,.05), transparent 70%);
+  }
+  .wrap{position:relative; z-index:1; max-width:1024px; margin:0 auto; padding:56px 24px 96px}
+  h1{font-family:'DM Serif Display',serif; font-weight:400; font-size:38px; line-height:1.18;
+     letter-spacing:-.005em; color:var(--ink); margin:0 0 14px}
+  .lede{font-size:18px; color:var(--body); margin:0 0 8px; max-width:70ch}
+  .hint{color:var(--muted); font-size:15px; margin:0}
+  h2{font-family:'DM Serif Display',serif; font-weight:400; font-size:25px; color:var(--ink);
+     margin:0 0 6px; letter-spacing:-.004em}
+  .sub{color:var(--muted); font-size:14.5px; margin:0 0 22px; max-width:72ch}
+  section{margin-top:56px}
+  .eyebrow{font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.10em;
+           text-transform:uppercase; color:var(--accent); margin:0 0 8px}
+
+  /* ---- цепочка волн ---- */
+  .chain{display:flex; align-items:stretch; gap:0; flex-wrap:wrap;
+         background:var(--card); border:1px solid var(--line); border-radius:16px;
+         padding:22px 18px; box-shadow:0 2px 8px rgba(0,0,0,.04)}
+  .node{display:flex; align-items:center; gap:10px; padding:0 6px}
+  .dot{flex:0 0 auto; width:30px; height:30px; border-radius:50%; background:var(--accent);
+       color:#fff; display:grid; place-items:center; font-size:13px; font-weight:600;
+       font-family:'JetBrains Mono',monospace}
+  .node.dim .dot{background:var(--line); color:var(--muted)}
+  .node.done .dot{background:var(--accent)}
+  .nlabel{font-size:13.5px; font-weight:500; color:var(--ink); white-space:nowrap}
+  .arrow{flex:0 0 auto; width:20px; height:2px; background:var(--line); position:relative; margin:0 2px}
+  .arrow::after{content:""; position:absolute; right:-1px; top:-3px; border-left:6px solid var(--line);
+                border-top:4px solid transparent; border-bottom:4px solid transparent}
+  .arrow.dash{background:repeating-linear-gradient(90deg,var(--line) 0 4px,transparent 4px 8px)}
+  .arrow.dash::after{border-left-color:var(--line)}
+
+  /* ---- таймлайн волн ---- */
+  .timeline{list-style:none; margin:0; padding:0; position:relative}
+  .timeline::before{content:""; position:absolute; left:15px; top:10px; bottom:26px; width:2px;
+                    background:linear-gradient(180deg,var(--accent),var(--line)); opacity:.45}
+  .wave{position:relative; padding:0 0 22px 46px}
+  .wave::before{content:""; position:absolute; left:6px; top:8px; width:20px; height:20px;
+                border-radius:50%; background:var(--card); border:2px solid var(--accent)}
+  .wave.pending::before{border-color:var(--line)}
+  .wave.done::before{background:var(--accent)}
+  .wave h3{margin:0 0 4px; font-size:17px; font-weight:600; color:var(--ink)}
+  .wave .where{font-family:'JetBrains Mono',monospace; font-size:12.5px; color:var(--muted);
+               margin:0 0 10px}
+  .kv{display:grid; grid-template-columns:132px 1fr; gap:6px 16px; margin:0}
+  .kv dt{color:var(--muted); font-size:13.5px}
+  .kv dd{margin:0; font-size:14.5px}
+  .exit{color:var(--accent); font-weight:500}
+
+  /* ---- таблица границ ---- */
+  table{width:100%; border-collapse:collapse; background:var(--card);
+        border:1px solid var(--line); border-radius:14px; overflow:hidden; font-size:14.5px}
+  th{text-align:left; font-weight:600; font-size:12px; letter-spacing:.08em; text-transform:uppercase;
+     color:var(--muted); padding:14px 18px; background:var(--bg); border-bottom:1px solid var(--line)}
+  td{padding:14px 18px; border-bottom:1px solid var(--line-soft); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.no{font-weight:500; color:var(--ink); width:38%}
+  td.why{color:var(--body)}
+
+  /* ---- бенчи ---- */
+  .panel{background:var(--card); border:1px solid var(--line); border-radius:16px;
+         padding:24px; box-shadow:0 2px 8px rgba(0,0,0,.04)}
+  .bench{display:grid; grid-template-columns:190px 1fr 92px; gap:14px; align-items:center; padding:9px 0}
+  .bench-label{font-size:14px; color:var(--ink)}
+  .bench-track{height:16px; background:var(--line-soft); border-radius:6px; overflow:hidden}
+  .bench-fill{height:100%; background:var(--accent); border-radius:6px}
+  .bench-fill.warn{background:var(--warn)}
+  .bench-val{font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--muted); text-align:right}
+  .note{margin:18px 0 0; padding:14px 16px; background:var(--warn-soft); border-radius:12px;
+        font-size:14px; color:var(--body)}
+  code{font-family:'JetBrains Mono',monospace; font-size:.92em; background:var(--line-soft);
+       padding:1px 6px; border-radius:5px; color:var(--ink)}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:24px}
+  @media(max-width:768px){
+    .wrap{padding:36px 18px 64px}
+    h1{font-size:29px} h2{font-size:21px}
+    .kv{grid-template-columns:1fr; gap:2px 0}
+    .kv dt{margin-top:8px}
+    .grid2{grid-template-columns:1fr}
+    .bench{grid-template-columns:1fr; gap:5px}
+    .bench-val{text-align:left}
+    td.no{width:auto}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">change 2026-10-06-spec-integrity</p>
+    <h1>Порядок работ: почему именно такой</h1>
+    <p class="lede">Семь волн. Каждая опирается только на уже сделанное, поэтому
+      ни один пункт не приходится переделывать. Задача циклическая — чтобы
+      проверить спеки, нужен валидатор, а чтобы написать валидатор, нужно знать
+      правила. Разрыв цикла — не в коде, а в том, что «правильно» определено
+      один раз.</p>
+    <p class="hint">Полный текст с обоснованиями — <code>openspec/changes/2026-10-06-spec-integrity/plan.md</code></p>
+  </header>
+
+  <section>
+    <p class="eyebrow">Цепочка</p>
+    <h2>Семь волн идут строго последовательно</h2>
+    <p class="sub">Стрелки сплошные — зависимость. Пункты 1 и 7 волны идут
+      вместе: починить валидатор и затем написать тесты невозможно, после починки
+      уже нечем доказать, что починка что-то изменила.</p>
+    <div class="chain">
+      <div class="node"><span class="dot">0</span><span class="nlabel">Норма</span></div>
+      <div class="arrow"></div>
+      <div class="node"><span class="dot">1</span><span class="nlabel">Измеритель</span></div>
+      <div class="arrow"></div>
+      <div class="node"><span class="dot">2</span><span class="nlabel">Решения</span></div>
+      <div class="arrow"></div>
+      <div class="node"><span class="dot">3</span><span class="nlabel">Спеки</span></div>
+      <div class="arrow"></div>
+      <div class="node"><span class="dot">4</span><span class="nlabel">Реестр</span></div>
+      <div class="arrow"></div>
+      <div class="node"><span class="dot">5</span><span class="nlabel">Домены</span></div>
+      <div class="arrow dash"></div>
+      <div class="node pending"><span class="dot">6</span><span class="nlabel">CI</span></div>
+    </div>
+    <p class="hint" style="margin-top:12px">Волна 6 отмечена пунктиром: включать
+      конвейер, пока дерево красное, — значит обесценить его до того, как он
+      заработает.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Подробности</p>
+    <h2>Предусловие и критерий выхода каждой волны</h2>
+    <p class="sub">Критерий выхода проверяем: это либо число, либо код возврата,
+      либо красная проба. Волна, критерий которой нельзя проверить, не считается
+      законченной.</p>
+    <ol class="timeline">
+      <li class="wave">
+        <h3>0. Норма — «что считается правильным», один раз</h3>
+        <p class="where">tasks.md §2</p>
+        <dl class="kv">
+          <dt>Предусловие</dt><dd>ничего, это первая волна</dd>
+          <dt>Что</dt><dd>свести три перечня разделов в один; внести <code>Scope</code>;
+            выбрать одно имя на раздел; решить, важен ли порядок разделов</dd>
+          <dt>Выход</dt><dd class="exit">код, <code>component-model</code> и
+            <code>component-spec-validation</code> отвечают на вопрос «какие
+            разделы обязательны» одинаково</dd>
+        </dl>
+      </li>
+      <li class="wave">
+        <h3>1. Измеритель — валидатор вместе со стражами</h3>
+        <p class="where">tasks.md §1 и §7 вместе</p>
+        <dl class="kv">
+          <dt>Предусловие</dt><dd>волна 0</dd>
+          <dt>Что</dt><dd>каждая правка валидатора приходит вместе с пробой,
+            которая на её отключение краснеет</dd>
+          <dt>Выход</dt><dd class="exit">каждый пункт §1 имеет пробу; набор проб
+            лежит в репозитории и запускается одной командой</dd>
+        </dl>
+        <p class="note">Побочный эффект нормален: после волны 1 дерево станет
+          красным. Красным станет ровно то, что уже нарушено — это инвентарь,
+          а не авария.</p>
+      </li>
+      <li class="wave">
+        <h3>2. Решения по предмету</h3>
+        <p class="where">tasks.md §3 · закрыты 3.2b, 3.2c, 3.4</p>
+        <dl class="kv">
+          <dt>Предусловие</dt><dd>волна 1 — решения опираются на измеренную картину, а не на догадки о ней</dd>
+          <dt>Выход</dt><dd class="exit">по каждому пункту записано решение; видно, кто и что правит</dd>
+        </dl>
+      </li>
+      <li class="wave">
+        <h3>3. Артефакты — спеки приводятся к норме</h3>
+        <p class="where">tasks.md §4 · 20 спек из 28</p>
+        <dl class="kv">
+          <dt>Предусловие</dt><dd>волна 0; для тех спек, где предмет удалён — ещё и волна 2</dd>
+          <dt>Что</dt><dd>не хватает всех семи разделов 19 спекам, шести — одной; ни одна спека не теряет базовый раздел</dd>
+          <dt>Выход</dt><dd class="exit">валидатор зелёный; ни один добавленный
+            раздел не является заглушкой</dd>
+        </dl>
+      </li>
+      <li class="wave">
+        <h3>4. Реестр</h3>
+        <p class="where">tasks.md §5</p>
+        <dl class="kv">
+          <dt>Предусловие</dt><dd>задача 1.9 из волны 1 <b>и</b> волна 3</dd>
+          <dt>Выход</dt><dd class="exit">все строки разбираются; статус вычисляется проверкой, а не объявляется; паритет виден в обе стороны</dd>
+        </dl>
+      </li>
+      <li class="wave">
+        <h3>5. Домены и покрытие</h3>
+        <p class="where">tasks.md §8 и §9</p>
+        <dl class="kv">
+          <dt>Предусловие</dt><dd>волна 0 (перечень категорий канонизирован) и волна 3</dd>
+          <dt>Выход</dt><dd class="exit">ни одна спека не лежит в домене вне закрытого перечня</dd>
+        </dl>
+      </li>
+      <li class="wave pending">
+        <h3>6. Замыкание контура — CI</h3>
+        <p class="where">tasks.md §6 + правки чужих change</p>
+        <dl class="kv">
+          <dt>Предусловие</dt><dd>всё зелёное, буквально</dd>
+          <dt>Выход</dt><dd class="exit">зелёный конвейер означает «проверено», а не «не запускалось»</dd>
+        </dl>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <p class="eyebrow">Границы</p>
+    <h2>Что запрещено делать не в своей волне</h2>
+    <p class="sub">Каждое нарушение воспроизводимо и стоит работы.</p>
+    <table>
+      <thead>
+        <tr><th>Нельзя</th><th>Почему</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="no">Править валидатор до волны 0</td>
+            <td class="why">Он написан под одну из трёх противоречащих норм; выбор другой нормы обесценивает правку целиком</td></tr>
+        <tr><td class="no">Считать зелёный прогон доказательством до волны 1</td>
+            <td class="why">Валидатор слеп к большинству проб, значит зелёный означает «проверка не выполняется»</td></tr>
+        <tr><td class="no">Приводить реестр к пяти колонкам до 1.9</td>
+            <td class="why">Разбор понимает четыре поля: пятиколоночная таблица проходит как пустая, и проверка выключается молча</td></tr>
+        <tr><td class="no">Заполнять <code>Implementation</code> до решения по предмету</td>
+            <td class="why">Появится ссылка на путь, которого нет на диске: устаревшая ссылка станет свежеутверждённой устаревшей</td></tr>
+        <tr><td class="no">Добавлять <code>Forbidden Behavior</code> заглушкой</td>
+            <td class="why">Закрывает пробел и создаёт впечатление, что пробела не было</td></tr>
+        <tr><td class="no">Включать CI до волны 6</td>
+            <td class="why">Красный конвейер раньше времени обесценивает проверку; зелёный из-за молчащей проверки — учат не проверять</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <p class="eyebrow">Точка отсчёта</p>
+    <h2>Состояние, на котором стоит этот порядок</h2>
+    <p class="sub">Пересчитано 2026-10-06. Числа, перенесённые из отчёта и не
+      воспроизведённые, в порядок не входят — помечены в реестре расхождений как
+      неподтверждённые.</p>
+    <div class="grid2">
+      <div class="panel">
+        <div class="bench">
+          <span class="bench-label">Валидатор слеп</span>
+          <div class="bench-track"><div class="bench-fill warn" style="width:54%"></div></div>
+          <span class="bench-val">13 / 24</span>
+        </div>
+        <div class="bench">
+          <span class="bench-label">Спеки полной формы</span>
+          <div class="bench-track"><div class="bench-fill" style="width:29%"></div></div>
+          <span class="bench-val">8 / 28</span>
+        </div>
+        <div class="bench">
+          <span class="bench-label">Спеки без записи в реестре</span>
+          <div class="bench-track"><div class="bench-fill warn" style="width:61%"></div></div>
+          <span class="bench-val">17 / 28</span>
+        </div>
+        <div class="bench">
+          <span class="bench-label">Change помечены <code>✗</code></span>
+          <div class="bench-track"><div class="bench-fill warn" style="width:100%"></div></div>
+          <span class="bench-val">11 всего</span>
+        </div>
+        <p class="note">Из 11 помеченных change блокирующими являются <b>8</b> —
+          это 11 сообщений, из них 4 «дельт нет» и 7 «<code>MODIFIED</code>
+          выбросил сценарий». Ещё 3 помечены только за предупреждение и архивацию
+          не блокируют. Числа 11 и 8 не равны и не обязаны быть равны: это разные
+          единицы — change и сообщения.</p>
+      </div>
+      <div class="panel">
+        <p class="hint" style="margin:0 0 14px;color:var(--muted);font-size:12px;font-family:'JetBrains Mono',monospace;letter-spacing:.08em;text-transform:uppercase">Два источника, одна норма</p>
+        <div class="bench">
+          <span class="bench-label"><code>component-model</code></span>
+          <div class="bench-track"><div class="bench-fill" style="width:100%"></div></div>
+          <span class="bench-val">9</span>
+        </div>
+        <div class="bench">
+          <span class="bench-label"><code>component-spec-validation</code></span>
+          <div class="bench-track"><div class="bench-fill warn" style="width:100%"></div></div>
+          <span class="bench-val">2 + 7</span>
+        </div>
+        <div class="bench">
+          <span class="bench-label">код валидатора</span>
+          <div class="bench-track"><div class="bench-fill warn" style="width:100%"></div></div>
+          <span class="bench-val">3 + 7</span>
+        </div>
+        <p class="note">На вопрос «какие разделы обязательны» отвечают три
+          источника, и все три отвечают по-разному. <code>Scope</code> обязателен по
+          коду и не назван ни в одной норме; <code>Negative Requirements</code> и
+          <code>Forbidden Behavior</code> — два имени одного раздела. Пока это не
+          сведено, любой валидатор написан вслепую — поэтому норма идёт первой.</p>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>
