@@ -16,8 +16,8 @@
 новое: требование «Единый словарь имён событий» велит писать только канонические
 имена из `mcp-platform/libs/enterprise_common/eventing/types.py`, его таблица
 соответствия отображает `context_compacted` → `agent.compacted`
-(`logging-db:1878`), а таблица покрытия этапов оборота называет `agent.compacted`
-каноническим именем стадии 9 (`:1454`). Код уже пишет `agent.compacted`
+(`docs/journal-observability.md:734`), а таблица покрытия этапов оборота называет `agent.compacted`
+каноническим именем стадии 9 (`docs/journal-observability.md:310`). Код уже пишет `agent.compacted`
 (`lib/services/context_compaction.py:377,396`), словарь платформы его объявляет
 (`types.py:32,94`). Расходились только два требования ниже.
 

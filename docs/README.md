@@ -52,6 +52,7 @@ reference** по своей подсистеме; README в корне — эт�
 | Документ | Назначение |
 |---|---|
 | [table-registry.md](table-registry.md) | Реестр таблиц PG → DuckDB, sync-контроль, track-колонки |
+| [journal-observability.md](journal-observability.md) | Наблюдаемость оборота журнала: покрытие событий, словарь имён, итоги |
 
 ### Операционные руководства
 
