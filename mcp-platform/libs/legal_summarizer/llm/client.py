@@ -61,8 +61,48 @@ from libs.enterprise_client import (  # noqa: E402
 from libs.enterprise_common.execution.context import (  # noqa: E402
     McpCallContext as _McpCallContext,
 )
+from libs.enterprise_common.execution.errors import FAILURE_CODES  # noqa: E402
 
-__all__ = ["chat", "LlmOperationError", "LlmUnavailable"]
+__all__ = [
+    "chat",
+    "classify_llm_failure",
+    "LlmOperationError",
+    "LlmUnavailable",
+]
+
+
+def classify_llm_failure(exc: BaseException) -> str:
+    """Код платформы для отказа LLM-вызова.
+
+    Отказ вызова и пустой результат — разные вещи, и платформа обязана видеть
+    разные коды. Когда они сливались в один, отказ провайдера выглядел как
+    «свод не получился»: повторять его бессмысленно, а на самом деле у него
+    может быть ровно противоположный смысл.
+
+    Повторяемость здесь **не выдумывается**: её платформа уже определила в
+    ``RETRYABLE_CODES``, поэтому код обязан быть её собственным. Отсюда и
+    решение не заводить здесь новый код ``reduce_*``: неизвестный код платформа
+    трактует как ``internal``, то есть как «повторять бессмысленно» — ровно
+    противоположность того, что нужно при отказе провайдера.
+
+    ``FAILURE_CODES`` берётся у платформы, а не составляется здесь: свой список
+    рано или поздно разойдётся с её словарём, и молча начнёт выдавать коды,
+    которых на проводе не бывает.
+    """
+    if isinstance(exc, LlmUnavailable):
+        # Сессия не поднялась, оборвалась или не ответила вовремя. Платформа
+        # считает ``upstream_unavailable`` повторяемым, и это верно: тот же
+        # вызов на живой сессии имеет смысл.
+        return "upstream_unavailable"
+    if isinstance(exc, LlmOperationError):
+        code = str(exc.code or "").strip()
+        # Код, который сервер вернул и платформа знает, отдаём как есть.
+        if code in FAILURE_CODES:
+            return code
+        return "internal"
+    if isinstance(exc, (TimeoutError,)):
+        return "timeout"
+    return "internal"
 
 def _trace_enabled() -> bool:
     """Флаг трассировки: аргумент запуска ИЛИ настройка домена.

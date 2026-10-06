@@ -234,8 +234,14 @@ def test_document_reduce_exception_is_non_retryable_single_attempt(
     """Сценарий 4: ``llm_document_reduce`` бросает исключение.
 
     Контракт: ``status='failed'``, ``llm_document_reduce`` вызывается
-    РОВНО ОДИН раз (NO retry на REDUCE_INPUT_EMPTY — non-retryable
-    error, обусловленный input).
+    РОВНО ОДИН раз (повтор внутри домена не делаем — клиент уже повторяет сам).
+
+    Раньше проба проверяла только форму — ``status='failed'`` и один вызов — и
+    потому оставалась зелёной и на старом поведении, и на новом. Она прогоняла
+    ровно тот путь, где отказ вызова отличается от пустого результата, и
+    проверять это различие не проверяла: код отказа в ней не упоминался ни
+    разу, поэтому подстановка ``REDUCE_INPUT_EMPTY`` («вернул пустой summary»)
+    вместо отказа провайдера проходила незамеченной.
     """
     document_reduce_calls = {"n": 0}
 
@@ -259,6 +265,23 @@ def test_document_reduce_exception_is_non_retryable_single_attempt(
     assert "result" not in result or not (
         result.get("result", {}).get("summary", "").strip()
     ), f"completed/partial с непустым summary недопустим: {result}"
+
+    err = result.get("error") or {}
+    # Причина отказа обязана быть названа, и она обязана быть **не** «свод пуст»:
+    # вызов упал, а не вернул пустое.
+    assert err.get("code") != "REDUCE_INPUT_EMPTY", (
+        "отказ вызова не должен выдаваться за пустой результат свода: "
+        f"code={err.get('code')!r}"
+    )
+    assert err.get("code") == "internal", (
+        f"неизвестное исключение должно давать internal, получено {err.get('code')!r}"
+    )
+    assert err.get("stage") == "document_reduce", (
+        f"этап отказа назван неверно: {err.get('stage')!r}"
+    )
+    assert "simulated LLM error" in str(err.get("detail") or ""), (
+        f"причина не попала в тело ответа: {err!r}"
+    )
 
 
 def test_normal_run_returns_completed_with_nonempty_summary(monkeypatch, tmp_path):

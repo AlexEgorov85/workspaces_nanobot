@@ -25,6 +25,7 @@ from typing import Any
 
 import libs.legal_summarizer.llm.calls as _llm_calls_mod
 import libs.legal_summarizer.llm.sanitize as _llm_sanitize_mod
+from libs.legal_summarizer.llm.client import classify_llm_failure
 from libs.legal_summarizer.application.manifest_builder import build_manifest
 from libs.legal_summarizer.cache.document_cache import DocumentCache
 from libs.legal_summarizer.cache.manifest import (
@@ -130,15 +131,32 @@ def run_direct(
             structure=canonical_structure, question=question,
         )
         reduce_calls = 1
-    except Exception:
-        # REDUCE_INPUT_EMPTY на non-retryable input error. Не используем
-        # ``joined`` как fallback — это невалидный summary (сырой текст
-        # чанков), и он нарушит контракт ``completed only with non-empty
-        # summary``. Runtime классифицирует это как REDUCE_INPUT_EMPTY
-        # → ``status='failed'``.
-        retries += 1
-        reduce_calls = 0
-        final_summary = ""
+    except Exception as exc:
+        # Отказ **вызова** не превращается в пустой результат. Здесь была ровно
+        # та же ошибка, что и в плоском пути ``map_reduce``, и хуже: под
+        # ``except Exception:`` не оставалось даже трассировки, так что отказ был
+        # невидим целиком — ни в ответе, ни в журнале. На ветке direct (один
+        # чанк) это и есть основной путь, то есть дефект был не редким, а главным.
+        #
+        # Никакого fallback на ``joined``: сырой текст чанков не является сводкой.
+        # ``retries`` не увеличивается: повтора здесь не было, и увеличение
+        # счётчика повторов за отказ, который никто не повторял, записывало в
+        # состояние то, чего не происходило.
+        code = classify_llm_failure(exc)
+        return {
+            "status": "failed",
+            "operation_id": operation_id,
+            "error": {
+                "code": code,
+                "message": (
+                    f"Свод не составлен: вызов document_reduce отказал "
+                    f"({type(exc).__name__}). Разобранная работа сохранена — "
+                    "повторный вызов продолжит с неё."
+                ),
+                "stage": "document_reduce",
+                "detail": str(exc)[:400],
+            },
+        }
 
     final_summary = _llm_sanitize_mod.strip_think_blocks(final_summary)
 

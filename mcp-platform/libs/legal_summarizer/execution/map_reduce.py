@@ -46,6 +46,7 @@ from libs.legal_summarizer.execution.hierarchical import (
     reduce_chunks_hierarchical,
 )
 from libs.legal_summarizer.llm.config import mr_trace_enabled
+from libs.legal_summarizer.llm.client import classify_llm_failure
 from libs.legal_summarizer.llm.sanitize import (
     extract_subject,
     strip_think_blocks,
@@ -66,6 +67,25 @@ WriteDocumentChunkSummaryFn = Callable[..., None] | None
 RunOneBatchFn = Callable[..., Any]
 # ``load_cached_partials(operation_id, expected_chunk_ids, workspace_root)``
 LoadCachedPartialsFn = Callable[..., dict[str, str]]
+
+
+class ReduceCallFailed(RuntimeError):
+    """Свод не состоялся, потому что **вызов** упал, а не потому что пусто.
+
+    Отказ вызова и пустой результат — разные вещи, и раньше они были слиты в
+    один исход: исключение глоталось, возвращалась пустая строка, и наверх
+    уходил ``REDUCE_INPUT_EMPTY`` с текстом «вернул пустой summary». Текст
+    врал, а код делал отказ провайдера неповторяемым — платформа считает
+    повторяемость по коду, и ``REDUCE_INPUT_EMPTY`` в её списке отсутствует.
+
+    Исключение существует, чтобы решение принималось **одним местом**: кто-то
+    должен разобрать причину и назвать её. Это оно, а не ветка, где всплыло.
+    """
+
+    def __init__(self, *, stage: str, cause: BaseException) -> None:
+        super().__init__(f"{stage}: {type(cause).__name__}: {cause}")
+        self.stage = stage
+        self.cause = cause
 
 
 def _assert_invariants(
@@ -316,10 +336,17 @@ def _reduce_phase(
         )
 
         def _llm_section_runner(joined, *, section_path="", section_heading="", **_kw):
-            result = _llm_calls_mod.llm_section_reduce(
-                section_path, section_heading, joined,
-                length=length, question=question,
-            )
+            # Отказ вызова здесь поднимается тем же ``ReduceCallFailed``, что и
+            # в плоском пути. Иначе иерархическая стратегия сообщала бы одну и ту
+            # же пустую сводку по двум разным причинам, а различает их ровно
+            # один — платформа по коду отказа.
+            try:
+                result = _llm_calls_mod.llm_section_reduce(
+                    section_path, section_heading, joined,
+                    length=length, question=question,
+                )
+            except Exception as exc:
+                raise ReduceCallFailed(stage="section_reduce", cause=exc) from exc
             result = strip_think_blocks(result)
             if len(result) > _SECTION_SUMMARY_MAX_CHARS:
                 result = fit_input(result, _SECTION_SUMMARY_MAX_CHARS)
@@ -334,11 +361,14 @@ def _reduce_phase(
             return result
 
         def _llm_doc_runner(joined, *, length=length, focus=focus, structure=struct, question=question, **_kw):
-            result = strip_think_blocks(
-                _llm_calls_mod.llm_document_reduce(
-                    joined, length=length, focus=focus, structure=structure, question=question,
+            try:
+                result = strip_think_blocks(
+                    _llm_calls_mod.llm_document_reduce(
+                        joined, length=length, focus=focus, structure=structure, question=question,
+                    )
                 )
-            )
+            except Exception as exc:
+                raise ReduceCallFailed(stage="document_reduce", cause=exc) from exc
             _mr_trace(
                 "doc_reduce",
                 joined_chars=len(joined),
@@ -404,18 +434,21 @@ def _reduce_phase(
         )
         document_reduce_calls += 1
     except Exception as exc:
-        # REDUCE_INPUT_EMPTY на non-retryable input error: возвращаем
-        # пустую строку, чтобы runtime классифицировал это как
-        # ``REDUCE_INPUT_EMPTY`` → ``status='failed'``.
-        # Никакого fallback на ``joined`` (это невалидное поведение —
-        # сырой текст не является summary). И никакого retry — input
-        # сам по себе non-retryable.
+        # Отказ **вызова** поднимается, а не превращается в пустой результат.
+        # Раньше здесь возвращалась пустая строка, и наверх уходил
+        # ``REDUCE_INPUT_EMPTY`` с текстом «вернул пустой summary»: текст врал
+        # (свод не вернул пусто — он не вернулся), а код объявлял отказ
+        # провайдера неповторяемым, потому что платформа считает повторяемость
+        # по коду. Никакого fallback на ``joined`` по-прежнему: сырой текст не
+        # является сводкой. Никакого повтора на этом уровне тоже: клиент уже
+        # повторяет сам, и повтор поверх «отказ упал в internal» только удлинил
+        # ожидание.
         _mr_trace(
             "flat_reduce_error",
             err=type(exc).__name__,
             msg=str(exc)[:200],
         )
-        return "", section_reduce_calls, document_reduce_calls, True, "map_reduce_flat", {}
+        raise ReduceCallFailed(stage="document_reduce", cause=exc) from exc
     _mr_trace(
         "flat_reduce_done",
         result_chars=len(final_summary),
@@ -841,20 +874,47 @@ def run_map_reduce_execution(
         avg_chars=f"{avg_chars:.0f}",
     )
 
-    final_summary, section_reduce_calls, document_reduce_calls, retries_incremented, strategy_label, section_summaries = (
-        _reduce_phase(
-            strategy=strategy,
-            struct=struct,
-            section_ids=section_ids,
-            section_headings=section_headings,
-            section_paths=section_paths,
-            chunks=chunks,
-            all_partials=all_partials,
-            length=length,
-            focus=focus,
-            question=question,
+    try:
+        final_summary, section_reduce_calls, document_reduce_calls, retries_incremented, strategy_label, section_summaries = (
+            _reduce_phase(
+                strategy=strategy,
+                struct=struct,
+                section_ids=section_ids,
+                section_headings=section_headings,
+                section_paths=section_paths,
+                chunks=chunks,
+                all_partials=all_partials,
+                length=length,
+                focus=focus,
+                question=question,
+            )
         )
-    )
+    except ReduceCallFailed as exc:
+        # Здесь и только здесь отказ вызова перестаёт быть «свод не получился».
+        # Код берётся у платформы, поэтому повторяемость получается её же: если
+        # отказ временный, модель повторит вызов, а не будет крутить один и тот
+        # же документ до отчаяния.
+        code = classify_llm_failure(exc.cause)
+        report = _build_progress_report(chunk_states, expected_chunk_ids)
+        return {
+            "status": "failed",
+            "operation_id": operation_id,
+            "error": {
+                "code": code,
+                "message": (
+                    f"Свод не составлен: вызов {exc.stage} отказал "
+                    f"({type(exc.cause).__name__}). Разобранная работа сохранена — "
+                    "повторный вызов продолжит с неё."
+                ),
+                # Причина названа прямо в теле ответа, а не только под
+                # отладочным флагом: до этого отказ нельзя было отличить ни от
+                # чего, и диагностика жила в stderr, которого на живом вызове
+                # никто не смотрит.
+                "stage": exc.stage,
+                "detail": str(exc.cause)[:400],
+            },
+            **({"progress_report": report} if report["done"] > 0 else {}),
+        }
     if retries_incremented:
         retries += 1
 
@@ -937,5 +997,6 @@ def run_map_reduce_execution(
 
 __all__ = [
     "DOCUMENT_REDUCE_INPUT_BUDGET_CHARS",
+    "ReduceCallFailed",
     "run_map_reduce_execution",
 ]
