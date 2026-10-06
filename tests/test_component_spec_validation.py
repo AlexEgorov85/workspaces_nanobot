@@ -87,7 +87,7 @@ owns: пример.
 
 Создаётся при старте, уничтожается при остановке.
 
-## Владение данными
+## Data Ownership
 
 Данными не владеет.
 
@@ -205,7 +205,7 @@ def test_mandatory_section_present(section: str) -> None:
         "## State",
         "## Configuration",
         "## Lifecycle",
-        "## Владение данными",
+        "## Data Ownership",
         "## Error Behavior",
         "## Invariants",
         "## Consumers",
@@ -305,16 +305,17 @@ def test_duplicate_section_is_an_issue() -> None:
     assert any("повторно" in m.lower() for m in messages)
 
 
-def test_duplicate_section_via_dictionary_alias_is_an_issue() -> None:
-    """``## Responsibility`` и ``## Ответственность`` — один раздел двумя именами.
+def test_russian_heading_is_unknown_section_and_not_an_alias() -> None:
+    """Русский эквивалент заголовка — неизвестный раздел, а не его синоним.
 
-    `Ответственность` — нормативный русский термин из «Словаря терминов»
-    ``component-model``, поэтому это проверка на дубль по каноническому имени,
-    а не на ручной список синонимов.
+    Канон (`architecture/component-model`, требование `язык спецификации`)
+    объявляет все 19 имён английскими, как и словарь OpenSpec: русский
+    заголовок был вторым именем того же раздела во всём дереве. Проба обязана
+    краснеть на нём — иначе возврат к синонимам останется незаметным.
     """
-    messages = _messages(_BASELINE + "\n## Ответственность\n\nПовтор через словарь.\n")
-    assert any("повторно" in m.lower() for m in messages), (
-        f"дубль через словарный синоним обязана ловиться; сообщения: {messages}"
+    sections = _sections(_BASELINE.replace("## Responsibility", "## Ответственность"))
+    assert any("Responsibility" in s for s in sections), (
+        f"русский заголовок обязан считаться неизвестным разделом; разделы: {sections}"
     )
 
 
