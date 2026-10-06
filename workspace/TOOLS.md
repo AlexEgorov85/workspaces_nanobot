@@ -15,12 +15,15 @@ This file documents non-obvious constraints and usage patterns.
 строки — ищи операцию (`mcp_enterprise_*`) или скажи пользователю, что
 действие недоступно. Молча подменять shell чем-то другим не нужно.
 
-## glob — File Discovery
+## find_files — File Discovery
 
-- Use `glob` to find files by pattern
-- Simple patterns like `*.py` match recursively by filename
-- Use `entry_type="dirs"` when you need matching directories instead of files
-- Use `head_limit` and `offset` to page through large result sets
+Инструмента `glob` в наборе **нет**. Реестр нано-агента объявляет
+`read_file`, `write_file`, `edit_file`, `list_dir`, `find_files`, `grep` и
+`web_search` (`nanobot/agent/tools/`); отдельного `glob` среди них нет, а
+`entry_type="dirs"`, `head_limit` и `offset` — параметры несуществующего
+инструмента.
+
+- Для поиска файлов по имени или шаблону — `find_files`
 - Это способ узнать пути: командной строки, которой можно было бы
   обойтись `find`, здесь нет
 
@@ -59,65 +62,45 @@ This file documents non-obvious constraints and usage patterns.
 **Параметры:**
 
 - `query` (опц.) — подстрока для ILIKE-поиска по `summary` и `payload::text`.
-- `event_type` (опц.) — один из `context_compacted`, `tool_call`,
-  `tool_result`, `llm_call`, `run_finished`, `turn_completed`,
+- `event_type` (опц.) — тип события журнала, например `context_compacted`,
+  `tool_call`, `tool_result`, `llm_call`, `run_finished`, `turn_completed`,
   `subagent_run_finished`, `inbound`.
   * `turn_completed` — метрики оборота (latency_ms, outcome,
     usage_tokens, runtime_model). НЕ содержит `final_content` —
     только статистика; для контента используйте `run_finished`.
+- `level` (опц.) — уровень журнала.
 - `tool_name` (опц.) — имя инструмента для фильтрации `tool_call` /
   `tool_result`. Удобно для поиска истории конкретного инструмента.
 - `since` / `until` (опц.) — ISO-8601 таймстамп.
-- `session_scope` (опц., дефолт `current`) — область поиска:
-  - `current` — только текущая сессия (по `session_id` из `RequestContext.session_key`).
-    При отсутствии identity-store возвращает
-    `{"status": "error", "error_type": "missing_session_identity"}`,
-    SQL-запрос НЕ выполняется.
-  - `all` — все сессии **текущего пользователя** (по `user_id` из
-    `RequestContext.sender_id`). Не глобальный поиск по всем пользователям.
-    При отсутствии identity-store возвращает
-    `{"status": "error", "error_type": "missing_user_identity"}`,
-    SQL-запрос НЕ выполняется.
-- `limit` (опц.) — максимум событий (по конфигу `max_rows`).
+- `limit` (опц.) — максимум событий на страницу.
 - `offset` (опц., дефолт 0) — пропустить первые `offset` событий
-  после сортировки `ORDER BY timestamp DESC, id DESC`. Продолжать
-  пагинацию через `next_offset` из предыдущего ответа, **НЕ** через
-  `offset + limit` (при `results_truncated=true` часть событий была
-  отброшена).
+  после сортировки `ORDER BY timestamp DESC, id DESC`.
+
+Параметра `session_scope` **нет**: область поиска задаёт платформа из контекста
+вызова. Сессия и пользователь подставляются обработчиком из `ctx.session_id` и
+`ctx.user_id` и в опубликованной схеме модели не видны, поэтому расширить видимость
+перебором аргументов нельзя. Утверждать обратное — значит искать параметр, которого
+в `inputSchema` нет.
 
 **Ответ (JSON):**
 
-- `count` — количество событий в массиве `events`.
-- `has_more` — `true`, если есть следующая страница. Композитная формула
-  `db_has_more OR results_truncated`: даже когда `LIMIT N+1` не нашёл
-  следующей строки в БД, `results_truncated=true` означает, что
-  truncation выбросил часть отобранных событий и следующая страница
-  обязательна.
-- `next_offset` — целое ≥ 0; `offset` для следующего запроса при
-  пагинации. Равно `original_offset + count` (после всех truncation-проходов).
-- `results_truncated` — `true`, если из выборки были выброшены целые
-  события, чтобы общий JSON влез в `max_result_chars`.
-- `payload_truncated` (на каждом событии) — `true`, если `payload`
-  конкретного события отличается от БД из-за обрезки через
-  `truncate_middle`.
-- `truncated` — **deprecated** алиас `results_truncated`. Сохранён ради
-  совместимости; удаляется в отдельном follow-up change. Новый код должен
-  читать `results_truncated` (выброс целых событий) и `payload_truncated`
-  (ужатие payload'а конкретного события) раздельно.
-- `events: [{event_id, timestamp, event_type, name, level, summary,
-  payload, payload_truncated}]` — `payload` хранится как JSON-string
-  (нужен `json.loads` для получения структуры).
+- `hits` — массив найденных событий.
+- `next_offset` — смещение для следующей страницы; `null`, если страниц больше нет.
+- `truncated` — `true`, если выборка была усечена.
+- `hits: [{id, timestamp, event_type, name, level, summary, payload}]`.
+  **`payload` — объект JSON, а не строка**: разбирать его через `json.loads` не нужно,
+  значение уже разобрано. Идентификатор события называется `id`, не `event_id`.
 
 **Примеры:**
 
 - «Какие файлы я прикладывал?» →
   `data.history_search(event_type="tool_call", tool_name="read_file")`
 - «Когда последний раз сжимался контекст?» →
-  `data.history_search(event_type="context_compacted", session_scope="current")`
+  `data.history_search(event_type="context_compacted")`
 - «Что я писал про договор аренды?» →
   `data.history_search(query="договор аренды", event_type="llm_call")`
 - Пагинация: первая страница → `data.history_search(limit=20)` →
-  если `has_more=true`, продолжить с `offset=next_offset` (НЕ `20`).
+  если `next_offset` не `null`, продолжить с `offset=next_offset` (НЕ `20`).
 
 **Замечания:**
 
@@ -126,9 +109,7 @@ This file documents non-obvious constraints and usage patterns.
   `document_summarized` — таких нет в журнале).
 - Если результат пустой — отвечай «не найдено в истории», не выдумывай.
 - `data.history_search` **не выполняет глобальный поиск по всем пользователям**:
-  `session_scope="all"` — это все сессии текущего пользователя, а не
-  вся БД. Без identity-store запрос возвращает структурированную
-  ошибку (`missing_user_identity`) и SQL не выполняется. Это
+  выборка ограничена сессией и пользователем контекста вызова. Это
   закрывает cross-user leakage (security boundary).
 - `offset`-пагинация **не snapshot-consistent**: при INSERT'е новых
   событий между запросами более новые строки попадают в начало
@@ -319,7 +300,7 @@ JSON-string. Изменение формы данных требует отде�
 **Шаг 2 — запустить.** Когда пользователь подтвердил, вызови теми же самыми
 параметрами плюс:
 
-- `confirm` — `true`;
+- `confirmed` — `true`;
 - `operation_id` — значение из ответа шага 1.
 
 Параметры обязаны совпадать с шагом 1: `document`, `length`, `focus` и
@@ -340,8 +321,9 @@ JSON-string. Изменение формы данных требует отде�
   значение вне перечисления — `invalid_params`.
 - `focus` (опц.) — предмет фокуса, например `аренда`.
 - `question` (опц.) — конкретный вопрос к документу.
-- `confirm` — `true` запускает разбор; без него операция возвращает
-  `confirmation_required` и **делает ноль LLM-вызовов**.
+- `confirmed` — `true` запускает разбор; без него операция возвращает
+  `confirmation_required` и **делает ноль LLM-вызовов**. Имя параметра именно такое:
+  `mcp-platform/servers/enterprise/tools/analyze_document.py:962`.
 - `operation_id` (опц.) — идентификатор из шага 1; нужен для запуска и для
   повторного входа.
 
@@ -366,7 +348,7 @@ JSON-string. Изменение формы данных требует отде�
 
 ### Не делать
 
-- Не ставь `confirm: true` сам, от себя. Подтверждение — это согласие
+- Не ставь `confirmed: true` сам, от себя. Подтверждение — это согласие
   пользователя на платную работу, а не твоё решение за него.
 - Не выдавай `confirmation_required` за ошибку и не отвечай пользователю «не
   могу разобрать документ». Это нормальный первый шаг диалога.
