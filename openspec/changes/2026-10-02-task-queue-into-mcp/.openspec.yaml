@@ -1,2 +1,15 @@
 schema: spec-driven
 created: 2026-10-02
+# Нормативный контракт этого change написан не в нём. Код операций очереди задач
+# добавлен тем же коммитом c439ef3, что и proposal, а сама дельта capability
+# data/task-queue лежит в следующем change'е —
+# openspec/changes/2026-10-04-task-queue-platform-ops/specs/data/task-queue/spec.md
+# (пять требований). Тот change валиден, и именно его архивирование вносит
+# capability в канон; дублировать её дельтой здесь значило бы заявить одно и то же
+# требование дважды — а требование «два источника не утверждают разное об одном
+# предмете» это прямо запрещает.
+#
+# Проверено: в каноне openspec/specs/data/ на момент написания только
+# cache-provider, operation-schema и vector-indexes; capability data/task-queue
+# существует только внутри change'а.
+skip_specs: true
