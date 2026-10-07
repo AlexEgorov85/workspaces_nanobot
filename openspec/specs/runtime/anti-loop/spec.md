@@ -22,12 +22,15 @@
 Система SHALL предоставлять три режима работы защитника, выбираемых
 конфигурацией. В режиме `off` защитник SHALL NOT выполнять никаких
 действий: ни сравнения, ни журналирования, ни прерывания вызовов.
-В режиме `warn` защитник SHALL enqueueing ровно одно событие
-`tool_repeat_warned` через `DbLoggingService.try_log_event` в момент
-превышения порога и НЕ прерывать tool-вызов. В режиме `block`
-защитник SHALL заменять повторный вызов синтетическим tool-результатом
-с понятным сообщением об ошибке и enqueueing ровно одно событие
-`tool_repeat_blocked` через тот же producer'а. Последующие повторы
+В обоих активных режимах защитник SHALL ставить в очередь ровно одно
+событие `tool.suppressed` через `DbLoggingService.try_log_event` в момент
+превышения порога; режим различается полем `payload["mode"]`
+(`"warn"` или `"block"`), а не именем события. Имя `tool.suppressed`
+каноническое — `TOOL_SUPPRESSED` в
+`mcp-platform/libs/enterprise_common/eventing/types.py:56`. В режиме
+`warn` tool-вызов SHALL NOT прерываться. В режиме `block` защитник SHALL
+заменять повторный вызов синтетическим tool-результатом с понятным
+сообщением об ошибке. Последующие повторы
 сверх порога (до сброса state) SHALL NOT генерировать новых событий —
 ровно одно на момент crossing'а. Дефолт SHALL быть `off` (NO-OP),
 чтобы существующие деплои без правок конфигурации работали как раньше.
@@ -44,8 +47,8 @@
 - **WHEN** в режиме `warn` состояние scокользящего буфера пересекает
   порог `max_repeats_in_window` для данной пары `(tool_name,
   canonical_args)`
-- **THEN** ровно одно событие `tool_repeat_warned` SHALL быть
-  enqueued через `DbLoggingService.try_log_event` ровно в этот момент
+- **THEN** ровно одно событие `tool.suppressed` с `payload["mode"]="warn"`
+  SHALL быть enqueued через `DbLoggingService.try_log_event` ровно в этот момент
 - **AND THEN** любые последующие вызовы той же пары до сброса state
   SHALL NOT порождать новых событий
 
@@ -55,9 +58,10 @@
 - **THEN** tool-вызов SHALL быть прерван до выполнения реального
   инструмента, модель получает результат, начинающийся с `Error:` и
   содержащий понятное сообщение (без раскрытия внутренних деталей)
-- **AND THEN** ровно одно событие `tool_repeat_blocked` SHALL быть
-  enqueued через `DbLoggingService.try_log_event` (на момент
-  crossing'а; не на каждый последующий повтор)
+- **AND THEN** ровно одно событие `tool.suppressed` с
+  `payload["mode"]="block"` SHALL быть enqueued через
+  `DbLoggingService.try_log_event` (на момент crossing'а; не на каждый
+  последующий повтор)
 
 ### Requirement: Детектирование по нормализованному представлению аргументов
 
@@ -80,7 +84,7 @@ default=_stable_fallback)`, где рекурсивная упорядоченн
 Защитник SHALL использовать точное равенство нормализованных
 представлений для определения повторов внутри state'а (НЕ криптографические
 хэши — они НЕ используются для детекции во избежание теоретических
-коллизий). Опциональный 16-char hex-digest (`blake2b` или аналог)
+коллизий). Опциональный 8-символьный hex (`blake2b` или аналог)
 МОЖЕТ использоваться только как компактный идентификатор для записей
 в журнале `agent_gateway_logs`.
 
@@ -271,7 +275,8 @@ event pipeline или модуль `event_log` (удалён) SHALL NOT испо
 событий (это и есть защита от log-storm'а при зациклившемся агенте).
 
 Поля `LogEvent` (контракт producer'а):
-- `event_type` — `tool_repeat_blocked` или `tool_repeat_warned`;
+- `event_type` — `tool.suppressed` (один тип на оба активных режима);
+  режим читается из `payload["mode"]`;
 - `actor` = `"RepeatGuardHook"`;
 - `name` = `"agent"`;
 - `session_id` = `context.session_key` (как у всех других hooks);
@@ -279,7 +284,7 @@ event pipeline или модуль `event_log` (удалён) SHALL NOT испо
 - `summary` — человекочитаемое сообщение (например,
   `"repeat-guard: 3 identical read_file calls in last 5 iterations"`);
 - `payload` — JSONB-совместимый dict с полями `tool`,
-  `fingerprint_hash` (16-char hex-truncation для observability, не для
+  `fingerprint_hash` (8-символьный hex для observability, не для
   детекции), `attempt`, `window_size`, `max_repeats_in_window`,
   `mode`.
 
@@ -324,7 +329,7 @@ event pipeline или модуль `event_log` (удалён) SHALL NOT испо
   `repeated_external_lookup_error` (на 3-м вызове при
   `_MAX_REPEAT_EXTERNAL_LOOKUPS = 2`)
 - **AND THEN** если включён защитник, дополнительно enqueueing
-  событие `tool_repeat_blocked` / `tool_repeat_warned` через
+  событие `tool.suppressed` (с `payload["mode"]`) через
   `DbLoggingService.try_log_event` (взаимодополняющие сигналы)
 
 #### Scenario: Достижение upstream `max_iterations` поверх защитника
@@ -435,8 +440,8 @@ tool-результат SHALL формировать перехватчик эт
 ### Requirement: Наблюдаемость для оператора через `agent_gateway_logs`
 
 Система SHALL предоставлять оператору возможность находить все
-срабатывания защитника через `event_type IN ('tool_repeat_blocked',
-'tool_repeat_warned')` в `agent_gateway_logs` (после того, как
+срабатывания защитника через `event_type = 'tool.suppressed'` в
+`agent_gateway_logs` (после того, как
 worker `DbLoggingService` обработает очередь — eventual
 consistency, не строгий момент публикации). Прямого stdout/stderr
 вывода для срабатываний SHALL NOT быть; диагностика — через
@@ -446,7 +451,7 @@ consistency, не строгий момент публикации). Прямо�
 #### Scenario: Поиск срабатываний через event_type
 
 - **WHEN** оператор выполняет
-  `SELECT * FROM agent_gateway_logs WHERE event_type IN ('tool_repeat_blocked', 'tool_repeat_warned') ORDER BY created_at DESC LIMIT 50`
+  `SELECT * FROM agent_gateway_logs WHERE event_type = 'tool.suppressed' ORDER BY created_at DESC LIMIT 50`
 - **THEN** возвращаются записи срабатываний с указанием инструмента,
   режима, attempt и параметров окна
 

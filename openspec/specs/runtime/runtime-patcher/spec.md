@@ -120,16 +120,19 @@ call site'ов), а не runtime-механизмом idempotency. `RuntimePatch
   или эквивалентного) в production-код не вводится — production
   semantics не меняется ради тестов.
 
-### Requirement: Точное соответствие inventory (финально — 6 patches)
+### Requirement: Точное соответствие inventory (финально — 4 patches)
 
 Множество имён patches, вызываемых `RuntimePatcher.apply_all()`,
 множество ключей `_PATCH_SPECS` и множество имён в
 `lib.services.runtime_inventory.canonical_runtime_patches()` SHALL
-быть попарно равны. **Финальное состояние: 6 patches в каждом из
-трёх множеств** — `exec_limits`, `exec_timeout_cap`, `tool_limits`,
-`assemble_outbound`, `subagent_logging`, `repeat_guard_block`
-(после удаления `project_tools`). Любое расхождение
-считается drift'ом и SHALL быть обнаружено архитектурным тестом.
+быть попарно равны. **Финальное состояние: 4 patches в каждом из
+трёх множеств** — `exec_timeout_cap`, `assemble_outbound`,
+`subagent_logging`, `repeat_guard_block` (`_PATCH_SPECS` в
+`lib/services/runtime_patcher.py:271`). Сняты `project_tools`,
+`exec_limits` и `tool_limits`: первый удалён вместе с tool'ами агента,
+второй и третий — потому что потолки приходят из конфигурации, а не из
+патча. Любое расхождение считается drift'ом и SHALL быть обнаружено
+архитектурным тестом.
 
 #### Scenario: Дрейф между apply_all и PatchSpec невозможен
 

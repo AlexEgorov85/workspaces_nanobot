@@ -4,7 +4,7 @@
 Описывает нормативные требования к `AgentHook`-совместимости хуков проекта
 после апгрейда upstream `nanobot-ai 0.3.5`. Цель — зафиксировать
 контракт наследования, корректную работу с `LLMUsage` dataclass,
-новый API shutdown (`aclose`) и расширенную сигнатуру `patch_save_turn`.
+новый API shutdown (`aclose`).
 Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фиксируется
 отдельным требованием в `runtime/context` (MODIFIED).
 
@@ -49,14 +49,25 @@ Allowlist-проверка плагинов в `lib/cli/hook_loader.py` фикс
 - **ТОГДА** они ДОЛЖНЫ `await agent.aclose()`
 - **И НЕ ДОЛЖНЫ** вызывать `agent.close_mcp()` — это приведёт к `AttributeError` и неконтролируемому падению процесса
 
-### Requirement: Wrapper `patch_save_turn` принимает новые kwargs
+### Requirement: `_save_turn` не патчится
 
-`RuntimePatcher.patch_save_turn._wrap` (proxy вокруг `AgentLoop._save_turn`) MUST принимать и проксировать kwarg-only параметры, добавленные в nanobot 0.3.5: `summary_checkpoint: SessionSummaryCheckpoint | None = None` и `input_persisted_early: bool = False`. Без них wrapper падает с `TypeError: unexpected keyword argument 'summary_checkpoint'` при первом `_persist_turn`.
+`AgentLoop._save_turn` MUST NOT подменяться: в `_PATCH_SPECS`
+(`lib/services/runtime_patcher.py:271`) такой патч отсутствует, и
+`RuntimePatcher` не имеет метода `patch_save_turn`. Kwarg-only параметры,
+добавленные в nanobot 0.3.5 (`summary_checkpoint`, `input_persisted_early`),
+приходят в метод фреймворка нативно, минуя посредника, поэтому объявлять
+прокси для них нечего.
 
-#### Scenario: _save_turn вызывается с новыми kwargs
+Раньше здесь было требование «wrapper `patch_save_turn._wrap` принимает новые
+kwargs». Оно описывало патч, которого в коде нет; удаление wrapper'а оставило
+требование в каноне, хотя риск, который оно закрывало (`TypeError: unexpected
+keyword argument`), невозможен именно потому, что прокси нет.
 
-- **КОГДА** `AgentLoop._persist_turn` (или эквивалентный stage) вызывает `_save_turn(session, messages, skip, turn_latency_ms=..., summary_checkpoint=..., input_persisted_early=...)`
-- **ТОГДА** wrapper `_wrap` ДОЛЖЕН принять все kwargs и пробросить их в оригинальный `AgentLoop._save_turn`
+#### Scenario: Расширенная сигнатура `_save_turn`
+
+- **КОГДА** `AgentLoop._persist_turn` вызывает `_save_turn(session, messages, skip, turn_latency_ms=..., summary_checkpoint=..., input_persisted_early=...)`
+- **ТОГДА** вызов SHALL дойти до метода фреймворка без посредника
+- **И** `RuntimePatcher` SHALL NOT содержать `patch_save_turn`
 
 ## Responsibility
 

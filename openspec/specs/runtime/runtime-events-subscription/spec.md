@@ -21,7 +21,7 @@ lifecycle (`start`/`stop`) and idempotent context-bridge seeding.
 
 * читает `event.context.session_key` (string) и `event.runtime.context_window_tokens`
   (int) и `event.runtime.model` (string);
-* вызывает `context_bridge.seed_context_window(session_key, limit=..., model="...")`
+* вызывает `seed_context_window(session_key, limit=..., model="...")`
   **до** любых других side-effects;
 * если `session_key` пуст — выходит без записи и без side-effects;
 * исключения от `seed_context_window` MUST ДОЛЖНЫ быть поглощены с
@@ -57,12 +57,12 @@ lifecycle (`start`/`stop`) and idempotent context-bridge seeding.
 
 Handler MUST ДОЛЖЕН быть `async def handler(event)` или sync-callable.
 Handler MUST NOT НЕ ДОЛЖЕН делать ничего, кроме (а) обновления моста
-через `context_bridge.seed_context_window(...)` и (б) опционального
+через `seed_context_window(...)` и (б) опционального
 логирования через `loguru.logger`. Никаких HTTP/RPC/DB-вызовов.
 
 #### Scenario: Исключение в handler'е
 
-- **WHEN** `context_bridge.seed_context_window` бросает
+- **WHEN** `seed_context_window` бросает
   `RuntimeError("bridge down")`
 - **THEN** handler MUST ДОЛЖЕН залогировать warning через
   `logger.opt(exception=True).warning(...)` и MUST NOT НЕ ДОЛЖЕН
@@ -80,7 +80,7 @@ Handler MUST NOT НЕ ДОЛЖЕН делать ничего, кроме (а) о
 ### Requirement: Идемпотентность seed
 
 Двойной вызов `seed_context_window` для одной и той же `session_key`
-MUST ДОЛЖЕН быть идемпотентным. Это требование к `ContextBridge`-реализации
+MUST ДОЛЖЕН быть идемпотентным. Это требование к `seed_context_window`
 (НЕ к handler'у): первая запись выигрывает, последующие MUST NOT
 НЕ ДОЛЖНЫ затирать более новый `usage` от `_store_iteration_usage`.
 
@@ -105,19 +105,32 @@ MUST ДОЛЖЕН быть идемпотентным. Это требовани
 - **THEN** MUST ДОЛЖЕН быть залогирован warning через `logger.warning(...)`
 - **AND** MUST NOT НЕ ДОЛЖЕН быть вызван `bus.subscribe(...)` повторно.
 
-### Requirement: Контекстный мост как абстракция
+### Requirement: Контекстное окно сеется прямой функцией
 
-`ContextBridge` MUST ДОЛЖЕН быть протоколом с единственным методом
-`seed_context_window(session_key: str, *, limit: int, model: str = "") -> None`.
-Реализация по умолчанию `DatabaseLoggingContextBridge` MUST ДОЛЖЕН
-делегировать в `lib.hooks.database_logging_hook.seed_context_window`
-(ничего больше).
+`RuntimeEventsSubscriber` MUST ДОЛЖЕН сеять контекстное окно прямым
+вызовом `lib.hooks.database_logging_hook.seed_context_window`
+(`lib/services/runtime_events_subscriber.py:57`). Отдельного протокола
+`ContextBridge` и модуля-обёртки `lib/services/context_bridge.py` MUST NOT
+быть: producer у этого окна один, и посредник между двумя функциями ничего
+не добавлял, кроме лишнего слоя.
 
-#### Scenario: Default-имплементация — мост в DatabaseLoggingHook
+Ответственность при этом не сливается: subscriber отвечает только за
+подписку, а `seed_context_window` — только за запись bridge-state в
+`DatabaseLoggingHook`.
 
-- **WHEN** `DatabaseLoggingContextBridge.seed_context_window("postgres:1", limit=40000, model="MiniMax-M3")` зовётся
-- **THEN** `lib.hooks.database_logging_hook.seed_context_window` MUST ДОЛЖЕН быть вызван с теми же аргументами.
-- **AND** больше никаких side-effects (никаких DB-вызовов, никаких HTTP).
+Раньше здесь требовался протокол `ContextBridge` с реализацией
+`DatabaseLoggingContextBridge`. Модуль-обёртка не был создан — это записано
+как DEVIATION в `openspec/changes/archive/2026-09-27-runtime-events-subscription/tasks.md:5-12`
+(«абстракция избыточна для единственного producer'а»), и canon не был приведён
+к принятому решению.
+
+#### Scenario: Сев контекстного окна
+
+- **WHEN** подписчик получает событие, требующее записи контекстного окна
+- **THEN** `lib.hooks.database_logging_hook.seed_context_window` MUST ДОЛЖЕН
+  быть вызван напрямую с теми же аргументами
+- **AND** больше никаких side-effects (никаких DB-вызовов, никаких HTTP)
+- **AND** имя `ContextBridge` MUST NOT появляться в коде проекта
 
 ### Requirement: Контракт Subscribe между observer'ом и MessageBus
 

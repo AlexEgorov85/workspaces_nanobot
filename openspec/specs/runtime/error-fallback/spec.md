@@ -10,6 +10,8 @@
 
 ## Requirements
 
+Имя события каноническое: `agent.failed` (`EV_AGENT_FAILED` в `lib/hooks/database_logging_hook.py:50`, запись — `lib/services/turn_delivery_factory.py:145`). Раньше здесь стояло имя `turn_failed`, которого в коде нет.
+
 ### Requirement: Подстановка заготовленного текста при internal-ошибке
 
 > **Reason for MODIFICATION:** Реализация в `runtime_patcher.py:_wrap_fail`
@@ -72,7 +74,7 @@ THEN `OutboundMessage.metadata._error_kind` SHALL быть равен `"internal
 > `exception_type`/`exception_message` отсутствуют в payload.
 
 WHEN система формирует fallback-ответ,
-THEN при `gateway.error_messages.log_to_db=true` (default) система SHALL записать в `agent_gateway_logs` запись `event_type="turn_failed"` с payload, содержащим ВСЕ перечисленные ниже поля, полученные **из авторитетных источников**:
+THEN при `gateway.error_messages.log_to_db=true` (default) система SHALL записать в `agent_gateway_logs` запись `event_type="agent.failed"` с payload, содержащим ВСЕ перечисленные ниже поля, полученные **из авторитетных источников**:
 - `session_key` — из атрибута `TurnDelivery.session_key` (установлен через `TurnDelivery.create(msg, session_key, ...)` в `turn_delivery.py:85-103`). НЕ из `lifecycle_message` (такого поля нет).
 - `channel` — из `lifecycle_message.channel` (`nanobot/bus/events.py:28`).
 - `chat_id` — из `lifecycle_message.chat_id` (`nanobot/bus/events.py:30`).
@@ -88,12 +90,12 @@ AND при `log_to_db=false` система SHALL **не** вызывать `try
 #### Scenario: Запись при log_to_db=true
 
 - **WHEN** в `config.json` `gateway.error_messages.log_to_db=true` (или отсутствует — default)
-- **THEN** в таблице `agent_gateway_logs` появляется строка с `event_type="turn_failed"` и `payload`, содержащим тип и текст оригинального исключения
+- **THEN** в таблице `agent_gateway_logs` появляется строка с `event_type="agent.failed"` и `payload`, содержащим тип и текст оригинального исключения
 
 #### Scenario: Без записи при log_to_db=false
 
 - **WHEN** в `config.json` `gateway.error_messages.log_to_db=false`
-- **THEN** в `agent_gateway_logs` НЕ появляется новая строка для этого `turn_failed`; оригинальное исключение остаётся только в `loguru`
+- **THEN** в `agent_gateway_logs` НЕ появляется новая строка для этого `agent.failed`; оригинальное исключение остаётся только в `loguru`
 
 #### Scenario: Отсутствие DbLoggingService
 
@@ -103,7 +105,7 @@ AND при `log_to_db=false` система SHALL **не** вызывать `try
 #### Scenario: Все диагностические поля заполнены из авторитетных источников
 
 - **WHEN** `TurnDelivery.fail` вызывается из `except ValueError("boom")`-блока, `lifecycle_message.sender_id="u-42"`, `TurnDelivery.session_key="s-7"`, `agent_id="agent_main"`
-- **THEN** payload `turn_failed` SHALL содержать `exception_type="ValueError"`, `exception_message="boom"`, `exception_available=true`, `sender_id="u-42"`, `session_id="s-7"`, `agent_id="agent_main"`
+- **THEN** payload `agent.failed` SHALL содержать `exception_type="ValueError"`, `exception_message="boom"`, `exception_available=true`, `sender_id="u-42"`, `session_id="s-7"`, `agent_id="agent_main"`
 - **AND** НЕ ДОЛЖЕН быть записан с `session_id=null` или `user_id=null` из-за чтения несуществующих полей `lifecycle_message`
 
 #### Scenario: Отсутствие активного исключения деградирует gracefully
