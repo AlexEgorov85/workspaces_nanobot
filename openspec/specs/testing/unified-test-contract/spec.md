@@ -88,7 +88,8 @@
 - `contract` — тест проверяет совместимость с upstream `nanobot`. Гейта
   нет: выполняется всегда, в том числе в CI.
 - `benchmark` — офлайн-базовая линия на синтетических фикстурах. Гейта
-  нет, выполнение опционально (`-m benchmark`).
+  нет: фильтр джоб — `-m "not live and not integration"`, маркера в нём нет,
+  поэтому эти тесты выполняются всегда, а `-m benchmark` только отбирает их.
 
 Маркер `live` SHALL ставить **обе** кодовые базы. Это не симметрия ради
 симметрии: если на платформе ни один тест не помечен `live`, то фильтр
@@ -121,10 +122,12 @@
   `NANOBOT_LIVE_E2E: "0"` и `NANOBOT_INTEGRATION: "0"`
 - **THEN** `contract`-тесты выполняются: для них гейта не существует
 
-#### Scenario: `benchmark` по требованию
+#### Scenario: `benchmark` входит в обычный набор
 
 - **WHEN** тест помечен `benchmark`
-- **THEN** он не входит в фильтр CI и запускается только по явному `-m benchmark`
+- **THEN** он входит в фильтр CI и выполняется обычным прогоном, потому что
+  фильтр джоб — `-m "not live and not integration"` и маркера в нём нет
+- **AND** `-m benchmark` только отбирает эти тесты, а не разрешает их запуск
 
 ### Requirement: Паритет CI: одинаковый фильтр и линт обеих баз
 
@@ -611,7 +614,7 @@ SHALL быть удалены, а не оставлены «на будущее�
 | `live` | реальный gateway / БД / LLM | `NANOBOT_LIVE_E2E=1` | агент: `tests/test_gateway_live_media_e2e.py`, `tests/test_mcp_operations_live.py`, `tests/test_startup_schema_validation_live.py`; платформа: `mcp-platform/tests/test_live_stdio_contract.py` |
 | `integration` | worker pool на реальной БД | `NANOBOT_INTEGRATION=1` + `DATABASE_URL` | агент: `tests/integration/test_postgres_channel_lifecycle_stress.py` |
 | `contract` | проверки совместимости (upstream nanobot) | не гейтится, выполняется всегда | агент: `tests/contract/` |
-| `benchmark` | офлайн-базовая линия на синтетических фикстурах | не гейтится, опционален (`-m benchmark`) | маркер объявлен в обоих `pyproject.toml`, но **не применён ни к одному тесту**: `pytest -m benchmark` собирает 0 тестов. Ближайший офлайн-набор — `tests/benchmarks/test_quality_benchmark.py` (4 теста, маркера не несёт, собирается обычным прогоном) |
+| `benchmark` | офлайн-базовая линия на синтетических фикстурах | не гейтится, выполняется всегда; `-m benchmark` только отбирает | агент: `tests/benchmarks/test_quality_benchmark.py` — `pytest -m benchmark` собирает 4 теста из 3707; платформа: `mcp-platform/tests/legal_summarizer/test_structure_direct_threshold_benchmark.py` (10 тестов) |
 
 **Env-гейты:**
 
