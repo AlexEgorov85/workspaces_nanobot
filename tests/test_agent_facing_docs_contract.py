@@ -74,6 +74,21 @@ def _agent_facing_docs() -> list[Path]:
     docs.extend(sorted(WORKSPACE.glob("skills/*/SKILL.md")))
     return [d for d in docs if d.exists()]
 
+#: Имена событий журнала — отдельное объявленное пространство, а не операции
+#: capability, но форма у них та же (``<capability>.<operation>``). Причём
+#: ``llm`` — настоящая capability, поэтому ``llm.exchanged`` (событие обмена с
+#: моделью, ``db_logging_service.py``) разбирается регуляркой как вызов
+#: операции ``exchanged`` и называется несуществующей. Словарь событий —
+#: единственный их владелец (``eventing/types.py``), и он читается оттуда, а не
+#: дублируется здесь списком: выдуманный список забыл бы новое имя события
+#: тихо, а чтение словаря не может разойтись с ним по построению.
+_JOURNAL_EVENT_TYPES = frozenset(
+    re.findall(
+        r'=\s*"([a-z][a-z_.]*)"',
+        (REPO_ROOT / "mcp-platform" / "libs" / "enterprise_common" / "eventing" / "types.py")
+        .read_text(encoding="utf-8"),
+    )
+)
 
 #: Префиксы, за которыми в инструкциях стоит путь репозитория. Всё остальное
 #: (``session://results/...``, ``application/``, ``cache/``) — не путь, и
@@ -262,12 +277,22 @@ class TestSkillFileIsLoadable:
 class TestAgentDocsNameOnlyRealTools:
     def test_mcp_tools_are_in_enabled_list(self) -> None:
         """Имя операции в инструкции обязано быть в белом списке модели."""
+        # Словарь событий обязан не оказаться пустым: иначе исключение выше
+        # снимало бы с проверки всё подряд, и проверка позеленела бы ровно
+        # тогда, когда её словарь перестал читаться.
+        assert _JOURNAL_EVENT_TYPES, (
+            "не прочитан словарь событий журнала (eventing/types.py) — "
+            "исключение для имён событий снимает с проверки всё подряд"
+        )
         enabled = _enabled_tools()
         seen: dict[str, Path] = {}
         for doc in _agent_facing_docs():
             text = doc.read_text(encoding="utf-8")
             for name in _OPERATION.findall(text):
                 if name[1] in _FILE_SUFFIXES:
+                    continue
+                if f"{name[0]}.{name[1]}" in _JOURNAL_EVENT_TYPES:
+                    # Объявленное имя события журнала, а не вызов операции.
                     continue
                 seen[f"{name[0]}.{name[1]}"] = doc
         # Невакуумность: пустой обход означал бы, что форма опознавания больше

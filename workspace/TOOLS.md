@@ -62,15 +62,15 @@ This file documents non-obvious constraints and usage patterns.
 **Параметры:**
 
 - `query` (опц.) — подстрока для ILIKE-поиска по `summary` и `payload::text`.
-- `event_type` (опц.) — тип события журнала, например `context_compacted`,
-  `tool_call`, `tool_result`, `llm_call`, `run_finished`, `turn_completed`,
-  `subagent_run_finished`, `inbound`.
-  * `turn_completed` — метрики оборота (latency_ms, outcome,
+- `event_type` (опц.) — тип события журнала, например `agent.compacted`,
+  `tool.started`, `tool.completed`, `llm.exchanged`, `agent.responded`, `agent.completed`,
+  `agent.completed`, `agent.received`.
+  * `agent.completed` — метрики оборота (latency_ms, outcome,
     usage_tokens, runtime_model). НЕ содержит `final_content` —
-    только статистика; для контента используйте `run_finished`.
+    только статистика; для контента используйте `agent.responded`.
 - `level` (опц.) — уровень журнала.
-- `tool_name` (опц.) — имя инструмента для фильтрации `tool_call` /
-  `tool_result`. Удобно для поиска истории конкретного инструмента.
+- `tool_name` (опц.) — имя инструмента для фильтрации `tool.started` /
+  `tool.completed`. Удобно для поиска истории конкретного инструмента.
 - `since` / `until` (опц.) — ISO-8601 таймстамп.
 - `limit` (опц.) — максимум событий на страницу.
 - `offset` (опц., дефолт 0) — пропустить первые `offset` событий
@@ -94,17 +94,17 @@ This file documents non-obvious constraints and usage patterns.
 **Примеры:**
 
 - «Какие файлы я прикладывал?» →
-  `data.history_search(event_type="tool_call", tool_name="read_file")`
+  `data.history_search(event_type="tool.started", tool_name="read_file")`
 - «Когда последний раз сжимался контекст?» →
-  `data.history_search(event_type="context_compacted")`
+  `data.history_search(event_type="agent.compacted")`
 - «Что я писал про договор аренды?» →
-  `data.history_search(query="договор аренды", event_type="llm_call")`
+  `data.history_search(query="договор аренды", event_type="llm.exchanged")`
 - Пагинация: первая страница → `data.history_search(limit=20)` →
   если `next_offset` не `null`, продолжить с `offset=next_offset` (НЕ `20`).
 
 **Замечания:**
 
-- Для поиска файлов используй `tool_call` / `tool_result` (там аргументы
+- Для поиска файлов используй `tool.started` / `tool.completed` (там аргументы
   и пути), а НЕ выдуманные типы (`file_attached`, `file_created`,
   `document_summarized` — таких нет в журнале).
 - Если результат пустой — отвечай «не найдено в истории», не выдумывай.
@@ -122,7 +122,7 @@ This file documents non-obvious constraints and usage patterns.
 на момент публикации change и явно помечает поля, сериализованные как
 JSON-string. Изменение формы данных требует отдельного change.
 
-#### `tool_call.payload`
+#### `tool.started.payload`
 
 ```json
 {
@@ -134,7 +134,7 @@ JSON-string. Изменение формы данных требует отде�
 
 Все поля — простых типов или dict'ы.
 
-#### `tool_result.payload`
+#### `tool.completed.payload`
 
 ```json
 {
@@ -150,7 +150,7 @@ JSON-string. Изменение формы данных требует отде�
 `(N chars truncated)`). Для получения структуры примени
 `json.loads(payload.result)`.
 
-#### `llm_call.payload`
+#### `llm.exchanged.payload`
 
 ```json
 {
@@ -164,10 +164,10 @@ JSON-string. Изменение формы данных требует отде�
 
 `prompt` — массив ролей (system/user/assistant/tool), `response` —
 объект с контентом и метаданными. Размер payload'а сильно варьируется
-(большие `llm_call` обрезаются до `per_event_cap=4000` через
+(большие `llm.exchanged` обрезаются до `per_event_cap=4000` через
 `truncate_middle`).
 
-#### `run_finished.payload`
+#### `agent.responded.payload`
 
 ```json
 {
@@ -182,27 +182,38 @@ JSON-string. Изменение формы данных требует отде�
 Все поля — простых типов или list/str. `tools_used` — список имён
 инструментов, использованных в прогоне.
 
-#### `turn_completed.payload`
+#### `agent.completed.payload`
 
 Метрики оборота (для observability, не пользовательского контента):
 
 ```json
 {
-  "latency_ms": 1234,
   "outcome": "completed",
-  "failure_kind": null,
-  "failure_error_kind": null,
-  "failure_attempts": null,
-  "usage_tokens": 128,
-  "runtime_model": "MiniMax-M3"
+  "latency_ms": 1234,
+  "stop_reason": "stop",
+  "iterations": 2,
+  "tokens_used": 128
 }
 ```
 
+Это `metadata` строки, а не `payload`: итог оборота пишется как
+`_log_stage(...)` (`lib/hooks/database_logging_hook.py:613`), и метрики лежат
+в `metadata`, тогда как `payload` у этой строки пуст.
+
 НЕ содержит `final_content` / `tools_used` — это user-visible
-содержимое живёт в `run_finished`. Пишется через подписку на
+содержимое живёт в `agent.responded`. Пишется через подписку на
 `TurnCompleted` в `RuntimeEventsSubscriber`.
 
-#### `subagent_run_finished.payload`
+У подагента то же имя события, но другая форма: `channel="subagent"`,
+`session_id="subagent:<task_id>"`, а payload несёт `task_id`, `task`,
+`final_content`, `tools_used`, `stop_reason`, `request_id`,
+`parent_request_id`, `parent_user_id`, `usage_tokens`, `had_error`
+(`lib/services/runtime_events_subscriber.py:496`).
+
+#### `agent.completed.payload` — оборот подагента
+
+То же имя события, что у основного оборота, но форма другая: строка
+помечена `channel="subagent"`, а `session_id` равен `subagent:<task_id>`.
 
 ```json
 {
@@ -220,7 +231,7 @@ JSON-string. Изменение формы данных требует отде�
 `parent_request_id` — `request_id` родительского вопроса, из которого
 запущен подагент.
 
-#### `inbound.payload`
+#### `agent.received.payload`
 
 ```json
 {
@@ -234,9 +245,9 @@ JSON-string. Изменение формы данных требует отде�
 
 `sender_id` / `chat_id` опциональны (есть не всегда), `media` — list
 объектов `MediaItem` (см. `workspace/utils/media.py`). `message_id`
-связывает `inbound` с `request_id` вопроса.
+связывает `agent.received` с `request_id` вопроса.
 
-#### `context_compacted.payload`
+#### `agent.compacted.payload`
 
 Определяется реализацией `ContextCompactionService._notify`
 (`lib/services/context_compaction.py`) на момент архивации spec
