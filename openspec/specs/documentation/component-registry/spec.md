@@ -71,9 +71,9 @@
 
 - `runtime` — runtime компоненты (`ApplicationContext`, `AgentFactory`, `MessageBus`)
 - `configuration` — конфигурация (`ConfigService`, profiles)
-- `channels` — каналы коммуникации (`PostgresChannel`, `RedisChannel`)
-- `sessions` — управление сессиями (`PostgresSessionManager`)
-- `data` — данные, кеш, векторы (`CacheProvider`, `VectorIndexService`)
+- `channels` — каналы коммуникации (`PostgresChannel`); `RedisChannel` **снят** вместе со вторым транспортом, в `lib/channels/` остались `message_exchange.py`, `postgres_channel.py` и `queue_ops.py`
+- `sessions` — управление сессиями (`SessionManager` upstream-библиотеки); `PostgresSessionManager` **не остался**
+- `data` — данные, кеш, векторы (`CacheProvider`, `VectorBuilder`); `VectorIndexService` **снят** вместе с кэш-кластером, его преемник — сборщик capability `vectors`
 - `observability` — логирование, мониторинг (`DatabaseLogging`, `EventLogging`)
 - `infrastructure` — инфраструктура (`RuntimePatcher`, Hooks, SubprocessManagement)
 - `interfaces` — интерфейсы (CLI, Gateway)

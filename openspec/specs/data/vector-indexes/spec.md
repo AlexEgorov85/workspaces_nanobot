@@ -45,14 +45,15 @@
 - **КОГДА** векторный индекс добавлен или изменён
 - **ТОГДА** его декларация ДОЛЖНА находиться под `gateway.vector.index.indexes.<name>` в `config.json`
 
-### Requirement: Storage table зарегистрирован через infra API
+### Requirement: Состав векторных индексов объявляет платформа
 
-Система MUST сохранять векторные embeddings в таблице, зарегистрированной через `lib.core.infra_registration.register_vector_storage`.
+Система MUST сохранять векторные embeddings в таблице, имя которой объявляет платформа, а не реестр агента.
 
 #### Scenario: Таблица векторного хранилища
 
-- **КОГДА** `gateway.vector.index.storage_table` установлен
-- **ТОГДА** эта таблица ДОЛЖНА быть зарегистрирована через `register_vector_storage`, чтобы `TableRegistry` знал о ней для синхронизации
+- **КОГДА** capability `vectors` обращается к индексу
+- **ТОГДА** имя индекса и имя storage-таблицы MUST приходить из `mcp-platform/platform.json → vectors.indexes`, а не из `config.json` агента
+- **И MUST NOT** регистрироваться через `lib.core.infra_registration.register_vector_storage`: модуль **снят** вместе с кэш-кластером, и реестра таблиц `TableRegistry` в проекте **не осталось** — синхронизировать нечего, снимок наполняет платформа
 
 ### Requirement: FAISS-backed
 

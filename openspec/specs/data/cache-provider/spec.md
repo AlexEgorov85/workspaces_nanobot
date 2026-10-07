@@ -18,7 +18,7 @@
 #### Scenario: обновление данных
 
 - **КОГДА** в PostgreSQL изменились строки кэшируемой таблицы
-- **ТОГДА** `PgDuckDbSyncService` ДОЛЖЕН подхватить изменение (по track-колонке) и инкрементально обновить DuckDB-снапшот
+- **ТОГДА** обновление снимка MUST делать capability `data` платформы одной транзакцией с чтением (`SnapshotLoadService`, `mcp-platform/libs/enterprise_data/loader.py:149`). Инкрементального sync в системе нет: агентский `PgDuckDbSyncService` **снят** вместе с кэш-кластером
 - **И НЕ ДОЛЖЕН** использовать dual-write или иной механизм записи в обе БД одновременно
 
 ### Requirement: локальный ext4 storage
@@ -29,16 +29,16 @@ Concrete cache storage MUST reject unsupported network/shared filesystem paths b
 
 Snapshot-путь MUST быть единым для всех процессов:
 
-- `cache.duckdb` — единый runtime-resource, открывается в `ApplicationContext.create()` для `role="gateway"` и `role="cli"` в режиме, определяемом `CacheOwnershipCoordinator`.
-- Никаких role-based путей. Параметр `role` в `resolve_publish_path(role)` сохранён для backward compat, но `role="cli"` и `role="gateway"` MUST возвращать **`<local_path>/cache.duckdb`**.
+- `cache.duckdb` — имя файла снимка (`SNAPSHOT_FILENAME`, `mcp-platform/libs/enterprise_data/snapshot/store.py:88`). Путь объявляет платформа: `mcp-platform/platform.json → data.snapshot_path`; резолвится `resolve_snapshot_path()` (`:259`). Агент файл не открывает: `CacheProvider` в дереве агента **не остался**.
+- Никаких role-based путей. Функции `resolve_publish_path(role)` в коде нет, и роли она не принимала бы: резолвинг единственный — `resolve_snapshot_path(cache_dir, filename)`.
 
-**`gateway.cache.local_path` MUST быть shared runtime resource**, не profile-specific value. Если CLI работает с `profile="test"`, а gateway с `profile="prod"` — оба процесса MUST резолвить snapshot в один и тот же физический путь. Профили НЕ ДОЛЖНЫ переопределять `gateway.cache.local_path`.
+**Путь снимка MUST быть shared runtime resource**, не profile-specific value. Он объявляется на платформе (`mcp-platform/platform.json → data.snapshot_path`, `platform.json:99`), поэтому оба процесса резолвят его в один и тот же физический путь. Ключа `gateway.cache.local_path` в конфигурации агента **нет** — секция `gateway.cache` снята вместе с кэш-кластером.
 
-**Cache lifecycle MUST быть отделён от `gateway.enable_audit`.** Cache runtime (`CacheProvider`, concrete implementation, `CacheOwnershipCoordinator`) создаётся, если `gateway.cache` секция настроена (наличие `gateway.cache.local_path`). `gateway.enable_audit` MUST NOT определять существование cache — он контролирует ТОЛЬКО audit sync (`CacheSyncService`).
+**Снимок MUST загружать платформа, а не агент.** Ни `CacheProvider`, ни concrete implementation, ни слой владения в дереве агента не остались; снимком владеет capability `data`. Секции `gateway.cache` в конфигурации агента **нет**, и `gateway.enable_audit` не имеет отношения к её существованию.
 
-Режим открытия (`READ_WRITE` или `READ_ONLY`) MUST определяться через `CacheOwnershipCoordinator.try_claim(worker_id)` ДО создания `CacheProvider`. См. подробный контракт в `runtime/entrypoints`.
+Режим открытия (`READ_WRITE` или `READ_ONLY`) определяет владелец файла снимка; `CacheAccessMode` объявлен на платформе (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:46`). Слой владения **снят** (change `drop-local-cache-read-from-pg`): claim, heartbeat, fencing и таблица `agent_cache_ownership` не выполняются и не существуют.
 
-Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache через `CacheProvider` (без `role`-based path), читать свежий snapshot независимо от того, какой процесс является owner'ом.
+Skills (`audit_analyzer`, `legal_summarizer`) MUST читать снимок через операции capability `data` — модель получает их как `mcp_enterprise_*` с настоящими `inputSchema`. Прямого доступа к файлу снимка у них нет, и открывать его им не нужно: файл вообще не открывает агент.
 
 #### Scenario: обнаружение NFS пути
 
@@ -65,7 +65,7 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 - **КОГДА** `gateway.enable_audit=False`, но `gateway.cache` секция настроена
 - **ТОГДА** `CacheProvider` MUST быть создан (cache runtime существует)
-- **AND** `CacheSyncService` MUST NOT быть создан (sync отключён)
+- **AND** отдельной подсистемы sync в агенте MUST NOT быть создано: `CacheSyncService` **снят** вместе с кэш-кластером
 - **AND** Skills (`audit_analyzer`, `legal_summarizer`) MUST иметь доступ к cache через `CacheProvider`
 - **AND** если процесс получил ownership cache resource → `READ_WRITE` access НЕЗАВИСИМО от `enable_audit` (другие runtime-компоненты MAY выполнять cache mutations через `CacheProvider`)
 
@@ -103,38 +103,34 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 Конкретный тип локального cache-хранилища является implementation detail. Нормативные runtime-контракты НЕ ДОЛЖНЫ использовать конкретное имя или API текущей storage implementation, кроме разделов, описывающих соответствующий concrete adapter.
 
-Компоненты, которые MUST NOT зависеть от `DuckDbCacheStore` (или любого другого concrete имени):
+Компоненты, которые MUST NOT зависеть от concrete-имени хранилища:
 
 - `AgentLoop`
 - Skills
 - Tools
-- `CacheSyncService`
-- `CacheOwnershipCoordinator`
 - Runtime consumers `CacheProvider`
 
-`DuckDbCacheStore` MAY фигурировать только в:
+`DuckDbSnapshotStore` MAY фигурировать только в:
 - Concrete adapter specification
 - Composition root (`ApplicationContext.create`)
 - Configuration/factory
 - Tests, проверяющих DuckDB-specific behavior
 
-Замена `DuckDbCacheStore` на другую реализацию `CacheProvider` (например, `SQLiteCacheStore`) НЕ ДОЛЖНА требовать изменений в `AgentLoop`, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator` или других runtime consumers `CacheProvider`. Изменения MAY потребоваться только в concrete adapter, composition root, configuration/factory и integration tests конкретной реализации.
+Замена concrete-реализации на другую (например, `SQLiteCacheStore`) НЕ ДОЛЖНА требовать изменений в `AgentLoop`, Skills, Tools или других runtime consumers `CacheProvider`. Изменения MAY потребоваться только в concrete adapter, composition root, configuration/factory и integration tests конкретной реализации.
 
 #### Scenario: Замена concrete cache implementation
 
 - **GIVEN** cache runtime реализован через `CacheProvider`
-- **WHEN** concrete implementation заменяется (например, `DuckDbCacheStore` → `SQLiteCacheStore`)
+- **WHEN** concrete implementation заменяется (например, `DuckDbSnapshotStore` → `SQLiteCacheStore`)
 - **THEN** `AgentLoop` MUST NOT require changes
 - **AND** Skills MUST NOT require changes
 - **AND** Tools MUST NOT require changes
-- **AND** `CacheSyncService` MUST NOT require changes
-- **AND** `CacheOwnershipCoordinator` MUST NOT require changes
 - **AND** изменения MAY потребоваться только в: concrete adapter, composition root, configuration/factory, integration tests конкретной реализации
 
 #### Scenario: runtime-consumer код не импортирует concrete cache implementation
 
-- **WHEN** проверяется `AgentLoop`, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator` на импорт concrete cache class
-- **THEN** НЕ ДОЛЖНО быть импортов `DuckDbCacheStore` (или любой другой concrete реализации)
+- **WHEN** проверяется `AgentLoop`, Skills, Tools на импорт concrete cache class
+- **THEN** НЕ ДОЛЖНО быть импортов `DuckDbSnapshotStore` (или любой другой concrete реализации)
 - **AND** эти компоненты работают только через `CacheProvider` интерфейс
 
 ### Requirement: CacheProvider как интерфейс без конкретной СУБД
@@ -143,55 +139,23 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 - знать имя или тип конкретной СУБД;
 - содержать DuckDB-specific или SQLite-specific API в публичных методах;
-- управлять ownership PostgreSQL resource (это `CacheOwnershipCoordinator`);
+- управлять владением PostgreSQL resource: слоя владения **нет**, в системе один gateway и один известный writer;
 - самостоятельно выполнять ownership takeover;
 - создавать concrete storage implementation.
 
-`CacheProvider` НЕ ИМЕЕТ метода `open()`. Concrete factory (например, `DuckDbCacheStore.open(path, mode)` или эквивалентный для другой реализации) вызывается composition root'ом `ApplicationContext`.
+`CacheProvider` НЕ ИМЕЕТ метода `open()`. Concrete-реализация `DuckDbSnapshotStore` сама открывает своё хранилище; вызов идёт из composition root.
 
 #### Scenario: Замена concrete implementation
 
 - **GIVEN** cache runtime реализован через `CacheProvider`
-- **WHEN** concrete implementation заменяется (например, `DuckDbCacheStore` → `SQLiteCacheStore`)
-- **THEN** `CacheOwnershipCoordinator` MUST NOT require changes
-- **AND** `CacheSyncService` MUST NOT require changes
-- **AND** runtime consumers MUST NOT require changes
+- **WHEN** concrete implementation заменяется (например, `DuckDbSnapshotStore` → `SQLiteCacheStore`)
+- **THEN** runtime consumers MUST NOT require changes
 
 #### Scenario: runtime-consumer код не импортирует concrete cache implementation
 
-- **WHEN** проверяется `AgentLoop`, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator` на импорт concrete cache class
-- **THEN** НЕ ДОЛЖНО быть импортов `DuckDbCacheStore` (или любой другой concrete реализации)
+- **WHEN** проверяется `AgentLoop`, Skills, Tools на импорт concrete cache class
+- **THEN** НЕ ДОЛЖНО быть импортов `DuckDbSnapshotStore` (или любой другой concrete реализации)
 - **AND** эти компоненты работают только через `CacheProvider` интерфейс
-
-### Requirement: CacheOwnershipCoordinator как абстрагированный ownership
-
-`CacheOwnershipCoordinator` MUST отвечать за ownership общего **логического** cache resource. Coordinator MUST NOT зависеть от конкретной реализации локального cache-хранилища.
-
-Ownership определяется для одного логического cache resource, который может быть реализован DuckDB, SQLite или другой локальной реализацией.
-
-Coordinator отвечает только за:
-- `try_claim()` (atomic claim)
-- `heartbeat()`
-- `release()`
-- `acquire_write_fence()` (PG advisory lock для fencing)
-- проверку текущего owner (через `ClaimResult.current_owner_id` / `current_generation`)
-- generation (fencing token)
-
-Coordinator MUST NOT выполнять операций чтения или записи cache-хранилища.
-
-#### Scenario: Замена concrete cache implementation
-
-- **GIVEN** cache runtime реализован через `CacheProvider`
-- **WHEN** concrete implementation заменяется
-- **THEN** `CacheOwnershipCoordinator` MUST NOT require changes
-- **AND** runtime consumers MUST NOT require changes
-- **AND** изменения MAY потребоваться только в: concrete `CacheProvider` implementation, composition root, configuration/factory, integration tests конкретной реализации
-
-#### Scenario: Coordinator не делает cache I/O
-
-- **WHEN** `CacheOwnershipCoordinator` выполняет любую операцию (`try_claim`, `heartbeat`, `release`, `acquire_write_fence`)
-- **THEN** он НЕ ДОЛЖЕН делать read/write в cache storage
-- **AND** он работает только с PostgreSQL `agent_cache_ownership` table
 
 ### Requirement: query_sql mode semantics
 
@@ -228,12 +192,9 @@ In `READ_WRITE` режиме:
 
 ### Requirement: CacheAccessMode и двухуровневая защита
 
-`CacheAccessMode` — абстрактный enum: `READ_WRITE` или `READ_ONLY`. Ownership определяет режим:
+`CacheAccessMode` — enum: `READ_WRITE` или `READ_ONLY` (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:46`). Режим задаёт владелец файла снимка: механизма claim больше нет, и класс `ClaimResult` **снят** вместе со слоем владения.
 
-- `ClaimResult.acquired=True` → `READ_WRITE`
-- `ClaimResult.acquired=False` → `READ_ONLY`
-
-Concrete adapter (например, `DuckDbCacheStore`) сам реализует, как открыть своё хранилище в этих режимах.
+Concrete adapter `DuckDbSnapshotStore` сам реализует, как открыть своё хранилище в этих режимах.
 
 В `READ_ONLY` режиме все мутации MUST быть запрещены через **двухуровневую защиту**:
 
@@ -244,7 +205,7 @@ Concrete adapter (например, `DuckDbCacheStore`) сам реализуе�
 
 #### Scenario: Concrete adapter открывает storage в реальном read_only режиме
 
-- **WHEN** CacheProvider создан в mode=READ_ONLY (например, `DuckDbCacheStore.open(path, mode=READ_ONLY)`)
+- **WHEN** CacheProvider создан в mode=READ_ONLY (например, `DuckDbSnapshotStore` открыт в READ_ONLY)
 - **THEN** concrete adapter MUST открыть storage connection в реальном read-only режиме (для DuckDB: `duckdb.connect(path, read_only=True)`)
 - **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены storage engine
 
@@ -258,6 +219,16 @@ Concrete adapter (например, `DuckDbCacheStore`) сам реализуе�
 
 - **WHEN** вызов `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` (в любом mode)
 - **THEN** MUST поднять `UnsupportedSqlError` (DDL запрещён даже в READ_WRITE)
+
+## Снятые требования
+
+Раздел нормативной части НЕ содержит требований, и не должен. Ниже — запись о том, что снято чисткой кэш-кластера, **чем заменено** и где живёт замена. Запись существует, чтобы читатель спеки не искал владение снимком в `lib/services/` и не решил, что оно ещё не описано.
+
+| Снятое требование | Почему | Замена |
+|---|---|---|
+| `CacheOwnershipCoordinator как абстрагированный ownership` (`try_claim`, `heartbeat`, `release`, `acquire_write_fence`, `ClaimResult`, generation, таблица `agent_cache_ownership`) | Слой владения снят change'ом `drop-local-cache-read-from-pg`: в системе один gateway и один известный writer, takeover'а не бывает, а heartbeat каждые 30 сек расходовал тот ресурс, ради экономии которого снимок существует. | Режим открытия определяет владелец файла; `CacheAccessMode` объявлен на платформе (`snapshot/contracts.py:46`) |
+| `CacheSyncService` — синхронизация PG → снимок | Синхронизация снята вместе с локальным чтением из PG (change `drop-local-cache-read-from-pg`) | Загрузку снимка делает capability `data`: `SnapshotLoadService` (`enterprise_data/loader.py:149`) |
+| `PgDuckDbSyncService` — инкрементальный sync по track-колонке | Тот же change | Тот же `SnapshotLoadService` |
 
 ## Responsibility
 
@@ -294,7 +265,7 @@ CacheProvider отвечает за:
 - PostgreSQL как источника истины
 - конфигурации `gateway.cache.local_path` (путь к DuckDB)
 - конфигурации `gateway.vector.*` (параметры эмбеддинга и индексов)
-- `TableRegistry` для синхронизации таблиц PG → DuckDB
+- состава снимка, объявляемого платформой (`platform.json → data.snapshot_path`): реестра таблиц `TableRegistry` в проекте **не осталось**
 
 ### Must Not Depend On
 
@@ -473,7 +444,7 @@ CacheProvider хранит:
 ## Error Behavior
 
 - **NFS path**: fail fast при старте с явной ошибкой.
-- **Ошибка синхронизации**: логирование, кэш остаётся со stale данными до следующей успешной синхронизации (явная retry-политика `PgDuckDbSyncService`).
+- **Ошибка загрузки снимка**: логирование на платформе, снимок остаётся с устаревшими данными до следующей успешной загрузки. Явной retry-политики у зеркала нет: синхронизация снята вместе с `PgDuckDbSyncService`.
 - **Ошибка запроса**: возврат ошибки потребителю; молчаливый fallback на PostgreSQL запрещён.
 - **Stale/invalid index**: `IndexIntegrityError` с статусом `STALE`/`INVALID` и описанием `reason`; вызывающая сторона обязана обработать (например, пересобрать индекс сборщиком capability — `mcp-platform/servers/enterprise/build_index.py`).
 - **Config missing**: fail fast при старте (`ConfigurationError`).

@@ -43,9 +43,9 @@ ConfigService               → компонент
 SessionMirror      → компонент
 MessageBus                  → компонент
 PostgresChannel             → компонент
-RedisChannel                → компонент
+MirrorPoller               → компонент
 CacheProvider               → компонент
-VectorIndexService          → компонент
+VectorBuilder              → компонент
 DbLoggingService            → компонент
 RuntimePatcher              → компонент
 AgentFactory                → компонент

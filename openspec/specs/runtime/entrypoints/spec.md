@@ -1219,7 +1219,7 @@ Entrypoint не владеет данными: ни таблиц, ни файл�
 - Тянуть transport в `AgentLoop`.
 - Включать `CronService` при `role == "cli"` (`lib/core/application_context.py:427`).
 - Вызывать проверку WebSocket-порта из CLI-ветки.
-- Поднимать Streamlit или `RedisChannel` в runtime-коде.
+- Поднимать Streamlit (**снят**) или `RedisChannel` (**снят**) в runtime-коде.
 - Вычислять путь снимка или имена таблиц журнала в агенте: это объявления
   платформы.
 

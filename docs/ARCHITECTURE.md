@@ -1231,7 +1231,7 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 
 `MessageExchange` — единая точка кодирования/декодирования `InboundMessage` /
 `OutboundMessage`, поллинга и публикации outbound, фильтрации служебных
-сообщений. `PostgresChannel` и `RedisChannel` — тонкие обёртки над ним. Запрещено
+сообщений. `PostgresChannel` — единственная оставшаяся обёртка над ним: `RedisChannel` **снят** вместе со вторым транспортом, и в `lib/channels/` остались только `message_exchange.py`, `postgres_channel.py` и `queue_ops.py`. Запрещено
 дублировать логику polling/encoding в новых каналах — только через
 `MessageExchange`.
 

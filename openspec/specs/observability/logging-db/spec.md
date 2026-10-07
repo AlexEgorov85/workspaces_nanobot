@@ -700,7 +700,7 @@ fallback на `agent_question_runs`-таблицу
 #### Scenario: Standalone-утилита без DbLoggingService
 
 - **WHEN** standalone-утилита
-  (`tools/build_vectors.py` или иная) не создаёт
+  (`tools/diagnose_startup.py` или иная) не создаёт
   `ApplicationContext` и `DbLoggingService`
   соответственно отсутствует
 - **THEN** утилита SHALL использовать только
