@@ -47,6 +47,8 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | `runtime/platform-settings/spec.md` | блок собирает `enterprise_mcp_client.py` | принимает `libs/enterprise_common/settings.py` (`owner=OWNER_AGENT`), разбирает `servers/enterprise/server.py` |
 | `observability/logging-db/spec.md` | `lib/services/db_logging_service.py`, `log_transport.py` | операции `data.log_events`, `data.log_event`, `data.purge_logs` |
 | `interfaces/tools-history-search/spec.md` | агентской обёртки не осталось: `workspace/tools/history_search_tool.py` снят (change `2026-10-03-mcp-native-tools`, п. D6), личность вызова подставляет `lib/hooks/mcp_identity_hook.py` | SQL и изоляция по `session_id`/`user_id` в `data.history_search` — берутся из контекста вызова, а не из аргументов модели |
+| `runtime/session-files/spec.md` | `lib/services/session_files.py` (резолвер каталога сессии), `workspace/hooks/session_file_redirect_hook.py` (перенаправление записи в `files/`), `lib/utils/session_file_store.py` | `mcp-platform/servers/enterprise/tools/session_files.py` (`SessionHandle`), `libs/enterprise_common/session/workspace.py`, корень — `platform.json → execution.session_root` |
+| `runtime/call-contract/spec.md` | `lib/hooks/mcp_identity_hook.py` (подстановка личности), `workspace/skills/enterprise_mcp/SKILL.md` (коды в словаре модели) | `mcp-platform/libs/enterprise_common/execution/errors.py` (`FAILURE_CODES`, `normalize_exception`, `failure_from_payload`), разбор конвейера — `execution/pipeline.py` |
 | `testing/unified-test-contract/spec.md` | `tests/`, `pyproject.toml`, `.github/workflows/ci.yml` | `mcp-platform/tests/`, `mcp-platform/pyproject.toml` |
 
 ## `agent` — предмет реализован в агенте

@@ -24,12 +24,12 @@
 | infrastructure | 1 | 0 | 1 | 0 | 0 |
 | interfaces | 2 | 0 | 2 | 0 | 0 |
 | observability | 2 | 0 | 2 | 0 | 0 |
-| runtime | 11 | 0 | 11 | 0 | 0 |
+| runtime | 13 | 0 | 13 | 0 | 0 |
 | sessions | 2 | 0 | 1 | 1 | 0 |
 | skills | 1 | 0 | 1 | 0 | 0 |
 | testing | 1 | 0 | 1 | 0 | 0 |
 | validation | 1 | 0 | 0 | 1 | 0 |
-| **Итого** | **29** | **1** | **25** | **3** | **0** |
+| **Итого** | **31** | **1** | **27** | **3** | **0** |
 
 ## Компоненты
 
@@ -55,6 +55,8 @@
 | RuntimeEventsSubscriber | `lib/services/runtime_events_subscriber.py:RuntimeEventsSubscriber` | [`runtime/runtime-events-subscription`](runtime/runtime-events-subscription/spec.md) | partial |
 | RuntimePatcher | `lib/services/runtime_patcher.py:RuntimePatcher` | [`runtime/runtime-patcher`](runtime/runtime-patcher/spec.md) | partial |
 | StartupSchemaValidation | `lib/services/schema_validation.py:SchemaValidationService` | [`runtime/startup-schema-validation`](runtime/startup-schema-validation/spec.md) | partial |
+| SessionFiles | `lib/services/session_files.py`, `mcp-platform/servers/enterprise/tools/session_files.py` | [`runtime/session-files`](runtime/session-files/spec.md) | partial |
+| CallContract | `mcp-platform/libs/enterprise_common/execution/errors.py` | [`runtime/call-contract`](runtime/call-contract/spec.md) | partial |
 
 ### Configuration
 
