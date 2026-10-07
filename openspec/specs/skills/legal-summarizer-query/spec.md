@@ -1828,15 +1828,19 @@ SHALL быть платформенной. Практическое следст
 архивировании не сливается: обязанность, оставленная в нём, потерялась бы
 вместе с разделом, и коды остались бы неучтёнными.
 
-Канон `runtime/call-contract` держат **два** неархивированных change:
+Канон `runtime/call-contract` держали **два** change:
 `2026-10-03-mcp-native-tools` и `2026-10-04-enterprise-mcp-http-transport`
 (**пять** ADDED-требований: два у первого —
 `openspec/changes/2026-10-03-mcp-native-tools/specs/runtime/call-contract/spec.md:26`,
 `:149`, три у второго —
-`openspec/changes/2026-10-04-enterprise-mcp-http-transport/specs/runtime/call-contract/spec.md:22`,
+`openspec/changes/archive/2026-10-04-enterprise-mcp-http-transport/specs/runtime/call-contract/spec.md:22`,
 `:110`, `:150`; MODIFIED-требований в дельте первого нет). Оба сливаются в один
 канон, поэтому объявлять коды SHALL в обоих, а порядок архивирования значим:
 объявление, сделанное позже, перепишет уже слитое.
+
+**Сверка 2026-10-07:** `2026-10-04-enterprise-mcp-http-transport` архивирован, его
+три требования уже в каноне. Незакрытым остаётся `2026-10-03-mcp-native-tools`
+с двумя ADDED — до его архивирования перечень кодов в каноне неполон.
 
 Перечень кодов разделён на два, и требование относится только ко второму.
 
