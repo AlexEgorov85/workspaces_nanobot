@@ -368,6 +368,16 @@ CLI-пути событие `agent.compacted` в `agent_gateway_logs` НЕ пи�
 - **THEN** `agent_gateway_logs` MUST получить `event_type="agent.compacted"`
   (`lib/services/context_compaction.py::ContextCompactionService._record_event_log`)
 
+> Пометка D13. Требование описывает код, который есть сегодня, и живёт **до**
+> `unify-runtime-channels`: после него CLI — клиент Gateway, локального
+> `ContextCompactionService` у него не останется, а `/compact` уйдёт в Gateway
+> вместе с остальными slash-командами. Целевое состояние объявлено отдельной
+> capability [`runtime/cli-client`](../cli-client/spec.md) («slash-команды
+> исполняются на Gateway», а локальное исполнение `/compact` в её
+> `## Forbidden Behavior` запрещено). Читать оба требования как одновременно
+> действующие нельзя: это два состояния одного узла, и переходом между ними
+> является `unify-runtime-channels`, а не правка этой спеки.
+
 ### Requirement: Запрет Streamlit в runtime-коде
 
 `gateway.py`, `cli_agent.py` и весь runtime-код MUST NOT импортировать, спавнить или каким-либо образом инициализировать `streamlit_app` или `streamlit` модуль.

@@ -1,4 +1,4 @@
-﻿# Skill / Tool Boundary (Граница Skill / Tool)
+# Skill / Tool Boundary (Граница Skill / Tool)
 
 ## Purpose
 
