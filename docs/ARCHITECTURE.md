@@ -1782,15 +1782,16 @@ nanobot/
 │   ├── core/                             #   bootstrap ApplicationContext + фабрики
 │   │   ├── application_context.py        #     create/start/stop, связывает все общие сервисы
 │   │   ├── agent_factory.py              #     AgentLoop + ToolAudit hook + фабрика DatabaseLogging (per-turn)
-│   │   ├── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
 │   │   ├── project_settings.py           #     pydantic-валидация merged SETTINGS (fail-fast)
-│   │   ├── skill_config.py               #     параметризованный runtime API для skill'ов
-│   │   ├── skill_registration.py         #     декларативная регистрация skill-ресурсов
-│   │   └── infra_registration.py         #     регистрация инфраструктурных ресурсов (vector storage)
+│   │   └── __init__.py                   #     пакет
+│   │       # Шина MessageBus собирается в application_context.py::_create_bus
+│   │       # (обёртки publish_inbound/publish_outbound там же). Модулей
+│   │       # bus_factory.py, skill_config.py, skill_registration.py и
+│   │       # infra_registration.py больше нет — сняты вместе с TableRegistry.
 │   ├── services/                         #   сервисный слой
 │   │   ├── config_service.py             #    SETTINGS-аксессор + pre-resolve env + таймауты
 │   │   ├── session_storage.py            #    выбор режима хранения сессий + async_save
-│   │   ├── runtime_patcher.py            #    6 monkey-patch'ей upstream nanobot.agent.loop.AgentLoop
+│   │   ├── runtime_patcher.py            #    4 monkey-patch'а upstream nanobot.agent.loop.AgentLoop
 │   │   ├── project_tool_loader.py        #    stateless loader project tools (workspace/tools/*.py)
 │   │   ├── channel_factory.py            #    ChannelManager + канал PostgreSQL
 │   │   ├── ~~transcription_service.py~~   #     снят: голос разбирает базовый класс библиотеки
