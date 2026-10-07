@@ -55,13 +55,44 @@ GLOB_ROOTS = ("mcp-platform", "lib", "workspace", "tools", "scripts", "tools")
 SKIP_DIR_NAMES = {".git", ".venv", "venv", "__pycache__", "data_store", "node_modules"}
 
 
-def resolve(raw: str) -> tuple[Path | None, str]:
+def _library_roots() -> list[Path]:
+    """Каталоги установленных пакетов, где лежит код вне репозитория.
+
+    Канон законно ссылается на upstream: ``nanobot/agent/hook.py:33``,
+    ``mcp/server/lowlevel/server.py:527``. Этих файлов нет в репозитории, и
+    без этого обхода инструмент объявлял бы **ложные** расхождения на каждой
+    такой ссылке — а ложное расхождение хуже отсутствия проверки: по нему
+    полезли бы «чинить» живой и верный канон.
+
+    Оговорка: номер строки в установленной библиотеке вер��н только для той
+    версии, что стоит в окружении. Поэтому такие ссылки проверяются на
+    существование строки, но не на её смысл.
+    """
+    roots: list[Path] = []
+    for entry in sys.path:
+        if not entry:
+            continue
+        p = Path(entry)
+        if p.is_dir() and p.resolve() != ROOT:
+            roots.append(p)
+    return roots
+
+
+def resolve(raw: str, *, self_spec: Path | None = None) -> tuple[Path | None, str]:
     """Вернуть (файл, примечание). ``None`` — не нашёлся или неоднозначен."""
     rel = raw.replace("\\", "/").lstrip("./")
+    # Ссылка на саму проверяемую спеку: путь относительно её каталога.
+    if rel == "spec.md" and self_spec is not None:
+        return self_spec, "сама проверяемая спека"
     for prefix in RESOLVE_PREFIXES:
         candidate = (ROOT / prefix / rel).resolve()
         if candidate.is_file():
             return candidate, ""
+
+    for base in _library_roots():
+        candidate = base / rel
+        if candidate.is_file():
+            return candidate, f"установленный пакет ({base.name})"
 
     tail = rel.split("/", 1)[1] if rel.startswith("…/") else rel
     matches = [
@@ -84,7 +115,7 @@ def check(spec: Path, *, verbose: bool) -> tuple[int, int, list[str]]:
     problems: list[str] = []
     for m in CITE_RE.finditer(text):
         raw, start, end = m.group(1), int(m.group(2)), m.group(3)
-        target, how = resolve(raw)
+        target, how = resolve(raw, self_spec=spec)
         if target is None:
             bad += 1
             problems.append(f"ФАЙЛА НЕТ: {raw}:{start} — {how}")
@@ -106,7 +137,13 @@ def check(spec: Path, *, verbose: bool) -> tuple[int, int, list[str]]:
             continue
         ok += 1
         if verbose:
-            shown = target.relative_to(ROOT).as_posix()
+            # Путь может лежать ВНЕ репозитория (установленная библиотека),
+            # и ``relative_to(ROOT)`` на нём бросает исключение. Показываем
+            # тогда абсолютный путь.
+            try:
+                shown = target.relative_to(ROOT).as_posix()
+            except ValueError:
+                shown = str(target)
             note = f"  [{shown}{'; ' + how if how else ''}]" if shown != raw else ""
             print(f"  {raw}:{start}{'-' + end if end else ''}{note}")
             snippet = " / ".join(x.strip() for x in lines[start - 1:stop] if x.strip())
