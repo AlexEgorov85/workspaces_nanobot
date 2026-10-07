@@ -19,6 +19,9 @@ Maintenance»). Каждое нарушение — регрессия: код �
    файлы.
 5. Каждая спека OpenSpec объявляет владельца темы (``## Scope``), и все спеки
    перечислены в ``openspec/specs/OWNERSHIP.md``.
+6. Ни одна строка markdown-таблицы не разорвана на две физические строки.
+   Разрыв не виден в диффе (там просто две строки вместо одной), но ломает
+   таблицу: markdown не умеет переносить ячейку.
 """
 
 from __future__ import annotations
@@ -577,4 +580,155 @@ def test_mcp_contracts_operation_count_matches_registry() -> None:
     assert not unresolved, (
         "белый список ссылается на операции, которых нет в реестре: "
         f"{unresolved}"
+    )
+
+
+def _split_table_rows(text: str) -> list[tuple[int, str]]:
+    """Строки markdown-таблицы, разорванные на две физические строки.
+
+    Строка таблицы обязана помещаться в одну строку файла: markdown не умеет
+    переносить ячейку. Правка, которая удлиняет ячейку (например, добавление
+    пометки «удалён <коммит>») и затем переносит текст по ширине, превращает
+    строку в две — и таблица перестаёт быть таблицей: первая половина больше не
+    имеет хвостового ``|``, вторая не начинается с ``|``, и рендерер закрывает
+    таблицу прямо посреди строки.
+
+    Две формы, которые встречаются на практике:
+
+    * ``UNCLOSED`` — строка начинается с ``|``, но не заканчивается на ``|``;
+      продолжение начинается с ``|`` (обычно с ведущим пробела).
+    * ``CONTINUATION`` — строка выглядит законченной (одна ячейка), а
+      продолжение начинается с текста, без ведущего ``|``.
+
+    Возвращает ``(номер строки, короткий текст)`` для каждого разрыва.
+    """
+    lines = text.splitlines()
+    hits: list[tuple[int, str]] = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            # Внутри огороженного блока вертикальные черты — содержимое примера,
+            # а не таблица.
+            continue
+        stripped = line.rstrip()
+        if stripped.strip().startswith("|") and not stripped.endswith("|"):
+            hits.append((i + 1, stripped.strip()))
+        if i > 0:
+            prev, cur = lines[i - 1].strip(), line.strip()
+            if (
+                prev.startswith("|")
+                and prev.endswith("|")
+                and len(prev) > 1
+                and not cur.startswith("|")
+                and cur.endswith("|")
+                and "|" in cur
+            ):
+                hits.append((i + 1, cur))
+    return hits
+
+
+def test_markdown_tables_are_not_split_across_lines() -> None:
+    """Ни одна строка markdown-таблицы не разорвана на две физические строки.
+
+    Дефект выглядит безобидно: правка вносится осмысленно (путь пометили
+    удалённым), таблица в исходнике аккуратная, а поломка видна только
+    отрисовкой. В репозитории он появился 38 раз за одну волну правок
+    документации, и ни один просмотрщик изменений его не показывает: в диффе
+    видно только две строки вместо одной.
+
+    Архив ``openspec/changes/archive`` тоже проверяется: он заморожен, разрывов
+    в нём нет, и исключение было бы запасным путём, которым этот страж
+    незаметно перестанет ловить поломку в живой документации.
+    """
+    skip_parts = {
+        "data_store",
+        ".venv",
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".worktrees",
+        # Черновики исполнителей, не документация проекта.
+        "_wt_patched",
+    }
+
+    def is_skipped(p: Path) -> bool:
+        return any(skip in p.parts for skip in skip_parts) or any(
+            part.startswith("_wt_") for part in p.parts
+        )
+
+    md_files = sorted(
+        p
+        for p in _PROJECT_ROOT.rglob("*.md")
+        if p.is_file() and not is_skipped(p)
+    )
+
+    # Проверка обязана на чём-то держаться: пустой обход дал бы зелёный результат
+    # на выключенном сканере, то есть проверял бы ровно ничего.
+    assert len(md_files) > 100, (
+        f"найдено всего {len(md_files)} .md файлов — обход почти наверняка "
+        f"сломан (проверять нечего)"
+    )
+
+    broken: list[str] = []
+    for path in md_files:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lineno, snippet in _split_table_rows(text):
+            rel = path.relative_to(_PROJECT_ROOT).as_posix()
+            broken.append(f"{rel}:{lineno}: {snippet[:100]}")
+
+    assert not broken, (
+        "строки markdown-таблиц разорваны на две физические строки — таблица "
+        "перестаёт быть таблицей. Склейте части обратно в одну строку "
+        f"(найдено {len(broken)}):\n" + "\n".join(broken[:20])
+    )
+
+
+def test_split_table_row_detector_catches_a_planted_defect() -> None:
+    """Проба самого стража: детектор обязан ловить подсаженный разрыв.
+
+    Страж, который проходит на пустом множестве, не доказывает ничего — он
+    может не находить файлы, не открывать их или искать не то. Здесь детектор
+    проверяется на двух заведомо сломанных таблицах и на двух целых: он должен
+    отметить ровно первые две и не отметить вторые.
+    """
+    unclosed_form = (
+        "| header | value |\n"
+        "|---|---|\n"
+        "| alpha | beta\n"
+        " | gamma |\n"
+    )
+    narrow_form = (
+        "| header | loc | note |\n"
+        "|---|---|---|\n"
+        "| alpha |\n"
+        " loc | note |\n"
+    )
+    intact = (
+        "| header | value |\n"
+        "|---|---|\n"
+        "| alpha | beta |\n"
+        "| gamma | delta |\n"
+    )
+    in_fence = (
+        "```\n"
+        "| alpha | beta\n"
+        " | gamma |\n"
+        "```\n"
+    )
+
+    assert _split_table_rows(unclosed_form), (
+        "детектор не увидел разрыв «строка без хвостового | + продолжение с |» — "
+        "именно эту форму дали пометки об удалении файлов"
+    )
+    assert _split_table_rows(narrow_form), (
+        "детектор не увидел разрыв «узкая ячейка + продолжение без |»"
+    )
+    assert not _split_table_rows(intact), (
+        "детектор объявил разрывом целую таблицу — он непригоден"
+    )
+    assert not _split_table_rows(in_fence), (
+        "детектор принял пример внутри огороженного блока за разорванную таблицу"
     )
