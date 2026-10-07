@@ -251,7 +251,7 @@ NOT приходить аргументом вызова. Объявляя им�
 
 ## Responsibility
 
-Capability `data` отвечает за шесть операций очереди и за объявление её
+Capability `data` отвечает за шесть операций самой очереди задач и за объявление её
 адреса:
 
 - атомарный захват задачи или пачки, не более одной задачи на чат
@@ -300,9 +300,17 @@ Capability `data` отвечает за шесть операций очеред
 - `ClaimedBatch(tasks, next_cursor)` — frozen dataclass
   (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:359`, поля `mcp-platform/servers/enterprise/capabilities/data/service/main.py:372`, `mcp-platform/servers/enterprise/capabilities/data/service/main.py:373`).
 
-Прочие пять операций — `update_task_status`, `append_assistant_message`,
-`delete_assistant_message`, `patch_message_metadata`, `unstick_tasks` — объявлены
-здесь по общему контракту очереди: адрес, аудитория и класс работы у них те же.
+Прочие пять операций очереди задач — `update_task_status`, `unstick_tasks`,
+`release_claimed_tasks`, `fail_task`, `queue_stats` — объявлены здесь по общему
+контракту очереди: адрес, аудитория и класс работы у них те же. Все шесть помечены
+тегом `queue` в `mcp-platform/servers/enterprise/capabilities/data/tools/`.
+
+Под тем же тегом `queue` объявлены ещё восемь операций диалога и зеркала
+(`append_assistant_message`, `append_reasoning`, `append_history_notice`,
+`delete_assistant_message`, `patch_message_metadata`, `get_message`,
+`finalize_turn`, `merge_tool_delivery`) — контракт адреса и класса работы у них
+тот же, но к очереди задач они не относятся и в этот перечень не входят; в дереве
+тег `queue` стоит на 14 файлах.
 
 ## Inputs
 
@@ -432,7 +440,7 @@ Capability `data` отвечает за шесть операций очеред
 ## Consumers
 
 - `lib/channels/queue_ops.py:191` — канал агента, единственный потребитель
-  захвата; остальные пять операций зовутся из того же шва.
+  захвата; остальные пять операций очереди задач зовутся из того же шва.
 - `mcp-platform/servers/enterprise/capabilities/data/service/registry.py:33` — реестр классов работы, читающий записи поимённо.
 - `mcp-platform/platform.json:96` и оверлей профиля (`platform.json:83`) —
   владельцы имени таблицы.

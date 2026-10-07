@@ -103,14 +103,21 @@ capability.**
 Конкретные операции `run_script`, `generate_sql` и `list_scripts` описаны в
 спецификации `data/audit`.
 
-Состав поверхности `data`:
+Операции журнала и диагностики, объявленные capability `data` (полный состав
+операций платформы — в `mcp-platform/platform.json → capabilities`, модель видит
+только белый список `config.json → tools.mcpServers.enterprise.enabled_tools`):
 
 | Инструмент | Тип | Назначение |
 |---|---|---|
-| `log_event` | write | батчевая запись в журнал |
+| `log_event` | write | запись одного события в журнал |
+| `log_events` | write | батчевая запись событий |
 | `schema_check` | read | наличие обязательных таблиц |
 | `history_search` | read | поиск по истории с изоляцией |
 
+Этот перечень и таблица трёх входов выше — разные вещи, и смешивать их нельзя:
+входы (`run_script`, `generate_sql`, `history_search`) отвечают на вопрос «чем
+агент добывает данные», а этот список — «что ещё capability `data` публикует».
+`run_script` и `generate_sql` в него не входят: они операции capability `audit`.
 #### Scenario: Операции произвольного SQL не существует
 
 - **WHEN** агент перебирает доступные инструменты сервера

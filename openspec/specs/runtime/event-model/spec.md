@@ -109,7 +109,8 @@ llm.*       requested · completed · failed · exchanged
 tool.*      started · completed · failed · timeout · suppressed
 artifact.*  created · read
 quality.*   check
-legal.*     analysis_started · analysis_completed · analysis_failed
+legal_      analysis_step · analysis_confirmation · analysis_completed ·
+              analysis_partial · analysis_refused
 ```
 
 Произвольные строки вроде `mcp_magic_operation_finished` SHALL NOT
@@ -317,8 +318,11 @@ Nanobot SHALL NOT заводиться.
   дописывает имя типа — тот чинит словарь, а не пишет новую строку в месте.
 - **Писатель** — один на процесс: `EventWriter`
   (`mcp-platform/libs/enterprise_common/eventing/writer.py:53`). Он принимает
-  событие, проверяет тип, кладёт в буфер и пишет в тот конверт, который решает
-  реализация.
+  событие, проверяет тип и передаёт готовую строку тому конверту, который решает
+  реализация. Собственного буфера у писателя нет
+  (`mcp-platform/libs/enterprise_common/eventing/writer.py:138` — прямой вызов
+  sink'а), и это оговорено его же докстрингом: буфер живёт внутри capability
+  `data` (`mcp-platform/libs/enterprise_common/eventing/writer.py:10`).
 - **Конверт** собирает слой исполнения, а не операция: операция не знает, что
   такое колонка журнала, и не дублирует тело результата в `payload`.
 - **Порядок и момент события** выводит табличный писатель capability `data` из
@@ -328,8 +332,10 @@ Nanobot SHALL NOT заводиться.
 
 ## Boundary
 
-- **Внутри:** словарь типов, конверт, буфер, отказ-счётчики, файловая копия по
-  флагу. Всё это — `mcp-platform/libs/enterprise_common/eventing/`.
+- **Внутри:** словарь типов, конверт, отказ-счётчики, файловая копия по
+  флагу. Буфера здесь нет — он принадлежит capability `data`
+  (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:508`–`:512`).
+  Всё перечисленное — `mcp-platform/libs/enterprise_common/eventing/`.
 - **Снаружи:** колонки таблицы `agent_gateway_logs` (DDL и миграции), порядок
   чтения журнала (операции агента над журналом), доменные события capability
   (их собирает слой исполнения).
@@ -380,9 +386,10 @@ Nanobot SHALL NOT заводиться.
 ## State
 
 Состояние журнала принадлежит capability `data` и переживает процесс. У писателя
-состояние ровно трёх видов: счётчик отклонённых, счётчик сброшенных и буфер, у
-которого есть предел по размеру
-(`mcp-platform/libs/enterprise_common/eventing/writer.py:83`). Флаг зеркала
+состояние ровно двух видов: счётчик отклонённых
+(`mcp-platform/libs/enterprise_common/eventing/writer.py:83`) и счётчик
+сброшенных. Буфера, у которого есть предел по размеру, у писателя нет — буфер
+создаёт вызывающая сторона в capability `data`. Флаг зеркала
 считается один раз в конструкторе — из флага и наличия рабочего пространства
 сессии (`mcp-platform/libs/enterprise_common/eventing/writer.py:66`), поэтому
 включить его на ходу нельзя: это решение о политике, а не о состоянии записи.
@@ -489,8 +496,8 @@ Nanobot SHALL NOT заводиться.
 - `mcp-platform/libs/enterprise_common/eventing/types.py` — словарь и отказ.
 - `mcp-platform/libs/enterprise_common/eventing/models.py` — конверт, поля,
   `to_row`.
-- `mcp-platform/libs/enterprise_common/eventing/writer.py` — писатель, буфер,
-  счётчики, зеркало.
+- `mcp-platform/libs/enterprise_common/eventing/writer.py` — писатель,
+  отказ-счётчики, зеркало; буфера не содержит.
 - `mcp-platform/servers/enterprise/capabilities/data/service/main.py` — запись
   в таблицу и разбор `metadata` в колонки порядка.
 - `sql/logs/create_public_agent_gateway_logs.sql` — колонки и комментарии к ним.

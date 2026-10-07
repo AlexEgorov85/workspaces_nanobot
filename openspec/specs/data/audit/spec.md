@@ -113,9 +113,20 @@ SQL: реестр не SHALL протекать в LLM через whitelist та
 
 ### Requirement: `list_scripts` отдаёт пригодное описание
 
-Операция SHALL возвращать `name`, `description`, `long_description`, `returns`,
-`max_rows_default` и `parameters` объектом, где каждый параметр описан полями
-`type`, `required`, `default`, `description`, `validation`.
+Операция SHALL возвращать `name`, `short_description`, `long_description`,
+`returns` и `parameters` объектом, где каждый параметр описан полями `type`,
+`required`, `default`, `description`, `validation`. Ключ описания назван
+именно `short_description`
+(`mcp-platform/servers/enterprise/capabilities/audit/service/main.py:190`):
+ключа `description` в ответе нет, и называть его было бы ошибкой чтения ответа.
+
+`max_rows_default` в ответе SHALL NOT появляться: ни одна ветка сборки ответа
+его не сериализует (`mcp-platform/servers/enterprise/capabilities/audit/service/main.py:187`–`:211`).
+Значение живёт в модели скрипта (`mcp-platform/libs/audit/models.py:77`),
+передаётся исполнителю как `row_ceiling`
+(`mcp-platform/libs/audit/predefined.py:167`) и ограничивает потолок строк
+сверху (`:134`–`:135`) — то есть предел действует, но модели не виден. Требование «отдавать предел по умолчанию в описании» кодом не
+выполнено; это разрыв, а не описка.
 
 Строка со склеенными именами параметров SHALL NOT использоваться: для вызова
 `run_script` модели нужны типы, обязательность и значения по умолчанию.
@@ -367,10 +378,11 @@ Capability **не** отвечает за владение снимком, за 
 
 ## Outputs
 
-- `list_scripts` → по каждому скрипту `name`, `description`,
-  `long_description`, `returns`, `max_rows_default` и `parameters` объектом с
-  `type`, `required`, `default`, `description`, `validation`
-  (`mcp-platform/servers/enterprise/capabilities/audit/service/main.py:191`–`:210`);
+- `list_scripts` → по каждому скрипту `name`, `short_description`,
+  `long_description`, `returns` и `parameters` объектом с `type`, `required`,
+  `default`, `description`, `validation`
+  (`mcp-platform/servers/enterprise/capabilities/audit/service/main.py:187`–`:211`);
+  `max_rows_default` в ответе отсутствует — см. требование выше;
 - `run_script` → строки, число строк, имена колонок, применённый потолок;
 - `generate_sql` → строки и обязательное `outcome`; при исчерпании попыток —
   `not_answerable` с числом израсходованных попыток;
