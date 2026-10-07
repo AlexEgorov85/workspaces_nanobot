@@ -77,7 +77,7 @@
 - `observability` — логирование, мониторинг (`DatabaseLogging`, `EventLogging`)
 - `infrastructure` — инфраструктура (`RuntimePatcher`, Hooks, SubprocessManagement)
 - `interfaces` — интерфейсы (CLI, Gateway)
-- `security` — безопасность (`SqlSafety`)
+- `security` — безопасность (`SqlPolicy`, `mcp-platform/libs/enterprise_data/sql_safety.py:129`); `SqlSafety` **не существует**
 - `skills` — навыки (`AuditAnalyzer`, `LegalSummarizer`, `OfficeFiles`)
 - `testing` — тестирование, бенчмарки (Benchmarks)
 - `architecture` — архитектурные правила (`component-model`, `skill-tool-boundary`)

@@ -7,15 +7,24 @@ Lets the runtime safely recover sessions whose JSONL source is older than the Po
 
 `agent` — подсистема **частично реализована**: из семи требований закрыто одно.
 
-Реализовано (как инфраструктура `SessionMirror`,
-`lib/gateway/mirror/`):
-- «Reverse sync lag produces a logged event» — порог
-  `sync_lag_threshold_seconds` (дефолт 3600), событие
-  `sync_lag_exceeded`, счётчик `sync_lag_exceeded_total`;
-- смежный stale-detection: `stale_tolerance_seconds` (дефолт 120), событие
-  `session_stale_detected`, счётчики `stale_detected_total` и
-  `stale_sync_skipped_total`. В самой спеке это требование не выделено, но
-  детект — фундамент всех остальных.
+Реализовано (как инфраструктура `SessionMirror`, `lib/gateway/mirror/`).
+**Сверка имён с кодом — 2026-10-07**: прежняя редакция этого блока
+называла события и счётчики, которых в проекте нет; ниже фактические.
+- Reverse lag: порог `sync_lag_threshold_seconds` (дефолт 3600) приходит
+  в зеркало, операция возвращает признак `sync_lag_exceeded`, и зеркало
+  публикует `agent.degraded` уровнем WARN (`session_mirror.py:273-285`).
+  Отдельного счётчика у аномалии не существует: ключ
+  `sync_lag_exceeded_total` в `get_stats()` **не существует**.
+- Смежный stale-detection: порог `stale_tolerance_seconds` (дефолт 120),
+  операция возвращает `verdict="skipped_stale"`, зеркало инкрементирует
+  `skipped_stale_total` (`session_mirror.py:224-226`) и публикует
+  `agent.degraded` с дедупликацией на 60 с (`:246-271`).
+  Имён `session_stale_detected`, `stale_detected_total` и
+  `stale_sync_skipped_total` в проекте **не существует**: первое
+  встречается только как текст внутри сообщения `agent.degraded`, а не
+  как `event_type`.
+- Решение о пропуске принимает платформа в своей транзакции; зеркало судит
+  по вердикту, а не сравнивает метки времени само.
 
 Не реализовано ни в одном дереве:
 - три режима восстановления (`detect-only`, `read-only-fallback`,
