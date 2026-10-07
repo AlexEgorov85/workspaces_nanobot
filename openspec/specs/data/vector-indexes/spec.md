@@ -36,137 +36,303 @@
 > → entry в реестре), поэтому переписывание тел здесь было бы третьей редакцией
 > и сломало бы сопоставление требований по имени при архивации.
 
-### Requirement: Единый источник конфигурации
-
-Система MUST читать конфигурацию векторного индекса только из `gateway.vector.index.indexes.*` в `config.json`.
-
-#### Scenario: Конфигурация индекса
-
-- **КОГДА** векторный индекс добавлен или изменён
-- **ТОГДА** его декларация ДОЛЖНА находиться под `gateway.vector.index.indexes.<name>` в `config.json`
-
-### Requirement: Storage table зарегистрирован через infra API
-
-Система MUST сохранять векторные embeddings в таблице, зарегистрированной через `lib.core.infra_registration.register_vector_storage`.
-
-#### Scenario: Таблица векторного хранилища
-
-- **КОГДА** `gateway.vector.index.storage_table` установлен
-- **ТОГДА** эта таблица ДОЛЖНА быть зарегистрирована через `register_vector_storage`, чтобы `TableRegistry` знал о ней для синхронизации
-
-### Requirement: FAISS-backed
-
-Система MUST строить векторные индексы используя FAISS, вызываемый через `mcp-platform/libs/vectors/indexing.py:74` (`build_faiss_index`) и сборщик capability `mcp-platform/libs/vectors/builder.py:239` (`VectorBuilder`). Агентские точки входа `tools/build_vectors.py` и `lib/services/vector_index_service.py` **сняты** — в дереве агента их нет.
-
-#### Scenario: Сборка индекса
-
-- **КОГДА** векторный индекс строится
-- **ТОГДА** FAISS индекс ДОЛЖЕН быть сохранён под `<gateway.vector.index.default_root>/<index_name>` и ДОЛЖЕН загружаться по требованию при query time
-
-### Requirement: Единый путь доступа
-
-Система MUST предоставлять vector search исключительно через `CacheProvider.search_vector`.
-
-#### Scenario: Skill выполняет vector search
-
-- **КОГДА** Skill нуждается в vector similarity query
-- **ТОГДА** он ДОЛЖЕН вызвать `CacheProvider.search_vector` и НЕ ДОЛЖЕН загружать FAISS индексы напрямую
-
-### Requirement: FAISS собирается в памяти из DuckDB-снапшота
-
-Система SHALL build FAISS-индексы через capability `vectors` (`mcp-platform/libs/vectors/indexing.py:74`, сборщик `mcp-platform/libs/vectors/builder.py:239`); прежняя формулировка называла `tools/build_vectors.py` и `lib/services/vector_index_service.py` — **оба сняты**, в дереве агента их нет. Система SHALL NOT персистить FAISS-блобы (ни файлами под `gateway.vector.index.default_root`, ни строками в таблице, заданной `gateway.vector.index.signature_table`); вместо этого FAISS-индекс SHALL собираться в памяти по требованию из DuckDB-снапшота таблицы-источника, заданной `gateway.vector.index.storage_table` (либо — для оффлайн/предопубликованных снапшотов — из той же таблицы в локальном кэше навыка `audit_cache.duckdb`).
-
-Имена таблиц задаются конфигурацией (`gateway.vector.index.storage_table` и `gateway.vector.index.signature_table`), а не зашиты в код спецификации.
-
-#### Scenario: Сборка индекса сборщиком capability (прежний `build_vectors.py` снят)
-
-- **WHEN** сборщик capability (`mcp-platform/servers/enterprise/build_index.py`) завершил запись строк в таблицу-источник (`gateway.vector.index.storage_table`)
-- **THEN** он SHALL вызвать `provider.preload_indexes(db_table)`, чтобы прогреть per-process FAISS-кэш.
-- **AND** он SHALL NOT делать INSERT/UPDATE в таблицу-сигнатуру (`gateway.vector.index.signature_table`) и SHALL NOT писать файлы `<default_root>/<index_name>.faiss`.
-
-#### Scenario: Загрузка индекса при поиске
-
-- **WHEN** `CacheProvider.search_vector` вызывается с `index_name`
-- **THEN** FAISS-индекс SHALL собираться (или читаться из `self._index_cache`) через SELECT строк таблицы-источника (`gateway.vector.index.storage_table`) по `source = ?` из DuckDB-снапшота и вызов `build_faiss_index(records, metric)`.
-- **AND** payload (`content` / `search_text` / `row`) SHALL подтягиваться для каждого FAISS-hit'а через SELECT той же строки из DuckDB-снапшота по `(source, pk_value, chunk_index)`.
-
-#### Scenario: Стоимость холодного старта
-
-- **WHEN** первый `search_vector` для `index_name` вызван после старта процесса
-- **THEN** сборка индекса SHALL завершаться за ≤ 5 секунд на эталонной рабочей станции для индексов до 20 000 векторов × 1024.
-
-#### Scenario: Смена таблицы через настройки
-
-- **WHEN** оператор меняет значение `gateway.vector.index.storage_table` или `gateway.vector.index.signature_table` в `config.json`
-- **THEN** система SHALL использовать новые имена без изменений в коде спецификации или runtime-коде, требующих релизов.
-
 ### Requirement: Hydrated payload берётся из DuckDB-снапшота
 
-Система SHALL подтягивать `content` / `search_text` / `row_data` для каждого FAISS-hit'а через SELECT строки из DuckDB-снапшота таблицы-источника, заданной `gateway.vector.index.storage_table`, по ключу `(source, pk_value, chunk_index)`; она SHALL NOT читать эти поля из in-memory metadata, сериализованной в индекс.
+Система SHALL подтягивать `content` / `search_text` / `row_data` для каждого
+FAISS-hit'а из таблицы-источника по ключу `(source, pk_value, chunk_index)`; она
+SHALL NOT читать эти поля из метаданных, сериализованных в индекс.
+
+Прежняя редакция привязывала источник к `gateway.vector.index.storage_table`.
+Ключ удалён; источник теперь определяется объявлением
+`platform.json → vectors.indexes`.
+
+> Заголовок требования оставлен дословно как в каноне
+> (`openspec/specs/data/vector-indexes/spec.md:116`): OpenSpec сопоставляет
+> требования по имени, и переименование заголовка превратило бы `MODIFIED` в
+> новое требование — канонное осталось бы жить и требовало бы читать
+> `gateway.vector.index.storage_table`. Меняется тело, не имя.
 
 #### Scenario: Подтягивание payload
 
-- **WHEN** `group_vector_hits` выдаёт результат с `pk_value=P` и `chunk_index=K`
-- **THEN** система SHALL сделать SELECT `(content, search_text, row_data)` из снапшотной таблицы-источника `WHERE source = <index_name> AND pk_value = P AND chunk_index = K`, чтобы заполнить `SearchResult.content` и `SearchResult.row`.
+- **WHEN** поиск по индексу выдаёт результат с `pk_value=P` и `chunk_index=K`
+- **THEN** система SHALL получить `(content, search_text, row_data)` из
+  таблицы-источника по `source = <index_name> AND pk_value = P AND chunk_index = K`
+- **AND** SHALL NOT читать их из сериализованного в индексе
 
-### Requirement: Прогрев индексов при старте
+#### Scenario: Индекс без payload
 
-Система SHALL вызывать `provider.preload_indexes(db_table)` при старте gateway как часть startup-flow, синхронно, **ДО** того как runtime-health сигнализирует `READY`. Система SHALL NOT выполнять сборку FAISS лениво на пользовательском запросе — все индексы, объявленные в `gateway.vector.index.indexes.*` и не помеченные `enabled=false`, MUST быть прогреты до начала приёма пользовательских запросов.
+- **WHEN** FAISS-hit найден, а строка источника отсутствует
+- **THEN** отказ SHALL быть явным, без silent fallback на данные из индекса
 
-#### Scenario: Тёплый старт
+### Requirement: Агент не объявляет состав индексов
 
-- **WHEN** процесс gateway запускается
-- **THEN** для каждого `index_name`, объявленного в `gateway.vector.index.indexes.*` и не помеченного `enabled=false`, FAISS-индекс SHALL присутствовать в `self._index_cache` к моменту, когда runtime-health сигнализирует `READY`.
+Секции `gateway.vector.index` и `skills.<name>.vector_indexes` MUST
+отсутствовать в `config.json`, а модели конфигурации — исключены из
+`lib/core/project_settings.py`. Пока секция объявлена, но не читается, она выглядит
+владельцем: её значения печатаются как ожидаемые в `tests/test_config_keys.py`, а
+`VectorIndexConfig` называет себя единственным источником деталей построения.
 
-#### Scenario: Прогрев блокирует READY
+Агент, не объявляющий состав индексов, не строит их и не прогревает: постройка
+принадлежит capability `vectors` и выполняется ею на старте сервера, до event loop
+(`_prepare_capabilities`). Бюджет первичной сборки переезжает сюда из требования о
+прогреве, а не исчезает вместе с ним, — но платит его старт платформы, а не первый
+пользовательский запрос.
 
-- **WHEN** `preload_indexes` для какого-либо `index_name` падает (например, источник недоступен, DuckDB-снапшот не синк'нут)
-- **THEN** startup-flow SHALL NOT сигнализировать `READY` и SHALL завершиться ошибкой с понятным сообщением, какой именно индекс не удалось прогреть.
+#### Scenario: Секция удалена, тест это утверждает
 
-#### Scenario: Запрос без прогрева — ошибка
+- **WHEN** `gateway.vector.index` или `skills.<name>.vector_indexes` удалены из
+  `config.json`, из моделей и из ассертов `tests/test_config_keys.py`
+- **THEN** тест SHALL утверждать отсутствие этих секций, а не их значения
 
-- **WHEN** `CacheProvider.search_vector` вызван с `index_name`, которого нет в `self._index_cache` (cold miss)
-- **THEN** система SHALL NOT собирать FAISS на лету и SHALL вернуть ошибку `_search_error` с указанием, что startup-flow не прогрел индекс — это нарушение контракта startup'а, не пользовательский retry.
+#### Scenario: Секция вернулась
 
-### Requirement: Preload health-summary виден оператору и логируется
+- **WHEN** кто-то добавит `gateway.vector.index` в `config.json` снова
+- **THEN** `tests/test_config_keys.py` SHALL упасть, а не принять значение
+  молча
 
-После прогона `preload_indexes` система SHALL опубликовать health-summary (declared / loaded / missing / orphan / stale) в **stderr** (multi-line, human-readable) и одним событием в `agent_gateway_logs` (`event_type="vector_index_preload_health"`). Это поведение существующего `PreloadService._emit_health_summary`, который **не перенесён**: агентский `lib/services/preload_service.py` **снят**, а его диагностическая часть портирована в capability `vectors` как чистые функции `compute_index_health` (`mcp-platform/libs/vectors/preload.py:65`) и `format_index_health_lines` (`mcp-platform/libs/vectors/preload.py:30`) — вызывающей стороны в проде у них пока нет (см. `mcp-platform/libs/vectors/preload.py:1-23`).
+#### Scenario: Правка канона вместо кода
 
-#### Scenario: Health-summary после preload
+- **WHEN** нормативный текст упоминает `gateway.vector.index.indexes` как
+  источник состава индексов
+- **THEN** такое упоминание SHALL считаться расхождением, и это расхождение
+  SHALL выявляться grep-проверкой из `tasks.md` п. 4.6 либо правкой спеки
+- **AND** автоматического guard'а, который бы ловил такое упоминание, спека не
+  обещает: `tools/validate_component_specs.py` (`:277-318`) проверяет только
+  наличие `### Requirement:`, наличие `#### Scenario:` и маркер WHEN/THEN
+  (`:106-110`), по содержимому требований не смотрит
 
-- **WHEN** `preload_indexes` завершился (успешно или с ошибкой)
-- **THEN** система SHALL вывести в stderr строки вида:
-  ```
-  [vector] сводка состояния индексов после прогрева:
-    объявлено (N): ...
-    загружено (N): name1(12345), name2(19770), ...
-    не найдено (N): name3, ...
-    сироты    (N): ...
-    устаревшие (N): name4:STALE, ...
-  ```
-  и SHALL записать одно событие в `agent_gateway_logs` с payload, содержащим эти же поля.
+#### Scenario: Имена индексов приходят от платформы, а не из навыка
 
-  Имена ключей в payload (`declared`, `loaded`, `missing`, `orphan`, `stale`) и `event_type="vector_index_preload_health"` остаются на латинице — это API-контракт `agent_gateway_logs`, его изменение требует отдельного OpenSpec-change. Переводится ТОЛЬКО human-readable вывод в stderr (заголовок и подписи секций).
+Состав индексов объявляет `platform.json → vectors.indexes`, и этот факт должен
+быть виден модели, иначе объявление остаётся вещью для чтения людьми: она не
+сможет ни спросить, что есть, ни позвать поиск по имени, которого не знает.
 
-#### Scenario: Что загружено
+- **WHEN** модели нужен `index_name` для `vector_search`
+- **THEN** имя ДОЛЖНО приходить из операции `list_indexes`, объявленной модели в
+  `config.json → tools.mcpServers.enterprise.enabled_tools`
+- **AND** навык ДОЛЖЕН NOT перечислять имена индексов: перечисление — копия
+  объявления, и оно расходится с платформой молча, пока кто-то не отредактирует
+  навык руками
+- **AND** `index_stats` ДОЛЖНА остаться не объявленной модели: состояние индекса
+  доступно через `list_indexes` и через `index_state` в ответе `vector_search`,
+  поэтому отдельная операция модели ничего не добавляет
 
-- **WHEN** `preload_indexes` успешно прогрел индексы
-- **THEN** для каждого успешно загруженного `index_name` оператор SHALL видеть `name(N)` где `N` — количество векторов в `idx.ntotal` (читается из DuckDB-снапшота).
+#### Scenario: Смена состава индексов не требует правки агента
 
-#### Scenario: Что НЕ загрузилось
+- **WHEN** в `mcp-platform/platform.json → vectors.indexes` добавлен индекс
+- **THEN** модель ДОЛЖНА увидеть его в ответе `list_indexes` без изменения
+  `config.json`, кода навыка и кода спецификации
+- **AND** ДОЛЖЕН NOT требовать пересборки агента: перечисление имён в навыке
+  запрещено предыдущим сценарием, поэтому копировать нечего
 
-- **WHEN** часть индексов не прогрелась (preload упал или индекс отсутствует в DuckDB-снапшоте)
-- **THEN** оператор SHALL видеть их в `missing` секции summary и SHALL увидеть `level=WARN` (вместо `INFO`), чтобы grep/CI могли алёртить. Источник `declared` — `gateway.vector.index.indexes.*`, источник `loaded` — то, что вернул `preload_indexes`.
+#### Scenario: Стоимость первичной постройки
 
-#### Scenario: Orphan-индексы
+Перенесено дословно из снятого требования
+«FAISS собирается в памяти из DuckDB-снапшота», сценарий «Стоимость холодного
+старта» (`openspec/specs/data/vector-indexes/spec.md:106-109`): ленивая постройка
+не отменяет его, а меняет только то, кто её выполняет.
 
-- **WHEN** в DuckDB-снапшоте `<storage_table>` есть строки с `source` (index_name), которого нет в `gateway.vector.index.indexes.*`
-- **THEN** этот `source` SHALL попасть в `orphan` секцию summary. (После удаления `<signature_table>` источником `orphan` становится DuckDB-снапшот `<storage_table>`, а не persisted store.)
+- **WHEN** первый `vector_search` для `index_name` вызван до того, как индекс
+  этого `index_name` собран
+- **THEN** первичная постройка SHALL завершаться за ≤ 5 секунд на эталонной
+  рабочей станции для индексов до 20 000 векторов × 1024
+- **AND** отказ от прогрева ДОЛЖЕН NOT поднимать этот порог до отведённого
+  пользовательского таймаута: холодный поиск — штатный путь, и его стоимость
+  обязана быть видна в измеримом пороге, а не в снятом требовании
 
-#### Scenario: Stale-индексы
+### Requirement: Конфигурация индексов читается только из platform.json
 
-- **WHEN** `_check_index_signature` пометил прогретый индекс как `STALE` или `INVALID`
-- **THEN** этот `index_name` SHALL попасть в `stale` секцию summary с указанием статуса (`name:STALE` / `name:INVALID`). Статус берётся из `loaded_items[i]["signature_status"]`, вычисленного inline при прогреве (без чтения persisted metadata).
+Система MUST читать состав и параметры векторных индексов **только** из
+`mcp-platform/platform.json → vectors.indexes`, объявленного capability `vectors`.
+Агент MUST NOT держать собственный список индексов, ни в `config.json`, ни в
+`gateway.*`, ни в `skills.*`.
+
+Прежняя редакция требовала читать `gateway.vector.index.indexes.*` из
+`config.json`. Секция объявлена и провалидируется, но не читается: grep по `lib/`
+даёт только объявления моделей и docstring-комментарии
+(`lib/core/project_settings.py:186,481`). Её собственный докстринг называет секцию
+«единственным источником деталей построения индекса» (`:484`), то есть нормативный
+текст и код описывали источник истины, которого нет.
+
+#### Scenario: Состав индексов в одном месте
+
+- **WHEN** векторный индекс добавлен или изменён
+- **THEN** его декларация ДОЛЖНА находиться в
+  `mcp-platform/platform.json → vectors.indexes`
+- **AND** агент ДОЛЖЕН NOT объявлять его ни в `gateway.vector.index.indexes.*`,
+  ни в `skills.<name>.vector_indexes`
+
+#### Scenario: Смена состава индексов без релиза
+
+- **WHEN** оператор меняет состав или параметры объявления в
+  `mcp-platform/platform.json → vectors.indexes`
+- **THEN** система SHALL использовать новое объявление без изменений в коде
+  спецификации или runtime-коде, требующих релизов
+- **AND** ДОЛЖЕН NOT требовать пересборки агента: смена состава — операция
+  контура платформы, а не агента
+
+#### Scenario: Агентский список индексов отвергается
+
+Две половины проверяются разными механизмами, и различать их обязательно: обе
+возникают **только после реализации этого change**, но путём разным.
+
+- **WHEN** в `config.json` присутствует `skills.<name>.vector_indexes`
+  (или `skills.<name>.tables`)
+- **THEN** валидация конфигурации ДОЛЖНА отвергнуть секцию как неизвестный
+  ключ
+- **AND** отказ ДОЛЖЕН быть вызван `extra="forbid"` модели `SkillSettings`
+  (`lib/core/project_settings.py:663`), но сработать он сможет **только после
+  удаления полей** `SkillSettings.tables` (`:666`) и
+  `SkillSettings.vector_indexes` (`:667`): сегодня это **объявленные** поля
+  модели, а `extra="forbid"` типизирует объявленное поле, а не отвергает его, —
+  обе секции валидируются (`config.json:817,835`). Удаление объявлено в
+  `tasks.md` п. 3.3
+
+- **WHEN** в `config.json` присутствует `gateway.vector.index`
+- **THEN** валидация конфигурации ДОЛЖНА отвергнуть секцию явно, а не принять
+  её молча как лишний ключ
+- **AND** отказ ДОЛЖЕН быть наблюдаемым: `ConfigurationError` на старте, а не
+  «всё стартануло, но объявление нигде не читается»
+
+> **Маршрут реализации — решение этого change, а не уже работающий механизм.**
+> В ветке `gateway.*` отвержения нет: `_StrictOptional` объявлен как
+> `extra="allow"` (`lib/core/project_settings.py:55-58`), `GatewaySettings`
+> (`:237`) своего `model_config` не имеет, а `ProjectSettings` (`:759`) —
+> тоже. Единственный действующий отвергатель в этой ветке —
+> валидатор `_reject_legacy_renamed_sections` (`:253-261`) поверх списка
+> `_LEGACY_GATEWAY_KEYS` (`:782-784`), и он знает ровно одну секцию —
+> `gateway.vector_index` **без точки** (legacy-путь, а не текущий
+> `gateway.vector.index`). Поэтому требование отвержения `gateway.vector.index`
+> невыполнимо в текущем виде: без явного решения (добавить путь в
+> legacy-guard как fail-fast либо запретить секцию иначе) ключ будет принят
+> как лишний. Реализация зафиксирована в `tasks.md` п. 3.9 (выбор механизма),
+> 3.3 (удаление моделей) и 3.6 (тест, утверждающий отказ).
+
+#### Scenario: Расхождение двух списков невозможно выразить
+
+- **WHEN** оператор правит состав индексов
+- **THEN** система ДОЛЖНА находить ровно одно объявление, потому что второго
+  места для него в агенте не осталось
+- **AND** система ДОЛЖЕН NOT применять правило приоритета между двумя
+  источниками: выбирать «более новый» из двух нечего, если объявление одно
+
+### Requirement: Vector search доступен только через операцию vectors
+
+Система MUST предоставлять vector search модели исключительно через операцию
+capability `vectors` (`mcp_enterprise_vector_search`), а коду платформы — через
+владельца индексов `mcp-platform/libs/vectors/`.
+
+Прежняя редакция требовала `CacheProvider.search_vector` и запрещала Skill-коду
+обращаться к FAISS напрямую. `CacheProvider` удалён вместе с локальным кэшем;
+Skill, которому был нужен vector search, тоже уехал в платформу
+(`skills/legal-summarizer-query` закрыт change `2026-10-03-mcp-native-tools`, п. D6).
+Запрет «обходить владельца индексами» сохраняется, но адресат у него изменился.
+
+#### Scenario: Модель ищет по вектору
+
+- **WHEN** модели нужен vector similarity query
+- **THEN** она ДОЛЖНА вызвать операцию `vector_search` capability `vectors`
+- **AND** поиск ДОЛЖЕН пройти через владельца индексов, а не через прямой
+  доступ к FAISS
+
+#### Scenario: Обход владельца
+
+Маршрут поиска, объявленный соседним каноном
+(`openspec/specs/data/cache-provider/spec.md`, дельта
+`2026-10-04-close-cache-provider-canon-gap/specs/data/cache-provider/spec.md:504-506`),
+таков и здесь: навык → операция `vector_search` → `search_vector` хранилища
+(`mcp-platform/libs/enterprise_data/snapshot/store.py`) → `mcp-platform/libs/vectors/`.
+Обход — любой выход за `libs/vectors/` на этом маршруте.
+
+- **WHEN** код capability или библиотеки обращается к FAISS в обход
+  `mcp-platform/libs/vectors/`
+- **THEN** такой доступ ДОЛЖЕН считаться нарушением контракта владения, даже
+  если технически работает
+- **AND** на стороне платформы поиск MUST идти через `search_vector` хранилища,
+  делегирующий владельцу индексов, а не через прямой `import faiss` в хранилище
+
+### Requirement: Отказ прогрева индекса не роняет старт платформы
+
+Платформа SHALL собирать векторный индекс каждого **объявленного и включённого**
+источника (`platform.json → vectors.indexes`, поле `enabled` не равно `false`)
+**до начала обслуживания запросов**: `ensure_index` вызывается из
+`servers/enterprise/server.py::_prepare_capabilities` до старта event loop.
+Индекс с `enabled=false` SHALL NOT собираться, и его отсутствие в памяти SHALL
+NOT считаться дефектом. Источник, присутствующий в снимке, но отсутствующий в
+объявлении, SHALL NOT собираться — у него не объявлены ни метрика, ни
+размерность, ни подпись — и SHALL NOT считаться неготовым индексом.
+
+Система SHALL NOT собирать индекс лениво, на пользовательском запросе:
+холодный поиск SHALL NOT быть штатным путём, и ошибка «индекс не прогрет» SHALL
+NOT подменять собой отказ прогрева.
+
+Отказ сборки SHALL быть назван в логе процесса с именем индекса и SHALL быть
+виден в `list_indexes` через `state` (`missing` / `error`) и `error`. Снимок по
+контракту необязателен (`OPTIONAL`), поэтому отказ SHALL NOT ронять старт
+процесса: подняться без снимка — законное состояние, а не дефект. Проверка
+готовности на стороне агента SHALL судить **объявленные и включённые** индексы;
+незаявленный источник из снимка SHALL быть назван отдельно, как расхождение
+объявления и данных, а не как неготовность.
+
+Прежняя редакция требовала `provider.preload_indexes(db_table)` до сигнала
+`READY`, запрещала ленивую постройку и срывала старт при отказе. Это не
+соответствует ни коду (`ensure_index` в `_prepare_capabilities`, `:901-927`),
+ни `CHANGELOG.md:121-122`, ни контракту `OPTIONAL` снимка. Имя требования
+сохранено дословно: OpenSpec сопоставляет требования по имени, и переименование
+превратило бы `MODIFIED` в новое требование, а старое осталось бы жить.
+
+#### Scenario: Индексы готовы до первого запроса
+
+- **WHEN** процесс платформы стартует с подключённым снимком
+- **THEN** к моменту обслуживания запросов FAISS-индекс каждого объявленного и
+  включённого источника SHALL находиться в памяти
+- **AND** `list_indexes` SHALL отдавать по ним `state="ready"`
+- **AND** первый же `vector_search` SHALL NOT платить за сборку индекса
+
+#### Scenario: Отключённый объявлением индекс не собирается
+
+- **WHEN** источник объявлен в `platform.json → vectors.indexes` с
+  `enabled=false`
+- **THEN** его сборка SHALL NOT выполняться на старте
+- **AND** его `state="missing"` SHALL NOT считаться неготовностью: отсутствие
+  индекса в памяти — исполнение объявления, а не отказ
+- **AND** проверка готовности агента SHALL исключать его из знаменателя и
+  называть его отключённым
+
+#### Scenario: Незаявленный источник из снимка
+
+- **WHEN** в снимке есть векторный источник, которого нет в
+  `platform.json → vectors.indexes`
+- **THEN** он SHALL NOT собираться на старте
+- **AND** он SHALL NOT делать проверку готовности нездоровой: отсутствие
+  объявления — расхождение объявления и данных, а не поломка поиска
+- **AND** он SHALL быть назван в сводке агента своим именем
+
+#### Scenario: Снимок не настроен
+
+- **WHEN** оператор не задал путь к снимку
+- **THEN** процесс SHALL подняться
+- **AND** capability `vectors` SHALL отвечать «снимок не подключён», а не
+  «индексов нет»: различать «не работает» и «не настроено» обязательно
+
+#### Scenario: Отказ сборки назван, а не проглочен
+
+- **WHEN** сборка индекса падает при подключённом снимке
+- **THEN** процесс SHALL подняться, потому что снимок необязателен
+- **AND** отказ SHALL быть назван в логе с именем индекса
+- **AND** `list_indexes` SHALL отдавать по этому индексу `state="error"` с
+  текстом отказа, а не `state="ready"`
+
+#### Scenario: Стоимость первичной сборки платит старт, а не поиск
+
+- **WHEN** оценивается стоимость сборки индекса
+- **THEN** она SHALL входить в бюджет старта платформы, а не в ответ на
+  пользовательский запрос
+- **AND** для индекса 20 000 векторов размерности 1024 ориентир SHALL
+  оставаться прежним — не более 5 секунд на сборку: величина не изменилась,
+  изменился момент её уплаты
+
+
 
 ## Responsibility
 
