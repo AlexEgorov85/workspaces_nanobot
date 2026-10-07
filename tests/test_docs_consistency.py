@@ -312,6 +312,11 @@ _REMOVED_AGENT_MODULES = (
 )
 
 #: Символы, которых в проекте нет вовсе (не файлы, а классы/функции).
+#: Каждый проверен перебором ``ast`` по ``lib/``, ``workspace/`` и
+#: ``mcp-platform/``: ни класса, ни функции с таким именем там нет.
+#: ``Class.method`` в такой проверке **не годится** — запись означает
+#: «операция над этим сервисом», а не членство (``try_log_event`` это
+#: функция модуля, первым аргументом принимающая сервис).
 _REMOVED_AGENT_SYMBOLS = (
     "PGSessionManager",
     "TableRegistry",
@@ -319,6 +324,19 @@ _REMOVED_AGENT_SYMBOLS = (
     "VectorIndexService",
     "CacheLoadService",
     "DuckDbCacheStore",
+    # слой владения и синхронизации, снятый вместе с кэш-кластером
+    # (change drop-local-cache-read-from-pg)
+    "CacheSyncService",
+    "CacheOwnershipCoordinator",
+    "ClaimResult",
+    "PgDuckDbSyncService",
+    "PreloadService",
+    "_record_sync_skipped",
+    # второй транспорт ушёл вместе с ним; класс назывался как путь, и
+    # по имени его никто не ловил
+    "RedisChannel",
+    # менеджер сессий переехал в upstream-библиотеку как SessionManager
+    "PostgresSessionManager",
 )
 
 #: Пометки, по которым видно, что ссылка на снятое дана намеренно.
@@ -327,7 +345,14 @@ _REMOVED_MARKERS = (
     "не существует", "нет в репо", "нет в дереве", "переехал", "уехал",
     "перенесён", "перенесен", "заменён", "заменен", "~", "был", "была",
     "было", "были", "истори", "История", "прежн", "Прежн",
+    # идиома репозитория: «в проекте не осталось»
+    "не осталось", "не остался", "не осталась", "не осталось.",
 )
+
+#: Ширина окна, в котором ищется пометка снятия вокруг строки. Нужна не
+#: «соседняя строка», а тот же абзац: список снятых модулей переносится, и
+#: объяснение стоит его первой строкой, а не у каждого имени.
+_REMOVED_MARKER_SPAN = 3
 
 #: Подкаталоги и файлы документации, которые историю хранят по назначению.
 _DOC_HISTORY_DIRS = (
@@ -356,6 +381,50 @@ def _doc_files() -> list[Path]:
     return out
 
 
+def _canon_spec_files() -> list[Path]:
+    """Канон: ``openspec/specs/<категория>/<компонент>/spec.md``.
+
+    Каталог ``changes/`` сюда не входит намеренно: архив — история, там
+    упоминание снятого нормально, а в действующей дельте означало бы
+    «применить и починить».
+    """
+    return sorted((_PROJECT_ROOT / "openspec" / "specs").glob("*/*/spec.md"))
+
+
+def _is_deliberate(lines: list[str], idx: int) -> bool:
+    """Видно ли намерение в строке или в её абзаце.
+
+    Поиск строго по строке давал 28 ложных срабатываний на 28 спек:
+    список снятых переносится на несколько строк, и объяснение стоит его
+    первой строкой, а у каждого имени пометки нет.
+    """
+    span = _REMOVED_MARKER_SPAN
+    start = idx
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    end = idx
+    while end + 1 < len(lines) and lines[end + 1].strip():
+        end += 1
+    block = "\n".join(lines[max(start, idx - span):min(end + 1, idx + span + 1)])
+    return any(mark in block for mark in _REMOVED_MARKERS)
+
+
+def _stale_removed_references(files: list[Path]) -> list[str]:
+    needles = _REMOVED_AGENT_MODULES + _REMOVED_AGENT_SYMBOLS
+    stale: list[str] = []
+    for f in files:
+        rel = f.relative_to(_PROJECT_ROOT).as_posix()
+        lines = f.read_text(encoding="utf-8").splitlines()
+        for num, line in enumerate(lines):
+            hit = next((n for n in needles if n in line), None)
+            if hit is None:
+                continue
+            if _is_deliberate(lines, num):
+                continue
+            stale.append(f"  {rel}:{num + 1} -> {hit}")
+    return stale
+
+
 def test_docs_do_not_point_at_removed_agent_modules() -> None:
     """docs/ не должна отправлять читателя в снятый модуль как в живой.
 
@@ -364,26 +433,66 @@ def test_docs_do_not_point_at_removed_agent_modules() -> None:
     ``scripts/skill_config.py``, а страница про реестр ресурсов в 494 строки
     описывала подсистему, снятую со временем локального снимка.
 
-    Ссылка на снятое допустима, только если в той же строке видно намерение
-    (пометка об устаревании или явная историческая рамка файла) — иначе
-    читатель примет её за инструкцию.
+    Ссылка на снятое допустима, только если рядом видно намерение (пометка
+    об устаревании или явная историческая рамка файла) — иначе читатель
+    примет её за инструкцию.
     """
-    stale: list[str] = []
-    needles = _REMOVED_AGENT_MODULES + _REMOVED_AGENT_SYMBOLS
-    for f in _doc_files():
-        rel = f.relative_to(_PROJECT_ROOT).as_posix()
-        for num, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
-            hit = next((n for n in needles if n in line), None)
-            if hit is None:
-                continue
-            if any(mark in line for mark in _REMOVED_MARKERS):
-                continue
-            stale.append(f"  {rel}:{num} -> {hit}")
+    stale = _stale_removed_references(_doc_files())
     assert not stale, (
         "docs/ ссылается на снятые модули без пометки об устаревании:\n"
         + "\n".join(stale[:40])
         + (f"\n... ещё {len(stale) - 40}" if len(stale) > 40 else "")
     )
+
+
+def test_canon_specs_do_not_name_removed_agent_modules() -> None:
+    """Канон не должен называть снятый класс действующим носителем правила.
+
+    Предыдущий страж смотрел только в ``docs/``, и канон остался вне
+    охвата. Нашлось при правке ``sessions/session-hybridization``:
+    ``logging-db`` объяснял единый инвариант недоступности журнала через
+    ``PgDuckDbSyncService``, ``DuckDbCacheStore`` и ``PreloadService`` —
+    классов, которых в проекте нет. Позже — 34 места в ``cache-provider``
+    и по одному в трёх других спеках, все в списках «живых компонентов».
+
+    Канон строже ``docs/`` быть не может: он по построению хранит разбор
+    «что снято и почему». Поэтому правило то же — ссылка допустима, если
+    рядом видно намерение.
+    """
+    stale = _stale_removed_references(_canon_spec_files())
+    assert not stale, (
+        "Канон называет снятый модуль или класс действующим без пометки:\n"
+        + "\n".join(stale[:40])
+        + (f"\n... ещё {len(stale) - 40}" if len(stale) > 40 else "")
+    )
+
+
+def test_removed_reference_guard_catches_a_planted_stale_name() -> None:
+    """Проба стража: подсаженная ссылка на снятое обязана его поймать.
+
+    Страж, проходящий на пустом множестве, неотличим от строчки, которая
+    никогда не срабатывает.
+    """
+    planted = "- **ТОГДА** `PgDuckDbSyncService` ДОЛЖЕН подхватить изменение"
+    assert not _is_deliberate(planted.splitlines(), 0), (
+        "подсаженная ссылка на снятый класс помечена как намеренная — "
+        "проверка ничего не проверяет"
+    )
+    # пометка рядом допускает ссылку
+    assert _is_deliberate(
+        ["`PgDuckDbSyncService` **не перенесён**, осталась загрузка"], 0
+    ), "пометка снятия в абзаце обязана скрывать ссылку"
+    # а перенос списка: объяснение в первой строке, имя — во второй
+    assert _is_deliberate(
+        [
+            "Сняты вместе с кэш-кластером:",
+            "`PgDuckDbSyncService`,",
+            "`DuckDbCacheStore`.",
+        ],
+        1,
+    ), "перенесённый список снятых должен читаться как список снятых"
+    # живое имя снятым не считается
+    assert not _is_deliberate(["- **THEN** `MirrorPoller` пишет событие"], 0)
 
 
 #: Формулировки, которыми помечалась незавершённая работа: «уезжает в фазе N»,
