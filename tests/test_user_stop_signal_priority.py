@@ -44,7 +44,7 @@ if _workspace_path not in sys.path:
 def priority_polling_mock_db(tmp_path):
     """Подменяет транспорт канала: двойник клиента ``enterprise-mcp``.
 
-    Раньше здесь подменялся ``utils.db``. Канал больше не ходит в PostgreSQL -
+    Раньше здесь подменялся ``lib.utils.db``. Канал больше не ходит в PostgreSQL -
     данные задач обслуживает платформа, - поэтому и нужен двойник клиента, а
     не мок драйвера. Проверки приоритетного захвата переехали на проверку
     аргументов операции: текста SQL в канале больше нет.
@@ -63,7 +63,7 @@ def priority_polling_mock_db(tmp_path):
             sys.modules["utils"] = real_utils_pkg
             spec.loader.exec_module(real_utils_pkg)
 
-        from utils.session_file_store import SessionFileStore  # noqa: F401
+        from lib.utils.session_file_store import SessionFileStore  # noqa: F401
 
         sys.modules.pop("lib.channels.postgres_channel", None)
         sys.modules.pop("lib.channels.message_exchange", None)

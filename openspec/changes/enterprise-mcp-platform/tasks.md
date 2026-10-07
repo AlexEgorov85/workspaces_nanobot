@@ -810,7 +810,7 @@
       перенесён на живой путь: `test_ensure_schema_replaces_previous_meta` в
       `tests/test_duckdb_cache_store.py`.
       **`sys.path`-хак (строки 247-250) оставлен:** около тридцати файлов в
-      `lib/`, `tools/` и `workspace/` делают `from utils.db import ...`, а
+      `lib/`, `tools/` и `workspace/` делают `from lib.utils.db import ...`, а
       `gateway.py` добавляет пути уже внутри `main()`, то есть после импорта
       модулей. Удаление хака — отдельное решение на границе импортов.
 - [x] 5.6 Убрать cache-API из `lib/core/skill_config.py`. `TableRegistry` и
@@ -1704,7 +1704,7 @@
       который в коде **исправлен** (внешний `AND` повторяет условие
       подзапроса, `main.py:1579-1584`).
       `docs/architecture/storage-layers.md` описывал зеркало сессий через
-      `utils.db.transaction()` и advisory-lock leader-election; обоих в коде
+      `lib.utils.db.transaction()` и advisory-lock leader-election; обоих в коде
       нет (0 совпадений `pg_try_advisory` в `lib/` и `mcp-platform/`),
       зеркало ходит в базу операциями `OP_STATE`/`OP_MIRROR`/`OP_CLEANUP`.
       Метрики `cycles_skipped_lock_busy`/`cycles_skipped_pool_busy` и

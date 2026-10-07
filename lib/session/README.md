@@ -64,7 +64,7 @@ manager = build_session_manager(workspace)   # upstream SessionManager + Sanitiz
 ## Санитизация
 
 `SanitizingSessionStore.save()` сперва прогоняет контент всех сообщений через
-`clean_text` (`workspace/utils/clean_text.py`). Чистятся две формы одного и
+`clean_text` (`lib/utils/clean_text.py`). Чистятся две формы одного и
 того же невалидного символа:
 
 - настоящий NUL-байт (`0x00`) — PostgreSQL не принимает его в `text`-литералах
@@ -103,7 +103,7 @@ LLM-вывода. Причина не в JSONL, а в PostgreSQL, поэтому
 > `create_public_agent_session_meta.sql`,
 > `create_public_agent_session_messages.sql`.
 
-DSN собирается общим `utils.db.resolve_dsn()` из `channels.postgres.{host,port,
+DSN собирается общим `lib.utils.db.resolve_dsn()` из `channels.postgres.{host,port,
 dbname,user}` + `DB_PASSWORD` (или `dsn` override), а не передаётся напрямую.
 
 ## Схема БД
@@ -196,4 +196,4 @@ referential integrity; каскад и так выполняет писател�
 ## Зависимости
 
 - `psycopg2` / `psycopg2-binary` — только для зеркала
-- `utils.db` (пул, retry) — общий с остальными подсистемами
+- `lib.utils.db` (пул, retry) — общий с остальными подсистемами

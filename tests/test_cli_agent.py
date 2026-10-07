@@ -114,11 +114,11 @@ def _setup_fake_modules():
         sys.path.insert(0, ws)
 
     utils_pkg = types.ModuleType("utils")
-    utils_db = types.ModuleType("utils.db")
+    utils_db = types.ModuleType("lib.utils.db")
     utils_db.configure = MagicMock()
     utils_pkg.db = utils_db
     sys.modules["utils"] = utils_pkg
-    sys.modules["utils.db"] = utils_db
+    sys.modules["lib.utils.db"] = utils_db
 
 
 # =================================================================

@@ -139,7 +139,7 @@ manager'а. Правка привязки от 2026-10-02 внесла сюда 
   семафора и поллинг-слотов сюда был бы переносом чужой модели.
 
 Переиспользуются из существующего кода: медиа-кодек
-(`workspace/utils/media.py`), фильтрация служебного шума
+(`lib/utils/media.py`), фильтрация служебного шума
 (`lib/utils/outbound_meta.py`), рендер (`nanobot.cli.stream.StreamRenderer`).
 
 ### Decision 3: handshake — bootstrap-токен, без обхода аутентификации

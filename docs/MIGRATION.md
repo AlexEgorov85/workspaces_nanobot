@@ -367,7 +367,7 @@ LLM-вызовы в production):
   адрес на момент v2.0.0: таблица с тех пор — legacy-артефакт, который код не
   читает, а состав индексов объявляет `mcp-platform/platform.json` →
   `vectors.indexes`.
-- DSN задаётся единым `channels.postgres.dsn` (обычно `"${DATABASE_URL}"` из `.secrets.env`, резолвится через `utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`user`/`dbname` не поддерживаются.
+- DSN задаётся единым `channels.postgres.dsn` (обычно `"${DATABASE_URL}"` из `.secrets.env`, резолвится через `lib.utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`user`/`dbname` не поддерживаются.
 - Все таблицы логов и сессий получили префикс `agent_` (`agent_gateway_logs`,
   `agent_conversation_messages`, `agent_worker_claims`).
 - Имя LLM-провайдера — каноническое `LLM_API_KEY` (вместо `MISTRAL_API_KEY`).

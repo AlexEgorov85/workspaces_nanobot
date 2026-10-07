@@ -231,7 +231,7 @@ tool'ов, и при переносе тяжёлых запросов в MCP о�
 |---|---|---|
 | `save_turn` | Хук `after_execute_tool` — архивирование результата происходит раньше, чем upstream усечёт его в `_save_turn` | 6.2 |
 | `async_save` | `lib/services/session_storage.py::install_async_save` — обёртка ставится при создании менеджера сессий | 6.3 |
-| `session_content_cleanup` | `SanitizingSessionStore.save` (`lib/session/pg_session_manager.py`) через `workspace/utils/clean_text.py`: чистка NUL — забота PostgreSQL, а не фреймворка | 6.4 |
+| `session_content_cleanup` | `SanitizingSessionStore.save` (`lib/session/pg_session_manager.py`) через `lib/utils/clean_text.py`: чистка NUL — забота PostgreSQL, а не фреймворка | 6.4 |
 | `session_dir_watch` | Удалён целиком: гейт выключен по умолчанию, тестов не было | 6.5 |
 | `document_text_threshold` | Нативный document-tool агента — это наш код, патчить фреймворк не нужно | 6.7 |
 

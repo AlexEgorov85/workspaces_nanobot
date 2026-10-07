@@ -61,7 +61,7 @@ def _dsn() -> str:
 @pytest.fixture
 def pool():
     """Настоящий пул воркеров против живой базы."""
-    from utils import db as utils_db
+    from lib.utils import db as utils_db
 
     utils_db.configure(_dsn())
     utils_db.start()

@@ -14,7 +14,7 @@ _workspace_path = str(_project_root / "workspace")
 if _workspace_path not in sys.path:
     sys.path.insert(0, _workspace_path)
 
-# Канал больше не ходит в `utils.db`: его данные обслуживает платформа.
+# Канал больше не ходит в `lib.utils.db`: его данные обслуживает платформа.
 # Подменяется клиент `enterprise-mcp` - см. `_FakeMcpClient`.
 
 class _FakeSessionFileStore:
@@ -56,7 +56,7 @@ class _FakeMcpClient:
 
     Ответы задаются по имени операции, каждое обращение записывается.
 
-    Раньше здесь подменялся ``utils.db``, и тесты утверждали на тексте SQL.
+    Раньше здесь подменялся ``lib.utils.db``, и тесты утверждали на тексте SQL.
     Проверять было нечего: текста в канале больше нет, и утверждение вида
     ``any("UPDATE" in c.args[0] ...)`` проверяло бы отсутствие кода, а не
     поведение. Теперь проверяется операция и её аргументы - то есть ровно
@@ -112,8 +112,8 @@ def mock_db_and_psycopg(tmp_path):
     with patch.dict("sys.modules"):
         import importlib
 
-        # Канал больше не ходит в ``utils.db``, но по-прежнему импортирует
-        # ``utils.session_file_store``, ``utils.media`` и ``utils.jsonb`` -
+        # Канал больше не ходит в ``lib.utils.db``, но по-прежнему импортирует
+        # ``lib.utils.session_file_store``, ``lib.utils.media`` и ``lib.utils.jsonb`` -
         # они про файлы и разбор, а не про базу.
         original_utils = sys.modules.get("utils")
 
@@ -128,7 +128,7 @@ def mock_db_and_psycopg(tmp_path):
             sys.modules["utils"] = real_utils_pkg
             spec.loader.exec_module(real_utils_pkg)
 
-        from utils.session_file_store import SessionFileStore  # noqa: F401
+        from lib.utils.session_file_store import SessionFileStore  # noqa: F401
 
         # Форсируем свежий импорт: если предыдущие тестовые файлы уже
         # импортировали канал с настоящими зависимостями, класс остался бы
@@ -165,8 +165,8 @@ def _store(root: Path):
     снятия собственной раскладки. Здесь она повторяет то, что делает резолвер —
     применяет объявленное правило имени к ``session_key``.
     """
-    from utils.session_file_store import SessionFileStore  # type: ignore
-    from utils.session_key import safe_session_key  # type: ignore
+    from lib.utils.session_file_store import SessionFileStore  # type: ignore
+    from lib.utils.session_key import safe_session_key  # type: ignore
 
     return SessionFileStore(
         lambda key: root / safe_session_key(key), attachments_subdir="attachments"
@@ -1654,7 +1654,7 @@ class TestStorePathComesFromResolver:
 
     def test_attachment_lands_in_resolver_session_dir(self, tmp_path):
         """Вложение попадает в `files/attachments/` каталога от резолвера."""
-        from utils.session_file_store import SessionFileStore
+        from lib.utils.session_file_store import SessionFileStore
 
         session_dir = tmp_path / "sessions" / "sess-1"
         store = SessionFileStore(lambda _key: session_dir, attachments_subdir="attachments")

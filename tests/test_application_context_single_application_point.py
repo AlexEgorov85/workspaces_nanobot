@@ -174,16 +174,16 @@ def _full_fake_modules(tmp_path):
     sfr = types.ModuleType("session_file_store")
     sfr.SessionFileStore = MagicMock()
 
-    sfs = types.ModuleType("utils.session_file_store")
+    sfs = types.ModuleType("lib.utils.session_file_store")
     sfs.SessionFileStore = MagicMock()
     sfs.prepare_content = MagicMock()
 
     utils_pkg = types.ModuleType("utils")
     utils_pkg.__path__ = []
-    utils_db = types.ModuleType("utils.db")
+    utils_db = types.ModuleType("lib.utils.db")
     utils_db.configure = MagicMock()
     utils_pkg.db = utils_db
-    utils_media = types.ModuleType("utils.media")
+    utils_media = types.ModuleType("lib.utils.media")
     utils_media.serialize = MagicMock(return_value=None)
     utils_pkg.media = utils_media
     utils_pkg.session_file_store = sfs
@@ -211,9 +211,9 @@ def _full_fake_modules(tmp_path):
         "config": cfg_mod,
         "session_file_store": sfr,
         "utils": utils_pkg,
-        "utils.db": utils_db,
-        "utils.media": utils_media,
-        "utils.session_file_store": sfs,
+        "lib.utils.db": utils_db,
+        "lib.utils.media": utils_media,
+        "lib.utils.session_file_store": sfs,
     }
 
     # Подменяем AgentLoop.from_config через патч модуля (НЕ пересоздаём модуль).

@@ -114,7 +114,9 @@ patches, preload, hooks). Проверка SHALL выполняться ровн
 ### Requirement: Проверка выполняется через пул соединений БД
 
 Проверка SHALL использовать тот же пул соединений, что и остальные
-сервисы (`utils.db` / `get_pool`). Предел времени SHALL выставляться как
+сервисы (модуль `lib.utils.db`). Функции `get_pool` в модуле нет и не
+было: наружу пул не торчит, а адаптером к нему служит
+`fetch_with_timeout`. Предел времени SHALL выставляться как
 `statement_timeout` на соединении воркера и SHALL сниматься после запроса
 (в том числе при отказе) — соединение возвращается в пул общим, и незакрытый
 предел уехал бы в чужие запросы. По истечении предела SHALL выбрасываться
@@ -222,7 +224,7 @@ SHALL формировать сообщение на русском, содер�
 ### May depend on
 
 - `config.ConfigurationError` (для boundary с gateway/cli entrypoint).
-- `utils.db.fetch` (psycopg2-пул) — адаптер для SELECT.
+- `lib.utils.db.fetch` (psycopg2-пул) — адаптер для SELECT.
 - `lib.core.project_settings.StartupSchemaValidationSettings` —
   pydantic-валидация `gateway.startup.schema_validation.*`.
 
@@ -230,7 +232,7 @@ SHALL формировать сообщение на русском, содер�
 
 - Upstream nanobot (никакой логики оттуда).
 - Конкретных имён таблиц в коде проверки.
-- Сетевых ресурсов вне пула `utils.db`.
+- Сетевых ресурсов вне пула `lib.utils.db`.
 
 ## Public Contract
 
@@ -242,11 +244,11 @@ SHALL формировать сообщение на русском, содер�
   возвращает `list[MissingTable]` (пустой, если всё на месте).
 - `SchemaValidationService.validate(settings, *, fetch, timeout_sec)`
   — верхний уровень: ожидаемые → проверка → `raise SchemaValidationError`.
-- `utils.db.fetch_with_timeout(sql, *args, *, timeout_sec)` — адаптер,
+- `lib.utils.db.fetch_with_timeout(sql, *args, *, timeout_sec)` — адаптер,
   которым `ApplicationContext` подменяет «голый» `fetch`. Механизм
   предела живёт здесь, а не в сервисе проверки: соединение принадлежит
   пулу, и держать открытый доступ к соединениям в потребителе нечего.
-  Плоский `utils.db.fetch` тоже годен — он просто ничего не ограничивает.
+  Плоский `lib.utils.db.fetch` тоже годен — он просто ничего не ограничивает.
 - `SchemaValidationTimeoutError(ConfigurationError)` — отказ по превышении
   предела. Намеренно **не** подкласс `SchemaValidationError`: таймаут не
   означает «нет таблиц», и отправлять оператора применять миграции там,
@@ -263,7 +265,7 @@ SHALL формировать сообщение на русском, содер�
   question_runs_table}`, плюс `profile` для текста отказа. Литералов имён в
   коде проверки нет: переименование таблицы меняет конфигурацию, а не код;
 - `fetch` — адаптер с сигнатурой `(sql, *params) -> list[dict]`, обычно
-  `utils.db.fetch_with_timeout`. Предел времени реализует адаптер, потому что
+  `lib.utils.db.fetch_with_timeout`. Предел времени реализует адаптер, потому что
   соединение принадлежит пулу, а не этому модулю;
 - `timeout_sec` — предел, который попадает в текст отказа: решение читает
   сообщение и видит конкретную цифру, а не «неизвестный таймаут»;
@@ -294,7 +296,7 @@ SHALL формировать сообщение на русском, содер�
 
 - `config.ConfigurationError` — базовый класс для
   `SchemaValidationError`.
-- `utils.db.fetch` — адаптер для SELECT (psycopg2-пул).
+- `lib.utils.db.fetch` — адаптер для SELECT (psycopg2-пул).
 - `lib.core.project_settings.StartupSchemaValidationSettings` —
   pydantic-валидация конфигурации.
 - `lib.core.application_context.ApplicationContext` — место вызова
@@ -337,7 +339,7 @@ SHALL формировать сообщение на русском, содер�
 
 Не владеет:
 
-- соединением: `fetch` — адаптер поверх общего пула `utils.db`, и сам
+- соединением: `fetch` — адаптер поверх общего пула `lib.utils.db`, и сам
   сервис соединение не открывает и не держит;
 - именами runtime-таблиц: они принадлежат конфигурации
   (`channels.postgres.*`, `logging.db.*`), а проверка их только читает и

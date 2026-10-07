@@ -231,7 +231,7 @@ class TestNoProductionDirectWriters:
 
 
 DELETED_FUNCTIONS = {"record_event", "record_sync_event", "emit_sync_event"}
-DELETED_MODULE = "workspace.utils.event_log"
+DELETED_MODULE = "lib.utils.event_log"
 
 
 class TestNoDeletedModuleImports:
@@ -416,7 +416,7 @@ class TestGuardNegativeCases:
         fixture = tmp_path / "fixture.py"
         fixture.write_text(
             "from config import SETTINGS\n"
-            "import utils.db as _db\n"
+            "import lib.utils.db as _db\n"
             "table = SETTINGS['logging']['db']['table_name']\n"
             "schema = SETTINGS['logging']['db'].get('schema', 'public')\n"
             "def _write(payload):\n"
@@ -437,11 +437,11 @@ class TestGuardNegativeCases:
         ast.parse(text)
 
     def test_guard_catches_event_log_import(self, tmp_path: Path) -> None:
-        """``from workspace.utils.event_log import record_event`` —
+        """``from lib.utils.event_log import record_event`` —
         AST-guard должен ловить (страховка, что фикстура парсится)."""
         fixture = tmp_path / "fixture.py"
         fixture.write_text(
-            "from workspace.utils.event_log import record_event\n"
+            "from lib.utils.event_log import record_event\n"
             "record_event('x', 'y', 'z', {})\n",
             encoding="utf-8",
         )

@@ -136,7 +136,7 @@ upstream JSONL.
 
 `ApplicationContext.stop()` вызывает `usage_store.close()` после
 `shutdown_all()` сервисов и перед `_stop_db_pool()`. Никаких
-race conditions — общий пул `utils.db` живёт до `_stop_db_pool`.
+race conditions — общий пул `lib.utils.db` живёт до `_stop_db_pool`.
 
 ## Архитектурный инвариант
 

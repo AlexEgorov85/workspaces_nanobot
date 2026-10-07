@@ -72,7 +72,7 @@
 
 > С версии 2.0.0 все параметры `channels.postgres.*` управлялись через `project.json` (файл удалён `c439ef3`); сейчас — `config.json`.
 > В v1.x канал брал DSN напрямую из собственной секции конфига — теперь общий
-> `utils.db.resolve_dsn()` собирает DSN из `channels.postgres.{host,port,
+> `lib.utils.db.resolve_dsn()` собирает DSN из `channels.postgres.{host,port,
 > dbname,user}` + `DB_PASSWORD` (или `dsn` override). Полный список ключей —
 > в `config.json → channels.postgres` и `channels.redis`.
 
@@ -178,7 +178,7 @@
 (Postgres / Redis) и для чтения истории. Инкапсулирует:
 
 - кодирование/декодирование `InboundMessage` / `OutboundMessage`;
-- JSONB-кодек медиа (`workspace/utils/media.py`);
+- JSONB-кодек медиа (`lib/utils/media.py`);
 - поллинг и публикацию outbound;
 - фильтрацию служебных outbound (`lib/utils/outbound_meta.py`).
 

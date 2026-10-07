@@ -155,7 +155,7 @@ WHERE l.request_id = r.request_id
 Что проверяется на уровне guard-тестов:
 
 1. **Сгенерированный SQL и параметры** — primary guard.
-   `tests/test_history_search_tool.py` через mock на `utils.db.fetch`
+   `tests/test_history_search_tool.py` через mock на `lib.utils.db.fetch`
    фиксирует:
    - `scope="current"` → SQL содержит `session_id = %s` с
      параметром `session_key`;

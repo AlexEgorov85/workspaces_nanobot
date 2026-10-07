@@ -258,9 +258,9 @@ class SchemaValidationService:
 
         Args:
             fetch: callable с сигнатурой ``(sql, *params) -> list[dict]``.
-                Обычно ``utils.db.fetch_with_timeout``: предел времени
+                Обычно ``lib.utils.db.fetch_with_timeout``: предел времени
                 реализует адаптер, потому что соединение принадлежит пулу,
-                а не этому модулю. Плоский ``utils.db.fetch`` тоже годен —
+                а не этому модулю. Плоский ``lib.utils.db.fetch`` тоже годен —
                 он просто ничего не ограничивает по времени.
             expected: список ``(schema, table_name)``.
             timeout_sec: предел, упомянутый в тексте отказа. Значение
@@ -314,7 +314,7 @@ class SchemaValidationService:
             settings: merged SETTINGS (с ``profile``). Может быть
                 сырым dict или ``_LazySettings`` proxy.
             fetch: адаптер для SELECT, обычно
-                ``utils.db.fetch_with_timeout`` — он же применяет предел.
+                ``lib.utils.db.fetch_with_timeout`` — он же применяет предел.
             timeout_sec: предел, названный в тексте отказа.
 
         Raises:

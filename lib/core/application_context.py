@@ -954,7 +954,7 @@ class ApplicationContext:
             )
             return
         try:
-            from utils.db import fetch_with_timeout as _db_fetch
+            from lib.utils.db import fetch_with_timeout as _db_fetch
 
             from lib.services.schema_validation import SchemaValidationService
         except Exception as exc:
@@ -1375,13 +1375,12 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
         # воркера (psycopg2.connect + connect_max_retries могут занять
         # десятки секунд, а ``fetch().get()`` блокирует навсегда).
         try:
-            import sys
-            from pathlib import Path
-
-            _ws = Path(__file__).resolve().parents[2] / "workspace"
-            if str(_ws) not in sys.path:
-                sys.path.insert(0, str(_ws))
-            from utils.db import _get_manager, _Job
+            # Каталог ``workspace/`` в ``sys.path`` здесь больше не нужен и
+            # не добавляется: зона навыков не участвует в резолве имён
+            # агента, а пул живёт в ``lib/utils/db.py``. Прежняя вставка была
+            # остатком от ``workspace/utils/db.py`` и держала каталог в
+            # позиции 0, где он перехватывал одноимённые пакеты.
+            from lib.utils.db import _get_manager, _Job
 
             def _ping(conn: Any) -> Any:
                 with conn.cursor() as cur:
@@ -1995,7 +1994,7 @@ def _make_usage_store(ctx: ApplicationContext) -> Any | None:
 
 
 def _configure_db_pool(pool_cfg: dict, print_activity: bool = False) -> None:
-    """Применить ``channels.postgres.pool`` к общему пулу ``utils.db``.
+    """Применить ``channels.postgres.pool`` к общему пулу ``lib.utils.db``.
 
     ``pool_cfg`` — словарь с ключами ``min_conn/max_conn/pool_timeout/
     queue_maxsize/reconnect_backoff_sec/reconnect_backoff_max_sec/
@@ -2007,30 +2006,30 @@ def _configure_db_pool(pool_cfg: dict, print_activity: bool = False) -> None:
     ``print_activity``.
     """
     try:
-        from utils.db import set_pool_config
+        from lib.utils.db import set_pool_config
 
         merged = dict(pool_cfg)
         merged["print_activity"] = bool(print_activity)
         set_pool_config(merged)
     except Exception as exc:
-        logger.warning("utils.db pool config ignored: %s", exc)
+        logger.warning("lib.utils.db pool config ignored: %s", exc)
 
 
 def _start_db_pool() -> None:
-    """Запустить общий пул ``utils.db`` (воркеры подключаются лениво)."""
+    """Запустить общий пул ``lib.utils.db`` (воркеры подключаются лениво)."""
     try:
-        from utils.db import start
+        from lib.utils.db import start
 
         start()
     except Exception as exc:
-        logger.warning("utils.db pool start failed: %s", exc)
+        logger.warning("lib.utils.db pool start failed: %s", exc)
 
 
 def _stop_db_pool() -> None:
-    """Остановить общий пул ``utils.db`` и закрыть все соединения."""
+    """Остановить общий пул ``lib.utils.db`` и закрыть все соединения."""
     try:
-        from utils.db import shutdown
+        from lib.utils.db import shutdown
 
         shutdown()
     except Exception as exc:
-        logger.warning("utils.db pool shutdown failed: %s", exc)
+        logger.warning("lib.utils.db pool shutdown failed: %s", exc)

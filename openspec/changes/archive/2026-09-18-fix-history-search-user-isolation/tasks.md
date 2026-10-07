@@ -60,7 +60,7 @@ non-goals — в `proposal.md`; архитектурные решения — в
       payload, metadata, request_id, name) и в список параметров.
 - [ ] 2.6 `tests/test_db_logging_service.py`:
       - `test_log_event_user_id_reaches_insert` —
-        мок `utils.db.run`/`execute_batch` фиксирует, что
+        мок `lib.utils.db.run`/`execute_batch` фиксирует, что
         `LogEvent(user_id="alice")` доходит до INSERT.
       - `test_enqueue_fills_user_id_when_request_id_matches`:
         register_request → enqueue пустого `user_id` с тем же
@@ -135,7 +135,7 @@ non-goals — в `proposal.md`; архитектурные решения — в
         возвращается через `scope="current"`.
 - [ ] 3.6 Тот же файл, класс `TestGeneratedSqlGuard` (primary
       guard):
-      - mock `utils.db.fetch` перехватывает SQL и params;
+      - mock `lib.utils.db.fetch` перехватывает SQL и params;
       - `test_scope_current_uses_session_id_predicate`:
         SQL содержит `session_id = %s`, параметр = session_key;
       - `test_scope_all_uses_user_id_predicate`: SQL содержит

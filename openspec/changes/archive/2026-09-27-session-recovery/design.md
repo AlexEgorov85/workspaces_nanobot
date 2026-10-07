@@ -3,13 +3,13 @@
 > **Замечание о соответствии реальному коду.** Эта спека написана
 > до анализа фактической реализации. Все PG-операции
 > (`_read_pg_meta`, `_read_session_from_pg`, `_acquire_sync_lock`)
-> должны идти через единый пул `utils.db.transaction()`, как в
+> должны идти через единый пул `lib.utils.db.transaction()`, как в
 > `SessionColdSyncService` (см. `openspec/changes/storage-hybridization/design.md`
 > D-Pool). Никаких `psycopg2.connect()` / `pg_pool.getconn()` /
 > `putconn()` / `_lock_conn` — это **запрещено** спекой
 > `storage/session-hybridization` (D-Pool.1: «Пул — единый, через DI»).
 > При имплементации примеры ниже должны быть переписаны под
-> `utils.db.transaction()`.
+> `lib.utils.db.transaction()`.
 
 ## D1: Три режима и строгий Read-Only
 ```python

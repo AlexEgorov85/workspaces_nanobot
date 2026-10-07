@@ -40,7 +40,7 @@
 Почему имя каталога в режиме без платформы берётся чужой функцией. Платформенный
 ``safe_name`` живёт в процессе платформы, а агент без платформы всё равно обязан
 куда-то положить файл. Свою копию санитайзера агент не заводит: он зовёт
-``workspace.utils.session_key.safe_session_key`` — единственную агентскую
+``lib.utils.session_key.safe_session_key`` — единственную агентскую
 функцию имени. Согласие сторон обеспечивает контрактный тест
 ``tests/contract/test_session_dir_name_contract.py``, а не копирование
 алгоритма; резолвер политику имени не дублирует и не улучшает.
@@ -141,7 +141,7 @@ def _agent_session_dir_name(session_key: str) -> str:
     Импорт ленивый: ``lib/services`` не тянет ``workspace`` при импорте модуля
     (по той же причине, что и остальные тяжёлые зависимости в этом слое).
     """
-    from workspace.utils.session_key import safe_session_key
+    from lib.utils.session_key import safe_session_key
 
     return safe_session_key(session_key)
 
@@ -193,7 +193,7 @@ class SessionFileResolver:
     def resolved_session_dir(self, session_key: str) -> Path:
         """Каталог сессии **из уже полученного** ответа платформы, синхронно.
 
-        Для кодека вложений (``workspace/utils/media.py``), который синхронен, а
+        Для кодека вложений (``lib/utils/media.py``), который синхронен, а
         резолвер асинхронен: канал дожидается каталога один раз, вызывая
         :meth:`ensure`, и дальше отдаёт хранилищу функцию, читающую этот ответ.
 

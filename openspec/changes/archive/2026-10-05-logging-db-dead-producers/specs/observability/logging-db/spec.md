@@ -120,7 +120,7 @@ Runtime-producers structured events
 
 - **WHEN** runtime-компонент пишет structured event
 - **THEN** producer SHALL NOT вызывать
-  `utils.db.execute('INSERT INTO ... agent_gateway_logs ...')`
+  `lib.utils.db.execute('INSERT INTO ... agent_gateway_logs ...')`
   или аналогичные прямые SQL-команды.
 - **AND** producer SHALL NOT использовать
   `psycopg2.extras.Json(...)` для сериализации

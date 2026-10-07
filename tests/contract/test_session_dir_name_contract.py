@@ -2,7 +2,7 @@
 
 Функции, которые приводят ``session_key`` к имени каталога:
 
-* ``workspace/utils/session_key.py::safe_session_key`` — агентская реализация
+* ``lib/utils/session_key.py::safe_session_key`` — агентская реализация
   правила, её зовёт хук перенаправления файлов и резолвер;
 * ``mcp-platform/libs/enterprise_common/session/security.py::session_dir_name`` —
   **единственная** платформенная реализация правила;
@@ -66,7 +66,7 @@ from libs.legal_summarizer.cache.session_key import (  # noqa: E402
     safe_session_key as legal_side_name,
 )
 
-from workspace.utils.session_key import (  # noqa: E402
+from lib.utils.session_key import (  # noqa: E402
     safe_session_key as agent_side_name,
 )
 

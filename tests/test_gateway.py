@@ -211,21 +211,21 @@ def _setup_fake_modules():
 
     # utils.db
     utils_mod = types.ModuleType("utils")
-    utils_db = types.ModuleType("utils.db")
+    utils_db = types.ModuleType("lib.utils.db")
     utils_db.configure = MagicMock()
     utils_mod.db = utils_db
     sys.modules["utils"] = utils_mod
-    sys.modules["utils.db"] = utils_db
+    sys.modules["lib.utils.db"] = utils_db
 
     # utils.media — ``db_logging_bus`` импортирует
-    # ``from utils.media import serialize as media_serialize`` на
+    # ``from lib.utils.media import serialize as media_serialize`` на
     # module-level. Без этого модуль utils.media не существует
-    # (utils — голый ModuleType без __path__, ``utils.media`` будет
+    # (utils — голый ModuleType без __path__, ``lib.utils.media`` будет
     # raise ``ModuleNotFoundError: 'utils' is not a package``).
-    utils_media = types.ModuleType("utils.media")
+    utils_media = types.ModuleType("lib.utils.media")
     utils_media.serialize = MagicMock(return_value=None)
     utils_mod.media = utils_media
-    sys.modules["utils.media"] = utils_media
+    sys.modules["lib.utils.media"] = utils_media
 
 
 def _get_ctx():

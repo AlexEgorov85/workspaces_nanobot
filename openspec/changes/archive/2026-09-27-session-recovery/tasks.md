@@ -22,10 +22,10 @@
 - [x] 2.3 `project.json` обновление не требуется — pydantic имеет дефолты.
 
 ## Этап 3: Реализация SessionRecoveryService
-- [x] 3.1 Все PG-операции через `utils.db.transaction()` —
-      реализовано через `from workspace.utils.db import transaction`
+- [x] 3.1 Все PG-операции через `lib.utils.db.transaction()` —
+      реализовано через `from lib.utils.db import transaction`
       в `_read_pg_meta` и `_read_session_from_pg`.
-- [x] 3.2 `_read_session_from_pg` через `utils.db.transaction()` с
+- [x] 3.2 `_read_session_from_pg` через `lib.utils.db.transaction()` с
       проверкой размера (100 MB) и обязательным `rollback()` на
       исключении. `ValueError` для oversized sessions пробрасывается
       (caller логирует и возвращает None); прочие исключения

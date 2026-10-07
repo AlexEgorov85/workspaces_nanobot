@@ -58,7 +58,7 @@ from lib.services.session_files import (
     SessionFilesUnavailable,
     current_session_file_resolver,
 )
-from workspace.utils.session_key import SessionDirNameDenied, raw_session_key
+from lib.utils.session_key import SessionDirNameDenied, raw_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ class SessionFileRedirectHook(AgentHook):
         workspace (``workspace / path``), а файлы сессии лежат в ``files/``.
         Из-за этого прикрепление файла по относительному пути — или по
         «абсолютному» пути чужого workspace — не находило файл, и
-        ``utils.media.serialize`` писал ``Media file not found, keeping path``.
+        ``lib.utils.media.serialize`` писал ``Media file not found, keeping path``.
 
         Ищем в ``files/`` (по относительному пути и по basename), в
         ``files/attachments/`` и в ``files/results/``. URL и ``data:``-схемы не

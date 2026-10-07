@@ -15,7 +15,7 @@ cold-storage mirror'ом в отдельной подсистеме шлюза
 * наш вклад — ``SanitizingSessionStore``: перед записью на диск контент
   всех сообщений проходит через ``clean_text`` (санитизация NUL и
   литеральных ``\\u0000``..``\\u0003``, см.
-  ``workspace/utils/clean_text.py``). Раньше это делал патч
+  ``lib/utils/clean_text.py``). Раньше это делал патч
   ``RuntimePatcher.patch_session_content_cleanup``, оборачивавший
   ``Session.add_message``; теперь санитизация стоит на границе записи,
   рядом с потребителем (PostgreSQL не принимает NUL в text-литералах).
@@ -43,7 +43,7 @@ from pathlib import Path
 
 from nanobot.session.manager import JsonlSessionStore, Session, SessionManager
 
-from workspace.utils.clean_text import clean_text
+from lib.utils.clean_text import clean_text
 
 
 def clean_session_content(session: Session) -> None:

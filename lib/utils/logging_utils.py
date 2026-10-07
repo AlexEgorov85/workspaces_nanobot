@@ -8,7 +8,7 @@
 **Мост stdlib → loguru.** Модули рантайма пишут через stdlib
 ``logging.getLogger(__name__)`` (``application_context``,
 ``gateway_runner``, ``shutdown_coordinator``, ``db_logging_service``,
-``log_transport``, ``database_logging_hook``, ``workspace/utils/db``,
+``log_transport``, ``database_logging_hook``, ``lib/utils/db``,
 ``turn_delivery_factory``, ``lib/gateway/mirror/``). Пока сюда
 настраивался только loguru, у них не было ни sink'а, ни уровня: root
 оставался с ``level=WARNING`` и пустым ``handlers``, поэтому ``INFO``-записи

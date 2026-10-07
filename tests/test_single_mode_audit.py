@@ -1,7 +1,7 @@
 """Строгий аудит: ни один SQL PostgresChannel не должен трогать таблицу аренды.
 
 Тест вызывает hot-path методы PostgresChannel и через
-патчинг ``utils.db`` (execute/fetchone/fetch/fetchval/transaction) собирает
+патчинг ``lib.utils.db`` (execute/fetchone/fetch/fetchval/transaction) собирает
 **все** SQL-строки, отправленные в БД. После каждого метода делается
 assertion: нет ни одной строки, содержащей ``agent_worker_claims``.
 
@@ -34,7 +34,7 @@ if _workspace_path not in sys.path:
 class _SqlRecorder:
     """Захватывает все SQL-строки, отправленные через utils.db.
 
-    Заменяет ``utils.db.execute``/``fetchone``/``fetch``/``fetchval``/
+    Заменяет ``lib.utils.db.execute``/``fetchone``/``fetch``/``fetchval``/
     ``transaction`` на моки, которые записывают SQL в общий список.
     """
 
@@ -43,8 +43,8 @@ class _SqlRecorder:
         self._executed_results: dict[str, Any] = {}
 
     def attach(self, pg_mod) -> MagicMock:
-        """Подменить ``utils.db`` и пропатчить ``pg_mod`` ссылки на него."""
-        db_mod = types.ModuleType("utils.db")
+        """Подменить ``lib.utils.db`` и пропатчить ``pg_mod`` ссылки на него."""
+        db_mod = types.ModuleType("lib.utils.db")
         db_mod.async_fetchval = AsyncMock(side_effect=self._wrap_fetchval)
         db_mod.async_execute = AsyncMock(side_effect=self._wrap_execute)
         db_mod.async_fetchone = AsyncMock(side_effect=self._wrap_fetchone)
@@ -123,7 +123,7 @@ class _SqlRecorder:
 class _OpRecorder:
     """Собирает **все** операции, отправленные каналом платформе.
 
-    Раньше здесь собирался текст SQL из перехваченного ``utils.db``.
+    Раньше здесь собирался текст SQL из перехваченного ``lib.utils.db``.
     Теперь у канала нет SQL вообще: единственный путь к данным задач -
     операции ``enterprise-mcp``, и регрессионный гард формулируется в
     этих терминах.
@@ -190,7 +190,7 @@ class TestChannelHasNoDirectDatabaseAccess:
     """Структурный гард: у канала нет пути в PostgreSQL.
 
     Раньше это был набор проверок «здесь не такой-то SQL». Теперь канал не
-    импортирует драйвер и не знает про ``utils.db``, поэтому гарантия
+    импортирует драйвер и не знает про ``lib.utils.db``, поэтому гарантия
     структурная: вернуть SQL к таблице аренды можно, только вернув
     зависимость, и это будет видно здесь, а не в семи разных местах
     с пустым списком SQL.
@@ -208,7 +208,7 @@ class TestChannelHasNoDirectDatabaseAccess:
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom)
         ]
-        assert not any(m.startswith("utils.db") for m in offenders), (
+        assert not any(m.startswith("lib.utils.db") for m in offenders), (
             f"канал снова импортирует utils.db: {offenders!r}"
         )
 

@@ -899,7 +899,7 @@ Runtime-producers structured events
 
 - **WHEN** runtime-компонент пишет structured event
 - **THEN** producer SHALL NOT вызывать
-  `utils.db.execute('INSERT INTO ... agent_gateway_logs ...')`
+  `lib.utils.db.execute('INSERT INTO ... agent_gateway_logs ...')`
   или аналогичные прямые SQL-команды.
 - **AND** producer SHALL NOT использовать
   `psycopg2.extras.Json(...)` для сериализации
@@ -1144,7 +1144,7 @@ The system SHALL публиковать в `get_stats()` поле
 #### Scenario: Случайный остаток SQL не считается покрытым тестами
 
 - **WHEN** в `db_logging_service.py` появляется строковый SQL- литерал либо
-  импорт `psycopg2` или `utils.db`
+  импорт `psycopg2` или `lib.utils.db`
 - **THEN** падает страж, разбирающий дерево модуля, а не ищущий подстроку:
   подстрока искала бы не код, а упоминание в `docstring`
 

@@ -130,7 +130,7 @@ class TestNoDirectPostgresInTheCompactionService:
     """Структурный запрет: сервис сжатия не ходит в базу сам.
 
         Проверяется исходником, а не поведением, потому что дефект был в
-        самом факте подключения: пока код импортирует ``utils.db``, любой
+        самом факте подключения: пока код импортирует ``lib.utils.db``, любой
         путь «записать напрямую» существует, даже когда сегодня его никто
         не зовёт.
     """
@@ -145,7 +145,7 @@ class TestNoDirectPostgresInTheCompactionService:
                         offenders.append(f"import {alias.name}")
             elif isinstance(node, ast.ImportFrom) and node.module:
                 root = node.module.split(".")[0]
-                if root in {"psycopg2", "psycopg"} or node.module.startswith("utils.db"):
+                if root in {"psycopg2", "psycopg"} or node.module.startswith("lib.utils.db"):
                     offenders.append(f"from {node.module} import ...")
         assert not offenders, (
             f"{SERVICE_PATH.name} подключается к БД напрямую: {offenders}. "
@@ -159,7 +159,7 @@ class TestNoDirectPostgresInTheCompactionService:
             f"{SERVICE_PATH.name} собирает собственный SQL: операциями "
             "платформы записывается заметка целиком"
         )
-        assert 'utils.db' not in source
+        assert 'lib.utils.db' not in source
 
 
 class TestChannelFactoryPassesTheSubscriber:

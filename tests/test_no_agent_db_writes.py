@@ -1,12 +1,12 @@
 """Страж: агент не пишет в базу мимо платформы.
 
-Формулировка «никакого ``utils.db`` в коде агента» оказалась невыполнимой и
+Формулировка «никакого ``lib.utils.db`` в коде агента» оказалась невыполнимой и
 потому бесполезной. Пул жив: его конфигурируют, поднимают и останавливают в
 ``lib/core/application_context.py``, а DSN настраивает
 ``lib/services/session_storage.py``. Ни то, ни другое не является записью.
 
 Поэтому проверяется то, что change и упраздняет: **писать** в базу из агента
-нечем. Символы ``utils.db``, которые дают запись или транзакцию, не должны
+нечем. Символы ``lib.utils.db``, которые дают запись или транзакцию, не должны
 встречаться в дереве агента ни разу, а остальные должны быть перечислены явно —
 чтобы появление нового потребителя требовало решения, а не проходило молча.
 
@@ -24,7 +24,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: Что ``utils.db`` ещё отдаёт агенту. Ни один из этих символов не пишет.
+#: Что ``lib.utils.db`` ещё отдаёт агенту. Ни один из этих символов не пишет.
 #:
 #: Символы, которых в дереве нет, здесь не перечисляются: ``ALLOWED`` —
 #: опись того, чем агент пользуется, а не того, чем он мог бы. Проверка на
@@ -67,13 +67,13 @@ def _utils_db_imports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "utils.db":
+        if isinstance(node, ast.ImportFrom) and node.module == "lib.utils.db":
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.Import):
             names.update(
                 alias.name
                 for alias in node.names
-                if alias.name == "utils.db" or alias.name.startswith("utils.db.")
+                if alias.name == "lib.utils.db" or alias.name.startswith("lib.utils.db.")
             )
     return names
 
@@ -136,15 +136,15 @@ class TestGuardBites:
         "snippet",
         [
             pytest.param(
-                "from utils.db import run",
+                "from lib.utils.db import run",
                 id="run",
             ),
             pytest.param(
-                "from utils.db import transaction, execute",
+                "from lib.utils.db import transaction, execute",
                 id="transaction",
             ),
             pytest.param(
-                "import utils.db",
+                "import lib.utils.db",
                 id="import-module",
             ),
         ],
@@ -158,7 +158,7 @@ class TestGuardBites:
 
     def test_allowed_import_is_detected_and_not_flagged(self, tmp_path: Path) -> None:
         module = tmp_path / "probe_ok.py"
-        module.write_text("from utils.db import configure, start\n", encoding="utf-8")
+        module.write_text("from lib.utils.db import configure, start\n", encoding="utf-8")
         names = _utils_db_imports(module)
         assert names == {"configure", "start"}
         assert not names & WRITE_SYMBOLS
@@ -168,7 +168,7 @@ class TestGuardBites:
         """Описание запрета не должно падать тем же, что и запрет."""
         module = tmp_path / "probe_doc.py"
         module.write_text(
-            '"""Здесь нельзя: from utils.db import run."""\n',
+            '"""Здесь нельзя: from lib.utils.db import run."""\n',
             encoding="utf-8",
         )
         assert _utils_db_imports(module) == set()

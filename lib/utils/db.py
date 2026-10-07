@@ -32,7 +32,7 @@
 
 Пример::
 
-    from utils.db import configure, execute, fetchone, transaction
+    from lib.utils.db import configure, execute, fetchone, transaction
 
     configure("postgresql://user:pass@localhost:5432/mydb")
     execute("INSERT INTO t (x) VALUES (%s)", 42)
@@ -61,7 +61,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extensions
 import psycopg2.extras
-from utils.clean_text import clean_text
+from lib.utils.clean_text import clean_text
 
 # Глобальный адаптер: psycopg2 автоматически сериализует dict → JSONB
 psycopg2.extensions.register_adapter(dict, psycopg2.extras.Json)
@@ -699,7 +699,7 @@ def _sanitize_param(value: Any) -> Any:
     Единая глобальная точка санитизации всех параметров, идущих в psycopg2
     (``execute``/``mogrify``, в т.ч. ``execute_values`` для сессий).
 
-    Каноническая логика вычистки — в ``utils.clean_text.clean_text`` (её же
+    Каноническая логика вычистки — в ``lib.utils.clean_text.clean_text`` (её же
     применяет патч ``Session.add_message`` на источнике). Здесь — только
     страховка на границе БД для контента, который мог обойти живой патч.
     """

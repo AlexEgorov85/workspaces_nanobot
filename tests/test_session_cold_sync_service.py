@@ -392,7 +392,7 @@ class TestStatsAndBoundaries:
             "lib/gateway/mirror/session_mirror.py",
         ):
             source = Path(relative).read_text(encoding="utf-8")
-            for forbidden in ("meta_table", "messages_table", "psycopg2", "utils.db"):
+            for forbidden in ("meta_table", "messages_table", "psycopg2", "lib.utils.db"):
                 assert forbidden not in source, f"{relative}: {forbidden}"
 
     def test_default_replica_id_is_stable_across_calls(self) -> None:

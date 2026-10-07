@@ -203,11 +203,11 @@ class TestRegisterReadinessChecks:
 
     @staticmethod
     def _patch_pool(monkeypatch, *, mode: str):
-        """Подменить ``utils.db._get_manager`` под нужный сценарий.
+        """Подменить ``lib.utils.db._get_manager`` под нужный сценарий.
 
         Модуль грузится по файловому пути и кладётся в ``sys.modules`` под
-        именем ``utils.db`` на время теста: часть существующих тестов
-        подменяет ``sys.modules["utils.db"]`` голым ``ModuleType`` и НЕ
+        именем ``lib.utils.db`` на время теста: часть существующих тестов
+        подменяет ``sys.modules["lib.utils.db"]`` голым ``ModuleType`` и НЕ
         восстанавливает его, поэтому брать модуль из ambient-состояния
         нельзя — он может оказаться чужой заглушкой без ``_get_manager``.
 
@@ -232,13 +232,14 @@ class TestRegisterReadinessChecks:
         import uuid
         from pathlib import Path
 
-        _ws = Path(__file__).resolve().parents[1] / "workspace"
-        if str(_ws) not in sys.path:
-            sys.path.insert(0, str(_ws))
-
+        # ``db.py`` живёт в ``lib/utils/`` рядом со своим пакетом, поэтому
+        # корень репозитория уже должен быть в ``sys.path`` (иначе и сам
+        # ``lib.utils.db`` не импортировался бы). Отдельного ``sys.path.insert``
+        # не делаем: ``workspace/`` больше не участвует в резолве имён.
+        _repo = Path(__file__).resolve().parents[1]
         real = importlib.util.module_from_spec(
             importlib.util.spec_from_file_location(
-                "utils_db_real_" + uuid.uuid4().hex, _ws / "utils" / "db.py"
+                "utils_db_real_" + uuid.uuid4().hex, _repo / "lib" / "utils" / "db.py"
             )
         )
         real.__spec__.loader.exec_module(real)
@@ -257,9 +258,9 @@ class TestRegisterReadinessChecks:
         manager._submit.return_value = handle
         get_manager = MagicMock(return_value=manager)
 
-        # production-код делает ``from utils.db import _get_manager, _Job``
+        # production-код делает ``from lib.utils.db import _get_manager, _Job``
         # на момент вызова — значит подменять надо сам sys.modules.
-        monkeypatch.setitem(sys.modules, "utils.db", real)
+        monkeypatch.setitem(sys.modules, "lib.utils.db", real)
         monkeypatch.setattr(real, "_get_manager", get_manager, raising=False)
         return get_manager, manager
 

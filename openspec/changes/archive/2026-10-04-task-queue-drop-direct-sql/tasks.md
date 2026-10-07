@@ -46,7 +46,7 @@ python tools/validate_component_specs.py --strict      # 3 ошибки в runti
 - [x] 2.7 Переосмыслить страж колонок: он охранял согласие двух писателей.
       Теперь охраняет «платформа пишет полный конверт, агент не пишет в
       журнал ничего» (`tests/test_journal_writer_columns_contract.py`).
-- [x] 2.8 Перевести тесты на мок писателя, а не на `psycopg2`/`utils.db`:
+- [x] 2.8 Перевести тесты на мок писателя, а не на `psycopg2`/`lib.utils.db`:
       `RecordingWriter` в `tests/test_db_logging_service.py`. Переведены
       `test_log_transport_wiring.py`, `test_subagent_logging.py`,
       `test_turn_observability_events.py`, `test_log_transport.py`,
@@ -86,7 +86,7 @@ python tools/validate_component_specs.py --strict      # 3 ошибки в runti
 - [x] 3.5 Все три стража проверены на укус (временная подкладка запрещённого,
       откат, повторный прогон):
       - SQL в writer'е → падают 3 теста, после отката 64 зелёные;
-      - `from utils.db import run` в `lib/services/` → падают 2 теста, после
+      - `from lib.utils.db import run` в `lib/services/` → падают 2 теста, после
         отката 8 зелёные;
       - файл на подчёркивании в `data/tools/` → падает
         `test_no_undeclared_tombstone_appears`, после отката 3 зелёные.
@@ -144,7 +144,7 @@ git rm workspace/utils/db.py        # пул ещё нужен lifecycle'у, с�
 
 **Нужно решение владельца:** переносим ли мы проверку схемы за рукопожатие
 (и согласуем ли смену слоя, поднимающего `SchemaValidationError`), или
-`schema_validation` остаётся на `utils.db.fetch_with_timeout` до отдельного
+`schema_validation` остаётся на `lib.utils.db.fetch_with_timeout` до отдельного
 change? `application_context.py` и `cli_agent.py` в моём владении не были,
 `runtime/entrypoints` трогать нельзя — решить это в своей волне я не мог.
 
@@ -186,7 +186,7 @@ change? `application_context.py` и `cli_agent.py` в моём владении 
 
 Правка приёмки (прямой SQL не оставляет тестов зелёными «как есть»)
 потребовала тронуть файлы, которых в списке владения не было. Ни один из них
-не в запрещённом списке; все правки — подмена `psycopg2`/`utils.db` на мок
+не в запрещённом списке; все правки — подмена `psycopg2`/`lib.utils.db` на мок
 писателя, ни одна не меняет проверяемое поведение.
 
 - `tests/test_log_transport_wiring.py` — тест, утверждавший «при выключенной
@@ -223,6 +223,6 @@ change? `application_context.py` и `cli_agent.py` в моём владении 
 
 Пока писался этот change, появился
 `openspec/changes/2026-10-04-utils-db-pool-removal/` — инвентаризация потребителей
-`workspace/utils/db.py` и его снос. То есть B3 и B1 (часть с `utils.db`)
+`workspace/utils/db.py` и его снос. То есть B3 и B1 (часть с `lib.utils.db`)
 закрываются там, и в этом change они остаются зафиксированными как
 заявка, а не как невыполненная работа.

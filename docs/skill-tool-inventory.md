@@ -69,7 +69,7 @@ generic-инструментов для произвольного SQL и век
 | `PredefinedScriptRegistry` core | `lib/services/predefined_script_registry.py` | реестр переехал в capability `audit`; Python `REGISTRY`/`scripts/predefined/scripts.py` отсутствуют |
 | `PredefinedScriptRequestBuilder` core | `lib/services/predefined_script_request.py` (удалён `468a3db`) | параметры скрипта и подстановка — на стороне capability `audit` |
 | `ParameterValidator` core | `lib/services/predefined_script_validator.py` (удалён `468a3db`) | не используется |
-| `workspace.utils.event_log` module | `workspace/utils/event_log.py` (197 строк) | отсутствует — заменён `DbLoggingService.log_event(LogEvent(...))` / `DbLoggingService.try_log_event(...)`; прямой SQL INSERT bypass ликвидирован |
+| `workspace.utils.event_log` module | `lib/utils/event_log.py` (197 строк) | отсутствует — заменён `DbLoggingService.log_event(LogEvent(...))` / `DbLoggingService.try_log_event(...)`; прямой SQL INSERT bypass ликвидирован |
 | `tests/test_event_log.py` | `tests/test_event_log.py` (83 строки) | удалён — тестировал прямой INSERT bypass; заменён `tests/test_unified_event_logging_pipeline.py` (AST + ownership guard'ы) |
 | `tests/test_audit_analyzer_query_tool.py` и соседи | `tests/` | удалены вместе с инструментами; покрытие ушло на платформу (`test_audit_capability.py`, `test_vectors_*`, `test_data_service.py::TestHistorySearchIsolation`) |
 

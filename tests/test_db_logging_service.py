@@ -511,7 +511,7 @@ class TestSingleWriter:
         когда его начинают звать снова.
 
         Проверяется код, а не текст: в docstring'ах слова ``psycopg2`` и
-        ``utils.db`` остаться обязаны — они объясняют, почему их нет в коде.
+        ``lib.utils.db`` остаться обязаны — они объясняют, почему их нет в коде.
         Проверка словом искала бы не код, а упоминание.
         """
         import ast
@@ -532,7 +532,7 @@ class TestSingleWriter:
                     re.IGNORECASE,
                 ):
                     sql_literals.append(node.value)
-        assert "utils.db" not in imported, "пул записи журнала в дереве агента не нужен"
+        assert "lib.utils.db" not in imported, "пул записи журнала в дереве агента не нужен"
         assert not any(name.split(".")[0] == "psycopg2" for name in imported), (
             "драйвер БД в дереве агента не нужен вовсе"
         )

@@ -72,7 +72,7 @@ class _FakeMcpClient:
 
 @pytest.fixture(autouse=True)
 def error_retry_mock_db():
-    """Подставной клиент MCP вместо бывшего мока ``utils.db``."""
+    """Подставной клиент MCP вместо бывшего мока ``lib.utils.db``."""
     with patch.dict("sys.modules"):
         import importlib
         import importlib.util

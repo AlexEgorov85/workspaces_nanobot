@@ -111,7 +111,7 @@ class TestValidateRuntimeSchema:
                 if n in params
             ]
 
-        with patch("utils.db.fetch_with_timeout", _fetch):
+        with patch("lib.utils.db.fetch_with_timeout", _fetch):
             ctx._validate_runtime_schema()  # no raise
 
     def test_raises_when_one_table_missing(self) -> None:
@@ -129,7 +129,7 @@ class TestValidateRuntimeSchema:
             ]
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch_with_timeout", _fetch):
+        with patch("lib.utils.db.fetch_with_timeout", _fetch):
             with pytest.raises(SchemaValidationError) as exc_info:
                 ctx._validate_runtime_schema()
         assert exc_info.value.profile == "prod"
@@ -143,7 +143,7 @@ class TestValidateRuntimeSchema:
             raise AssertionError("fetch should not be called when disabled")
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch_with_timeout", _fetch):
+        with patch("lib.utils.db.fetch_with_timeout", _fetch):
             ctx._validate_runtime_schema()  # no raise
 
     def test_missing_settings_keys_raises_configuration_error(self) -> None:
@@ -154,7 +154,7 @@ class TestValidateRuntimeSchema:
             return []
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch_with_timeout", _fetch):
+        with patch("lib.utils.db.fetch_with_timeout", _fetch):
             with pytest.raises(ConfigurationError) as exc_info:
                 ctx._validate_runtime_schema()
         assert isinstance(exc_info.value, SchemaValidationError)
@@ -169,7 +169,7 @@ class TestValidateRuntimeSchema:
             raise RuntimeError("DB connection refused")
 
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch_with_timeout", _fetch):
+        with patch("lib.utils.db.fetch_with_timeout", _fetch):
             with pytest.raises(RuntimeError, match="DB connection refused"):
                 ctx._validate_runtime_schema()
 
@@ -199,7 +199,7 @@ class TestValidateRuntimeSchema:
 
         settings = _settings(timeout=2.5)
         ctx = _CtxStub(settings)
-        with patch("utils.db.fetch_with_timeout", _fetch):
+        with patch("lib.utils.db.fetch_with_timeout", _fetch):
             ctx._validate_runtime_schema()
         assert captured["called"]
         assert captured["timeout_sec"] == 2.5

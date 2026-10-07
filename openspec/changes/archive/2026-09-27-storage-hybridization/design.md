@@ -24,7 +24,7 @@
 **Goals:**
 
 1. Реализовать `SessionColdSyncService` в рамках единого пула
-   (`utils.db.transaction()` / `utils.db.run()`); никаких
+   (`lib.utils.db.transaction()` / `lib.utils.db.run()`); никаких
    `psycopg2.connect()` / `SimpleConnectionPool` / `create_pool()`.
 2. Поддержать **stale-detection** (D23): если PG свежее JSONL +
    tolerance — пропустить sync для этой сессии и залогировать
@@ -53,7 +53,7 @@
 ### D13: Sync-модель и фоновый поток
 
 Sync-код в `daemon=True` потоке, чтобы не блокировать event loop.
-Sync-код с `threading.Lock` совместим с пулом `utils.db`
+Sync-код с `threading.Lock` совместим с пулом `lib.utils.db`
 (worker-потоки пула принимают job'ы от вызывающего daemon'а;
 acquire/release соединения происходит в одном worker-потоке).
 
@@ -175,8 +175,8 @@ def _do_sync_batch(self) -> None:
 См. раздел «Connection pool» в `openspec/changes/storage-hybridization/design.md`
 (общий для всех модулей проекта):
 
-- Пул — единый `utils.db`. Все PG-операции через
-  `utils.db.transaction()` / `utils.db.run()`.
+- Пул — единый `lib.utils.db`. Все PG-операции через
+  `lib.utils.db.transaction()` / `lib.utils.db.run()`.
 - `pg_try_advisory_xact_lock` — per-transaction; auto-release
   на COMMIT/ROLLBACK. Никакого долгоживущего соединения.
 - Батчи с сортировкой по `session_key` (исключает ABBA-deadlock
@@ -245,7 +245,7 @@ def _get_lock_conn(self):
    явно запрещает собственные psycopg2-пулы и `connect()`:
    «Пул — единый, через DI. Никаких `SimpleConnectionPool` /
    `psycopg2.pool` / `connect()` / `create_pool`».
-2. Проект уже имеет общий `utils.db` worker-thread pool; новое
+2. Проект уже имеет общий `lib.utils.db` worker-thread pool; новое
    выделенное соединение — это race-condition с пулом (lock
    «повиснет» на отдельном соединении, если процесс упадёт).
 3. Двухкомпонентный lock — workaround для перегрузки
@@ -255,5 +255,5 @@ def _get_lock_conn(self):
 
 **Альтернатива (применена):** per-transaction
 `pg_try_advisory_xact_lock(hashtext('storage_hybridization_session_cold_sync')::bigint)`
-через `utils.db.transaction()` — auto-release на COMMIT/ROLLBACK,
+через `lib.utils.db.transaction()` — auto-release на COMMIT/ROLLBACK,
 никаких долгоживущих соединений, единый пул, threading-safe.

@@ -158,7 +158,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
     успешного цикла;
   - `last_success_lag_seconds`: разница между
     `last_success_ts` и текущим временем;
-  - `pool_size`: текущий размер пула `utils.db` (`int | None`);
+  - `pool_size`: текущий размер пула `lib.utils.db` (`int | None`);
   - `pool_available`: свободные соединения в пуле (`int | None`);
   - `pool_wait_seconds`: время последнего цикла, включая ожидание
     lease'а (D-Pool.6);
@@ -208,7 +208,7 @@ leader-election в рамках одной транзакции sync-цикла:
   первая итерация `_sync_loop` запускается в обеих
 - **THEN** каждая реплика вызывает
   `SELECT pg_try_advisory_xact_lock(hashtext('storage_hybridization_session_cold_sync')::bigint)`
-  в начале цикла (через `utils.db.transaction()`, в той же
+  в начале цикла (через `lib.utils.db.transaction()`, в той же
   транзакции, где идёт sync).
   - Явный `::bigint` cast — `hashtext()` возвращает
     `int4`; `pg_try_advisory_xact_lock` имеет две перегрузки
@@ -541,7 +541,7 @@ JSONL, считается устаревшим и удаляется cleanup-ц�
 
 ### Requirement: Правила использования пула PG-соединений
 
-`SessionColdSyncService` SHALL использовать общий пул `utils.db`.
+`SessionColdSyncService` SHALL использовать общий пул `lib.utils.db`.
 В модуле SHALL NOT быть собственных psycopg2-пулов,
 `connect()` или `create_pool()`.
 
@@ -553,8 +553,8 @@ shutdown order) — в `openspec/changes/storage-hybridization/design.md`
 #### Scenario: Пул — единый, через DI
 
 - **WHEN** `SessionColdSyncService` обращается к PG
-- **THEN** он использует `utils.db.transaction()` /
-  `utils.db.run()` для всех операций.
+- **THEN** он использует `lib.utils.db.transaction()` /
+  `lib.utils.db.run()` для всех операций.
 - **AND** НЕ создаёт собственный `SimpleConnectionPool` /
   `psycopg2.pool` / `connect()` / `create_pool`.
 
@@ -571,7 +571,7 @@ shutdown order) — в `openspec/changes/storage-hybridization/design.md`
 
 #### Scenario: Пул исчерпан — цикл пропущен
 
-- **WHEN** `utils.db.run(...)` бросает `RuntimeError` /
+- **WHEN** `lib.utils.db.run(...)` бросает `RuntimeError` /
   `TimeoutError` / `PoolError` (пул временно исчерпан)
 - **THEN** `SessionColdSyncService` инкрементирует
   `cycles_skipped_pool_busy`, логирует

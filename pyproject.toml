@@ -7,8 +7,10 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 pythonpath = [
     ".",
-    "workspace",
 ]
+# `workspace` больше не в пути: общие модули лежат в `lib/utils/`.
+# Две папки `utils` на одном sys.path делали `utils.db` неоднозначным —
+# тест `tests/test_utils_db.py:46` это фиксировал.
 asyncio_mode = "auto"
 filterwarnings = [
     # FAISS SWIG-биндинги не имеют __module__; предупреждение приходит из

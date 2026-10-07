@@ -466,7 +466,7 @@ def test_e2e_relative_path_reaches_serialize(session_workspace):
     """write → message(media=[относительный путь]) → хук → ``_resolve_media``
     → ``serialize`` находит файл и кодирует data URL. Без фикса serialize писал
     'Media file not found, keeping path'."""
-    from workspace.utils.media import serialize
+    from lib.utils.media import serialize
 
     hook = _make_hook(session_workspace)
     params, _ = _run_before_execute_tool(
@@ -488,7 +488,7 @@ def test_e2e_relative_path_reaches_serialize(session_workspace):
 
 def test_e2e_stale_absolute_path_reaches_serialize(session_workspace):
     """Тот же сценарий, но агент передал «абсолютный» путь чужого workspace."""
-    from workspace.utils.media import serialize
+    from lib.utils.media import serialize
 
     hook = _make_hook(session_workspace)
     stale = "/home/datalab/nfs/workspaces_nanobot-release-v2.3.1/workspace/presentation_minimal.html"

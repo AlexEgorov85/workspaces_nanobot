@@ -208,7 +208,7 @@ MUST отклоняться с названным порогом, а не усе
 
 `SessionMirror` SHALL обращаться к PostgreSQL только через операции платформы.
 В модуле SHALL NOT быть ни собственного пула, ни `connect()`, ни `create_pool()`,
-ни прямых обращений к `utils.db` из зеркала.
+ни прямых обращений к `lib.utils.db` из зеркала.
 
 Полные правила (DI, advisory lock, threading, батчи, метрики,
 shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridization/design.md`
@@ -216,9 +216,9 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 нормативный контракт.
 
 > Правка 2026-10-04. Прежняя первая фраза требования («SHALL использовать общий
-> пул `utils.db`») описывала мир, в котором зеркало ходило в базу само. После
+> пул `lib.utils.db`») описывала мир, в котором зеркало ходило в базу само. После
 > перевода зеркала на операции платформы в модуле нет **ни одного** упоминания
-> `utils.db` (поиск по `lib/gateway/mirror/*.py` — 0 совпадений), а пул
+> `lib.utils.db` (поиск по `lib/gateway/mirror/*.py` — 0 совпадений), а пул
 > обслуживает платформа. Вторая фраза («SHALL NOT быть собственных пулов»)
 > остаётся в силе без изменений: запрет второго владельца пула как раз теперь и
 > держится на отсутствии у зеркала доступа к базе.
@@ -237,14 +237,14 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
   (`lib/gateway/mirror/session_mirror.py:77-80` — `MIRROR_OPERATIONS`;
   `lib/gateway/mirror/mirror_poller.py:446-451` — единая точка вызова `_call()`)
 - **AND** он MUST NOT создавать `SimpleConnectionPool` / `psycopg2.pool` /
-  `connect()` / `create_pool` и MUST NOT импортировать `utils.db` — это
+  `connect()` / `create_pool` и MUST NOT импортировать `lib.utils.db` — это
   проверяемо целиком: поиск по `lib/gateway/mirror/*.py` даёт 0 совпадений
 - **AND** сессия клиента MUST переиспользоваться между вызовами цикла, а не
   подниматься на каждый вызов операции
   (``_ensure_session()` в `lib/services/enterprise_mcp_client.py`` — одна живая сессия на
   процесс)
 
-> Прежняя редакция требовала `utils.db.transaction()` / `utils.db.run()` «для
+> Прежняя редакция требовала `lib.utils.db.transaction()` / `lib.utils.db.run()` «для
 > всех операций». Таких операций у зеркала больше нет.
 
 #### Scenario: Разграничение реплик — данными, а не lock'ом
@@ -325,7 +325,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 > и остальные четыре сценария перенесены дословно.
 >
 > **Это требование stale шире, чем эта правка.** Сценарий «Зеркалирование
-> agent_session_messages (full re-read)» всё ещё показывает `utils.db.transaction()`
+> agent_session_messages (full re-read)» всё ещё показывает `lib.utils.db.transaction()`
 > и `SessionMirror._sync_cycle()`, которых в коде нет; «Single-flight защита от
 > перекрытия циклов» задаёт backoff как `min(interval, interval * 2^n)` — код
 > использует `max(interval, backoff)` с потолком `_BACKOFF_CAP_SEC`, и старый
@@ -457,7 +457,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
     успешного цикла;
   - `last_success_lag_seconds`: разница между
     `last_success_ts` и текущим временем;
-  - `pool_size`: текущий размер пула `utils.db` (`int | None`);
+  - `pool_size`: текущий размер пула `lib.utils.db` (`int | None`);
   - `pool_available`: свободные соединения в пуле (`int | None`);
   - `pool_wait_seconds`: время последнего цикла, включая ожидание
     lease'а (D-Pool.6);

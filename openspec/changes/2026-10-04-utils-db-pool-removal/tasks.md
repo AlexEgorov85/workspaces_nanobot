@@ -1,4 +1,4 @@
-# Tasks — инвентаризация пула `utils.db` и снос надгробий
+# Tasks — инвентаризация пула `lib.utils.db` и снос надгробий
 
 **Baseline (зафиксирован ДО первой правки).**
 
@@ -15,7 +15,7 @@ python tools/validate_component_specs.py --strict
 
 - [x] 0.1 Перемерить `workspace/utils/db.py`: **1143 строки**, SQL-строк — 8,
       `.execute(`/`executemany(` — 13. Модуль — фабрика пула, не простыня SQL.
-- [x] 0.2 Перемерить потребителей: упоминаний `utils.db` — **35 файлов**
+- [x] 0.2 Перемерить потребителей: упоминаний `lib.utils.db` — **35 файлов**
       (в постановке было 7). Реальных импортов в продакшн-коде — **4**.
 - [x] 0.3 Разложить по категориям (реальный импорт / строковый patch /
       подставной `sys.modules` / docstring) — таблица в `proposal.md`.
@@ -58,18 +58,18 @@ python tools/validate_component_specs.py --strict
       - `tests/test_utils_db.py` — собственный набор тестов модуля (15 ссылок),
         удаляется вместе с модулем;
       - `tests/test_application_context.py:502,522` — строковый
-        `monkeypatch.setattr("utils.db.fetch_with_timeout", …)`;
+        `monkeypatch.setattr("lib.utils.db.fetch_with_timeout", …)`;
       - `tests/test_application_context_schema_validation.py:114,132,146,157,172,202`
-        — строковый `patch("utils.db.fetch_with_timeout", …)`;
+        — строковый `patch("lib.utils.db.fetch_with_timeout", …)`;
       - `tests/test_startup_schema_validation_live.py:64` — реальный импорт;
       - `tests/test_turn_observability_events.py:146` — реальный импорт.
-      Ещё 6 файлов подставляют `sys.modules["utils.db"]`
+      Ещё 6 файлов подставляют `sys.modules["lib.utils.db"]`
       (`test_application_context.py`, `test_application_context_logging.py`,
       `test_cli_agent.py`, `test_gateway.py`, `test_runtime_health.py`,
       `test_session_storage.py`) — после удаления станут инертными.
       **Не выполнено** — следствие 2.1.
 - [ ] 2.3a **Коллизия владения подтвердилась.** `tests/test_turn_observability_events.py`
-      входит и в список потребителей `utils.db` (стр. 146, реальный импорт),
+      входит и в список потребителей `lib.utils.db` (стр. 146, реальный импорт),
       и в список файлов соседа. На момент начала сессии файл был чист, к
       концу работы уже модифицирован соседом (−220/+18 строк). Правки не
       вносились.
@@ -78,18 +78,18 @@ python tools/validate_component_specs.py --strict
       «не удалось подключиться») и `scripts/backfill_media_aw.py:37`.
 - [x] 2.5 Зафиксировать нормативное препятствие:
       `openspec/specs/runtime/startup-schema-validation/spec.md:180-187`
-      требует пул `utils.db`, `:55-59` запрещает ресурсы вне его.
+      требует пул `lib.utils.db`, `:55-59` запрещает ресурсы вне его.
 
 ## 3. Коллизия change'ов (требует решения владельца)
 
 - [x] 3.1 Обнаружено: id `2026-10-04-task-queue-drop-direct-sql` занят
       параллельной работой над `DbLoggingService` (журнал), и она пишет в тот
       же каталог. Обе стороны пришли к одному выводу про надгробия и к одному
-      про то, что `utils.db` должен остаться.
+      про то, что `lib.utils.db` должен остаться.
 - [x] 3.2 Инвентаризация пула вынесена в отдельный change
       `2026-10-04-utils-db-pool-removal`, чтобы два изменения не затирали
       друг друга. Обе стороны сошлись на одинаковых выводах (надгробия
-      устарели; `utils.db` должен остаться), но пишут разный объём работ, и
+      устарели; `lib.utils.db` должен остаться), но пишут разный объём работ, и
       общий id схлопывал два разных изменения в один каталог.
 - [x] 3.3 Опасность снята сама: сосед перезаписал мой `tasks.md` в своём
       каталоге в 23:45, и его change теперь целостен

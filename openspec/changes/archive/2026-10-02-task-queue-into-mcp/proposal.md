@@ -88,7 +88,7 @@ MCP.**
 - **Тесты агента:** `test_utils_db.py` (902), `test_postgres_channel.py` (1393),
   `test_db_logging_service.py` (921), `test_session_cold_sync_service.py` (685),
   `test_schema_validation.py` (456), `test_single_mode_audit.py` (404),
-  `test_storage_hybridization*.py` — все подменяют `utils.db`, все переписываются
+  `test_storage_hybridization*.py` — все подменяют `lib.utils.db`, все переписываются
   на моки MCP-клиента.
 - **Наблюдаемость:** круговые обороты по stdio добавляются на каждый poll и на
   каждое обновление статуса. Требуется батчинг: `claim_task` должен уметь

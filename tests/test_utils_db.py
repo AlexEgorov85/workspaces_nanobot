@@ -47,11 +47,11 @@ def mock_psycopg2():
         # гарантируем, что workspace первым в sys.path и модуль не закэшен.
         sys.path[:] = [p for p in sys.path if p != _workspace_path]
         sys.path.insert(0, _workspace_path)
-        for _m in [m for m in sys.modules if m == "utils" or m.startswith("utils.")]:
+        for _m in [m for m in sys.modules if m == "utils" or m.startswith("lib.utils.")]:
             del sys.modules[_m]
 
-        import utils.db as _db
-        from utils.db import (
+        import lib.utils.db as _db
+        from lib.utils.db import (
             PoolTimeoutError,
             async_execute,
             async_fetch,
@@ -108,7 +108,7 @@ class TestConfigure:
         assert mock_psycopg2["resolve_dsn"]() == "postgresql://u:p@h/db"
 
     def test_empty_dsn_skips_set(self, mock_psycopg2):
-        import utils.db as _db
+        import lib.utils.db as _db
 
         _db._dsn = "existing"
         mock_psycopg2["configure"]("")
@@ -129,7 +129,7 @@ class TestResolveDsn:
     """resolve_dsn возвращает только явный dsn из channels.postgres — без fallback."""
 
     def test_explicit_dsn(self, mock_psycopg2):
-        import utils.db as _db
+        import lib.utils.db as _db
         from config import SETTINGS
 
         _db._dsn = ""
@@ -143,7 +143,7 @@ class TestResolveDsn:
             SETTINGS["channels"] = original
 
     def test_configure_wins(self, mock_psycopg2):
-        import utils.db as _db
+        import lib.utils.db as _db
         from config import SETTINGS
 
         _db._dsn = ""
@@ -160,7 +160,7 @@ class TestResolveDsn:
 
     def test_no_fallback_from_parts(self, mock_psycopg2):
         """Части host/port/dbname/user больше не собираются в DSN."""
-        import utils.db as _db
+        import lib.utils.db as _db
         from config import SETTINGS
 
         _db._dsn = ""
@@ -183,7 +183,7 @@ class TestResolveDsn:
             SETTINGS["channels"] = original
 
     def test_no_host_returns_empty(self, mock_psycopg2):
-        import utils.db as _db
+        import lib.utils.db as _db
         from config import SETTINGS
 
         _db._dsn = ""
@@ -199,7 +199,7 @@ class TestResolveDsn:
             SETTINGS["channels"] = original
 
     def test_database_url_only_via_config(self, mock_psycopg2):
-        import utils.db as _db
+        import lib.utils.db as _db
         from config import SETTINGS
 
         _db._dsn = ""
@@ -237,10 +237,10 @@ class TestExecute:
         assert result is None
 
     def test_execute_no_dsn_raises(self, mock_psycopg2):
-        import utils.db as _db
+        import lib.utils.db as _db
 
         _db._dsn = ""
-        with patch("utils.db.resolve_dsn", return_value=""):
+        with patch("lib.utils.db.resolve_dsn", return_value=""):
             with pytest.raises(RuntimeError, match="не инициализирован"):
                 mock_psycopg2["execute"]("SELECT 1")
 
@@ -446,7 +446,7 @@ class TestPool:
         """Воркер без _idle_since (старт/shutdown) не роняет _maybe_shrink:
         TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'."""
         _db = mock_psycopg2["_db"]
-        from utils.db import DBManager
+        from lib.utils.db import DBManager
 
         mgr = DBManager()
         mgr._min_conn = 1
@@ -624,7 +624,7 @@ class TestPool:
         _db = mock_psycopg2["_db"]
 
         with patch(
-            "utils.db.DBManager._begin_tx",
+            "lib.utils.db.DBManager._begin_tx",
             side_effect=RuntimeError("begin boom"),
         ):
             with pytest.raises(RuntimeError, match="begin boom"):

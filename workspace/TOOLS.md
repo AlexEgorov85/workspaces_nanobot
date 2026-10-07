@@ -244,7 +244,7 @@ JSON-string. Изменение формы данных требует отде�
 ```
 
 `sender_id` / `chat_id` опциональны (есть не всегда), `media` — list
-объектов `MediaItem` (см. `workspace/utils/media.py`). `message_id`
+объектов `MediaItem` (см. `lib/utils/media.py`). `message_id`
 связывает `agent.received` с `request_id` вопроса.
 
 #### `agent.compacted.payload`

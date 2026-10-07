@@ -516,11 +516,12 @@ def main(argv: list[str] | None = None) -> int:
     script_dir = script_dir_for_runtime()
     workspace_dir = script_dir / "workspace"
 
-    # Добавляем корень проекта и workspace в sys.path (для lib.* / workspace.utils.*).
+    # Добавляем корень проекта в sys.path (для lib.* / workspace.hooks.*).
+    # Каталог `workspace/` в путь НЕ добавляется: общие модули лежат
+    # в `lib/utils/`, а сам `workspace/` в позиции 0 перехватывал бы
+    # импорт `tools` — корневой пакет и `workspace/tools/` одноимённы.
     if str(script_dir) not in sys.path:
         sys.path.insert(0, str(script_dir))
-    if str(workspace_dir) not in sys.path:
-        sys.path.insert(0, str(workspace_dir))
 
     try:
         _entrypoint_main(args)

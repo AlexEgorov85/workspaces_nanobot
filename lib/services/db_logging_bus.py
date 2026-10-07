@@ -43,7 +43,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from utils.media import serialize as media_serialize
+from lib.utils.media import serialize as media_serialize
 
 from lib.utils.outbound_meta import is_outbound_final, is_outbound_noise, msg_session_key
 

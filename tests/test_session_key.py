@@ -10,7 +10,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from workspace.utils.session_key import (  # noqa: E402
+from lib.utils.session_key import (  # noqa: E402
     SessionDirNameDenied,
     extract_session_key_from_path,
     raw_session_key,

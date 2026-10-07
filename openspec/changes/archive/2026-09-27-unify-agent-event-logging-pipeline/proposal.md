@@ -4,7 +4,7 @@
 structured agent events в `agent_gateway_logs`**:
 
 1. `DbLoggingService` (очередь + worker-поток + батч + INSERT
-   через общий пул `utils.db`) — канонический путь;
+   через общий пул `lib.utils.db`) — канонический путь;
 2. `workspace/utils/event_log.py` (sync `INSERT INTO
    "<schema>"."<table>"` через `utils.db.execute`) — обходной
    путь, оставшийся от момента, когда `DbLoggingService`
@@ -95,8 +95,8 @@ structured agent events в `agent_gateway_logs`**:
 - **Запретить** runtime-коду вне `lib/services/db_logging_service.py`
   выполнять прямой `INSERT INTO "<schema>"."<table>"` против
   `agent_gateway_logs` (или любой таблицы, заданной
-  `logging.db.table_name`). Это касается и `utils.db.execute`,
-  и `utils.db.run`, и любых новых SQL-путей.
+  `logging.db.table_name`). Это касается и `lib.utils.db.execute`,
+  и `lib.utils.db.run`, и любых новых SQL-путей.
 - **Запретить** producer'ам structured events читать
   logging-DB конфиг (`logging.db.*`, `channels.postgres.dsn`
   для целей INSERT в журнал). Они получают уже сконфигурированный

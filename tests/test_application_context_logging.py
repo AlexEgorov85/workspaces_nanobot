@@ -250,8 +250,8 @@ def minimal_fake_modules(tmp_path):
             sys.modules[name] = m
 
         utils_mod = types.ModuleType("utils")
-        utils_db = types.ModuleType("utils.db")
-        # ``utils.db`` в дереве агента остался только для пула lifecycle'а
+        utils_db = types.ModuleType("lib.utils.db")
+        # ``lib.utils.db`` в дереве агента остался только для пула lifecycle'а
         # (``ApplicationContext``) и DSN в ``os.environ``
         # (``SessionStorageService``). Записи журнала он уже не касается.
         utils_db.configure = MagicMock()
@@ -264,17 +264,17 @@ def minimal_fake_modules(tmp_path):
         utils_db.execute = MagicMock(return_value=None)
         utils_mod.db = utils_db
         sys.modules["utils"] = utils_mod
-        sys.modules["utils.db"] = utils_db
+        sys.modules["lib.utils.db"] = utils_db
 
-        utils_media = types.ModuleType("utils.media")
+        utils_media = types.ModuleType("lib.utils.media")
         utils_media.serialize = MagicMock(return_value=None)
         utils_mod.media = utils_media
-        sys.modules["utils.media"] = utils_media
+        sys.modules["lib.utils.media"] = utils_media
 
-        sfs = types.ModuleType("utils.session_file_store")
+        sfs = types.ModuleType("lib.utils.session_file_store")
         sfs.SessionFileStore = MagicMock()
         sfs.prepare_content = MagicMock()
-        sys.modules["utils.session_file_store"] = sfs
+        sys.modules["lib.utils.session_file_store"] = sfs
 
         yield {
             "settings": settings,

@@ -140,10 +140,10 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   upstream-сессия → diff-based cleanup в PG»).
 
 > Правка 2026-10-07. Прежняя редакция этого сценария показывала
-> `SessionMirror._sync_cycle()` и `with utils.db.transaction() as conn:`.
+> `SessionMirror._sync_cycle()` и `with lib.utils.db.transaction() as conn:`.
 > Ни того, ни другого в модуле нет: цикл живёт в `MirrorPoller`, а
 > транзакцию ведёт платформа (поиск по `lib/gateway/mirror/*.py` по
-> `utils.db` даёт 0 совпадений). Правку `2026-10-04` внесла в канон
+> `lib.utils.db` даёт 0 совпадений). Правку `2026-10-04` внесла в канон
 > требование «Правила использования пула PG-соединений», но до этого
 > сценария не дошла — он был объявлен «stale шире, чем эта правка».
 
@@ -233,7 +233,7 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 
 > Правка 2026-10-07. Список имён переписан по фактическому
 > `get_stats()`. Прежние 16 метрик описывали зеркало, ходившее в
-> PostgreSQL напрямую через пул `utils.db`.
+> PostgreSQL напрямую через пул `lib.utils.db`.
 
 ### Requirement: Multi-instance изоляция через replica_id в ключе
 
@@ -686,7 +686,7 @@ JSONL, считается устаревшим и удаляется cleanup-ц�
 
 `SessionMirror` SHALL обращаться к PostgreSQL только через операции платформы.
 В модуле SHALL NOT быть ни собственного пула, ни `connect()`, ни `create_pool()`,
-ни прямых обращений к `utils.db` из зеркала.
+ни прямых обращений к `lib.utils.db` из зеркала.
 
 Полные правила (DI, advisory lock, threading, батчи, метрики,
 shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridization/design.md`
@@ -694,9 +694,9 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 нормативный контракт.
 
 > Правка 2026-10-04. Прежняя первая фраза требования («SHALL использовать общий
-> пул `utils.db`») описывала мир, в котором зеркало ходило в базу само. После
+> пул `lib.utils.db`») описывала мир, в котором зеркало ходило в базу само. После
 > перевода зеркала на операции платформы в модуле нет **ни одного** упоминания
-> `utils.db` (поиск по `lib/gateway/mirror/*.py` — 0 совпадений), а пул
+> `lib.utils.db` (поиск по `lib/gateway/mirror/*.py` — 0 совпадений), а пул
 > обслуживает платформа. Вторая фраза («SHALL NOT быть собственных пулов»)
 > остаётся в силе без изменений: запрет второго владельца пула как раз теперь и
 > держится на отсутствии у зеркала доступа к базе.
@@ -715,14 +715,14 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
   (`lib/gateway/mirror/session_mirror.py:77-80` — `MIRROR_OPERATIONS`;
   `lib/gateway/mirror/mirror_poller.py:446-451` — единая точка вызова `_call()`)
 - **AND** он MUST NOT создавать `SimpleConnectionPool` / `psycopg2.pool` /
-  `connect()` / `create_pool` и MUST NOT импортировать `utils.db` — это
+  `connect()` / `create_pool` и MUST NOT импортировать `lib.utils.db` — это
   проверяемо целиком: поиск по `lib/gateway/mirror/*.py` даёт 0 совпадений
 - **AND** сессия клиента MUST переиспользоваться между вызовами цикла, а не
   подниматься на каждый вызов операции
   (``_ensure_session()` в `lib/services/enterprise_mcp_client.py`` — одна живая сессия на
   процесс)
 
-> Прежняя редакция требовала `utils.db.transaction()` / `utils.db.run()` «для
+> Прежняя редакция требовала `lib.utils.db.transaction()` / `lib.utils.db.run()` «для
 > всех операций». Таких операций у зеркала больше нет.
 
 #### Scenario: Разграничение реплик — данными, а не lock'ом
@@ -1187,7 +1187,7 @@ single-flight: второй цикл, стартовавший параллел�
 - `nanobot` `SessionStore` — `Protocol`, объявленный библиотекой
   (`nanobot/session/manager.py:526`), и `store=` в конструкторе
   `SessionManager` (строка 1647 по комментарию модуля);
-- `workspace.utils.clean_text.clean_text` — санитизация NUL
+- `lib.utils.clean_text.clean_text` — санитизация NUL
   (`pg_session_manager.py:46`);
 - `lib.gateway.mirror.MirrorPoller` — механизм зеркала;
 - `lib.services.enterprise_mcp_client.CallIdentity` — личность служебного
@@ -1476,7 +1476,7 @@ stale_tolerance_seconds` → `ValueError`
 
 - `lib/session/pg_session_manager.py` — `build_session_manager` (85),
   `SanitizingSessionStore` (71), `clean_session_content` (49);
-- `workspace/utils/clean_text.py` — санитизация.
+- `lib/utils/clean_text.py` — санитизация.
 
 **Зеркало:**
 

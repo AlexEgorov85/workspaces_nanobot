@@ -19,11 +19,11 @@ def fake_modules():
         fake = {}
 
         utils = types.ModuleType("utils")
-        utils_db = types.ModuleType("utils.db")
+        utils_db = types.ModuleType("lib.utils.db")
         utils_db.configure = MagicMock()
         utils.db = utils_db
         sys.modules["utils"] = utils
-        sys.modules["utils.db"] = utils_db
+        sys.modules["lib.utils.db"] = utils_db
         fake["configure"] = utils_db.configure
 
         pg_mod = types.ModuleType("lib.session.pg_session_manager")

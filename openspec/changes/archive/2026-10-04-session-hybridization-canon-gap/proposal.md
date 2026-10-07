@@ -17,7 +17,7 @@ Change `2026-10-03-session-mirror-mcp` сегодня архивирован с 
 | 2 | `delete_after_missed_cycles` — порог едет **аргументом операции**, счётчик ведёт платформа | `mcp-platform/.../data/tools/cleanup_session_mirror.py:32-51`, `lib/gateway/mirror/mirror_poller.py:419` | назван только ключ настройки агента `missing_cycles_threshold` |
 | 3 | отказ по превышении **8 МБ** на один вызов зеркала | `mcp-platform/.../data/service/main.py:411-416,2514-2522` | отсутствует |
 
-| 4 | требование «Правила использования пула PG-соединений» велит ходить в базу через `utils.db.transaction()` | `lib/gateway/mirror/*.py` — 0 совпадений на `utils.db` | **устарело, это дыра** |
+| 4 | требование «Правила использования пула PG-соединений» велит ходить в базу через `lib.utils.db.transaction()` | `lib/gateway/mirror/*.py` — 0 совпадений на `lib.utils.db` | **устарело, это дыра** |
 
 Четвёртый пункт — единственный, где канон не молчит, а говорит неправду, и
 поэтому он правится (`## MODIFIED Requirements`), а не дополняется. Остальные три
@@ -97,7 +97,7 @@ Change `2026-10-03-session-mirror-mcp` сегодня архивирован с 
   исправлено **только** тело сценария «PG недоступен — hot path работает»
   (устаревшее имя события). Остальное перенесено дословно и остаётся неправдой:
   - «Зеркалирование agent_session_messages (full re-read)» (строка 84) — блок
-    кода с `utils.db.transaction()` и `SessionMirror._sync_cycle()`; в модуле
+    кода с `lib.utils.db.transaction()` и `SessionMirror._sync_cycle()`; в модуле
     зеркала нет ни того, ни другого;
   - «Single-flight защита от перекрытия циклов» (строка 143) — backoff задан как
     `min(interval, interval * 2^n)`, код использует `max(interval, backoff)` с

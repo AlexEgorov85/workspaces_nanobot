@@ -87,7 +87,7 @@ class _FakeSessionFileStore:
 
 @pytest.fixture(autouse=True)
 def mock_db(tmp_path):
-    """Подставной клиент ``enterprise-mcp`` вместо мока ``utils.db``.
+    """Подставной клиент ``enterprise-mcp`` вместо мока ``lib.utils.db``.
 
     Канал больше не ходит в PostgreSQL, поэтому мокать нечего: вложения
     наблюдаются как аргументы операций платформы.
@@ -120,7 +120,7 @@ def mock_db(tmp_path):
                 spec.loader.exec_module(real_utils_pkg)
             assert real_utils_pkg is not None
 
-            from utils.session_file_store import SessionFileStore  # noqa: F401
+            from lib.utils.session_file_store import SessionFileStore  # noqa: F401
 
             # Принудительный re-import: если предыдущие тестовые файлы уже
             # импортировали канал, класс остался связан с другим транспортом.

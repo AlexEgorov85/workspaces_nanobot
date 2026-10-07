@@ -6,7 +6,7 @@
     channels.postgres от ConfigurationResolver). ``session_manager.json``
     **не читается здесь** — это делает Resolver (см. ``config.py``).
   * режим storage: ``auto`` | ``postgres`` | ``file``;
-  * при ``configure_db=True`` и наличии DSN — настройка ``utils.db`` и
+  * при ``configure_db=True`` и наличии DSN — настройка ``lib.utils.db`` и
     экспорт ``DATABASE_URL`` (нужно инструментам/скриптам);
   * ``storage=postgres`` без DSN → ``SessionStorageError``;
   * любой созданный менеджер получает ``install_async_save`` — обёртку,
@@ -142,7 +142,7 @@ class SessionStorageService:
           1. Берём уже разрешённый ``pg`` от ConfigurationResolver;
           2. Достаём ``dsn`` из мердженной конфигурации;
           3. Если DSN есть И ``configure_db=True`` — настраиваем
-             ``utils.db`` (общий пул для инструментов) и экспортируем
+             ``lib.utils.db`` (общий пул для инструментов) и экспортируем
              ``DATABASE_URL`` (нужно для ``tools.exec.allowedEnvKeys``);
           4. Решаем режим ``use_postgres``:
               * ``storage == "postgres"`` — принудительно PG (ошибка
@@ -155,7 +155,7 @@ class SessionStorageService:
             config: runtime-конфиг nanobot (нужен ``workspace_path``).
             storage: ``"auto"`` | ``"postgres"`` | ``"file"``.
             pg: уже разрешённая секция ``channels.postgres`` (dsn, schema, ...).
-            configure_db: настраивать ``utils.db`` и ``DATABASE_URL`` при DSN.
+            configure_db: настраивать ``lib.utils.db`` и ``DATABASE_URL`` при DSN.
             workspace_dir: переопределить workspace (по умолчанию из config).
             return_file_manager: для ``mode="file"`` вернуть
                 ``SessionManager(workspace)`` (True) или ``None``
@@ -185,7 +185,7 @@ class SessionStorageService:
         workspace = Path(workspace_dir) if workspace_dir else config.workspace_path
 
         if dsn and configure_db:
-            from utils.db import configure
+            from lib.utils.db import configure
 
             configure(dsn)
             os.environ["DATABASE_URL"] = dsn

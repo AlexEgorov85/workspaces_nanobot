@@ -7,7 +7,7 @@
 
 - `workspace/utils/event_log.py:30-98` — `record_event()`
   с прямым `INSERT INTO "<schema>"."<table>"` через
-  `utils.db.execute` и собственным чтением
+  `lib.utils.db.execute` и собственным чтением
   `SETTINGS["logging"]["db"]` /
   `SETTINGS["channels"]["postgres"]["dsn"]`.
 - `workspace/utils/event_log.py:105-142` —

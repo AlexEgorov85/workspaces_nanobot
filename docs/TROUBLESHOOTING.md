@@ -5,7 +5,7 @@
 навигационный хаб от деталей.
 
 > **TL;DR для диагноста:** логи — в stderr (loguru, `sys.stderr`);
-> статистика пула соединений — `utils.db.get_stats()`; время и состав снимка —
+> статистика пула соединений — `lib.utils.db.get_stats()`; время и состав снимка —
 > payload событий `cache_load_started`/`cache_load_done` в
 > `agent_gateway_logs` (снимком грузит и владеет capability `data` платформы,
 > агент снимком не владеет); зависшие `processing`-задачи — их вернёт в пул
@@ -45,17 +45,17 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 1. PostgreSQL/Greenplum запущен? `pg_isready` или `pg_lsclusters`.
 2. DSN правильный? `psql "$DATABASE_URL"` работает?
 3. На Greenplum 6.25 — `gssencmode=disable` (пул соединений в
-   `workspace/utils/db.py:233` уже выставляет его через kwargs `connect()`,
+   `lib/utils/db.py:233` уже выставляет его через kwargs `connect()`,
    но если проблема — проверьте).
 4. На PG 9.4 — минимум 3 retry, для GP — 50.
 
 ### `too many connections` (Greenplum)
 
-`channels.postgres.pool.max_conn` (дефолт `4` в `workspace/utils/db.py`,
+`channels.postgres.pool.max_conn` (дефолт `4` в `lib/utils/db.py`,
 применяется к пулам воркеров и PG-сессий). Пул общий для всех сервисов ядра,
 поэтому 4 слота на процесс — жёсткий бюджет. Если не хватает, увеличьте
 `channels.postgres.pool.max_conn`; число потоков загрузки кэша возьмёт новое
-значение автоматически. Мониторинг: `utils.db.get_stats()`.
+значение автоматически. Мониторинг: `lib.utils.db.get_stats()`.
 
 ---
 

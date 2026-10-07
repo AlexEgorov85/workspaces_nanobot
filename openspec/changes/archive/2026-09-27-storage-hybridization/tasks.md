@@ -55,11 +55,11 @@
 
 - [x] 3.1 Per-transaction advisory lock
       (`pg_try_advisory_xact_lock(hashtext(... )::bigint)` через
-      `utils.db.transaction`); xact-scoped — без `_lock_conn`
+      `lib.utils.db.transaction`); xact-scoped — без `_lock_conn`
       (единый пул, D-Pool.1).
-- [x] 3.2 `_read_pg_meta` через `utils.db.transaction()` с
+- [x] 3.2 `_read_pg_meta` через `lib.utils.db.transaction()` с
       обязательным `rollback()` на исключении
-      (контракт `utils.db.transaction()` сам делает ROLLBACK
+      (контракт `lib.utils.db.transaction()` сам делает ROLLBACK
       на исключении).
 - [x] 3.3 Worker loop: `_stop_event` (`threading.Event`) +
       `_stop_event.wait(timeout=self._compute_delay())` вместо

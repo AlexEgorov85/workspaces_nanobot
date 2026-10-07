@@ -32,7 +32,7 @@ if _workspace_path not in sys.path:
 
 @pytest.fixture(autouse=True)
 def user_stop_signal_mock_db(tmp_path):
-    """Подставной клиент ``enterprise-mcp`` вместо мока ``utils.db``.
+    """Подставной клиент ``enterprise-mcp`` вместо мока ``lib.utils.db``.
 
     Канал больше не ходит в PostgreSQL: отмена задачи проверяется операцией
     ``get_message``, а финализация сама различает «записать» и «отменённую».
@@ -53,7 +53,7 @@ def user_stop_signal_mock_db(tmp_path):
             spec.loader.exec_module(real_utils_pkg)
         assert real_utils_pkg is not None
 
-        from utils.session_file_store import SessionFileStore  # noqa: F401
+        from lib.utils.session_file_store import SessionFileStore  # noqa: F401
 
         # Форсируем свежий импорт: если предыдущие тестовые файлы уже
         # импортировали канал с настоящим клиентом, класс остался связан

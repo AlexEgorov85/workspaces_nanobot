@@ -333,7 +333,7 @@ class DocumentReadTool(Tool):
             SessionFilesUnavailable,
             current_session_file_resolver,
         )
-        from workspace.utils.session_key import SessionDirNameDenied
+        from lib.utils.session_key import SessionDirNameDenied
 
         session_key = current_request_session_key()
         if not session_key:

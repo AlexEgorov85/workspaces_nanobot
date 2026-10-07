@@ -5,7 +5,7 @@
 
   * цикл поллинга входящих сообщений и backoff при ошибках;
   * ограничение параллельности (семафор + множество in-flight);
-  * работу с вложениями ``media`` (единый кодек ``utils.media``);
+  * работу с вложениями ``media`` (единый кодек ``lib.utils.media``);
   * фильтрацию служебных сообщений (reasoning/progress/turn_end);
   * **priority polling path** для команд, которые не должны ждать
     свободного обычного слота (``/stop``, ``/restart``, ``/status``).
@@ -33,10 +33,10 @@ import asyncio
 from contextlib import suppress
 from typing import Any
 
-from utils.media import (
+from lib.utils.media import (
     resolve_paths_and_hints as media_resolve_paths_and_hints,
 )
-from utils.media import (
+from lib.utils.media import (
     serialize as media_serialize,
 )
 

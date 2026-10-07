@@ -7,7 +7,7 @@
 - 1.1 ``updated_at`` обновляется при ``save()``;
 - 1.2 ``Session.__init__`` принимает ``key``/``id`` и ``messages``;
 - 1.3 ``try_log_event`` — sync (для фонового потока);
-- 1.4 ``utils.db.run`` rollback'ит на исключении (нет
+- 1.4 ``lib.utils.db.run`` rollback'ит на исключении (нет
   open-транзакции в пуле).
 """
 
@@ -118,15 +118,15 @@ class TestDbLoggingTryLogEventIsSync:
 
 
 class TestUtilsDbRunDoesNotLeaveOpenTransaction:
-    """Task 1.4: ``utils.db.transaction()`` rollback'ит на исключении."""
+    """Task 1.4: ``lib.utils.db.transaction()`` rollback'ит на исключении."""
 
     def test_transaction_calls_release_with_commit_false_on_exception(self) -> None:
-        """Контракт ``utils.db.transaction()``: при исключении внутри
+        """Контракт ``lib.utils.db.transaction()``: при исключении внутри
         блока `with` вызывается ``manager._release_lease(commit=False)``
         (ROLLBACK). При нормальном завершении — ``commit=True``.
 
         Здесь подтверждаем контракт source-code (поведение stub'а
-        совпадает с реальным контрактом ``utils.db.transaction``).
+        совпадает с реальным контрактом ``lib.utils.db.transaction``).
         """
         from contextlib import contextmanager
 

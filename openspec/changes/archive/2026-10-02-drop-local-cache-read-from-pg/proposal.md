@@ -22,8 +22,8 @@ vector search, в этом бюджете места не оставалось.
 
 | Кто | Как ходит в PG | Сколько держит |
 |---|---|---|
-| `PgDuckDbSyncService` | через общий `utils.db` | **постоянно**: `_ensure_connected()` один раз, соединение живёт до shutdown |
-| `CacheOwnershipCoordinator` | `from workspace.utils.db import execute, transaction` | транзакция `try_claim` на каждом старте + heartbeat каждые 30 сек |
+| `PgDuckDbSyncService` | через общий `lib.utils.db` | **постоянно**: `_ensure_connected()` один раз, соединение живёт до shutdown |
+| `CacheOwnershipCoordinator` | `from lib.utils.db import execute, transaction` | транзакция `try_claim` на каждом старте + heartbeat каждые 30 сек |
 
 Итого кэшовая машинерия постоянно занимает один слот целиком и ещё один
 периодически — **до половины пула**, из-за чего навыкам достаётся меньше, чем

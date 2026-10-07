@@ -218,25 +218,25 @@ def full_fake_modules(tmp_path):
 
         # utils.db
         utils_mod = types.ModuleType("utils")
-        utils_db = types.ModuleType("utils.db")
+        utils_db = types.ModuleType("lib.utils.db")
         utils_db.configure = MagicMock()
         utils_mod.db = utils_db
         sys.modules["utils"] = utils_mod
-        sys.modules["utils.db"] = utils_db
+        sys.modules["lib.utils.db"] = utils_db
 
-        # utils.media — db_logging_bus делает ``from utils.media import
+        # utils.media — db_logging_bus делает ``from lib.utils.media import
         # serialize``; без мока «utils» — голый ModuleType без __path__
         # (не пакет), и импорт падает «utils is not a package».
-        utils_media = types.ModuleType("utils.media")
+        utils_media = types.ModuleType("lib.utils.media")
         utils_media.serialize = MagicMock(return_value=None)
         utils_mod.media = utils_media
-        sys.modules["utils.media"] = utils_media
+        sys.modules["lib.utils.media"] = utils_media
 
         # utils.session_file_store
-        sfs = types.ModuleType("utils.session_file_store")
+        sfs = types.ModuleType("lib.utils.session_file_store")
         sfs.SessionFileStore = MagicMock()
         sfs.prepare_content = MagicMock()
-        sys.modules["utils.session_file_store"] = sfs
+        sys.modules["lib.utils.session_file_store"] = sfs
 
         yield {
             "settings": settings,
@@ -304,7 +304,7 @@ class TestCreate:
     def test_pool_config_applied_from_settings(self, full_fake_modules):
         from unittest.mock import MagicMock
 
-        utils_db = sys.modules["utils.db"]
+        utils_db = sys.modules["lib.utils.db"]
         utils_db.set_pool_config = MagicMock()
         full_fake_modules["settings"].channels = {
             "postgres": {
@@ -428,7 +428,7 @@ class TestStartupSchemaValidation:
     """Проверка схемы на старте: состояния, которые должен различать код.
 
     Тесты дёргают ``ApplicationContext._validate_runtime_schema`` напрямую и
-    подменяют только ``utils.db`` — сам composition root не поднимается.
+    подменяют только ``lib.utils.db`` — сам composition root не поднимается.
     Живой прогон по настоящей базе и настоящему пулу лежит в
     ``tests/test_startup_schema_validation_live.py``.
 
@@ -490,7 +490,7 @@ class TestStartupSchemaValidation:
         present = [n for n in everything if n not in absent]
 
         monkeypatch.setattr(
-            "utils.db.fetch_with_timeout",
+            "lib.utils.db.fetch_with_timeout",
             lambda sql, *p, **_kw: [
                 {"table_schema": "public", "table_name": n} for n in present
             ],
@@ -507,7 +507,7 @@ class TestStartupSchemaValidation:
         settings = self._settings()
         everything = self._all_names(settings)
         monkeypatch.setattr(
-            "utils.db.fetch_with_timeout",
+            "lib.utils.db.fetch_with_timeout",
             lambda sql, *p, **_kw: [
                 {"table_schema": "public", "table_name": n} for n in everything
             ],
@@ -524,7 +524,7 @@ class TestStartupSchemaValidation:
         def _explode(*_a, **_kw):
             raise AssertionError("БД не должна трогаться при выключенном гейте")
 
-        monkeypatch.setattr("utils.db.fetch_with_timeout", _explode)
+        monkeypatch.setattr("lib.utils.db.fetch_with_timeout", _explode)
         self._ctx(self._settings(enabled=False))._validate_runtime_schema()
 
     def test_timeout_value_reaches_the_adapter(self, monkeypatch) -> None:
@@ -544,7 +544,7 @@ class TestStartupSchemaValidation:
                 {"table_schema": "public", "table_name": n} for n in everything
             ]
 
-        monkeypatch.setattr("utils.db.fetch_with_timeout", _fetch)
+        monkeypatch.setattr("lib.utils.db.fetch_with_timeout", _fetch)
         self._ctx(settings)._validate_runtime_schema()
         assert seen["timeout_sec"] == 1.5
 

@@ -25,9 +25,9 @@ if str(REPO) not in sys.path:
 
 
 def _get_v220_media_py() -> str:
-    """Получить workspace/utils/media.py (если есть) или postgres_channel.py из v2.2.0."""
+    """Получить lib/utils/media.py (если есть) или postgres_channel.py из v2.2.0."""
     out = subprocess.run(
-        ["git", "show", "v2.2.0:workspace/utils/media.py"],
+        ["git", "show", "v2.2.0:lib/utils/media.py"],
         cwd=str(REPO), capture_output=True, text=True, check=False,
     ).stdout
     if out.strip():
@@ -41,7 +41,7 @@ def _get_v220_media_py() -> str:
 
 def test_serialize_existing_files_returns_aw_format(tmp_path):
     """Существующие файлы сериализуются в AW-формат с непустым mime_type."""
-    from workspace.utils.media import serialize
+    from lib.utils.media import serialize
 
     f1 = tmp_path / "test.md"
     f1.write_bytes(b"# hello\n")
@@ -65,7 +65,7 @@ def test_serialize_missing_file_returns_dict_with_empty_mime(tmp_path):
     Это регрессия v2.3.0 vs v2.2.0: в v2.2.0 несуществующий файл клался
     просто строкой-путь, а не dict-обёрткой с пустым mime.
     """
-    from workspace.utils.media import serialize
+    from lib.utils.media import serialize
 
     missing = tmp_path / "does_not_exist.docx"
     result = serialize([str(missing)])
@@ -82,7 +82,7 @@ def test_serialize_missing_file_returns_dict_with_empty_mime(tmp_path):
 
 def test_serialize_mixed_existing_and_missing(tmp_path):
     """Смешанный сценарий: существующие и несуществующий."""
-    from workspace.utils.media import serialize
+    from lib.utils.media import serialize
 
     f1 = tmp_path / "test.md"
     f1.write_bytes(b"# hello")
@@ -126,9 +126,9 @@ def test_v220_behavior_for_missing_file():
 
 def test_full_round_trip_existing_files(tmp_path):
     """Полный цикл: создать файл → serialize → deserialize → проверить."""
-    from workspace.utils.media import deserialize, serialize
-    from utils.session_file_store import SessionFileStore
-    from utils.session_key import safe_session_key
+    from lib.utils.media import deserialize, serialize
+    from lib.utils.session_file_store import SessionFileStore
+    from lib.utils.session_key import safe_session_key
 
     f1 = tmp_path / "report.md"
     f1.write_bytes(b"# Report\nContent here.")
@@ -158,9 +158,9 @@ def test_full_round_trip_existing_files(tmp_path):
 
 def test_round_trip_keeps_existing_when_some_missing(tmp_path):
     """Сценарий со скрина: .md и .xlsx есть, .docx нет."""
-    from workspace.utils.media import deserialize, serialize
-    from utils.session_file_store import SessionFileStore
-    from utils.session_key import safe_session_key
+    from lib.utils.media import deserialize, serialize
+    from lib.utils.session_file_store import SessionFileStore
+    from lib.utils.session_key import safe_session_key
 
     md = tmp_path / "test.md"
     md.write_bytes(b"# test")

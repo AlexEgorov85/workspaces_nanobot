@@ -24,7 +24,7 @@ def _store(root: Path, **kw):
     Контракт после снятия собственной раскладки: каталог сессии приходит
     функцией от резолвера, а не вычисляется хранилищем из корня.
     """
-    from utils.session_file_store import SessionFileStore
+    from lib.utils.session_file_store import SessionFileStore
 
     return SessionFileStore(lambda key: root / key, **kw)
 
@@ -39,7 +39,7 @@ class TestSafeSessionKey:
     """
 
     def test_store_does_not_name_directories_at_all(self):
-        import utils.session_file_store as store_module
+        import lib.utils.session_file_store as store_module
 
         assert not hasattr(store_module, "safe_session_key"), (
             "хранилище снова заводит правило имени каталога: "
@@ -47,7 +47,7 @@ class TestSafeSessionKey:
         )
 
     def test_store_does_not_import_session_key_module(self):
-        import utils.session_file_store as store_module
+        import lib.utils.session_file_store as store_module
 
         assert not hasattr(store_module, "SessionDirNameDenied"), (
             "хранилище имену каталога не вычисляет"
@@ -65,7 +65,7 @@ class TestSafeSessionKey:
 
 class TestPrepareContent:
     def test_json_dict_formatted(self):
-        from utils.session_file_store import prepare_content
+        from lib.utils.session_file_store import prepare_content
 
         content, ext = prepare_content('{"a": 1}')
         assert ext == ".json"
@@ -73,35 +73,35 @@ class TestPrepareContent:
         assert parsed == {"a": 1}
 
     def test_json_list_formatted(self):
-        from utils.session_file_store import prepare_content
+        from lib.utils.session_file_store import prepare_content
 
         content, ext = prepare_content("[1, 2, 3]")
         assert ext == ".json"
         assert json.loads(content) == [1, 2, 3]
 
     def test_plain_text(self):
-        from utils.session_file_store import prepare_content
+        from lib.utils.session_file_store import prepare_content
 
         content, ext = prepare_content("hello world")
         assert ext == ".txt"
         assert content == "hello world"
 
     def test_invalid_json_returns_txt(self):
-        from utils.session_file_store import prepare_content
+        from lib.utils.session_file_store import prepare_content
 
         content, ext = prepare_content("{invalid}")
         assert ext == ".txt"
         assert content == "{invalid}"
 
     def test_empty_string(self):
-        from utils.session_file_store import prepare_content
+        from lib.utils.session_file_store import prepare_content
 
         content, ext = prepare_content("")
         assert ext == ".txt"
         assert content == ""
 
     def test_list_of_dicts_converts_to_csv(self):
-        from utils.session_file_store import prepare_content
+        from lib.utils.session_file_store import prepare_content
 
         content, ext = prepare_content('[{"a": 1, "b": 2}]')
         assert ext == ".csv"
@@ -122,7 +122,7 @@ class TestTryConvertToCsv:
         (None, [], True),
     ])
     def test_try_convert_to_csv(self, input_value, expected_substrings, expected_is_none):
-        from utils.session_file_store import _try_convert_to_csv
+        from lib.utils.session_file_store import _try_convert_to_csv
 
         result = _try_convert_to_csv(input_value)
         if expected_is_none:

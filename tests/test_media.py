@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from utils.media import (
+from lib.utils.media import (
     data_url_info,
     entry_from_data_url,
     normalize_storage_entry,

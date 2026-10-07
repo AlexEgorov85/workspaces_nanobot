@@ -31,7 +31,7 @@ if _workspace_path not in sys.path:
 
 @pytest.fixture
 def mock_db():
-    """Подставной клиент ``enterprise-mcp`` вместо мока ``utils.db``.
+    """Подставной клиент ``enterprise-mcp`` вместо мока ``lib.utils.db``.
 
     Канал больше не пишет SQL: данные задач обслуживает платформа, а канал
     зовёт её операциями. Патчить больше нечего — атрибутов ``execute``,

@@ -88,7 +88,7 @@ workspace/skills/<skill_name>/
 | Доменный workflow из нескольких шагов | **Skill** (`SKILL.md` + `scripts/`) |
 | Детерминированная операция **внутри** Skill workflow | **Skill script** |
 | LLM-фолбэк на естественном языке для конкретного домена | **Skill** (операция `audit.generate_sql` платформы) |
-| Тонкая обёртка вокруг generic utility для домена | **Skill** (описание поверх `workspace/utils/`) |
+| Тонкая обёртка вокруг generic utility для домена | **Skill** (описание поверх `lib/utils/`) |
 | Capability, которую агент выбирает и вызывает **самостоятельно** | **Tool** (`workspace/tools/`) |
 | Реализация, общая для Skill и Tool | **`lib/services`** / **`lib/core`** |
 | Универсальный SQL validator / chunker / splitter | **`lib/utils`** |
@@ -159,11 +159,11 @@ workspace/skills/<skill_name>/
 |---|---|---|---|
 | **Полный skill** | Своя доменная логика, за ней capability платформы | `SKILL.md` (+ `scripts/`, если есть что считать) + секция `config.json → gateway.agent.skills.<name>` | `audit_analyzer` (по составу каталога — только `SKILL.md`) |
 | **Минимальный skill** | Своя логика, которой не за что зацепиться в capability | `SKILL.md` + `scripts/` с детерминированной обработкой | — (в `workspace/skills/` таких нет) |
-| **Documentation-only skill** | Только описывает готовый модуль из `workspace/utils/*` | **Только** SKILL.md; без `__init__.py`, без `scripts/`, без секции в `config.json` | — (в `workspace/skills/` таких нет) |
+| **Documentation-only skill** | Только описывает готовый модуль из `lib/utils/*` | **Только** SKILL.md; без `__init__.py`, без `scripts/`, без секции в `config.json` | — (в `workspace/skills/` таких нет) |
 
 **Documentation-only skill** допустим **только** когда выполняются **все** условия:
 
-1. Реализация уже живёт в `workspace/utils/<module>.py` и покрыта собственными unit-тестами.
+1. Реализация уже живёт в `lib/utils/<module>.py` и покрыта собственными unit-тестами.
 2. У skill'а нет собственной доменной инфраструктуры — нечего объявлять в `config.json`.
 3. SKILL.md нужен исключительно для **discovery** агентом при маршрутизации по описанию.
 
@@ -817,7 +817,7 @@ skill'а — `mcp-platform/libs/enterprise_client/llm.py`.
 
 ### Documentation-only skill
 
-9''. ☐ Реализация уже живёт в `workspace/utils/<module>.py`.
+9''. ☐ Реализация уже живёт в `lib/utils/<module>.py`.
 10''. ☐ У skill'а нет доменной инфраструктуры — секцию в `config.json` НЕ трогаем.
 11''. ☐ SKILL.md секции: «Когда использовать», «Когда не вызывать», «Что не делать» (может называться «Ограничения»), «Что внутри» со ссылкой на utility-модуль.
 

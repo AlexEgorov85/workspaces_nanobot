@@ -8,7 +8,7 @@ Maintenance»). Каждое нарушение — регрессия: код �
 Тесты:
 
 1. ``AGENTS.md`` не упоминает удалённые/несуществующие модули
-   (``workspace/utils/doc_index.py``, ``workspace/utils/text_chunking.py``,
+   (``lib/utils/doc_index.py``, ``lib/utils/text_chunking.py``,
    ``workspace/tools/doc_index_search.py``).
 2. ``README.md`` не предлагает удалённый вход ``
    workspace/skills/audit_analyzer/scripts/cli.py``: CLI у навыка больше нет,

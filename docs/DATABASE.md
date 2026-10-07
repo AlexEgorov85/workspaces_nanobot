@@ -71,7 +71,7 @@
 делает `mcp-platform/servers/enterprise/build_index.py`, который снимок вообще
 не открывает.
 
-## 🔌 Единый пул соединений PostgreSQL (`workspace/utils/db.py`)
+## 🔌 Единый пул соединений PostgreSQL (`lib/utils/db.py`)
 
 Чтобы на сервере никогда не было десятков параллельных подключений к PG
 (проблема «too many connections» решается на уровне архитектуры, а не ретраями),
@@ -145,7 +145,7 @@
   `reconnect_backoff_sec`, `reconnect_backoff_max_sec`, `connect_max_retries`,
   `idle_timeout_sec`, `job_max_retries`. `ApplicationContext.create()` читает эту
   секцию и применяет через `set_pool_config()`; `ctx.start()/stop()` вызывают
-  `utils.db.start()/shutdown()`.
+  `lib.utils.db.start()/shutdown()`.
 
 **Кто ходит в БД через пул:** `DbLoggingService`, `SessionMirror`
 (зеркало сессий), `PostgresChannel`, `session_storage` и инструменты.
@@ -167,8 +167,8 @@
 двух уровнях:
   1. **на источнике** — патч `RuntimePatcher.patch_session_content_cleanup`
      оборачивает `Session.add_message` и чистит контент через канонический
-     `workspace/utils/clean_text.py`;
-  2. **страховка на границе БД** — `utils.db._sanitize_param` (все параметры
+     `lib/utils/clean_text.py`;
+  2. **страховка на границе БД** — `lib.utils.db._sanitize_param` (все параметры
      `execute`/`mogrify`, включая `execute_values`) тоже прогоняет значение через
      `clean_text`, чтобы обойдённая живым патчем строка не упала на записи.
 
@@ -220,10 +220,10 @@
 > не зависят.
 
 DSN подключается только через `channels.postgres.dsn` в `config.json`
-(обычно `"${DATABASE_URL}"` из `.secrets.env`) через `utils.db.resolve_dsn()`.
+(обычно `"${DATABASE_URL}"` из `.secrets.env`) через `lib.utils.db.resolve_dsn()`.
 Подключение возможно только через полный DSN (`channels.postgres.dsn`
 в `config.json`, обычно `"${DATABASE_URL}"` из `.secrets.env` через
-`utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`dbname`/`user`
+`lib.utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`dbname`/`user`
 не поддерживаются. Навык собственного DSN не хранит.
 
 ---

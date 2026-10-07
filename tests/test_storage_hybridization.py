@@ -123,8 +123,8 @@ class TestNoDirectSQLToSessionTables:
 class TestNoNewPoolCreated:
     """Модули storage-hybridization НЕ создают собственный psycopg2-пул.
 
-    Пул — единый (``utils.db``), DI через ``utils.db.transaction()`` /
-    ``utils.db.run()``. См. design D-Pool.1.
+    Пул — единый (``lib.utils.db``), DI через ``lib.utils.db.transaction()`` /
+    ``lib.utils.db.run()``. См. design D-Pool.1.
     """
 
     def test_no_new_pool_in_storage_hybridization_modules(self) -> None:

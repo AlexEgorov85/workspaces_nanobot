@@ -51,7 +51,7 @@ def _full_settings(profile: str = "prod") -> dict[str, Any]:
 
 
 def _make_fetch(existing_names: set[str]) -> Any:
-    """Mock ``utils.db.fetch``: возвращает строки для имён в existing_names."""
+    """Mock ``lib.utils.db.fetch``: возвращает строки для имён в existing_names."""
     def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
         result = []
         for p in params:
@@ -374,7 +374,7 @@ class TestValidate:
 class TestStatementTimeout:
     """Предел применяет адаптер; сервис переводит его отказ в доменный.
 
-    Механизм ``statement_timeout`` живёт в ``utils.db.fetch_with_timeout``,
+    Механизм ``statement_timeout`` живёт в ``lib.utils.db.fetch_with_timeout``,
     потому что соединение принадлежит пулу. Здесь проверяется граница
     договора: сервис узнаёт об отмене по ``QueryCanceled`` и не путает
     её ни с «нет таблиц», ни с любой другой ошибкой БД.

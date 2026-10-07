@@ -6,7 +6,7 @@
 AW (audit_point_new) читает ``file_id``/``mime_type``/``file_size``, поэтому
 у старых ответов нет превью/кнопки «Скачать». Скрипт однократно приводит
 такие записи к новому формату ``{"filename", "file_id", "mime_type",
-"file_size"}`` через общий кодек ``utils.media.normalize_storage_entry``.
+"file_size"}`` через общий кодек ``lib.utils.media.normalize_storage_entry``.
 
 Безопасность:
   * идемпотентен — переписывает только dict-элементы с ``data`` и без
@@ -34,8 +34,8 @@ for _p in (str(_REPO), str(_WORKSPACE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from utils.db import configure, execute, fetch, start, shutdown  # noqa: E402
-from utils.media import normalize_storage_entry  # noqa: E402
+from lib.utils.db import configure, execute, fetch, start, shutdown  # noqa: E402
+from lib.utils.media import normalize_storage_entry  # noqa: E402
 
 
 def _decode_media(raw: object) -> list:

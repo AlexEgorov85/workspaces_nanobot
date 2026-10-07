@@ -412,7 +412,7 @@ is out of scope».
 `unify-agent-event-logging-pipeline`) все события идут через
 `DbLoggingService`/`try_log_event`, хронология — одним потоком.
 
-**Удалённый модуль.** `workspace/utils/event_log.py` (197 строк,
+**Удалённый модуль.** `lib/utils/event_log.py` (197 строк,
 `record_event`/`record_sync_event`/`emit_sync_event`) удалён в коммите
 `1893b17`. Прямой INSERT bypass ликвидирован. Тесты
 `tests/test_event_log.py` (83 строки) тоже удалены.
@@ -855,7 +855,7 @@ fallback на штатный шаблон при отсутствии файла
 
 DDL: `metadata JSONB DEFAULT '{}'::jsonb` (см.
 `sql/channels/create_public_agent_conversation_messages.sql`).
-Чтение — `_decode_jsonb(metadata)` (из `utils.jsonb`).
+Чтение — `_decode_jsonb(metadata)` (из `lib.utils.jsonb`).
 
 ##### 1. Жизненный цикл `metadata` одной строки
 
@@ -1236,13 +1236,13 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 `MessageExchange`.
 
 Зависимости модуля:
-- `workspace/utils/media.py` — кодек media (AW-формат `{filename, file_id, mime_type,
+- `lib/utils/media.py` — кодек media (AW-формат `{filename, file_id, mime_type,
   file_size}` + обратная совместимость со старым `{filename, data}` и
   data-URL).
-- `workspace/utils/jsonb.py` — JSONB-декодер media для PG.
+- `lib/utils/jsonb.py` — JSONB-декодер media для PG.
 - `lib/utils/outbound_meta.py` — единый фильтр служебных outbound
   (`system`, `audit`, `tool_audit`, `_assemble_outbound`-артефакты).
-- `SessionFileStore` (`workspace/utils/session_file_store.py`) — общий стор
+- `SessionFileStore` (`lib/utils/session_file_store.py`) — общий стор
   вложений в `data_store/sessions/<key>/files/attachments/` (рядом `files/results/` — каталог рантайма, нет в дереве репозитория —
   выгрузки инструментов). Каталог сессии даёт резолвер
   `lib/services/session_files.py`; собственную раскладку хранилище больше не выводит.

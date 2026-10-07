@@ -57,7 +57,7 @@ LLM-агенты иногда генерируют абсолютные пути
 `C:\Users\<user>\workspace\test\test.md`, повторяющие раскладку рабочей
 машины, на которой готовился промпт. На другом хосте файл по этому пути
 **не существует** (или лежит в недоступной NFS-шаре), и тогда
-`utils.media.serialize` не находит вложение → `Media file not found,
+`lib.utils.media.serialize` не находит вложение → `Media file not found,
 keeping path` → в БД уходит AW-dict с пустым `mime_type`/`file_size`.
 
 Чтобы этого избежать:

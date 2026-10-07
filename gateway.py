@@ -738,7 +738,7 @@ def _gateway_print_worker_activity() -> bool:
 def _report_db_pool_startup() -> None:
     """Прогреть пул соединений БД и вывести отчёт о его воркерах.
 
-    Воркеры ``utils.db`` подключаются лениво, поэтому перед отчётом
+    Воркеры ``lib.utils.db`` подключаются лениво, поэтому перед отчётом
     заставляем их реально подключиться (``probe_connections``), чтобы
     на старте gateway было видно: сколько воркеров должно быть, сколько
     запустилось и сколько не смогли подключиться к БД.
@@ -747,7 +747,7 @@ def _report_db_pool_startup() -> None:
     (при недоступной БД это честно выявляет ошибку вместо «0 connected»).
     """
     try:
-        from utils.db import probe_connections, get_stats
+        from lib.utils.db import probe_connections, get_stats
 
         probe_connections()
         s = get_stats()
@@ -899,13 +899,14 @@ def main(argv: list[str] | None = None) -> int:
     script_dir = script_dir_for_runtime()
     workspace_dir = script_dir / "workspace"
 
-    # Добавляем корень проекта и workspace в sys.path, чтобы импортировать
-    # lib.hooks.* и workspace.utils.*. Префикс (0) — приоритет
+    # Добавляем корень проекта в sys.path, чтобы импортировать
+    # lib.hooks.* и workspace.hooks.*. Префикс (0) — приоритет
     # над site-packages (нужно для подмены модулей в тестах).
+    # Каталог `workspace/` в путь НЕ добавляется: общие модули лежат
+    # в `lib/utils/`, а сам `workspace/` в позиции 0 перехватывал бы
+    # импорт `tools` — корневой пакет и `workspace/tools/` одноимённы.
     if str(script_dir) not in sys.path:
         sys.path.insert(0, str(script_dir))
-    if str(workspace_dir) not in sys.path:
-        sys.path.insert(0, str(workspace_dir))
 
     try:
         _entrypoint_main(args, script_dir, workspace_dir)

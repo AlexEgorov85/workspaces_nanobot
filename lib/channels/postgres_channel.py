@@ -36,17 +36,17 @@ from typing import Any
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from utils.jsonb import decode_jsonb as _decode_jsonb
-from utils.media import (
+from lib.utils.jsonb import decode_jsonb as _decode_jsonb
+from lib.utils.media import (
     deserialize as media_deserialize,
 )
-from utils.media import (
+from lib.utils.media import (
     resolve_paths_and_hints as media_resolve_paths_and_hints,
 )
-from utils.media import (
+from lib.utils.media import (
     serialize as media_serialize,
 )
-from utils.session_file_store import SessionFileStore
+from lib.utils.session_file_store import SessionFileStore
 
 from lib.channels.message_exchange import MessageExchange
 from lib.channels.queue_ops import QueueOps
@@ -82,7 +82,7 @@ async def _ensure_session_dir(session_key: str) -> None:
 def _resolved_session_dir(session_key: str) -> Path:
     """Каталог сессии из уже полученного ответа резолвера, синхронно.
 
-    Кодек ``utils.media.deserialize`` синхронен, а резолвер асинхронен, поэтому
+    Кодек ``lib.utils.media.deserialize`` синхронен, а резолвер асинхронен, поэтому
     канал дожидается каталога один раз (см. :func:`_ensure_session_dir`), и
     дальше хранилище читает уже полученный ответ. Вычислять путь на стороне
     канала или хранилища нельзя: это была бы вторая копия корня сессии.
@@ -292,7 +292,7 @@ class PostgresChannel(BaseChannel):
     async def _embed_media_for_db(self, media: list[str]) -> list[Any]:
         """Прочитать локальные файлы и закодировать для БД (AW-формат).
 
-        Делегирует общему ``utils.media.serialize`` — единая схема
+        Делегирует общему ``lib.utils.media.serialize`` — единая схема
         ``{"filename", "file_id", "mime_type", "file_size"}`` для всех каналов.
         """
         return media_serialize(media)
@@ -305,7 +305,7 @@ class PostgresChannel(BaseChannel):
         функция на разбор вложений, потому что только здесь дожидается каталога
         сессии.
 
-        Делегирует общему ``utils.media.deserialize`` — терпит legacy
+        Делегирует общему ``lib.utils.media.deserialize`` — терпит legacy
         ``{filename, data}``, новый AW ``{filename, file_id, ...}`` и
         ``{filename, path}``. Файлы пишутся через ``SessionFileStore`` в
         ``files/attachments/`` каталога сессии, который отдал резолвер.
