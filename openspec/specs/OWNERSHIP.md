@@ -4,7 +4,7 @@
 разделён на два дерева — агента (`lib/`, `workspace/`, `gateway.py`) и платформу
 `mcp-platform` (корпоративный MCP-сервер), — и половина работы состоит в переезде
 подсистем между ними. Без этой таблицы вопрос «кто это чинит» не имеет ответа,
-кроме как прочитать все 28 спек.
+кроме как прочитать все 42 спеки.
 
 Раздел `## Scope` в каждой спеке — источник истины, этот файл — его раскладка.
 Значение берётся из первой метки в обратных кавычках тела `## Scope` и
@@ -34,6 +34,13 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | Спека | Где смотреть |
 |---|---|
 | `data/operation-schema/spec.md` | `mcp-platform/libs/enterprise_common/registry.py` (`build_input_schema`, `_json_type`, `validate_operation_name`, `ToolRegistry.register` — общая точка проверки имени), `libs/enterprise_common/loader.py` (выбор публикуемой схемы, `load_definition`, `load_registry`, `build_server`), `libs/enterprise_common/execution/pipeline.py` (capability в политике и журнале), `INPUT_SCHEMA`, имя и capability в `capabilities/*/tools/*.py`, платформенные операции в `servers/enterprise/tools/*.py`, второй сервер на общем реестре — `servers/_template/` |
+| `data/audit/spec.md` | `mcp-platform/libs/audit/` (`registry_loader.py`, `generated_sql.py`, `predefined.py`, `guard.py`), `servers/enterprise/capabilities/audit/`; модель ходит операциями `mcp_enterprise_audit_*` |
+| `data/vectors/spec.md` | `mcp-platform/libs/vectors/` (`owner.py`, `embedding.py`), сборка индекса — `servers/enterprise/build_index.py`, объявления — `platform.json → vectors.indexes` |
+| `data/query/spec.md` | `servers/enterprise/capabilities/data/` (`service/main.py:DataService`, `tools/`, `guard.py`), пул и классы работы — `mcp-platform/libs/enterprise_data/db.py` |
+| `data/duckdb-cache/spec.md` | `mcp-platform/libs/enterprise_data/snapshot/` (`store.py:DuckDbSnapshotStore`, `contracts.py`), корень файла — `platform.json` |
+| `data/task-queue/spec.md` | `servers/enterprise/capabilities/data/tools/claim_task.py`, `service/main.py` (`claim_tasks`, `ClaimedBatch`), имя таблицы — `platform.json → data.task_table` |
+| `runtime/tool-registry/spec.md` | `mcp-platform/libs/enterprise_common/registry.py:ToolRegistry`, `libs/enterprise_common/loader.py`, раскладка `capabilities/<имя>/tools/` |
+| `runtime/tool-execution/spec.md` | `mcp-platform/libs/enterprise_common/execution/` (`pipeline.py`, `context.py`, `quality.py`, `errors.py`) |
 | `runtime/db-queue-classes/spec.md` | `mcp-platform/libs/enterprise_data/db.py` (`_Worker`, `submit`, `submit_transaction`), `platform.json` (`pool`, `job_classes`) |
 
 ## `shared` — контракт между агентом и платформой
@@ -50,6 +57,8 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | `runtime/session-files/spec.md` | `lib/services/session_files.py` (резолвер каталога сессии), `workspace/hooks/session_file_redirect_hook.py` (перенаправление записи в `files/`), `lib/utils/session_file_store.py` | `mcp-platform/servers/enterprise/tools/session_files.py` (`SessionHandle`), `libs/enterprise_common/session/workspace.py`, корень — `platform.json → execution.session_root` |
 | `runtime/call-contract/spec.md` | `lib/hooks/mcp_identity_hook.py` (подстановка личности), `workspace/skills/enterprise_mcp/SKILL.md` (коды в словаре модели) | `mcp-platform/libs/enterprise_common/execution/errors.py` (`FAILURE_CODES`, `normalize_exception`, `failure_from_payload`), разбор конвейера — `execution/pipeline.py` |
 | `testing/unified-test-contract/spec.md` | `tests/`, `pyproject.toml`, `.github/workflows/ci.yml` | `mcp-platform/tests/`, `mcp-platform/pyproject.toml` |
+| `runtime/event-model/spec.md` | `lib/services/runtime_events_subscriber.py`, `workspace/hooks/`, `lib/core/agent_factory.py` (события оборота) | `mcp-platform/libs/enterprise_common/eventing/` (`types.py` — закрытый словарь, `models.py` — конверт, `writer.py`), таблица `agent_gateway_logs` |
+| `runtime/call-timeout/spec.md` | `config.json → tools.mcpServers.enterprise.tool_timeout` (модельная нога) и `gateway.agent.enterprise_mcp.tool_timeout_sec` (фоновая), `lib/services/enterprise_mcp_client.py` | `mcp-platform/platform.json → execution.execution_timeout_sec`, конвейер `execution/pipeline.py`; страж знака зазора — `tests/test_mcp_platform_declaration.py` |
 
 ## `agent` — предмет реализован в агенте
 
@@ -72,6 +81,9 @@ grep -rl '`platform`' openspec/specs --include=spec.md
 | `observability/usage-store/spec.md` | `lib/core/agent_factory.py` |
 | `infrastructure/upgrade-compatibility/spec.md` | `requirements.txt`, `tests/contract/` |
 | `validation/component-spec-validation/spec.md` | `tools/validate_component_specs.py` |
+| `runtime/queue-channel-switch/spec.md` | `lib/channels/queue_ops.py:QueueOps`, `lib/channels/postgres_channel.py` |
+| `runtime/patch-to-hook/spec.md` | `lib/services/runtime_patcher.py` (`_PATCH_SPECS`, `PatchSpec`), `lib/services/runtime_inventory.py`, `docs/architecture/runtime-patcher-inventory.md` |
+| `runtime/cli-client/spec.md` | `cli_agent.py`, `lib/cli/console_loop.py` — **предмет ещё не реализован**: клиентский модуль `lib/channels/cli_channel.py` вводится change `unify-runtime-channels` (5 из 51 задачи), спека описывает целевое состояние |
 
 `COMPONENTS.md` — реестр компонентов, не спека: раздела `## Scope` в ней нет по
 той же причине, по какой его нет у этого файла.
@@ -91,7 +103,23 @@ grep -rl '`platform`' openspec/specs --include=spec.md
   `skills/legal-summarizer-query`: спека описывает subprocess-IPC со
   `scripts/cli_query.py`, которого в агенте уже нет, а фактический вызов идёт
   через MCP-операцию `legal_summarizer.query_operation`.
-- **`COMPONENTS.md` всё ещё перечисляет `CacheProvider` и `VectorIndexService`
-  как компоненты агента** и указывает файлы реализации, которых нет. Валидатор
-  честно предупреждает об этом на каждом запуске (предупреждение, не ошибка:
-  код может быть в другой ветке).
+- **Ни один из 14 активных change'ов не завершён** — 360 задач из 584, поэтому
+  ни один не готов к архивированию по критерию OpenSpec (выполненные задачи,
+  а не наличие текста). Ближе всех `enterprise-mcp-platform` (142/143, не
+  сделана одна задача 7.4 — перенос `logging.db.retention_days` и purge пустых
+  outbound в конфиг).
+  `tools/change_status.py` считает блокером **другое**: либо дельта заводит
+  несуществующую спеку, либо её требования уже лежат в каноне и архив их
+  продублирует. Это разные вещи — снятие блокера инструмента не делает change
+  завершённым, поэтому «Требуют решения: 10 из 14» нельзя читать как «10
+  change'ов ждут меня».
+- **`runtime/cli-client` описывает несуществующий код.** Change
+  `unify-runtime-channels` выполнен на 5 из 51 задач, модуль
+  `lib/channels/cli_channel.py` в дереве отсутствует. Нормативные требования
+  оставлены как целевое состояние, статус в `COMPONENTS.md` — `draft`.
+- **Три сценария `data/query` расходятся с кодом** и ждут решения владельца:
+  код отказа пула — `pool_busy` (`mcp-platform/libs/enterprise_data/db.py:453`),
+  а не `queue_full`; предел ожидания — `wait_sec` у класса работы, а не
+  `pool_timeout`; форма ответа о приёме события — строка `"accepted"` /
+  `"dropped"` либо пара `{"accepted": n, "dropped": m}`, а не объект с
+  `reason`. Расхождения перечислены в `## Verification` этой спеки.

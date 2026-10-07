@@ -19,17 +19,17 @@
 |-----------|-------|----------|---------|-------|---------|
 | architecture | 2 | 0 | 2 | 0 | 0 |
 | configuration | 1 | 0 | 1 | 0 | 0 |
-| data | 4 | 1 | 3 | 0 | 0 |
+| data | 9 | 1 | 8 | 0 | 0 |
 | documentation | 1 | 0 | 0 | 1 | 0 |
 | infrastructure | 1 | 0 | 1 | 0 | 0 |
 | interfaces | 2 | 0 | 2 | 0 | 0 |
 | observability | 2 | 0 | 2 | 0 | 0 |
-| runtime | 13 | 0 | 13 | 0 | 0 |
+| runtime | 20 | 0 | 19 | 1 | 0 |
 | sessions | 2 | 0 | 1 | 1 | 0 |
 | skills | 1 | 0 | 1 | 0 | 0 |
 | testing | 1 | 0 | 1 | 0 | 0 |
 | validation | 1 | 0 | 0 | 1 | 0 |
-| **Итого** | **31** | **1** | **27** | **3** | **0** |
+| **Итого** | **43** | **1** | **38** | **4** | **0** |
 
 ## Компоненты
 
@@ -57,6 +57,13 @@
 | StartupSchemaValidation | `lib/services/schema_validation.py:SchemaValidationService` | [`runtime/startup-schema-validation`](runtime/startup-schema-validation/spec.md) | partial |
 | SessionFiles | `lib/services/session_files.py`, `mcp-platform/servers/enterprise/tools/session_files.py` | [`runtime/session-files`](runtime/session-files/spec.md) | partial |
 | CallContract | `mcp-platform/libs/enterprise_common/execution/errors.py` | [`runtime/call-contract`](runtime/call-contract/spec.md) | partial |
+| EventModel | `mcp-platform/libs/enterprise_common/eventing/writer.py`, `.../eventing/types.py` | [`runtime/event-model`](runtime/event-model/spec.md) | partial |
+| ToolRegistry | `mcp-platform/libs/enterprise_common/registry.py:ToolRegistry`, `.../loader.py` | [`runtime/tool-registry`](runtime/tool-registry/spec.md) | partial |
+| ToolExecutionPipeline | `mcp-platform/libs/enterprise_common/execution/pipeline.py` | [`runtime/tool-execution`](runtime/tool-execution/spec.md) | partial |
+| CallTimeoutBudget | `config.json::tools.mcpServers.enterprise.tool_timeout`, `mcp-platform/platform.json::execution` | [`runtime/call-timeout`](runtime/call-timeout/spec.md) | partial |
+| QueueChannelSwitch | `lib/channels/queue_ops.py:QueueOps`, `lib/channels/postgres_channel.py` | [`runtime/queue-channel-switch`](runtime/queue-channel-switch/spec.md) | partial |
+| PatchToHook | `lib/services/runtime_patcher.py:_PATCH_SPECS` | [`runtime/patch-to-hook`](runtime/patch-to-hook/spec.md) | partial |
+| CliChannelClient | `cli_agent.py`, `lib/cli/console_loop.py` — клиентский модуль вводится change `unify-runtime-channels` и в дереве отсутствует | [`runtime/cli-client`](runtime/cli-client/spec.md) | draft |
 
 ### Configuration
 
@@ -78,6 +85,11 @@
 | VectorIndexBuilder | `mcp-platform/libs/vectors/builder.py:VectorBuilder` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
 | VectorIndexOwner | `mcp-platform/libs/vectors/owner.py:VectorIndexOwner` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
 | OperationSchema | `mcp-platform/libs/enterprise_common/registry.py:build_input_schema` | [`data/operation-schema`](data/operation-schema/spec.md) | complete |
+| AuditScripts | `mcp-platform/libs/audit/registry_loader.py`, `.../generated_sql.py` | [`data/audit`](data/audit/spec.md) | partial |
+| VectorsCapability | `mcp-platform/libs/vectors/owner.py`, `mcp-platform/servers/enterprise/build_index.py` | [`data/vectors`](data/vectors/spec.md) | partial |
+| QueryCapability | `mcp-platform/servers/enterprise/capabilities/data/service/main.py:DataService` | [`data/query`](data/query/spec.md) | partial |
+| DuckDbCacheStore | `mcp-platform/libs/enterprise_data/snapshot/store.py:DuckDbSnapshotStore` | [`data/duckdb-cache`](data/duckdb-cache/spec.md) | partial |
+| TaskQueueOps | `mcp-platform/servers/enterprise/capabilities/data/tools/claim_task.py`, `.../service/main.py` | [`data/task-queue`](data/task-queue/spec.md) | partial |
 
 ### Infrastructure
 
