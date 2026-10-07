@@ -779,7 +779,7 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
 - **THEN** зеркало MUST NOT числиться среди владельцев: перечень его операций
   MUST совпадать с тем, что платформа реально регистрирует, и каждая операция
   MUST быть `runtime-only`, то есть недоступна модели
-  (`mcp-platform/servers/enterprise/capabilities/data/service/registry.py:62-64`
+  (`mcp-platform/servers/enterprise/capabilities/data/service/registry.py:67-69`
   — `JOB_AUDIENCE_RUNTIME`; страж
   `tests/test_session_mirror_wire.py::test_mirror_operation_is_registered_on_the_platform`,
   `::test_no_mirror_operation_is_left_unused`)
@@ -812,7 +812,7 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
   чтения источника и без вызова записи
   (`lib/gateway/mirror/mirror_poller.py:378-383`).
 - Операция MUST оставаться `runtime-only`: её зовёт фоновая подсистема шлюза, а
-  не модель (`mcp-platform/servers/enterprise/capabilities/data/service/registry.py:62-64`;
+  не модель (`mcp-platform/servers/enterprise/capabilities/data/service/registry.py:67-69`;
   permission `data:session_mirror_state`).
 
 #### Scenario: Состояние реплики запрашивается один раз за цикл
@@ -883,7 +883,8 @@ shutdown order) — в `openspec/changes/archive/2026-09-27-storage-hybridizatio
   (`cleanup_session_mirror()` в `capabilities/data/service/main.py` — возвращаемые счётчики): `scanned`, `missing`, `reappeared`, `deleted_sessions`,
   `deleted_keys`, `deleted_messages`.
 - Операция MUST оставаться `runtime-only`
-  (`registry.py:62-64`; permission `data:cleanup_session_mirror`).
+  (`mcp-platform/servers/enterprise/capabilities/data/service/registry.py:68`;
+  permission `data:cleanup_session_mirror`).
 
 #### Scenario: Порог доезжает аргументом, а не настройкой базы
 

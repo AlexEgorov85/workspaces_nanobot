@@ -549,7 +549,8 @@
 - `mcp-platform/servers/enterprise/server.py:1154`
   (`_agent_settings_path_from_argv`) — разбор argv;
   `Settings(..., agent_settings_path=...)` — чтение и слияние блока;
-  баннер `agent_settings_summary(settings)` в стартовом логе (`server.py:722`);
+  баннер `agent_settings_summary(settings)` в стартовом логе
+  (`mcp-platform/servers/enterprise/server.py:722`);
 - `mcp-platform/servers/enterprise/http_transport.py:97`
   (`requested_transport`) — читает уже **применённые** значения
   `ENTERPRISE_TRANSPORT_{MODE,BIND,PORT,NOTIFY_FD}`, и больше ниоткуда.

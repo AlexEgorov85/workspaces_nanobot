@@ -68,14 +68,14 @@ THEN `OutboundMessage.metadata._error_kind` SHALL быть равен `"internal
 > **Reason for MODIFICATION:** Реализация читала `session_key` и `user_id`
 > из `lifecycle_message`, но `InboundMessage` (`nanobot/bus/events.py:25-37`) не имеет
 > ни `session_key`, ни `user_id`. Кроме того, `TurnDelivery.fail(self, *,
-> publish_completion: bool)` (`turn_delivery.py:336`) не получает объект
+> publish_completion: bool)` (`nanobot/agent/turn_delivery.py:336`) не получает объект
 > исключения в сигнатуре, а захват через `sys.exception()` не был
 > реализован. Результат: `session_id=None`, `user_id=None`,
 > `exception_type`/`exception_message` отсутствуют в payload.
 
 WHEN система формирует fallback-ответ,
 THEN при `gateway.error_messages.log_to_db=true` (default) система SHALL записать в `agent_gateway_logs` запись `event_type="agent.failed"` с payload, содержащим ВСЕ перечисленные ниже поля, полученные **из авторитетных источников**:
-- `session_key` — из атрибута `TurnDelivery.session_key` (установлен через `TurnDelivery.create(msg, session_key, ...)` в `turn_delivery.py:85-103`). НЕ из `lifecycle_message` (такого поля нет).
+- `session_key` — из атрибута `TurnDelivery.session_key` (установлен через `TurnDelivery.create(msg, session_key, ...)` в `nanobot/agent/turn_delivery.py:85-103`). НЕ из `lifecycle_message` (такого поля нет).
 - `channel` — из `lifecycle_message.channel` (`nanobot/bus/events.py:28`).
 - `chat_id` — из `lifecycle_message.chat_id` (`nanobot/bus/events.py:30`).
 - `sender_id` — из `lifecycle_message.sender_id` (`nanobot/bus/events.py:29`). НЕ из `lifecycle_message.user_id` (такого поля нет).

@@ -413,8 +413,8 @@ SHALL выполняться до вызова `run()`.
 у `run()` нет ни пути, ни режима загрузки, ни разбора исходов отказа.
 
 Загрузчик домена отказывает голым `ValueError`
-(`application/document_io.py:17`, `:24-28` на неподдерживаемом расширении и
-`:33-36` на документе без извлекаемого текста), а ошибки парсера
+(`application/document_io.py:17`, `:34-37` на неподдерживаемом расширении и
+`:40-42` на документе без извлекаемого текста), а ошибки парсера
 (`libs.office.extract_text`) выпускает как есть. Ни один из этих исходов не
 назван, поэтому операция SHALL различать пять исходов и каждому SHALL
 соответствовать названный код отказа:
@@ -434,8 +434,8 @@ SHALL выполняться до вызова `run()`.
 файла и каталог вместо файла проверяются примитивом сессии до загрузки,
 неподдерживаемое расширение отвергается загрузчиком по списку
 `_SUPPORTED_EXTENSIONS` (`.pdf`, `.docx`, `.txt`,
-`application/document_io.py:14`), отсутствие текста — тем же загрузчиком на
-`:33-36`, нечитаемость — исключением парсера. Последние два дают один и тот же
+`application/document_io.py:13`), отсутствие текста — тем же загрузчиком на
+`:40-42`, нечитаемость — исключением парсера. Последние два дают один и тот же
 тип исключения, поэтому перевод SHALL различать их по факту: извлечённого текста
 нет, но файл открыт — это `EMPTY_DOCUMENT`, а файл не открылся — это
 `document_unreadable`.
@@ -1191,7 +1191,7 @@ SHALL снимать его в `finally`, и SHALL отказывать повт
 
 - **WHEN** вызов закончился `ExecutionTimeout`, и его поток не был прерван —
   `future.cancel()` для идущей задачи не действует
-  (`execution/pipeline.py:346`)
+  (`mcp-platform/libs/enterprise_common/execution/pipeline.py:346`)
 - **THEN** признак занятости SHALL остаться удержанным до завершения потока,
   потому что `finally` в потоке выполнится
 - **AND** следующий вызов SHALL получить `operation_in_progress`, а не начать
@@ -1393,7 +1393,7 @@ SHALL проходить гейт без повторного подтвержд
 Выбор подкаталога обоснован занятыми смыслами: `results/` — «крупные результаты,
 сохраняемые по порогу», пишет их платформа; `files/` — «не содержит файлов,
 созданных платформой»; `artifacts/` — «доменные вложения, созданные явно»
-(`openspec/changes/2026-10-03-session-files/specs/runtime/session-files/spec.md:204-221`).
+(`openspec/changes/archive/2026-10-03-session-files/specs/runtime/session-files/spec.md:204-221`).
 Манифест операции — доменное вложение, а не крупный результат по порогу.
 Ссылка `session://artifacts/…` уже разбирается существующей `read_result`.
 
@@ -1622,27 +1622,35 @@ SHALL NOT выдавать `artifact_id` для него. Поиск имён х
 Причина объявления — признак, а не место: чтение состояния операции есть работа
 с файлами сессии, поэтому по признаку «работа с состоянием операции» операция
 SHALL быть платформенной. Практическое следствие признака видно прямо в коде:
-у операции capability нет `ctx`. Её фабрика получает только контейнер
-(`create_tool(container: ToolContainer)`), а сигнатура обработчика
-`query_operation(operation_id, field, max_chunk_summary_chars)`
-(`…/capabilities/legal_summarizer/tools/query_operation.py:21-30`) не содержит
-`ctx` вообще, то есть `session_id` у неё сегодня недоступен никак. Хранилище
-безопасность берётся у слоя исполнения и намеренно не кладётся в контейнер
-(`servers/enterprise/server.py:629-630`), поэтому и обходного пути у capability
-нет.
+у операции, объявленной внутри capability, нет `ctx` — её фабрика получает
+только контейнер (`create_tool(container: ToolContainer)`), а `session_id`
+обработчику взять неоткуда. Хранилище и безопасность берётся у слоя исполнения и
+намеренно не кладётся в контейнер (`servers/enterprise/server.py:629-630`),
+поэтому и обходного пути у capability нет.
+
+Перенос выполнен: обработчик объявлен в composition root'е и первым аргументом
+принимает `ctx: ToolExecutionContext`
+(`mcp-platform/servers/enterprise/tools/query_operation.py:179-184`), а объявления
+внутри capability в дереве нет: у неё остались только запасной корень и доменная
+конфигурация
+(`mcp-platform/servers/enterprise/capabilities/legal_summarizer/service/main.py:1-14`).
 
 `query_operation` SHALL разрешать каталог операции **тем же способом, что и
 `analyze_document`**, — из сессии вызова, и SHALL читать состояние по тому же
 пути, куда его пишет писатель.
 
-Сейчас читатель разрешает корень сам и не из сессии: сервис capability берёт
-`legal_summarizer.cache_root`, затем `ENTERPRISE_LEGAL_CACHE_ROOT`, и сам выводит
-корень (`capabilities/legal_summarizer/service/main.py:104-110`), после чего
-передаёт его вниз как `workspace_root=self._cache_root` (`:135`), а тот читает
-`<корень>/operations/<op_id>/`. Писатель после переноса состояния в папку сессии
-пишет в `artifacts/legal_summarizer/operations/<operation_id>/` сессии, то есть
-разрешение корня у читателя и писателя разойдётся, и **любой** `query_operation`
-получит `manifest_not_found`, хотя состояние только что было создано.
+Корень состояния объявлен один, но применяется по двум путям. Сервис capability
+берёт `legal_summarizer.cache_root`, затем `ENTERPRISE_LEGAL_CACHE_ROOT`, и сам
+выводит корень (`capabilities/legal_summarizer/service/main.py:87-93`), а читатель
+получает его как запасной путь, применяемый только без сессии
+(`servers/enterprise/tools/query_operation.py:171`, `:199-211`), и читает
+`<корень>/operations/<op_id>/`
+(`mcp-platform/libs/legal_summarizer/cache/manifest.py:227-238`). Писатель пишет
+в `artifacts/legal_summarizer/operations/<operation_id>/` сессии
+(`servers/enterprise/tools/analyze_document.py:170-177`), то есть если бы читатель
+разрешал корень сам, разрешение у него и у писателя разошлось бы, и **любой**
+`query_operation` получил бы `manifest_not_found`, хотя состояние только что было
+создано.
 
 Поэтому:
 
@@ -1697,8 +1705,9 @@ SHALL быть платформенной. Практическое следст
 частичное завершение и финальное завершение.
 
 Уточнение: отказ по таймауту **уже различим** — конвейер пишет его сам
-(`execution/pipeline.py:467-492` → `logger.failed(..., timed_out=True)` →
-`payload["status"] = "timeout"`, `execution/logger.py:396`). Требование
+(`mcp-platform/libs/enterprise_common/execution/pipeline.py:467-492` →
+`logger.failed(..., timed_out=True)` → `payload["status"] = "timeout"`,
+`execution/logger.py:396`). Требование
 распространяется на шаги самой операции, а не заменяет журнал конвейера.
 
 Записи шагов операции SHALL идти через платформенную операцию `log_events`, а не
@@ -1821,11 +1830,12 @@ SHALL быть платформенной. Практическое следст
 
 Канон `runtime/call-contract` держат **два** неархивированных change:
 `2026-10-03-mcp-native-tools` и `2026-10-04-enterprise-mcp-http-transport`
-(**четыре** ADDED-требования: одно у первого —
-`2026-10-03-mcp-native-tools/…/call-contract/spec.md:70`, три у второго —
-`2026-10-04-enterprise-mcp-http-transport/…/call-contract/spec.md:22`, `:110`,
-`:150`; у первого же есть одно MODIFIED — `:27`). Оба сливаются в один канон,
-поэтому объявлять коды SHALL в обоих, а порядок архивирования значим:
+(**пять** ADDED-требований: два у первого —
+`openspec/changes/2026-10-03-mcp-native-tools/specs/runtime/call-contract/spec.md:26`,
+`:149`, три у второго —
+`openspec/changes/2026-10-04-enterprise-mcp-http-transport/specs/runtime/call-contract/spec.md:22`,
+`:110`, `:150`; MODIFIED-требований в дельте первого нет). Оба сливаются в один
+канон, поэтому объявлять коды SHALL в обоих, а порядок архивирования значим:
 объявление, сделанное позже, перепишет уже слитое.
 
 Перечень кодов разделён на два, и требование относится только ко второму.
@@ -2014,7 +2024,7 @@ max_chunk_summary_chars: int = 1500
 **Допустимые `field`** — `frozenset` из шести имён
 (`mcp-platform/libs/legal_summarizer/cli_query.py:112-114`):
 `stats`, `articles`, `chunks`, `sections`, `tree`, `all`. Проверка стоит
-**до** чтения с диска (`cli_query.py:418`).
+**до** чтения с диска (`cli_query.py:423`).
 
 **Таблица кодов конверта** (`query_operation.py:52-57`) — четыре ключа,
 буквально совпадающих с ключами `cli_query.DOMAIN_ERROR_TYPES`
@@ -2204,7 +2214,7 @@ capability касаться `SessionWorkspace`/`ArtifactStore`. Именно п�
    Проверка до чтения с диска — иначе на несуществующем `operation_id`
    модель получила бы «manifest не найден» и решила бы, что ошиблась в
    имени, а не в поле (`cli_query.py:414-417`).
-2. **Неизвестное поле** (`cli_query.py:418-429`) → `LegalQueryError` с
+2. **Неизвестное поле** (`cli_query.py:423-434`) → `LegalQueryError` с
    `error_type: invalid_field`, переводится в `invalid_params`
    (`query_operation.py:56`). Сообщение содержит перечень допустимых
    полей. Чтение манифеста не выполняется.

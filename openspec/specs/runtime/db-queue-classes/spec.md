@@ -121,7 +121,7 @@
 
 Обоснование: подбор воркера по признаку работы уже есть в коде — аренда
 берётся только тем воркером, у которого совпал `lease_id`
-(`db.py:825`, :851-869). Обобщение на аудиторию не вводит нового механизма.
+(`mcp-platform/libs/enterprise_data/db.py:825`, :851-869). Обобщение на аудиторию не вводит нового механизма.
 
 #### Scenario: Зарезервированный воркер не берёт работу модели
 
@@ -212,7 +212,7 @@
 - Счётчик отказов обязателен и обязан быть виден в `get_stats()`.
 
 Смысл: сейчас `pool.run(...)` ждёт результат без таймаута
-(`db.py:1561` — модульный `run`), а `queue_maxsize: 10000` разрешает десять тысяч
+(`mcp-platform/libs/enterprise_data/db.py:1561` — модульный `run`), а `queue_maxsize: 10000` разрешает десять тысяч
 ожидающих на четыре места. Ожидание без предела не выражает приоритет,
 а прячет его.
 
@@ -365,7 +365,7 @@
    проходит по `psycopg2`, а не по объекту соединения. Вне
    `mcp-platform/libs/enterprise_data` MUST NOT импортировать `psycopg2` и
    MUST NOT создавать соединение; это и ловит страж границ. Но `run(fn)`
-   (`db.py:1561`) **отдаёт вызывающему сырой `psycopg2`-conn** — и это
+   (`mcp-platform/libs/enterprise_data/db.py:1561`) **отдаёт вызывающему сырой `psycopg2`-conn** — и это
    объявленный контракт, а не утечка: его докстринг прямо называет это
    невы транзакционным путём и предупреждает не звать внутри публичного API
    модуля. Причина в том, что `_ConnectionProxy` привязан к аренде и
@@ -420,7 +420,7 @@
 `job_classes`, которая обязана быть полной так же.
 
 Соответствие «контракт пула = список настроек» сохраняется: новый ключ
-появляется одновременно в `_POOL_SPEC` (`db.py:108`),
+появляется одновременно в `_POOL_SPEC` (`mcp-platform/libs/enterprise_data/db.py:108`),
 `POOL_SETTING_KEYS` (`mcp-platform/libs/enterprise_common/settings.py:1149`) и в
 `mcp-platform/platform.json`. Значений в коде не появляется — этого требует
 существующий страж `test_no_pool_values_are_declared_in_code`.
@@ -455,61 +455,61 @@
 - Имена аудиторий — единственное место определения:
   `JOB_AUDIENCE_MODEL = "model"`, `JOB_AUDIENCE_RUNTIME = "runtime"`,
   `ALL_AUDIENCES` (`mcp-platform/libs/enterprise_data/audience.py:28-40`).
-- Настройка: `set_pool_config(cfg)` (`db.py:125`) и
-  `set_job_class_config(cfg)` (`db.py:223`) — обе проверяют полноту набора и
+- Настройка: `set_pool_config(cfg)` (`mcp-platform/libs/enterprise_data/db.py:125`) и
+  `set_job_class_config(cfg)` (`mcp-platform/libs/enterprise_data/db.py:223`) — обе проверяют полноту набора и
   типы, обе бросают `InfrastructureError`.
-- Чтение настроек: `pool_is_configured()` (`db.py:193`),
-  `job_class_config()` (`db.py:284`), `job_classes_configured()`
-  (`db.py:289`), `statement_timeout_ms(audience)` (`db.py:301`).
-- Работа с БД: `start()` (`db.py:1505`), `shutdown()` (`db.py:1510`),
-  `get_stats()` (`db.py:1518`), `run(fn, *, audience=...)`
-  (`db.py:1561`), `try_submit(job, *, audience=...)` (`db.py:1575`),
+- Чтение настроек: `pool_is_configured()` (`mcp-platform/libs/enterprise_data/db.py:193`),
+  `job_class_config()` (`mcp-platform/libs/enterprise_data/db.py:284`), `job_classes_configured()`
+  (`mcp-platform/libs/enterprise_data/db.py:289`), `statement_timeout_ms(audience)` (`mcp-platform/libs/enterprise_data/db.py:301`).
+- Работа с БД: `start()` (`mcp-platform/libs/enterprise_data/db.py:1505`), `shutdown()` (`mcp-platform/libs/enterprise_data/db.py:1510`),
+  `get_stats()` (`mcp-platform/libs/enterprise_data/db.py:1518`), `run(fn, *, audience=...)`
+  (`mcp-platform/libs/enterprise_data/db.py:1561`), `try_submit(job, *, audience=...)` (`mcp-platform/libs/enterprise_data/db.py:1575`),
   `execute` (`:1606`), `fetch` (`:1621`), `fetchone` (`:1636`),
   `fetchval` (`:1652`), `execute_values` (`:1668`), `execute_values_on`
   (`:1693`), `transaction(*, audience=...)` (`:1724`),
   `run_transaction` (`:1747`). Аудитория по умолчанию — `model`.
-- Отказы: `PoolTimeoutError` (`db.py:437`), `PoolBusyError` с кодом
-  `pool_busy` (`db.py:441-453`), `InfrastructureError` от настройки.
+- Отказы: `PoolTimeoutError` (`mcp-platform/libs/enterprise_data/db.py:437`), `PoolBusyError` с кодом
+  `pool_busy` (`mcp-platform/libs/enterprise_data/db.py:441-453`), `InfrastructureError` от настройки.
 
 ## Inputs
 
 - Секция `pool` из `mcp-platform/platform.json` целиком — значения в коде
   отсутствуют, `_POOL_SPEC` объявляет только ключи и типы
-  (`db.py:108-122`).
+  (`mcp-platform/libs/enterprise_data/db.py:108-122`).
 - Секция `job_classes` — по одной записи на аудиторию
-  (`db.py:213-218`); набор аудиторий обязан совпасть с `ALL_AUDIENCES`.
+  (`mcp-platform/libs/enterprise_data/db.py:213-218`); набор аудиторий обязан совпасть с `ALL_AUDIENCES`.
 - Аудитория каждой работы — keyword-аргумент в сигнатуре операции, а не
   вычисление внутри пула.
-- DSN — `resolve_dsn()` (`db.py:1476`).
+- DSN — `resolve_dsn()` (`mcp-platform/libs/enterprise_data/db.py:1476`).
 
 ## Outputs
 
 - Счётчики на аудиторию: `queued`, `running`, `rejected`, `taken`,
-  `wait_total`, `wait_max` (`_audience_bucket`, `db.py:465-474`), плюс
+  `wait_total`, `wait_max` (`_audience_bucket`, `mcp-platform/libs/enterprise_data/db.py:465-474`), плюс
   общая сводка из `get_stats()`.
 - Результат операции или доменный отказ; наружу выходит ровно то, что вернул
   переданный `fn`.
 - `pool_busy` как код доменной ошибки, который отличает «занято» от
-  «упало» (`db.py:444-453`).
+  «упало» (`mcp-platform/libs/enterprise_data/db.py:444-453`).
 
 ## State
 
-Модульные `_pool_cfg: dict` (`db.py:122`) и
-`_job_class_cfg: dict[str, dict]` (`db.py:220`) — единственное долговременное
+Модульные `_pool_cfg: dict` (`mcp-platform/libs/enterprise_data/db.py:122`) и
+`_job_class_cfg: dict[str, dict]` (`mcp-platform/libs/enterprise_data/db.py:220`) — единственное долговременное
 состояние настроек; заполняются один раз при старте. Персистентный
-`DBManager` (`db.py:699`) держит счётчики аудиторий, `_reserved_workers`
+`DBManager` (`mcp-platform/libs/enterprise_data/db.py:699`) держит счётчики аудиторий, `_reserved_workers`
 (`:727`) и набор соединений. Инстанс один на процесс, под локом
-(`_manager`, `_manager_lock` — `db.py:1456-1457`).
+(`_manager`, `_manager_lock` — `mcp-platform/libs/enterprise_data/db.py:1456-1457`).
 
 ## Dependencies
 
 - `psycopg2` — соединения и курсоры; `_Worker` владеет ровно одним
-  соединением (`db.py:482-493`).
+  соединением (`mcp-platform/libs/enterprise_data/db.py:482-493`).
 - `libs.enterprise_data.audience` — имена и множество аудиторий.
 - `libs.enterprise_common.settings` — `Settings` и оверлей профиля.
 - `mcp-platform/servers/enterprise/server.py::_apply_pool_settings`
-  (`server.py:144`) — единственный, кто применяет обе секции; вызывается
-  при старте (`server.py:607`).
+  (`mcp-platform/servers/enterprise/server.py:144`) — единственный, кто применяет обе секции; вызывается
+  при старте (`mcp-platform/servers/enterprise/server.py:607`).
 - Никаких значений настроек из кода: `_POOL_SPEC` и `_JOB_CLASS_SPEC`
   хранят только ключи и типы.
 
@@ -521,9 +521,9 @@
   `queue_maxsize`, `reconnect_backoff_sec`, `reconnect_backoff_max_sec`,
   `connect_max_retries`, `idle_timeout_sec`, `job_max_retries`,
   `print_activity`) — полный набор, неполнота это ошибка конфигурации
-  (`db.py:174-184`).
+  (`mcp-platform/libs/enterprise_data/db.py:147-155`).
 - `job_classes` (`statement_timeout_ms`, `queue_maxsize`, `wait_sec`,
-  `leases`) — полный набор для каждой аудитории (`db.py:213-218`,
+  `leases`) — полный набор для каждой аудитории (`mcp-platform/libs/enterprise_data/db.py:213-218`,
   `:260-269`).
 - Инварианты, проверяемые на старте: `reserved_workers < max_conn - 1`
   (`:175`), при `reserved_workers >= 1` требуется `min_conn >= 2` (`:182`).
@@ -533,13 +533,13 @@
 ## Lifecycle
 
 1. Сервер читает `Settings` и вызывает `_apply_pool_settings`
-   (`server.py:607`), которая зовёт `set_pool_config` и
-   `set_job_class_config` (`server.py:160-162`).
+   (`mcp-platform/servers/enterprise/server.py:607`), которая зовёт `set_pool_config` и
+   `set_job_class_config` (`mcp-platform/servers/enterprise/server.py:160-162`).
 2. Неприменённая секция — не запасной путь: `job_classes_configured() == False`
-   означает «классификации нет» (`db.py:289-298`), и сервер обязан был
+   означает «классификации нет» (`mcp-platform/libs/enterprise_data/db.py:289-298`), и сервер обязан был
    применить файл до старта.
 3. `start()` создаёт `DBManager` и воркеры; каждый воркер один раз получает
-   набор аудиторий через `_audiences_for(index)` (`db.py:492`).
+   набор аудиторий через `_audiences_for(index)` (`mcp-platform/libs/enterprise_data/db.py:492`).
 4. Работа входит в пул через `submit`/`try_submit`/`run`/операции с
    аудиторией и уходит в воркер.
 5. `shutdown()` останавливает пул.
@@ -548,25 +548,25 @@
 
 Пул не владеет данными PostgreSQL: он владеет **соединениями**. Пул не
 создаёт таблиц, не объявляет DDL и не мигрирует схему. Аргументы запросов
-проходят через санитайзеры (`_sanitize_param` `db.py:1262`,
+проходят через санитайзеры (`_sanitize_param` `mcp-platform/libs/enterprise_data/db.py:1262`,
 `_sanitize_params` `:1278`); соединение, пока отдан в аренду под транзакцию,
 чужими задачами не берётся.
 
 ## Error Behavior
 
 - Неизвестная аудитория отвергается на входе в пул (`_check_audience`,
-  `db.py:327-335`): молча пропустить хуже, её не взял бы ни один воркер, и
+  `mcp-platform/libs/enterprise_data/db.py:327-335`): молча пропустить хуже, её не взял бы ни один воркер, и
   она стояла бы в очереди вечно — пул выглядел бы живым, а работа пропала.
 - Переполнение `queue_maxsize` и невозможность дождаться воркера — отказ
-  `PoolBusyError` (`db.py:441`), а не ожидание в обход объявленного потолка.
+  `PoolBusyError` (`mcp-platform/libs/enterprise_data/db.py:441`), а не ожидание в обход объявленного потолка.
 - `set_pool_config` / `set_job_class_config` бросают `InfrastructureError` с
-  перечислением недостающих и лишних ключей (`db.py:243-279`).
+  перечислением недостающих и лишних ключей (`mcp-platform/libs/enterprise_data/db.py:243-279`).
 - `PoolBusyError.__init__` написан явно: множественное наследование
   пропускает `EnterpriseError.__init__`, а адаптер MCP читает `message` у
-  любой доменной ошибки (`db.py:455-462`).
+  любой доменной ошибки (`mcp-platform/libs/enterprise_data/db.py:455-462`).
 - Воркер без живого соединения не отнимает задачи у подключённых: берёт
   обычную задачу, только когда в пуле нет ни одного воркера с живым
-  соединением (`db.py`, module docstring, `:18-22`).
+  соединением (`mcp-platform/libs/enterprise_data/db.py`, module docstring, `:18-22`).
 
 ## Invariants
 
@@ -574,27 +574,27 @@
   (`mcp-platform/libs/enterprise_data/audience.py:28-40`); дублировать их в
   capability нельзя — общий код не имеет права зависеть от capability.
 - `_RESERVED_AUDIENCES = frozenset({JOB_AUDIENCE_RUNTIME})`
-  (`db.py:81`): зарезервированный воркер не берёт `model` ни при каком
+  (`mcp-platform/libs/enterprise_data/db.py:81`): зарезервированный воркер не берёт `model` ни при каком
   состоянии пула.
 - Резерв выражен числом воркеров, а не счётчиком «занято моделью»:
   воркер, который не берёт `model`, не может отдать его ни при каком
-  состоянии пула (`db.py:898-902`).
+  состоянии пула (`mcp-platform/libs/enterprise_data/db.py:898-902`).
 - Значения настроек живут только в `platform.json`; `_POOL_SPEC` и
   `_JOB_CLASS_SPEC` — контракт ключей и типов, а не значения
-  (`db.py:202-218`).
+  (`mcp-platform/libs/enterprise_data/db.py:202-218`).
 - `pool_timeout` — порог диагностического warning, а не лимит ожидания
-  (`db.py`, module docstring `:14-15`).
+  (`mcp-platform/libs/enterprise_data/db.py`, module docstring `:14-15`).
 
 ## Forbidden Behavior
 
 - Объявлять значение настройки в коде как запасной вариант: настройка,
   объявленная в двух местах, даёт два ответа на вопрос «что применяется»
-  (`db.py:202-205`).
+  (`mcp-platform/libs/enterprise_data/db.py:202-205`).
 - Неполная секция `job_classes`, достроенная значениями по умолчанию:
   отсутствующий ключ останавливает сервер с его именем
   (`mcp-platform/platform.json` → `job_classes._about`).
 - Дублировать имя аудитории вне `audience.py`.
-- Молча пропускать работу неизвестного класса (`db.py:327-333`).
+- Молча пропускать работу неизвестного класса (`mcp-platform/libs/enterprise_data/db.py:327-333`).
 - Отдавать `model`-работу зарезервированному воркеру «по очереди, если
   модельных нет» — резерв существует именно затем, чтобы этого не было.
 - Держать настройку очереди в коде вместо `platform.json`.
@@ -602,13 +602,13 @@
 ## Consumers
 
 - `mcp-platform/servers/enterprise/server.py::_apply_pool_settings`
-  (`server.py:144`, вызов `:607`) — единственный применяющий обе секции.
+  (`mcp-platform/servers/enterprise/server.py:144`, вызов `:607`) — единственный применяющий обе секции.
 - `mcp-platform/servers/enterprise/capabilities/data/service/` — объявляет
   аудиторию в сигнатуре операций и берёт `_require_runtime`.
 - Аудитории импортируются в
   `mcp-platform/servers/enterprise/capabilities/data/service/main.py`
   (`:41-44`) из `audience.py`, а не определяются там.
-- Оператор — через `get_stats()` (`db.py:1518`): счётчики занятости и
+- Оператор — через `get_stats()` (`mcp-platform/libs/enterprise_data/db.py:1518`): счётчики занятости и
   ожидания по классам.
 
 ## Implementation

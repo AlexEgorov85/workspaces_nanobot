@@ -414,7 +414,7 @@ SQLite-база в режиме WAL, одноимённый файл по пут
   библиотеки;
 - **явный путь — наша ответственность**, потому что синглтон его не
   знает: `Path(str(raw_path)).expanduser()` и создание родительского
-  каталога (`lib/core/application_context.py:1981-1982`).
+  каталога (`lib/core/application_context.py:1980-1981`).
 
 Второй элемент состояния — **счётчик досылок** в
 `lib/hooks/mcp_identity_hook.py` (`_generated_request_ids`). К предмету
@@ -427,7 +427,7 @@ SQLite-база в режиме WAL, одноимённый файл по пут
 
 - `nanobot.llm_usage.get_llm_usage_store` — фабрика-синглтон; импортируется
   **лениво**, внутри `_make_usage_store`
-  (`lib/core/application_context.py:1975`);
+  (`lib/core/application_context.py:1974`);
 - `nanobot.llm_usage.store.LLMUsageStore` — сам объект;
 - `nanobot.llm_usage.LLMCallRecord` — тип входа `record()`;
 - `nanobot.providers.fallback_provider.FallbackProvider` — ленивый импорт
@@ -608,7 +608,7 @@ None`. То есть битый раздел конфигурации приво
    предупреждением; иначе пропавший учёт выглядел бы как «учёта нет».
 9. **Импортировать `nanobot.llm_usage` на уровне модуля** вместо
    ленивого импорта внутри фабрики
-   (`lib/core/application_context.py:1975`): ленивость здесь позволяет
+   (`lib/core/application_context.py:1974`): ленивость здесь позволяет
    работать без storage-стека вообще.
 
 ## Consumers

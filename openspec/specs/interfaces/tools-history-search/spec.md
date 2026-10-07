@@ -614,12 +614,15 @@ offset: int = 0
 **Задаётся моделью (публикуется в схеме):**
 
 - `query` — подстрока, ищется по `summary ILIKE` и по `payload::text ILIKE`
-  (`main.py:1370-1373`), оба с `%…%`;
+  (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1370-1373`),
+  оба с `%…%`;
 - `event_type`, `level`, `tool_name`, `since`, `until` — точные фильтры;
   `level` приводится `normalize_level` — **тем же** регистром, что при
-  записи (`main.py:1357`), иначе фильтр молча ничего не находит;
+  записи (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1357`),
+  иначе фильтр молча ничего не находит;
 - `limit` (дефолт 50) прижимается к `[1, max_rows]`
-  (`main.py:1339`), `offset` — к неотрицательному (`main.py:1340`);
+  (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1339`),
+  `offset` — к неотрицательному (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1340`);
 - `offset` — страницовая навигация.
 
 ## Outputs
@@ -650,7 +653,8 @@ offset: int = 0
 Читаемое состояние:
 
 - таблица `agent_gateway_logs`, имя и схема которой резолвятся
-  `_require_log_table("search_logs")` (`main.py:1375`) — то есть
+  `_require_log_table("search_logs")`
+  (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1375`) — то есть
   перекрытие профиля (`platform.json → profiles.<имя> → data.log_table`)
   влияет и на чтение;
 - индекс `agent_gateway_logs_user_id_timestamp_idx`
@@ -693,7 +697,7 @@ offset: int = 0
   (`history_search.py:15-18`);
 - `libs.enterprise_data.jsonb.decode_jsonb` — разбор `payload`;
 - пул соединений платформы — через `submit(...)` с `audience`
-  (`main.py:1387`).
+  (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1387`).
 
 Зависимость, замыкающая контракт, но лежащая в агенте:
 `lib/hooks/mcp_identity_hook.py` подставляет `session_id`/`user_id` в
@@ -711,11 +715,12 @@ offset: int = 0
 
 - **таблица журнала** — `platform.json → data.log_table`, и профиль может
   её переопределить (`platform.json → profiles.<имя>`); операция берёт её
-  через `_require_log_table("search_logs")` (`main.py:1375`). Именно
+  через `_require_log_table("search_logs")`
+  (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1375`). Именно
   поэтому перекрытие профиля проверяется на старте: читать из одной
   таблицы, а писать в другую — значит показывать пустую выдачу;
 - **потолок выборки** — `max_rows` конструктора `DataService`
-  (дефолт 1000, `main.py:465`), то есть конфигурация платформы, а не
+  (дефолт 1000, `mcp-platform/servers/enterprise/capabilities/data/service/main.py:465`), то есть конфигурация платформы, а не
   аргумент вызова;
 - **идентичность на стороне агента** — результат
   `McpIdentityHook.before_execute_tool`; выключить подстановку ключом
@@ -738,12 +743,15 @@ offset: int = 0
    глобальная переменная зависела бы от порядка регистрации, и вторая
    регистрация тихо переписала бы первую
    (`history_search.py:21-23`);
-2. проверка области — в сервисе, до SQL (`main.py:1335-1338`);
-3. приведение `limit`/`offset` и сборка условий (`main.py:1339-1373`);
+2. проверка области — в сервисе, до SQL
+   (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1335-1338`);
+3. приведение `limit`/`offset` и сборка условий
+   (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1339-1373`);
 4. `submit(...)` — работа пула с `audience=AUDIENCE_MODEL` и
-   `statement_timeout` по классу работы (`main.py:1387`, `804-819`);
+   `statement_timeout` по классу работы (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1387`,
+   `804-819`);
 5. детект следующей страницы: `LIMIT N+1`, лишняя строка отбрасывается
-   (`main.py:1385-1389`).
+   (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1385-1389`).
 
 Асимметрия жизненных циклов, ради которой стоит читать этот раздел:
 **подпись личности живёт на стороне агента, выборка — на стороне
@@ -767,7 +775,8 @@ tool-результат с объяснением) или отказ серви�
 Правило, которое спека делает нормативным и которое легко нарушить
 неосторожно: **поиск без области — не «широкий поиск», а отказ.** Реализация
 единственная и она на второй строке метода
-(`main.py:1335-1338`): нет ни `user_id`, ни `session_id` →
+(`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1335-1338`): нет ни `user_id`,
+ни `session_id` →
 `InvalidRequestError`. Обход этого запрещён структурно, потому что модель
 не может передать ни одного из этих двух параметров — их нет в схеме.
 
@@ -783,7 +792,8 @@ single-writer (это написано в шапке миграции).
 Три различимых отказа, все на стороне платформы; агентский отказ
 описан отдельно.
 
-**1. Нет области** (`main.py:1335-1338`) → `InvalidRequestError` с текстом
+**1. Нет области** (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1335-1338`)
+→ `InvalidRequestError` с текстом
 «нужен user_id или session_id: поиск по журналу без области видимости
 запрещён». Проверка стоит **до** нормализации `limit` и до сборки SQL,
 то есть до обращения к базе вообще.
@@ -810,7 +820,8 @@ single-writer (это написано в шапке миграции).
 
 Особый случай — выравнивание регистра `level`: приведение выполняется на
 той же стороне, что и запись, иначе фильтр молча не нашёл бы ничего
-(`main.py:1355-1357`). Это не отказ, а предотвращение ложного пустого
+(`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1355-1357`). Это не отказ, а предотвращение
+ложного пустого
 результата.
 
 Чего **нет**: ни одного «мягкого» режима, ни флага
@@ -821,7 +832,8 @@ single-writer (это написано в шапке миграции).
 ## Invariants
 
 1. **Область — пересечение, а не выбор.** Оба предиката добавляются в
-   `clauses` независимо (`main.py:1344-1349`); при двух заданных значениях
+   `clauses` независимо (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1344-1349`);
+   при двух заданных значениях
    работает `AND`. Наличие одного из двух **не** даёт права не применять
    другой — это прямо оговорено требованием «index for scope access».
 2. **Модель не может выбрать область.** В схеме нет ни `user_id`, ни
@@ -829,7 +841,7 @@ single-writer (это написано в шапке миграции).
    обработчика, где параметров области нет
    (`history_search.py:27-37`, `89`).
 3. **Поиск без области — отказ, а не пустая выдача**
-   (`main.py:1335-1338`).
+   (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1335-1338`).
 4. **Личность выводится только из оборота.** Единственное обращение к
    identity-store — в хуке (`mcp_identity_hook.py:193-204`); вывода
    `user_id` из `session_id` нет ни в агенте, ни на платформе.
@@ -847,10 +859,11 @@ single-writer (это написано в шапке миграции).
 8. **Ответ не содержит `user_id`.** Ни одного из семи полей `hits`
    (`history_search.py:61-71`).
 9. **Порядок детерминирован:** `ORDER BY "timestamp" DESC, id DESC`
-   (`main.py:1382`) — сортировка по id обязательна, иначе страницы могли бы
+   (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1382`) — сортировка по id обязательна,
+   иначе страницы могли бы
    повторять и терять строки на равных метках времени.
 10. **Наличие следующей страницы детектируется одним запросом** через
-    `LIMIT N+1` (`main.py:1385-1388`), без отдельного счётчика.
+    `LIMIT N+1` (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1385-1388`), без отдельного счётчика.
 11. **`actor` не является личностью пользователя** и область не меняет.
 12. **Субагент наследует `user_id` родителя явно**, а не по индексу.
 
@@ -858,7 +871,8 @@ single-writer (это написано в шапке миграции).
 
 1. **Возвращать события при отсутствии `user_id` и `session_id`.**
    Это утечка, а не удобный режим: в журнале лежат вопросы пользователей
-   (`history_search.py:3-5`, `main.py:1331-1333`).
+   (`history_search.py:3-5`,
+   `mcp-platform/servers/enterprise/capabilities/data/service/main.py:1331-1333`).
 2. **Объявлять `user_id`, `session_id` или любой иной параметр области в
    опубликованной схеме.** В схеме они стали бы полем, которое заполняет
    модель.
@@ -873,7 +887,8 @@ single-writer (это написано в шапке миграции).
    — фильтр чтения, а не поле выдачи.
 7. **Возвращать отказ на пустую выборку.** Пустой `hits` — честный success.
 8. **Строить SQL по значениям из аргументов строковой склейкой.** Все
-   значения идут плейсхолдерами (`main.py:1345-1385`); единственные
+   значения идут плейсхолдерами (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1345-1385`);
+   единственные
    интерполируемые части — имя таблицы из `_require_log_table` и колонки,
    то есть не пользовательский ввод.
 9. **Сортировать по одной лишь метке времени** без вторичного ключа.
