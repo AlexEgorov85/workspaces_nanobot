@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Архитектура деплоя nanobot — от общего к частному</title>
+<style>
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #03045e;
+  font-family: "Times New Roman", serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+html, body, .slide, .slide-content, .slide-content * { box-sizing: border-box; }
+.slide { display: none; width: 100%; height: 100%; align-items: center; justify-content: center; }
+.slide.active { display: flex; }
+.slide-content {
+  width: 960px;
+  height: 540px;
+  position: relative;
+  transform-origin: center center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+</style>
+</head>
+<body>
+
+<!-- ================= 01 COVER ================= -->
+<div class="slide active" id="s1"><div class="slide-content" style="background:#03045e;">
+  <svg width="6" height="200" style="position:absolute;left:56px;top:104px;" aria-hidden="true">
+    <rect width="6" height="200" rx="3" fill="#00b4d8"/>
+  </svg>
+  <p style="position:absolute;left:84px;top:96px;margin:0;font-size:13px;letter-spacing:2px;color:#90e0ef;">АРХИТЕКТУРА ДЕПЛОЯ &nbsp;·&nbsp; NANOBOT + ENTERPRISE-MCP</p>
+  <p style="position:absolute;left:84px;top:134px;margin:0;font-size:46px;font-weight:700;line-height:54px;color:#caf0f8;">Агент и платформа:<br>два процесса,<br>одна граница</p>
+  <p style="position:absolute;left:84px;top:310px;margin:0;font-size:19px;color:#90e0ef;">От общего к частному: процессы, слои, контракты</p>
+  <svg width="460" height="2" style="position:absolute;left:84px;top:352px;" aria-hidden="true">
+    <rect width="460" height="2" fill="#0077b6"/>
+  </svg>
+  <p style="position:absolute;left:84px;top:372px;margin:0;font-size:13px;line-height:21px;color:#90e0ef;">Источник: <span style="color:#caf0f8;">openspec/specs</span> (29 компонентов), <span style="color:#caf0f8;">docs/</span> и код<br>Инвентарь runtime, платформы, данных и контрактов<br>7 октября 2026</p>
+
+  <svg width="330" height="330" style="position:absolute;right:56px;top:106px;" aria-hidden="true">
+    <rect x="0" y="0" width="330" height="330" rx="14" fill="none" stroke="#0077b6" stroke-width="1"/>
+    <rect x="22" y="22" width="286" height="92" rx="10" fill="#0077b6"/>
+    <text x="165" y="52" text-anchor="middle" dominant-baseline="central" font-size="15" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">АГЕНТ &nbsp;·&nbsp; nanobot-ai</text>
+    <text x="165" y="76" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">каналы · сессии · журнал · tools</text>
+    <text x="165" y="96" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">данных не держит</text>
+    <path d="M165 122 L165 152" stroke="#00b4d8" stroke-width="2" fill="none"/>
+    <path d="M157 145 L165 153 L173 145" stroke="#00b4d8" stroke-width="2" fill="none"/>
+    <rect x="102" y="152" width="126" height="30" rx="15" fill="#00b4d8"/>
+    <text x="165" y="167" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">MCP</text>
+    <path d="M165 182 L165 212" stroke="#00b4d8" stroke-width="2" fill="none"/>
+    <path d="M157 205 L165 213 L173 205" stroke="#00b4d8" stroke-width="2" fill="none"/>
+    <rect x="22" y="212" width="286" height="60" rx="10" fill="#caf0f8"/>
+    <text x="165" y="232" text-anchor="middle" dominant-baseline="central" font-size="15" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">ПЛАТФОРМА &nbsp;·&nbsp; enterprise-mcp</text>
+    <text x="165" y="254" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">audit · data · vectors · llm</text>
+    <rect x="22" y="288" width="82" height="24" rx="12" fill="#90e0ef"/>
+    <text x="63" y="300" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#03045e" font-family="Times New Roman, serif">PostgreSQL</text>
+    <rect x="112" y="288" width="92" height="24" rx="12" fill="#90e0ef"/>
+    <text x="158" y="300" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#03045e" font-family="Times New Roman, serif">снимок DuckDB</text>
+    <rect x="212" y="288" width="96" height="24" rx="12" fill="#90e0ef"/>
+    <text x="260" y="300" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#03045e" font-family="Times New Roman, serif">индексы FAISS</text>
+  </svg>
+</div></div>
+
+<!-- ================= 02 TOC ================= -->
+<div class="slide" id="s2"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:48px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">СОДЕРЖАНИЕ</p>
+  <p style="position:absolute;left:56px;top:74px;margin:0;font-size:40px;font-weight:700;color:#03045e;">Пять разрезов системы</p>
+  <svg width="792" height="2" style="position:absolute;left:56px;top:132px;" aria-hidden="true"><rect width="792" height="2" fill="#90e0ef"/></svg>
+
+  <svg width="792" height="62" style="position:absolute;left:56px;top:160px;" aria-hidden="true">
+    <rect width="836" height="62" rx="10" fill="#90e0ef"/>
+    <rect width="8" height="62" rx="4" fill="#0077b6"/>
+  </svg>
+  <p style="position:absolute;left:82px;top:176px;margin:0;font-size:26px;font-weight:700;color:#0077b6;">01</p>
+  <p style="position:absolute;left:136px;top:172px;margin:0;font-size:21px;font-weight:700;color:#03045e;">Общий взгляд</p>
+  <p style="position:absolute;left:136px;top:196px;margin:0;font-size:13px;color:#0077b6;">два процесса, граница ответственности, путь одного сообщения</p>
+
+  <svg width="792" height="62" style="position:absolute;left:56px;top:232px;" aria-hidden="true">
+    <rect width="836" height="62" rx="10" fill="#90e0ef"/>
+    <rect width="8" height="62" rx="4" fill="#0077b6"/>
+  </svg>
+  <p style="position:absolute;left:82px;top:248px;margin:0;font-size:26px;font-weight:700;color:#0077b6;">02</p>
+  <p style="position:absolute;left:136px;top:244px;margin:0;font-size:21px;font-weight:700;color:#03045e;">Нормативная архитектура</p>
+  <p style="position:absolute;left:136px;top:268px;margin:0;font-size:13px;color:#0077b6;">принципы, запреты, границы зависимостей, компонентная модель</p>
+
+  <svg width="792" height="62" style="position:absolute;left:56px;top:304px;" aria-hidden="true">
+    <rect width="836" height="62" rx="10" fill="#90e0ef"/>
+    <rect width="8" height="62" rx="4" fill="#0077b6"/>
+  </svg>
+  <p style="position:absolute;left:82px;top:320px;margin:0;font-size:26px;font-weight:700;color:#0077b6;">03</p>
+  <p style="position:absolute;left:136px;top:316px;margin:0;font-size:21px;font-weight:700;color:#03045e;">Runtime агента</p>
+  <p style="position:absolute;left:136px;top:340px;margin:0;font-size:13px;color:#0077b6;">порядок старта, ApplicationContext, хуки, патчи, инструменты</p>
+
+  <svg width="792" height="62" style="position:absolute;left:56px;top:376px;" aria-hidden="true">
+    <rect width="836" height="62" rx="10" fill="#90e0ef"/>
+    <rect width="8" height="62" rx="4" fill="#0077b6"/>
+  </svg>
+  <p style="position:absolute;left:82px;top:392px;margin:0;font-size:26px;font-weight:700;color:#0077b6;">04</p>
+  <p style="position:absolute;left:136px;top:388px;margin:0;font-size:21px;font-weight:700;color:#03045e;">Платформа enterprise-mcp</p>
+  <p style="position:absolute;left:136px;top:412px;margin:0;font-size:13px;color:#0077b6;">старт сервера, capability, контракт вызова, снимок и индексы</p>
+
+  <svg width="792" height="62" style="position:absolute;left:56px;top:448px;" aria-hidden="true">
+    <rect width="836" height="62" rx="10" fill="#90e0ef"/>
+    <rect width="8" height="62" rx="4" fill="#0077b6"/>
+  </svg>
+  <p style="position:absolute;left:82px;top:464px;margin:0;font-size:26px;font-weight:700;color:#0077b6;">05</p>
+  <p style="position:absolute;left:136px;top:460px;margin:0;font-size:21px;font-weight:700;color:#03045e;">Данные, сессии, наблюдаемость</p>
+  <p style="position:absolute;left:136px;top:484px;margin:0;font-size:13px;color:#0077b6;">слои хранения, гибрид сессий, журнал, профили, миграции</p>
+
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">2</text></svg>
+</div></div>
+
+<!-- ================= 03 DIVIDER 01 ================= -->
+<div class="slide" id="s3"><div class="slide-content" style="background:#0077b6;">
+  <svg width="960" height="540" style="position:absolute;left:0;top:0;" aria-hidden="true">
+    <defs><pattern id="dots1" x="0" y="0" width="34" height="34" patternUnits="userSpaceOnUse"><circle cx="17" cy="17" r="2" fill="#caf0f8"/></pattern></defs>
+    <rect width="960" height="540" fill="url(#dots1)" opacity="0.12"/>
+  </svg>
+  <svg width="140" height="140" style="position:absolute;left:56px;top:150px;" aria-hidden="true">
+    <circle cx="70" cy="70" r="68" fill="none" stroke="#caf0f8" stroke-width="2" opacity="0.5"/>
+    <text x="70" y="70" text-anchor="middle" dominant-baseline="central" font-size="64" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">01</text>
+  </svg>
+  <p style="position:absolute;left:56px;top:330px;margin:0;font-size:42px;font-weight:700;color:#caf0f8;">Общий взгляд</p>
+  <p style="position:absolute;left:56px;top:388px;margin:0;font-size:18px;color:#90e0ef;">Два процесса, одна граница, один источник истины</p>
+  <svg width="700" height="3" style="position:absolute;left:56px;top:440px;" aria-hidden="true"><rect width="700" height="3" rx="2" fill="#caf0f8" opacity="0.6"/></svg>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#03045e"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">3</text></svg>
+</div></div>
+
+<!-- ================= 04 ПРИНЦИП ================= -->
+<div class="slide" id="s4"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:44px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">РАЗДЕЛЕНИЕ ОТВЕТСТВЕННОСТИ</p>
+  <p style="position:absolute;left:56px;top:70px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Проект не должен быть вторым agent framework</p>
+
+  <svg width="410" height="286" style="position:absolute;left:56px;top:146px;" aria-hidden="true">
+    <rect width="410" height="286" rx="12" fill="#90e0ef"/>
+    <rect width="410" height="40" rx="12" fill="#0077b6"/>
+    <rect y="28" width="410" height="12" fill="#0077b6"/>
+    <text x="20" y="20" dominant-baseline="central" font-size="16" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">nanobot-ai — generic agent runtime</text>
+    <text x="20" y="64" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">AgentLoop / AgentRunner, контекст и сжатие,</text>
+    <text x="20" y="84" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">сессии, tool registry, хуки, события, MCP,</text>
+    <text x="20" y="104" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">провайдеры, субагенты, cron, generic-каналы</text>
+    <rect x="20" y="124" width="370" height="1" fill="#0077b6" opacity="0.4"/>
+    <text x="20" y="150" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Правило</text>
+    <text x="20" y="174" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">Возможности библиотеки используются, а не</text>
+    <text x="20" y="194" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">копируются. Вторые версии runtime не создаются.</text>
+    <rect x="20" y="216" width="150" height="26" rx="13" fill="#0077b6"/>
+    <text x="95" y="229" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">TARGET §1, §2.1</text>
+    <rect x="180" y="216" width="210" height="26" rx="13" fill="#caf0f8"/>
+    <text x="285" y="229" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">anti-patterns §22.5–22.7</text>
+  </svg>
+
+  <svg width="410" height="286" style="position:absolute;left:494px;top:146px;" aria-hidden="true">
+    <rect width="410" height="286" rx="12" fill="#caf0f8"/>
+    <rect width="410" height="40" rx="12" fill="#03045e"/>
+    <rect y="28" width="410" height="12" fill="#03045e"/>
+    <text x="20" y="20" dominant-baseline="central" font-size="16" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">workspaces_nanobot — integration layer</text>
+    <text x="20" y="64" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">lib/core: сборка, зависимости, конфигурация,</text>
+    <text x="20" y="84" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">lifecycle. Канал PostgreSQL, доменные навыки,</text>
+    <text x="20" y="104" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">профили, журнал, MCP-вызовы платформы</text>
+    <rect x="20" y="124" width="370" height="1" fill="#0077b6" opacity="0.4"/>
+    <text x="20" y="150" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Правило</text>
+    <text x="20" y="174" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">Слой интеграции не содержит собственного</text>
+    <text x="20" y="194" dominant-baseline="central" font-size="13" fill="#03045e" font-family="Times New Roman, serif">runtime: данных агент не держит, домены — у платформы.</text>
+    <rect x="20" y="216" width="130" height="26" rx="13" fill="#03045e"/>
+    <text x="85" y="229" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">TARGET §2.2</text>
+    <rect x="160" y="216" width="230" height="26" rx="13" fill="#90e0ef"/>
+    <text x="275" y="229" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">docs/ARCHITECTURE.md §Архитектура</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: docs/TARGET_ARCHITECTURE.md §1:25-53, §2.1:61-78, §2.2:84-92</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">4</text></svg>
+</div></div>
+
+<!-- ================= 05 СИСТЕМА ОДНИМ ВЗГЛЯДОМ ================= -->
+<div class="slide" id="s5"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">КАРТА СИСТЕМЫ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Система одним взглядом</p>
+
+  <svg width="848" height="352" style="position:absolute;left:56px;top:128px;" aria-hidden="true">
+    <!-- row 1: channels -->
+    <rect x="0" y="0" width="256" height="52" rx="10" fill="#90e0ef"/>
+    <text x="128" y="19" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Каналы и входы</text>
+    <text x="128" y="37" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">Postgres channel · CLI REPL · WebSocket</text>
+
+    <rect x="296" y="0" width="256" height="52" rx="10" fill="#90e0ef"/>
+    <text x="424" y="19" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">ApplicationContext</text>
+    <text x="424" y="37" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">composition root: сборка и lifecycle</text>
+
+    <rect x="592" y="0" width="256" height="52" rx="10" fill="#90e0ef"/>
+    <text x="720" y="19" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Конфигурация</text>
+    <text x="720" y="37" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">config.json · блок настроек агента</text>
+
+    <path d="M256 26 L296 26" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M288 19 L296 26 L288 33" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M552 26 L592 26" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M584 19 L592 26 L584 33" stroke="#0077b6" stroke-width="2" fill="none"/>
+
+    <!-- row 2: runtime -->
+    <rect x="0" y="80" width="848" height="74" rx="10" fill="#caf0f8"/>
+    <text x="424" y="100" text-anchor="middle" dominant-baseline="central" font-size="15" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Runtime: MessageBus → AgentLoop → хуки → инструменты → TurnDelivery</text>
+    <text x="424" y="122" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">RuntimePatcher (4 патча upstream) · логирование оборота · сжатие контекста · повторный guard</text>
+    <text x="424" y="141" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">собственного agent runtime здесь нет — цикл, контекст и сессии принадлежат nanobot-ai</text>
+    <path d="M424 52 L424 80" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M417 73 L424 80 L431 73" stroke="#0077b6" stroke-width="2" fill="none"/>
+
+    <!-- row 3: mcp boundary -->
+    <rect x="180" y="182" width="488" height="52" rx="26" fill="#00b4d8"/>
+    <text x="424" y="201" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">MCP: stdio-сессия enterprise-mcp</text>
+    <text x="424" y="219" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">второй транспорт — streamable-http на /mcp; адрес приходит блоком настроек</text>
+    <path d="M424 154 L424 182" stroke="#00b4d8" stroke-width="2" fill="none"/>
+    <path d="M417 175 L424 182 L431 175" stroke="#00b4d8" stroke-width="2" fill="none"/>
+
+    <!-- row 4: capabilities -->
+    <rect x="0" y="262" width="200" height="56" rx="10" fill="#0077b6"/>
+    <text x="100" y="281" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">audit</text>
+    <text x="100" y="300" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">данные агента, скрипты</text>
+    <rect x="216" y="262" width="200" height="56" rx="10" fill="#0077b6"/>
+    <text x="316" y="281" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">data</text>
+    <text x="316" y="300" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">очередь, журнал, зеркало</text>
+    <rect x="432" y="262" width="200" height="56" rx="10" fill="#0077b6"/>
+    <text x="532" y="281" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">vectors</text>
+    <text x="532" y="300" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">снимок и FAISS-поиск</text>
+    <rect x="648" y="262" width="200" height="56" rx="10" fill="#0077b6"/>
+    <text x="748" y="281" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">llm</text>
+    <text x="748" y="300" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">единственный вызов провайдера</text>
+    <path d="M424 234 L424 262" stroke="#00b4d8" stroke-width="2" fill="none"/>
+    <path d="M100 262 L100 248 L748 248 L748 262" stroke="#00b4d8" stroke-width="2" fill="none"/>
+    <path d="M424 234 L424 248" stroke="#00b4d8" stroke-width="2" fill="none"/>
+
+    <text x="424" y="340" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">Модель видит 9 операций из белого списка; capability data — вовсе не «база данных агента», а очередь, журнал и зеркало</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: README.md §Архитектура, docs/ARCHITECTURE.md:13-19, mcp-platform/libs/enterprise_common/settings.py:952-1041</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">5</text></svg>
+</div></div>
+
+<!-- ================= 06 ГРАНИЦА ПРОЦЕССОВ ================= -->
+<div class="slide" id="s6"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ГРАНИЦА</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Агент тонкий: что у него есть и чего нет</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:272px;height:250px;background:#90e0ef;border-radius:12px;padding:16px 18px;">
+    <p style="margin:0 0 10px 0;font-size:19px;font-weight:700;color:#03045e;">Агент</p>
+    <ul style="margin:0;padding-left:16px;font-size:13px;line-height:20px;color:#03045e;">
+      <li>каналы и приём сообщений</li>
+      <li>сессии и их зеркало</li>
+      <li>долговечный журнал</li>
+      <li>вызовы инструментов и хуки</li>
+      <li>сборка и lifecycle сервисов</li>
+    </ul>
+    <p style="margin:12px 0 0 0;font-size:13px;font-weight:700;color:#0077b6;">Не держит данных</p>
+  </div>
+
+  <div style="position:absolute;left:344px;top:132px;width:272px;height:250px;background:#03045e;border-radius:12px;padding:16px 18px;">
+    <p style="margin:0 0 10px 0;font-size:19px;font-weight:700;color:#caf0f8;">Платформа</p>
+    <ul style="margin:0;padding-left:16px;font-size:13px;line-height:20px;color:#90e0ef;">
+      <li>снимок DuckDB и его владелец</li>
+      <li>индексы FAISS в памяти</li>
+      <li>эмбеддинги и вызов модели</li>
+      <li>очередь задач и журнал</li>
+      <li>домены: audit, legal_summarizer, office</li>
+    </ul>
+    <p style="margin:12px 0 0 0;font-size:13px;font-weight:700;color:#00b4d8;">Объявляет состав сама</p>
+  </div>
+
+  <div style="position:absolute;right:56px;top:132px;width:272px;height:250px;background:#90e0ef;border-radius:12px;padding:16px 18px;">
+    <p style="margin:0 0 10px 0;font-size:19px;font-weight:700;color:#03045e;">Почему два процесса</p>
+    <p style="margin:0 0 8px 0;font-size:13px;line-height:19px;color:#03045e;">Второй владелец PostgreSQL или файла снимка — это гонка. Разделение делает владельца единственным.</p>
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;">Лёгкий режим <span style="font-weight:700;">--capabilities llm</span> не трогает ни БД, ни снимок — поэтому клиент для внешних процессов безопасен.</p>
+  </div>
+
+  <svg width="848" height="88" style="position:absolute;left:56px;top:404px;" aria-hidden="true">
+    <rect width="848" height="88" rx="12" fill="#caf0f8"/>
+    <rect width="4" height="88" rx="2" fill="#00b4d8"/>
+    <text x="20" y="22" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Два объявления одного процесса — и это объявлено, а не вышло случайно</text>
+    <text x="20" y="46" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">config.json → tools.mcpServers.enterprise — штатный MCPProvider нанобота: модель получает 9 операций как mcp_enterprise_*</text>
+    <text x="20" y="66" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">config.json → gateway.agent.enterprise_mcp — фоновые службы агента, ходящие в платформу вне оборота</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: docs/ARCHITECTURE.md:13-19, servers/enterprise/server.py:1054-1063, config.json</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">6</text></svg>
+</div></div>
+
+<!-- ================= 07 ПУТЬ СООБЩЕНИЯ ================= -->
+<div class="slide" id="s7"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ОДИН ОБОРОТ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Путь одного сообщения</p>
+
+  <svg width="848" height="188" style="position:absolute;left:56px;top:140px;" aria-hidden="true">
+    <rect x="0" y="0" width="250" height="76" rx="10" fill="#90e0ef"/>
+    <text x="16" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">1 · Захват задачи</text>
+    <text x="16" y="46" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">claim + lease; приоритетные команды</text>
+    <text x="16" y="64" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">идут мимо слота и inflight</text>
+
+    <rect x="300" y="0" width="250" height="76" rx="10" fill="#90e0ef"/>
+    <text x="316" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">2 · Шина</text>
+    <text x="316" y="46" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">MessageExchange → publish_inbound;</text>
+    <text x="316" y="64" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">занятый чат возвращается в pending</text>
+
+    <rect x="600" y="0" width="248" height="76" rx="10" fill="#90e0ef"/>
+    <text x="616" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">3 · AgentLoop</text>
+    <text x="616" y="46" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">LLM-итерации, выбор и вызов</text>
+    <text x="616" y="64" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">инструментов, навык как инструкция</text>
+
+    <path d="M250 38 L300 38" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M292 31 L300 38 L292 45" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M550 38 L600 38" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M592 31 L600 38 L592 45" stroke="#0077b6" stroke-width="2" fill="none"/>
+
+    <rect x="0" y="106" width="250" height="76" rx="10" fill="#caf0f8"/>
+    <text x="16" y="130" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">4 · Хуки и операции</text>
+    <text x="16" y="152" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">аудит → печать → guard → личность</text>
+    <text x="16" y="170" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">вызовы MCP-операций платформы</text>
+
+    <rect x="300" y="106" width="250" height="76" rx="10" fill="#caf0f8"/>
+    <text x="316" y="130" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">5 · Доставка ответа</text>
+    <text x="316" y="152" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">TurnDelivery; при внутренней ошибке —</text>
+    <text x="316" y="170" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">fallback вместо молчаливой потери</text>
+
+    <rect x="600" y="106" width="248" height="76" rx="10" fill="#03045e"/>
+    <text x="616" y="130" dominant-baseline="central" font-size="14" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">6 · Журнал и финализация</text>
+    <text x="616" y="152" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">DbLoggingService — единственный writer;</text>
+    <text x="616" y="170" dominant-baseline="central" font-size="12" fill="#90e0ef" font-family="Times New Roman, serif">finalize_turn и зеркало сессии</text>
+
+    <path d="M724 76 L724 106" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M717 99 L724 106 L731 99" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M125 106 L125 92 L425 92 L425 106" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M418 99 L425 106 L432 99" stroke="#0077b6" stroke-width="2" fill="none"/>
+  </svg>
+
+  <svg width="848" height="96" style="position:absolute;left:56px;top:352px;" aria-hidden="true">
+    <rect width="848" height="96" rx="12" fill="#90e0ef"/>
+    <rect width="4" height="96" rx="2" fill="#0077b6"/>
+    <text x="20" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Защиты, которые видно по коду</text>
+    <text x="20" y="48" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">«зависшая» задача в статусе processing блокирует чат — есть логика расчистки потерянных задач</text>
+    <text x="20" y="68" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">повтор одинаковых вызовов гасится защитником, а роняет весь оборот — только как синтетический результат инструмента</text>
+    <text x="20" y="86" dominant-baseline="central" font-size="11" fill="#0077b6" font-family="Times New Roman, serif">postgres_channel.py:991-1176 · message_exchange.py · turn_delivery_factory.py · lib/hooks/repeat_guard_hook.py</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: docs/ARCHITECTURE.md §Захват задач и статусы, §Lifecycle-инвариант оборота</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">7</text></svg>
+</div></div>
+
+<!-- ================= 08 DIVIDER 02 ================= -->
+<div class="slide" id="s8"><div class="slide-content" style="background:#03045e;">
+  <svg width="960" height="540" style="position:absolute;left:0;top:0;" aria-hidden="true">
+    <defs><pattern id="dots2" x="0" y="0" width="34" height="34" patternUnits="userSpaceOnUse"><circle cx="17" cy="17" r="2" fill="#90e0ef"/></pattern></defs>
+    <rect width="960" height="540" fill="url(#dots2)" opacity="0.1"/>
+  </svg>
+  <svg width="140" height="140" style="position:absolute;left:56px;top:150px;" aria-hidden="true">
+    <circle cx="70" cy="70" r="68" fill="none" stroke="#90e0ef" stroke-width="2" opacity="0.5"/>
+    <text x="70" y="70" text-anchor="middle" dominant-baseline="central" font-size="64" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">02</text>
+  </svg>
+  <p style="position:absolute;left:56px;top:330px;margin:0;font-size:42px;font-weight:700;color:#caf0f8;">Нормативная архитектура</p>
+  <p style="position:absolute;left:56px;top:388px;margin:0;font-size:18px;color:#90e0ef;">Что должно быть — раньше, чем что есть</p>
+  <svg width="700" height="3" style="position:absolute;left:56px;top:440px;" aria-hidden="true"><rect width="700" height="3" rx="2" fill="#90e0ef" opacity="0.6"/></svg>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">8</text></svg>
+</div></div>
+
+<!-- ================= 09 ПРИНЦИПЫ ================= -->
+<div class="slide" id="s9"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">TARGET_ARCHITECTURE.MD</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Принципы, по которым система судится</p>
+  <p style="position:absolute;left:56px;top:112px;margin:0;font-size:13px;color:#0077b6;">Нормативный документ: «как должно быть». Описание «как сейчас» живёт в docs/ и не дублируется сюда.</p>
+
+  <div style="position:absolute;left:56px;top:150px;width:404px;height:60px;background:#90e0ef;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§1 · </span>Проект не должен становиться вторым agent framework</p>
+  </div>
+  <div style="position:absolute;left:56px;top:218px;width:404px;height:60px;background:#90e0ef;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§2.1 · </span>Generic agent runtime принадлежит nanobot-ai</p>
+  </div>
+  <div style="position:absolute;left:56px;top:286px;width:404px;height:60px;background:#90e0ef;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§2.2 · </span>lib/core — слой сборки: зависимости, конфигурация, lifecycle</p>
+  </div>
+  <div style="position:absolute;left:56px;top:354px;width:404px;height:60px;background:#90e0ef;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§2.3 · </span>Skill — предметная логика и доменная оркестрация</p>
+  </div>
+  <div style="position:absolute;left:56px;top:422px;width:404px;height:60px;background:#90e0ef;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§2.4 · </span>Tool — самостоятельная agent-facing capability без домена</p>
+  </div>
+
+  <div style="position:absolute;left:500px;top:150px;width:404px;height:60px;background:#caf0f8;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§3 · </span>Skill и Tool независимы: только Skill → SI и Tool → SI</p>
+  </div>
+  <div style="position:absolute;left:500px;top:218px;width:404px;height:60px;background:#caf0f8;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§21 · </span>Зависимость — от потребителей к инфраструктуре; Skill и Tool — параллельные, не уровни</p>
+  </div>
+  <div style="position:absolute;left:500px;top:286px;width:404px;height:60px;background:#caf0f8;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§21 · </span>Shared infrastructure не скрытый business layer и не знает конкретных Skill/Tool</p>
+  </div>
+  <div style="position:absolute;left:500px;top:354px;width:404px;height:60px;background:#caf0f8;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">§37 · </span>Система обязана оставаться объяснимой восемью предложениями</p>
+  </div>
+  <div style="position:absolute;left:500px;top:422px;width:404px;height:60px;background:#03045e;border-radius:10px;padding:10px 14px;">
+    <p style="margin:0;font-size:13px;line-height:19px;color:#caf0f8;"><span style="font-weight:700;color:#00b4d8;">§38 · </span>«Проще написать сейчас» против target: при разумной цене побеждает target, при большом rewrite — сначала фиксируется gap и тест</p>
+  </div>
+
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">9</text></svg>
+</div></div>
+
+<!-- ================= 10 ЗАПРЕЩЕНО ================= -->
+<div class="slide" id="s10"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">TARGET §22</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Что запрещено архитектурно</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:268px;height:104px;background:#03045e;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#caf0f8;">Tool → Skill</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">Инструмент не ищет и не вызывает навык, не импортирует workspace.tools</p>
+  </div>
+  <div style="position:absolute;left:346px;top:132px;width:268px;height:104px;background:#03045e;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#caf0f8;">Skill → Tool</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">Навык не зависит от набора инструментов: их состав меняется независимо</p>
+  </div>
+  <div style="position:absolute;left:636px;top:132px;width:268px;height:104px;background:#03045e;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#caf0f8;">Tool знает domain</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">Универсальный поиск не ветвится по именам индексов и таблиц домена</p>
+  </div>
+
+  <div style="position:absolute;left:56px;top:248px;width:268px;height:104px;background:#90e0ef;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#03045e;">Скрытый business engine</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Tool не выбирает сам, к какой таблице идти: доменный выбор — за навыком</p>
+  </div>
+  <div style="position:absolute;left:346px;top:248px;width:268px;height:104px;background:#90e0ef;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#03045e;">Второй AgentLoop</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Только по проектному архитектурному решению, не по мере надобности</p>
+  </div>
+  <div style="position:absolute;left:636px;top:248px;width:268px;height:104px;background:#90e0ef;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#03045e;">Второй ToolRegistry</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Пока хватает наноботовского — свой реестр не заводится</p>
+  </div>
+
+  <div style="position:absolute;left:56px;top:364px;width:268px;height:104px;background:#90e0ef;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#03045e;">Дублирование nanobot</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Свои memory, context и session semantics без необходимости</p>
+  </div>
+  <div style="position:absolute;left:346px;top:364px;width:268px;height:104px;background:#90e0ef;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#03045e;">Dynamic import Skill</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Не целевая модель: связь должна быть видна в коде и в реестре</p>
+  </div>
+  <div style="position:absolute;left:636px;top:364px;width:268px;height:104px;background:#caf0f8;border-radius:10px;padding:12px 14px;">
+    <p style="margin:0 0 4px 0;font-size:15px;font-weight:700;color:#03045e;">Domain routing внутри сервиса</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Ветвление «если вызвал audit_analyzer» — не повод для общего сервиса</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: docs/TARGET_ARCHITECTURE.md §22:817-871; проверяется AST-стражами tests/test_skill_tool_independence.py, test_architecture_tool_domain_free.py</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">10</text></svg>
+</div></div>
+
+<!-- ================= 11 ГРАНИЦЫ ЗАВИСИМОСТЕЙ ================= -->
+<div class="slide" id="s11"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ГРАНИЦЫ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Кому что можно</p>
+
+  <svg width="500" height="236" style="position:absolute;left:56px;top:136px;" aria-hidden="true">
+    <rect width="500" height="236" rx="12" fill="#caf0f8"/>
+    <text x="18" y="26" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Правила зависимостей</text>
+    <rect x="18" y="46" width="464" height="32" rx="8" fill="#90e0ef"/>
+    <text x="32" y="62" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">runtime nanobot → integration layer, Skills, Tools</text>
+    <text x="468" y="62" text-anchor="end" dominant-baseline="central" font-size="12" font-weight="700" fill="#0077b6" font-family="Times New Roman, serif">можно</text>
+    <rect x="18" y="84" width="464" height="32" rx="8" fill="#90e0ef"/>
+    <text x="32" y="100" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Skill или Tool → shared infrastructure (lib/services, lib/core)</text>
+    <text x="468" y="100" text-anchor="end" dominant-baseline="central" font-size="12" font-weight="700" fill="#0077b6" font-family="Times New Roman, serif">можно</text>
+    <rect x="18" y="122" width="464" height="32" rx="8" fill="#03045e"/>
+    <text x="32" y="138" dominant-baseline="central" font-size="12.5" fill="#caf0f8" font-family="Times New Roman, serif">Skill ↔ Tool в любую сторону</text>
+    <text x="468" y="138" text-anchor="end" dominant-baseline="central" font-size="12" font-weight="700" fill="#00b4d8" font-family="Times New Roman, serif">запрещено</text>
+    <rect x="18" y="160" width="464" height="32" rx="8" fill="#03045e"/>
+    <text x="32" y="176" dominant-baseline="central" font-size="12.5" fill="#caf0f8" font-family="Times New Roman, serif">shared infrastructure → конкретные Skills / Tools</text>
+    <text x="468" y="176" text-anchor="end" dominant-baseline="central" font-size="12" font-weight="700" fill="#00b4d8" font-family="Times New Roman, serif">запрещено</text>
+    <rect x="18" y="198" width="464" height="32" rx="8" fill="#03045e"/>
+    <text x="32" y="214" dominant-baseline="central" font-size="12.5" fill="#caf0f8" font-family="Times New Roman, serif">агентский код → libs.* платформы (allowlist: 1 пункт)</text>
+    <text x="468" y="214" text-anchor="end" dominant-baseline="central" font-size="12" font-weight="700" fill="#00b4d8" font-family="Times New Roman, serif">ограничено</text>
+  </svg>
+
+  <div style="position:absolute;left:584px;top:136px;width:320px;height:114px;background:#90e0ef;border-radius:12px;padding:12px 14px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#03045e;">Skill</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Может: держать доменную логику, ходить в shared infrastructure напрямую, описывать выбор операции терминами capability. Не может: вызывать Tool и импортировать workspace.tools.</p>
+  </div>
+  <div style="position:absolute;left:584px;top:258px;width:320px;height:114px;background:#caf0f8;border-radius:12px;padding:12px 14px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#03045e;">Tool</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Может: быть agent-facing и доменно-нейтральным. Не должен знать имён Skills, доменных таблиц и индексов, бизнес-смысла параметров и domain routing.</p>
+  </div>
+
+  <svg width="848" height="70" style="position:absolute;left:56px;top:392px;" aria-hidden="true">
+    <rect width="848" height="70" rx="12" fill="#03045e"/>
+    <text x="20" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Как навык достаёт данные сейчас</text>
+    <text x="20" y="48" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">Данных у навыка нет: capability audit обслуживает данные агента, модель доходит до них через mcp_enterprise_* с настоящей inputSchema платформы.</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: TARGET_ARCHITECTURE.md §3, §21, §22 · openspec/specs/architecture/skill-tool-boundary/spec.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">11</text></svg>
+</div></div>
+
+<!-- ================= 12 КОМПОНЕНТНАЯ МОДЕЛЬ ================= -->
+<div class="slide" id="s12"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">OPENSPEC</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Компонентная модель: правило как контракт</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:470px;height:250px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#03045e;">Компонентная спека: 19 обязательных разделов</p>
+    <p style="margin:0;font-size:12px;line-height:20px;color:#03045e;">Purpose · Scope · Requirements · Responsibility · Boundary · Public Contract · Inputs · Outputs · State · Dependencies · Configuration · Lifecycle · Data Ownership · Error Behavior · Invariants · Forbidden Behavior · Consumers · Implementation · Verification</p>
+    <p style="margin:10px 0 0 0;font-size:12.5px;line-height:18px;color:#0077b6;">Порядок канонический, синонимы заголовков запрещены. У каждого требования — свой WHEN/THEN. Статусы: missing, draft, partial, complete, deprecated.</p>
+    <svg width="438" height="46" style="position:absolute;left:16px;bottom:12px;" aria-hidden="true">
+      <rect width="438" height="46" rx="8" fill="#90e0ef"/>
+      <text x="16" y="16" dominant-baseline="central" font-size="12" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Рабочий цикл</text>
+      <text x="16" y="33" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">change → archive → canonical spec → запись в реестре</text>
+    </svg>
+  </div>
+
+  <div style="position:absolute;left:546px;top:132px;width:358px;height:250px;background:#03045e;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 2px 0;font-size:17px;font-weight:700;color:#caf0f8;">Реестр: 29 компонентов</p>
+    <svg width="326" height="120" style="margin-top:8px;" aria-hidden="true">
+      <rect x="0" y="6" width="212" height="22" rx="11" fill="#00b4d8"/>
+      <text x="224" y="17" dominant-baseline="central" font-size="13" fill="#caf0f8" font-family="Times New Roman, serif">25 partial</text>
+      <rect x="0" y="40" width="24" height="22" rx="12" fill="#90e0ef"/>
+      <text x="36" y="51" dominant-baseline="central" font-size="13" fill="#caf0f8" font-family="Times New Roman, serif">3 draft</text>
+      <rect x="0" y="74" width="9" height="22" rx="5" fill="#0077b6"/>
+      <text x="21" y="85" dominant-baseline="central" font-size="13" fill="#caf0f8" font-family="Times New Roman, serif">1 complete</text>
+      <text x="0" y="112" dominant-baseline="central" font-size="11.5" fill="#90e0ef" font-family="Times New Roman, serif">0 missing · Scope: agent 17 · shared 5 · platform 4</text>
+    </svg>
+    <p style="margin:4px 0 0 0;font-size:12.5px;line-height:18px;color:#90e0ef;">Компонент — единица с признаком из восьми: lifecycle, публичный контракт, своя конфигурация, состояние, ответственность, зависимости, независимая изменяемость, архитектурная граница.</p>
+  </div>
+
+  <svg width="848" height="76" style="position:absolute;left:56px;top:400px;" aria-hidden="true">
+    <rect width="848" height="76" rx="12" fill="#90e0ef"/>
+    <rect width="4" height="76" rx="2" fill="#0077b6"/>
+    <text x="20" y="22" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Канон проверяется машинно, а не на ревью</text>
+    <text x="20" y="44" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">tools/validate_component_specs.py — 10 проверок: набор и порядок разделов, WHEN/THEN у каждого требования, паритет реестра и дерева спек</text>
+    <text x="20" y="62" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">CI: spec-validation — валидатор + openspec validate --all --strict</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: openspec/specs/COMPONENTS.md:16-32, architecture/component-model/spec.md, tools/validate_component_specs.py</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">12</text></svg>
+</div></div>
+
+<!-- ================= 13 DIVIDER 03 ================= -->
+<div class="slide" id="s13"><div class="slide-content" style="background:#0077b6;">
+  <svg width="960" height="540" style="position:absolute;left:0;top:0;" aria-hidden="true">
+    <defs><pattern id="dots3" x="0" y="0" width="34" height="34" patternUnits="userSpaceOnUse"><circle cx="17" cy="17" r="2" fill="#caf0f8"/></pattern></defs>
+    <rect width="960" height="540" fill="url(#dots3)" opacity="0.12"/>
+  </svg>
+  <svg width="140" height="140" style="position:absolute;left:56px;top:150px;" aria-hidden="true">
+    <circle cx="70" cy="70" r="68" fill="none" stroke="#caf0f8" stroke-width="2" opacity="0.5"/>
+    <text x="70" y="70" text-anchor="middle" dominant-baseline="central" font-size="64" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">03</text>
+  </svg>
+  <p style="position:absolute;left:56px;top:330px;margin:0;font-size:42px;font-weight:700;color:#caf0f8;">Runtime агента</p>
+  <p style="position:absolute;left:56px;top:388px;margin:0;font-size:18px;color:#90e0ef;">Запуск, сборка, хуки, патчи, инструменты</p>
+  <svg width="700" height="3" style="position:absolute;left:56px;top:440px;" aria-hidden="true"><rect width="700" height="3" rx="2" fill="#caf0f8" opacity="0.6"/></svg>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#03045e"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">13</text></svg>
+</div></div>
+
+<!-- ================= 14 ПОРЯДОК СТАРТА ================= -->
+<div class="slide" id="s14"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ТОЧКИ ВХОДА</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Порядок старта — это контракт, а не случайность</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:410px;height:272px;background:#03045e;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#caf0f8;">gateway.py — долгоживущий сервер</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#90e0ef;">1. Аргументы и настройки с профилем: без <span style="color:#caf0f8;">--profile</span> — ConfigurationError, exit 2</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#90e0ef;">2. ApplicationContext.create: патчи, шина, каналы, зеркало, доставка</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#90e0ef;">3. ctx.start(): подписчики, health, каналы, lifecycle</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#00b4d8;">4. Рукопожатие enterprise-mcp — отказ уходит в GatewayRunner, перезапуск с backoff</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#90e0ef;">5. ChannelFactory.create_all — если канал включён и есть DSN</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#90e0ef;">6. Сводка здоровья: по одной пробной операции на capability, сверка таблиц профиля</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#90e0ef;">7. run_forever; Ctrl-C → ctx.stop(), exit 0</p>
+  </div>
+
+  <div style="position:absolute;left:494px;top:132px;width:410px;height:272px;background:#90e0ef;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#03045e;">cli_agent.py — REPL</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#03045e;">1. Профиль <span style="font-weight:700;">test</span> фиксирован, флаг не принимается</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#03045e;">2. ApplicationContext.create с role=cli и override хранилища/сессии</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#03045e;">3. ctx.start()</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#0077b6;">4. То же рукопожатие платформы — до REPL и до транспорта журнала</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#03045e;">5. attach_log_transport()</p>
+    <p style="margin:0;font-size:12.5px;line-height:21px;color:#03045e;">6. ConsoleLoop: REPL и typewriter</p>
+    <p style="margin:8px 0 0 0;font-size:12.5px;line-height:18px;color:#0077b6;">Отказ любого шага печатается как «✗ … (stage=…)» и завершает процесс с exit 1</p>
+  </div>
+
+  <svg width="848" height="66" style="position:absolute;left:56px;top:418px;" aria-hidden="true">
+    <rect width="848" height="66" rx="12" fill="#caf0f8"/>
+    <rect width="4" height="66" rx="2" fill="#00b4d8"/>
+    <text x="20" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Почему рукопожатие идёт до работы агента</text>
+    <text x="20" y="46" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Платформа нужна всегда: «сервер не отвечает» обязано обнаруживаться на старте, а не посреди оборота пользователя</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: gateway.py:124-325, cli_agent.py:119-625, openspec/specs/runtime/entrypoints/spec.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">14</text></svg>
+</div></div>
+
+<!-- ================= 15 APPLICATIONCONTEXT ================= -->
+<div class="slide" id="s15"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">COMPOSITION ROOT</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">ApplicationContext собирает всё общее</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:410px;height:180px;background:#90e0ef;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#03045e;">Жизненный цикл</p>
+    <ul style="margin:0;padding-left:16px;font-size:12.5px;line-height:20px;color:#03045e;">
+      <li>create() — патчи, шина, каналы, зеркало, доставка, клиент платформы</li>
+      <li>start() — регистрация сервисов в ShutdownCoordinator</li>
+      <li>stop() — LIFO: сначала подписчики и каналы, потом writer'ы</li>
+      <li>role меняет только транспортную инфраструктуру</li>
+    </ul>
+  </div>
+
+  <div style="position:absolute;left:56px;top:324px;width:410px;height:126px;background:#03045e;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:17px;font-weight:700;color:#caf0f8;">Graceful degradation</p>
+    <p style="margin:0;font-size:12.5px;line-height:19px;color:#90e0ef;">PostgreSQL недоступен → журнал и менеджер сессий остаются None, каналы не поднимаются, старт продолжается с предупреждением. Падение БД не должно убивать подъём процесса.</p>
+  </div>
+
+  <div style="position:absolute;left:494px;top:132px;width:410px;height:180px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#03045e;">Шина без обходных путей</p>
+    <p style="margin:0;font-size:12.5px;line-height:19px;color:#03045e;">MessageBus собирается в _create_bus, publish_inbound/outbound оборачиваются логгерами в _wrap_bus_publish — оригинальные методы сохраняются в замыкании, monkey-patch не используется.</p>
+    <p style="margin:8px 0 0 0;font-size:12.5px;line-height:19px;color:#0077b6;">Отдельного bus_factory в коде нет.</p>
+  </div>
+
+  <div style="position:absolute;left:494px;top:324px;width:410px;height:126px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:17px;font-weight:700;color:#03045e;">Чего в нём уже нет</p>
+    <p style="margin:0;font-size:12.5px;line-height:19px;color:#03045e;">Полей cache_loader, cache_provider, cache_store, sync_service в dataclass нет: снятый локальный кэш не входит в состав агента — владельцем снимка стала capability data платформы.</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: lib/core/application_context.py:141,391,455-462,722,917; openspec/specs/runtime/context/spec.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">15</text></svg>
+</div></div>
+
+<!-- ================= 16 ХУКИ ================= -->
+<div class="slide" id="s16"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">AGENT HOOKS</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Порядок хуков зафиксирован кодом</p>
+
+  <svg width="848" height="150" style="position:absolute;left:56px;top:132px;" aria-hidden="true">
+    <rect x="0" y="20" width="152" height="92" rx="10" fill="#caf0f8"/>
+    <text x="76" y="42" text-anchor="middle" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Плагины</text>
+    <text x="76" y="62" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">workspace/hooks/*</text>
+    <text x="76" y="82" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#03045e" font-family="Times New Roman, serif">recent_files</text>
+    <text x="76" y="99" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#03045e" font-family="Times New Roman, serif">session_file_redirect</text>
+
+    <rect x="174" y="20" width="152" height="92" rx="10" fill="#90e0ef"/>
+    <text x="250" y="42" text-anchor="middle" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">ToolAuditHook</text>
+    <text x="250" y="64" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#03045e" font-family="Times New Roman, serif">аудит вызовов</text>
+    <text x="250" y="82" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">всегда</text>
+
+    <rect x="348" y="20" width="152" height="92" rx="10" fill="#90e0ef"/>
+    <text x="424" y="42" text-anchor="middle" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">TerminalPrint</text>
+    <text x="424" y="64" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#03045e" font-family="Times New Roman, serif">видимый вывод</text>
+    <text x="424" y="82" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">следует за исходом</text>
+
+    <rect x="522" y="20" width="152" height="92" rx="10" fill="#90e0ef"/>
+    <text x="598" y="42" text-anchor="middle" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">RepeatGuard</text>
+    <text x="598" y="64" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#03045e" font-family="Times New Roman, serif">защита от петель</text>
+    <text x="598" y="82" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">подключён и при off</text>
+
+    <rect x="696" y="20" width="152" height="92" rx="10" fill="#00b4d8"/>
+    <text x="772" y="42" text-anchor="middle" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">McpIdentity</text>
+    <text x="772" y="64" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#03045e" font-family="Times New Roman, serif">личность вызова</text>
+    <text x="772" y="82" text-anchor="middle" dominant-baseline="central" font-size="11.5" fill="#03045e" font-family="Times New Roman, serif">последний</text>
+
+    <path d="M152 66 L174 66" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M166 59 L174 66 L166 73" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M326 66 L348 66" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M340 59 L348 66 L340 73" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M500 66 L522 66" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M514 59 L522 66 L514 73" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M674 66 L696 66" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M688 59 L696 66 L688 73" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <text x="424" y="134" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">McpIdentityHook подключён последним, чтобы аудит видел аргументы модели, а не подставленные инфраструктурные ключи</text>
+  </svg>
+
+  <div style="position:absolute;left:56px;top:300px;width:848px;height:88px;background:#03045e;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:17px;font-weight:700;color:#caf0f8;">DatabaseLoggingHook — не общий инстанс, а фабрика оборота</p>
+    <p style="margin:0;font-size:12.5px;line-height:19px;color:#90e0ef;">Фреймворк создаёт свежий инстанс на каждый оборот: состояние вопроса изолировано между конкурентными сессиями. Общие инстансы — все прочие хуки; фабрика появляется только при наличии DbLoggingService.</p>
+  </div>
+
+  <svg width="848" height="58" style="position:absolute;left:56px;top:404px;" aria-hidden="true">
+    <rect width="848" height="58" rx="12" fill="#90e0ef"/>
+    <rect width="4" height="58" rx="2" fill="#0077b6"/>
+    <text x="20" y="20" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Плагины идут до фреймворковых хуков — иначе аудит не увидит то, что реально вызвала модель</text>
+    <text x="20" y="40" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">Проверяется инвентарём canonical_framework_hooks; подключение RepeatGuardHook при mode=off обязательно ради соответствия канону</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: lib/core/agent_factory.py:152-212; openspec/specs/runtime/agent-hooks/spec.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">16</text></svg>
+</div></div>
+
+<!-- ================= 17 RUNTIME PATCHER ================= -->
+<div class="slide" id="s17"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ОБНОВЛЕНИЕ АПСТРИМА</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">RuntimePatcher: четыре точечных вмешательства</p>
+
+  <svg width="848" height="216" style="position:absolute;left:56px;top:132px;" aria-hidden="true">
+    <rect width="848" height="216" rx="12" fill="#caf0f8"/>
+    <rect width="848" height="34" rx="12" fill="#0077b6"/>
+    <rect y="22" width="848" height="12" fill="#0077b6"/>
+    <text x="16" y="17" dominant-baseline="central" font-size="12.5" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Патч</text>
+    <text x="230" y="17" dominant-baseline="central" font-size="12.5" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Цель в nanobot</text>
+    <text x="700" y="17" dominant-baseline="central" font-size="12.5" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Риск</text>
+
+    <text x="16" y="56" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">exec_timeout_cap</text>
+    <text x="230" y="56" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">ExecTool._MAX_TIMEOUT и схема параметра timeout</text>
+    <text x="700" y="56" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">medium</text>
+    <rect x="12" y="72" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="92" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">assemble_outbound</text>
+    <text x="230" y="92" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">AgentLoop._assemble_outbound — финальная точка сообщения</text>
+    <text x="700" y="92" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">high · обязателен</text>
+    <rect x="12" y="108" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="128" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">subagent_logging</text>
+    <text x="230" y="128" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">_SubagentHook — события подагентов в журнал</text>
+    <text x="700" y="128" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">high · обязателен</text>
+    <rect x="12" y="144" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="164" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">repeat_guard_block</text>
+    <text x="230" y="164" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">_execute_tool_call — отказ становится результатом</text>
+    <text x="700" y="164" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">low</text>
+    <rect x="12" y="180" width="824" height="1" fill="#90e0ef"/>
+    <text x="16" y="198" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">Каждый патч декларирует цель, причину, проверенные альтернативы и риск; apply_all() вызывается на этапе сборки контекста</text>
+  </svg>
+
+  <div style="position:absolute;left:56px;top:366px;width:416px;height:100px;background:#90e0ef;border-radius:12px;padding:12px 14px;">
+    <p style="margin:0 0 5px 0;font-size:15px;font-weight:700;color:#03045e;">Дрейф API не роняет старт</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Патч возвращает пару «применился / причина». При расхождении с библиотекой — предупреждение, конфигуративный пропуск не смешивается с дрейфом.</p>
+  </div>
+  <div style="position:absolute;left:488px;top:366px;width:416px;height:100px;background:#03045e;border-radius:12px;padding:12px 14px;">
+    <p style="margin:0 0 5px 0;font-size:15px;font-weight:700;color:#caf0f8;">Расхождение с документацией</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">ARCHITECTURE.md пишет «6 monkey-patch'ей»: в коде объявлено четыре — сверено по _PATCH_SPECS.</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: lib/services/runtime_patcher.py:271-331; docs/architecture/runtime-patcher-inventory.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">17</text></svg>
+</div></div>
+
+<!-- ================= 18 ИНСТРУМЕНТЫ МОДЕЛИ ================= -->
+<div class="slide" id="s18"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ЧТО ВИДИТ МОДЕЛЬ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Инструменты: три источника, один список</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:268px;height:248px;background:#caf0f8;border-radius:12px;padding:14px 14px;">
+    <p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#03045e;">Свои инструменты</p>
+    <p style="margin:0 0 8px 0;font-size:12px;line-height:18px;color:#0077b6;">workspace/tools/*.py — авто-сканирование</p>
+    <ul style="margin:0;padding-left:16px;font-size:13px;line-height:21px;color:#03045e;">
+      <li>compact_context</li>
+      <li>document_read</li>
+    </ul>
+    <p style="margin:12px 0 0 0;font-size:12px;line-height:18px;color:#0077b6;">Раньше здесь были запросы к данным аудита и history_search — теперь модель получает те же возможности как операции платформы.</p>
+  </div>
+
+  <div style="position:absolute;left:346px;top:132px;width:268px;height:248px;background:#03045e;border-radius:12px;padding:14px;">
+    <p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#caf0f8;">Операции платформы — 9</p>
+    <p style="margin:0;font-size:11.5px;line-height:17px;color:#90e0ef;">audit.list_scripts<br>audit.run_script<br>audit.generate_sql<br>vectors.vector_search<br>vectors.list_indexes<br>platform.analyze_document<br>platform.query_operation<br>data.history_search<br>platform.read_result</p>
+    <p style="margin:8px 0 0 0;font-size:12px;line-height:18px;color:#00b4d8;">Приходят как mcp_enterprise_* с настоящей inputSchema платформы</p>
+  </div>
+
+  <div style="position:absolute;left:636px;top:132px;width:268px;height:248px;background:#90e0ef;border-radius:12px;padding:14px;">
+    <p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#03045e;">Нативные нанобота</p>
+    <p style="margin:0 0 8px 0;font-size:12px;line-height:18px;color:#0077b6;">включены в config.json → tools</p>
+    <ul style="margin:0;padding-left:16px;font-size:13px;line-height:21px;color:#03045e;">
+      <li>web</li>
+      <li>file</li>
+      <li>my</li>
+      <li>column_descriptions</li>
+    </ul>
+    <p style="margin:12px 0 0 0;font-size:12px;line-height:18px;color:#0077b6;">exec выключен: запуск команд описан как запрещённый путь.</p>
+  </div>
+
+  <svg width="848" height="70" style="position:absolute;left:56px;top:396px;" aria-hidden="true">
+    <rect width="848" height="70" rx="12" fill="#caf0f8"/>
+    <rect width="4" height="70" rx="2" fill="#00b4d8"/>
+    <text x="20" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Личность подставляет хук, а не модель</text>
+    <text x="20" y="46" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">session_id, user_id и request_id добавляются к аргументам mcp_enterprise_*; в аргументах от модели их быть не должно</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: config.json → tools.mcpServers.enterprise.enabled_tools (пересчитано: 9), lib/services/project_tool_loader.py, lib/hooks/mcp_identity_hook.py</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">18</text></svg>
+</div></div>
+
+<!-- ================= 19 DIVIDER 04 ================= -->
+<div class="slide" id="s19"><div class="slide-content" style="background:#03045e;">
+  <svg width="960" height="540" style="position:absolute;left:0;top:0;" aria-hidden="true">
+    <defs><pattern id="dots4" x="0" y="0" width="34" height="34" patternUnits="userSpaceOnUse"><circle cx="17" cy="17" r="2" fill="#90e0ef"/></pattern></defs>
+    <rect width="960" height="540" fill="url(#dots4)" opacity="0.1"/>
+  </svg>
+  <svg width="140" height="140" style="position:absolute;left:56px;top:150px;" aria-hidden="true">
+    <circle cx="70" cy="70" r="68" fill="none" stroke="#90e0ef" stroke-width="2" opacity="0.5"/>
+    <text x="70" y="70" text-anchor="middle" dominant-baseline="central" font-size="64" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">04</text>
+  </svg>
+  <p style="position:absolute;left:56px;top:330px;margin:0;font-size:42px;font-weight:700;color:#caf0f8;">Платформа enterprise-mcp</p>
+  <p style="position:absolute;left:56px;top:388px;margin:0;font-size:18px;color:#90e0ef;">Capability, контракт вызова, владение данными</p>
+  <svg width="700" height="3" style="position:absolute;left:56px;top:440px;" aria-hidden="true"><rect width="700" height="3" rx="2" fill="#90e0ef" opacity="0.6"/></svg>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">19</text></svg>
+</div></div>
+
+<!-- ================= 20 СТАРТ СЕРВЕРА ================= -->
+<div class="slide" id="s20"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ПОСЛЕДОВАТЕЛЬНОСТЬ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Сервер готовится до запуска event loop</p>
+
+  <div style="position:absolute;left:56px;top:130px;width:520px;height:266px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <ol style="margin:0;padding-left:22px;font-size:13px;line-height:31px;color:#03045e;">
+      <li>Settings: профиль и блок настроек агента — читаются <span style="font-weight:700;">до</span> настройки логирования</li>
+      <li>Настройка логирования: уровень вывода объявлен в platform.json</li>
+      <li>Разбор транспорта: stdio или streamable-http на /mcp</li>
+      <li>Сборка сервисов и операций</li>
+      <li>data.start() — только если сервис data есть</li>
+      <li>Прогрев тяжёлых импортов и capability — <span style="font-weight:700;">до</span> event loop</li>
+      <li>Обслуживание: HTTP-ветка или stdio-сервер; в finally — data.stop()</li>
+    </ol>
+  </div>
+
+  <div style="position:absolute;left:596px;top:130px;width:308px;height:126px;background:#90e0ef;border-radius:12px;padding:14px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#03045e;">Прогрев</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">Для каждого объявленного и включённого индекса — ensure_index: FAISS собирается заранее, иначе сборка случалась бы на первом же поиске.</p>
+  </div>
+  <div style="position:absolute;left:596px;top:270px;width:308px;height:126px;background:#03045e;border-radius:12px;padding:14px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#caf0f8;">Отказ не равен пустому результату</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">Снимок необязателен по контракту: его отсутствие не роняет старт, причина логируется и видна в ответах операций.</p>
+  </div>
+
+  <svg width="848" height="70" style="position:absolute;left:56px;top:410px;" aria-hidden="true">
+    <rect width="848" height="70" rx="12" fill="#caf0f8"/>
+    <rect width="4" height="70" rx="2" fill="#0077b6"/>
+    <text x="20" y="24" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Проверка «снимок не просто открывается, а отдаёт данные»</text>
+    <text x="20" y="46" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">На прогреве выполняется дешёвый вызов list_scripts: пустой реестр означает снимок без данных, а не «индекс не собран»</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: mcp-platform/servers/enterprise/server.py:893-965, 1074-1115</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">20</text></svg>
+</div></div>
+
+<!-- ================= 21 CAPABILITY ================= -->
+<div class="slide" id="s21"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">СОСТАВ СЕРВЕРА</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Capability — единица владения и отказа</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:196px;height:150px;background:#03045e;border-radius:12px;padding:12px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#caf0f8;">data</p>
+    <p style="margin:0 0 6px 0;font-size:24px;font-weight:700;color:#00b4d8;">23</p>
+    <p style="margin:0;font-size:11.5px;line-height:16px;color:#90e0ef;">очередь задач, журнал, чтение журнала, зеркало сессий, снимок</p>
+  </div>
+  <div style="position:absolute;left:266px;top:132px;width:196px;height:150px;background:#0077b6;border-radius:12px;padding:12px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#caf0f8;">audit</p>
+    <p style="margin:0 0 6px 0;font-size:24px;font-weight:700;color:#90e0ef;">3</p>
+    <p style="margin:0;font-size:11.5px;line-height:16px;color:#caf0f8;">реестр скриптов, их выполнение, генерация SQL по данным агента</p>
+  </div>
+  <div style="position:absolute;left:476px;top:132px;width:196px;height:150px;background:#0077b6;border-radius:12px;padding:12px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#caf0f8;">vectors</p>
+    <p style="margin:0 0 6px 0;font-size:24px;font-weight:700;color:#90e0ef;">3</p>
+    <p style="margin:0;font-size:11.5px;line-height:16px;color:#caf0f8;">FAISS-поиск, перечень индексов, состояние индекса</p>
+  </div>
+  <div style="position:absolute;left:686px;top:132px;width:218px;height:150px;background:#90e0ef;border-radius:12px;padding:12px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#03045e;">llm</p>
+    <p style="margin:0 0 6px 0;font-size:24px;font-weight:700;color:#0077b6;">2</p>
+    <p style="margin:0;font-size:11.5px;line-height:16px;color:#03045e;">чат и эмбеддинги; в лёгком режиме — единственный поднимаемый capability</p>
+  </div>
+
+  <div style="position:absolute;left:56px;top:298px;width:416px;height:152px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#03045e;">Вне capability — 4 платформенные операции</p>
+    <p style="margin:0;font-size:12.5px;line-height:19px;color:#03045e;">platform.analyze_document · platform.query_operation · platform.read_result · platform.session_files</p>
+    <p style="margin:8px 0 0 0;font-size:12.5px;line-height:18px;color:#0077b6;">Файлами сессии владеет платформа, поэтому операции чтения результата и состояния живут вне capability — это проверяется стражем границ.</p>
+  </div>
+  <div style="position:absolute;left:488px;top:298px;width:416px;height:152px;background:#90e0ef;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:16px;font-weight:700;color:#03045e;">Что объявлено, а не вычисляется</p>
+    <p style="margin:0;font-size:12.5px;line-height:19px;color:#03045e;">platform.json: путь снимка, состав таблиц аудита, имена и включённость индексов, потолок крупного результата, таймаут оборота, имена таблиц журнала и очереди, путь файла настроек агента, уровень вывода.</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: mcp-platform/libs/enterprise_common/settings.py:952-1041 (data: 20 в объявлении + 3 операции зеркала на диске), servers/enterprise/tools/</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">21</text></svg>
+</div></div>
+
+<!-- ================= 22 КОНТРАКТ ВЫЗОВА ================= -->
+<div class="slide" id="s22"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">КОНТРАКТ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Анатомия одного вызова операции</p>
+
+  <svg width="848" height="150" style="position:absolute;left:56px;top:128px;" aria-hidden="true">
+    <rect x="0" y="0" width="848" height="64" rx="10" fill="#caf0f8"/>
+    <text x="16" y="20" dominant-baseline="central" font-size="13" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Запрос</text>
+    <text x="16" y="44" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">аргументы по inputSchema, собранной из сигнатуры обработчика · личность добавляется хуком, обработчиком не объявляется</text>
+    <path d="M424 64 L424 82" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M417 75 L424 82 L431 75" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <rect x="0" y="82" width="848" height="64" rx="10" fill="#90e0ef"/>
+    <text x="16" y="102" dominant-baseline="central" font-size="13" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Конверт ответа _execution</text>
+    <text x="16" y="126" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">capability · duration_ms · quality · large_result · artifact — общий для всех операций</text>
+  </svg>
+
+  <div style="position:absolute;left:56px;top:296px;width:272px;height:154px;background:#03045e;border-radius:12px;padding:13px 14px;">
+    <p style="margin:0 0 6px 0;font-size:15px;font-weight:700;color:#caf0f8;">Крупный результат</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">Сверх потолка сохраняется артефакт и возвращается ссылка вида session://results/... Прочитать его можно только операцией read_result.</p>
+  </div>
+  <div style="position:absolute;left:346px;top:296px;width:272px;height:154px;background:#caf0f8;border-radius:12px;padding:13px 14px;">
+    <p style="margin:0 0 6px 0;font-size:15px;font-weight:700;color:#03045e;">Коды отказа</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">enterprise_error · not_found · invalid_request · infrastructure_error плюс доменные коды владельца данных.</p>
+  </div>
+  <div style="position:absolute;left:636px;top:296px;width:268px;height:154px;background:#90e0ef;border-radius:12px;padding:13px 14px;">
+    <p style="margin:0 0 6px 0;font-size:15px;font-weight:700;color:#03045e;">Двухшаговый разбор</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#03045e;">analyze_document сначала возвращает confirmation_required с оценкой и нулём вызовов модели; разбор идёт только после явного подтверждения.</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: libs/enterprise_common/registry.py:251, execution/pipeline.py:70-249, errors.py:14-42, servers/enterprise/tools/analyze_document.py:1142</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">22</text></svg>
+</div></div>
+
+<!-- ================= 23 СНИМОК И ИНДЕКСЫ ================= -->
+<div class="slide" id="s23"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ВЛАДЕНИЕ ДАННЫМИ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Снимок и индексы: кто пишет и кто читает</p>
+
+  <svg width="410" height="216" style="position:absolute;left:56px;top:132px;" aria-hidden="true">
+    <rect width="410" height="216" rx="12" fill="#caf0f8"/>
+    <text x="18" y="24" dominant-baseline="central" font-size="17" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Снимок DuckDB</text>
+    <rect x="18" y="44" width="374" height="46" rx="8" fill="#03045e"/>
+    <text x="32" y="60" dominant-baseline="central" font-size="12.5" fill="#caf0f8" font-family="Times New Roman, serif">Единственный writer — операторская загрузка</text>
+    <text x="32" y="78" dominant-baseline="central" font-size="11.5" fill="#90e0ef" font-family="Times New Roman, serif">процедура оператора, не фон и не работа агента</text>
+    <rect x="18" y="98" width="374" height="46" rx="8" fill="#90e0ef"/>
+    <text x="32" y="114" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Capability data читает на время операции</text>
+    <text x="32" y="132" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">соединение закрывается сразу: файл свободен между запросами</text>
+    <text x="18" y="166" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">DDL запрещён в любом режиме, запись — в режиме</text>
+    <text x="18" y="184" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">только для чтения; NFS и SMB отвергаются заранее.</text>
+    <text x="18" y="204" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">Свежесть снимка = перезапуск процесса платформы.</text>
+  </svg>
+
+  <svg width="410" height="216" style="position:absolute;left:494px;top:132px;" aria-hidden="true">
+    <rect width="410" height="216" rx="12" fill="#03045e"/>
+    <text x="18" y="24" dominant-baseline="central" font-size="17" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Индексы FAISS в памяти</text>
+    <rect x="18" y="46" width="86" height="30" rx="15" fill="#caf0f8"/>
+    <text x="61" y="61" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">missing</text>
+    <path d="M108 61 L128 61" stroke="#90e0ef" stroke-width="2" fill="none"/>
+    <path d="M121 54 L129 61 L121 68" stroke="#90e0ef" stroke-width="2" fill="none"/>
+    <rect x="132" y="46" width="90" height="30" rx="15" fill="#90e0ef"/>
+    <text x="177" y="61" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">building</text>
+    <path d="M226 61 L246 61" stroke="#90e0ef" stroke-width="2" fill="none"/>
+    <path d="M239 54 L247 61 L239 68" stroke="#90e0ef" stroke-width="2" fill="none"/>
+    <rect x="250" y="46" width="72" height="30" rx="15" fill="#00b4d8"/>
+    <text x="286" y="61" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">ready</text>
+    <text x="18" y="100" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">Четыре состояния — и error с кодом и текстом,</text>
+    <text x="18" y="120" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">а не «ничего не найдено». Сборка индекса —</text>
+    <text x="18" y="140" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">single-flight: первый собирает, остальные</text>
+    <text x="18" y="160" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">ждут результат — итого одна сборка.</text>
+    <text x="18" y="186" dominant-baseline="central" font-size="12" fill="#00b4d8" font-family="Times New Roman, serif">Персиста индекса нет ни файлом, ни строкой.</text>
+    <text x="18" y="204" dominant-baseline="central" font-size="11.5" fill="#90e0ef" font-family="Times New Roman, serif">Агент наблюдает состояние операциями list_indexes и index_stats.</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: libs/enterprise_data/snapshot/store.py:383-401,587-592 · libs/vectors/owner.py:51-54,244-269</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">23</text></svg>
+</div></div>
+
+<!-- ================= 24 DIVIDER 05 ================= -->
+<div class="slide" id="s24"><div class="slide-content" style="background:#0077b6;">
+  <svg width="960" height="540" style="position:absolute;left:0;top:0;" aria-hidden="true">
+    <defs><pattern id="dots5" x="0" y="0" width="34" height="34" patternUnits="userSpaceOnUse"><circle cx="17" cy="17" r="2" fill="#caf0f8"/></pattern></defs>
+    <rect width="960" height="540" fill="url(#dots5)" opacity="0.12"/>
+  </svg>
+  <svg width="140" height="140" style="position:absolute;left:56px;top:150px;" aria-hidden="true">
+    <circle cx="70" cy="70" r="68" fill="none" stroke="#caf0f8" stroke-width="2" opacity="0.5"/>
+    <text x="70" y="70" text-anchor="middle" dominant-baseline="central" font-size="64" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">05</text>
+  </svg>
+  <p style="position:absolute;left:56px;top:330px;margin:0;font-size:42px;font-weight:700;color:#caf0f8;">Данные и наблюдаемость</p>
+  <p style="position:absolute;left:56px;top:388px;margin:0;font-size:18px;color:#90e0ef;">Хранение, сессии, журнал, контуры</p>
+  <svg width="700" height="3" style="position:absolute;left:56px;top:440px;" aria-hidden="true"><rect width="700" height="3" rx="2" fill="#caf0f8" opacity="0.6"/></svg>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#03045e"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">24</text></svg>
+</div></div>
+
+<!-- ================= 25 СЛОИ ХРАНЕНИЯ ================= -->
+<div class="slide" id="s25"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">СОСТАВ БД</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Слои хранения и их владельцы</p>
+
+  <svg width="848" height="252" style="position:absolute;left:56px;top:128px;" aria-hidden="true">
+    <rect width="848" height="252" rx="12" fill="#caf0f8"/>
+    <rect width="848" height="32" rx="12" fill="#0077b6"/>
+    <rect y="20" width="848" height="12" fill="#0077b6"/>
+    <text x="16" y="16" dominant-baseline="central" font-size="12" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Слой</text>
+    <text x="250" y="16" dominant-baseline="central" font-size="12" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Таблицы</text>
+    <text x="600" y="16" dominant-baseline="central" font-size="12" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Кто пишет</text>
+
+    <text x="16" y="50" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Сессии</text>
+    <text x="250" y="50" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">agent_session_meta, agent_session_messages</text>
+    <text x="600" y="50" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">платформа, операция зеркала</text>
+    <rect x="12" y="62" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="78" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Канал</text>
+    <text x="250" y="78" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">agent_conversation_messages</text>
+    <text x="600" y="78" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">очередь захвата задач, UI читает</text>
+    <rect x="12" y="90" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="106" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Журнал</text>
+    <text x="250" y="106" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">agent_gateway_logs, agent_question_runs</text>
+    <text x="600" y="106" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">DbLoggingService — один writer</text>
+    <rect x="12" y="118" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="134" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Миграции</text>
+    <text x="250" y="134" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">schema_migrations</text>
+    <text x="600" y="134" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">tools/migrate.py, версия и SHA256</text>
+    <rect x="12" y="146" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="162" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Данные аудита</text>
+    <text x="250" y="162" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">oarb.audits, violations, audit_reports, report_items</text>
+    <text x="600" y="162" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">читает capability audit</text>
+    <rect x="12" y="174" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="190" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Векторы</text>
+    <text x="250" y="190" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">oarb.audit_vectors</text>
+    <text x="600" y="190" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">сборщик индексов, чтение — снимок</text>
+    <rect x="12" y="202" width="824" height="1" fill="#90e0ef"/>
+
+    <text x="16" y="218" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Скрипты</text>
+    <text x="250" y="218" dominant-baseline="central" font-size="12" fill="#03045e" font-family="Times New Roman, serif">agent_predefined_scripts</text>
+    <text x="600" y="218" dominant-baseline="central" font-size="12" fill="#0077b6" font-family="Times New Roman, serif">каталог capability audit</text>
+    <rect x="12" y="230" width="824" height="1" fill="#90e0ef"/>
+    <text x="16" y="244" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">Тестовый контур дублирует четыре таблицы суффиксом _test; имена таблиц — объявление владельца, а не константы кода</text>
+  </svg>
+
+  <svg width="848" height="66" style="position:absolute;left:56px;top:394px;" aria-hidden="true">
+    <rect width="848" height="66" rx="12" fill="#90e0ef"/>
+    <rect width="4" height="66" rx="2" fill="#0077b6"/>
+    <text x="20" y="24" dominant-baseline="central" font-size="13.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Мёртвые артефакты названы, чтобы их не искали</text>
+    <text x="20" y="46" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">agent_vector_index_config и agent_vector_index_store кодом не читаются; DDL-файлы по ним содержат только надгробные комментарии</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: docs/DATABASE.md, sql/README.md, mcp-platform/platform.json → audit.tables</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">25</text></svg>
+</div></div>
+
+<!-- ================= 26 СЕССИИ ================= -->
+<div class="slide" id="s26"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">СЕССИИ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">JSONL — источник истины, PostgreSQL — зеркало</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:410px;height:196px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#03045e;">Hot path: файлы</p>
+    <ul style="margin:0;padding-left:16px;font-size:12.5px;line-height:20px;color:#03045e;">
+      <li>менеджер сессий библиотеки поверх JSONL-хранилища</li>
+      <li>агентский слой — санация записи, без прямых SQL в таблицы сессий</li>
+      <li>атомарная запись через замену файла</li>
+      <li>режимы хранения: авто, PostgreSQL, файл</li>
+    </ul>
+  </div>
+
+  <div style="position:absolute;left:494px;top:132px;width:410px;height:196px;background:#03045e;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#caf0f8;">Cold mirror: PostgreSQL</p>
+    <ul style="margin:0;padding-left:16px;font-size:12.5px;line-height:20px;color:#90e0ef;">
+      <li>отдельный процесс зеркала: интервал 30 секунд</li>
+      <li>батчи, сортировка по ключу сессии</li>
+      <li>признак изменения — дайдёст источника</li>
+      <li>запись блокируется, если зеркало отстало слишком сильно</li>
+    </ul>
+  </div>
+
+  <svg width="848" height="96" style="position:absolute;left:56px;top:344px;" aria-hidden="true">
+    <rect width="848" height="96" rx="12" fill="#90e0ef"/>
+    <rect width="4" height="96" rx="2" fill="#0077b6"/>
+    <text x="20" y="24" dominant-baseline="central" font-size="14" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">Что ломается без миграции — и что в документации расходится</text>
+    <text x="20" y="48" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">Исторические сессии, оставшиеся только в PostgreSQL, обязаны быть перенесены в JSONL до деплоя: их нет в перечне сессий, и зеркало удалит их при первом же цикле.</text>
+    <text x="20" y="70" dominant-baseline="central" font-size="12.5" fill="#0077b6" font-family="Times New Roman, serif">Документ storage-layers.md упоминает advisory-локи в двух местах и сам же объявляет их исторической записью — действующего advisory lock в коде нет.</text>
+    <text x="20" y="86" dominant-baseline="central" font-size="11.5" fill="#0077b6" font-family="Times New Roman, serif">storage-layers.md:119 против :165-175</text>
+  </svg>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: docs/architecture/storage-layers.md:51-113, lib/gateway/mirror/session_mirror.py, openspec/specs/sessions/session-hybridization/spec.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">26</text></svg>
+</div></div>
+
+<!-- ================= 27 ЖУРНАЛ ================= -->
+<div class="slide" id="s27"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">НАБЛЮДАЕМОСТЬ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Журнал: один писатель и словарь событий</p>
+
+  <svg width="848" height="70" style="position:absolute;left:56px;top:128px;" aria-hidden="true">
+    <rect width="848" height="70" rx="12" fill="#caf0f8"/>
+    <rect x="16" y="18" width="180" height="34" rx="8" fill="#90e0ef"/>
+    <text x="106" y="35" text-anchor="middle" dominant-baseline="central" font-size="12.5" font-weight="700" fill="#03045e" font-family="Times New Roman, serif">DbLoggingService</text>
+    <path d="M200 35 L228 35" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M221 28 L229 35 L221 42" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <rect x="232" y="18" width="150" height="34" rx="8" fill="#90e0ef"/>
+    <text x="307" y="35" text-anchor="middle" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">батч</text>
+    <path d="M386 35 L414 35" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M407 28 L415 35 L407 42" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <rect x="418" y="18" width="190" height="34" rx="8" fill="#0077b6"/>
+    <text x="513" y="35" text-anchor="middle" dominant-baseline="central" font-size="12.5" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">операция записи в журнал</text>
+    <path d="M612 35 L640 35" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <path d="M633 28 L641 35 L633 42" stroke="#0077b6" stroke-width="2" fill="none"/>
+    <rect x="644" y="18" width="188" height="34" rx="8" fill="#caf0f8"/>
+    <text x="738" y="35" text-anchor="middle" dominant-baseline="central" font-size="12.5" fill="#03045e" font-family="Times New Roman, serif">откат: локальный файл</text>
+  </svg>
+
+  <svg width="410" height="196" style="position:absolute;left:56px;top:214px;" aria-hidden="true">
+    <rect width="410" height="196" rx="12" fill="#03045e"/>
+    <text x="18" y="24" dominant-baseline="central" font-size="16" font-weight="700" fill="#caf0f8" font-family="Times New Roman, serif">Словарь событий</text>
+    <text x="18" y="52" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">оборот: старт, приём, ответ, доставка,</text>
+    <text x="18" y="70" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">сжатие, отказ, завершение</text>
+    <text x="18" y="96" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">модель: запрос, ответ, обмен, отказ</text>
+    <text x="18" y="122" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">инструмент: старт, успех, отказ,</text>
+    <text x="18" y="140" dominant-baseline="central" font-size="12.5" fill="#90e0ef" font-family="Times New Roman, serif">таймаут, подавление</text>
+    <text x="18" y="166" dominant-baseline="central" font-size="12.5" fill="#00b4d8" font-family="Times New Roman, serif">артефакты и проверка качества</text>
+    <text x="18" y="186" dominant-baseline="central" font-size="11.5" fill="#90e0ef" font-family="Times New Roman, serif">Пробные события фильтруются префиксами.</text>
+  </svg>
+
+  <div style="position:absolute;left:494px;top:214px;width:410px;height:196px;background:#90e0ef;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#03045e;">Чтение журнала агентом</p>
+    <p style="margin:0;font-size:12px;line-height:17px;color:#03045e;">Операция поиска по журналу переживает сжатие контекста. Отбор — пересечение по сессии и пользователю, оба берутся из контекста вызова.</p>
+    <p style="margin:6px 0 0 0;font-size:12px;line-height:17px;color:#0077b6;">Без полной личности — отказ на границе конвейера, без обращения к базе. Выводить пользователя из сессии запрещено.</p>
+    <p style="margin:6px 0 0 0;font-size:12px;line-height:17px;color:#0077b6;">Параметра «область поиска» больше нет: он снят вместе с переходом на нативные операции.</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: openspec/specs/observability/logging-db/spec.md, libs/enterprise_common/eventing/types.py:18-114, openspec/specs/interfaces/tools-history-search/spec.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">27</text></svg>
+</div></div>
+
+<!-- ================= 28 ПРОФИЛИ И МИГРАЦИИ ================= -->
+<div class="slide" id="s28"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">КОНТУРЫ И СХЕМА</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Профили и миграции: чем тест отличается от боевого</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:410px;height:250px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#03045e;">Профиль задаётся только флагом</p>
+    <ul style="margin:0;padding-left:16px;font-size:12.5px;line-height:20px;color:#03045e;">
+      <li>сервер без флага — отказ с кодом 2; откат к боевому запрещён</li>
+      <li>CLI всегда работает в тестовом профиле и флага не принимает</li>
+      <li>до платформы едет только имя контура, не значения имён таблиц</li>
+      <li>белый список агента — пять ключей, у платформы — три; это разные списки</li>
+    </ul>
+    <p style="margin:10px 0 0 0;font-size:12.5px;line-height:18px;color:#0077b6;">Оверлей объявлен в двух файлах, поэтому при старте выполняется сверка: расхождение — отказ конфигурации.</p>
+  </div>
+
+  <div style="position:absolute;left:494px;top:132px;width:410px;height:250px;background:#03045e;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 8px 0;font-size:17px;font-weight:700;color:#caf0f8;">Миграции: смена схемы — транзакция</p>
+    <ul style="margin:0;padding-left:16px;font-size:12.5px;line-height:20px;color:#90e0ef;">
+      <li>файлы по шаблону версии и имени в каталоге миграций</li>
+      <li>применённый файл фиксируется с отпечатком нормализованного текста</li>
+      <li>изменение уже применённого файла — расхождение, а не «переприменить»</li>
+      <li>одна транзакция на миграцию: выполнение, запись в трекер, фиксация</li>
+    </ul>
+    <p style="margin:10px 0 0 0;font-size:12.5px;line-height:18px;color:#00b4d8;">Плейсхолдеры не подставляются: шаблон остаётся шаблоном, имя дополняет оператор.</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#0077b6;">Источник: openspec/specs/configuration/profiles/spec.md:35-95, config.py:514-535, tools/migrate.py, sql/README.md</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">28</text></svg>
+</div></div>
+
+<!-- ================= 29 ИТОГИ ================= -->
+<div class="slide" id="s29"><div class="slide-content" style="background:#caf0f8;">
+  <p style="position:absolute;left:56px;top:40px;margin:0;font-size:13px;letter-spacing:3px;color:#0077b6;">ИТОГИ</p>
+  <p style="position:absolute;left:56px;top:66px;margin:0;font-size:36px;font-weight:700;color:#03045e;">Семь выводов, которые держат систему</p>
+
+  <div style="position:absolute;left:56px;top:132px;width:848px;height:52px;background:#90e0ef;border-radius:10px;padding:9px 14px;">
+    <p style="margin:0;font-size:13.5px;line-height:18px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">1 · </span>Два процесса по владению, а не по удобству: снимок, индексы и вызов модели живут в платформе.</p>
+  </div>
+  <div style="position:absolute;left:56px;top:194px;width:848px;height:52px;background:#90e0ef;border-radius:10px;padding:9px 14px;">
+    <p style="margin:0;font-size:13.5px;line-height:18px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">2 · </span>Три уровня документации не дублируют друг друга: норма, описание реализации и контракт компонента.</p>
+  </div>
+  <div style="position:absolute;left:56px;top:256px;width:848px;height:52px;background:#90e0ef;border-radius:10px;padding:9px 14px;">
+    <p style="margin:0;font-size:13.5px;line-height:18px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">3 · </span>Порядок старта — часть контракта: рукопожатие платформы до работы агента, вердикт по capability печатается явно.</p>
+  </div>
+  <div style="position:absolute;left:56px;top:318px;width:848px;height:52px;background:#90e0ef;border-radius:10px;padding:9px 14px;">
+    <p style="margin:0;font-size:13.5px;line-height:18px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">4 · </span>Хуки упорядочены осознанно, а состояние оборота изолировано фабрикой на каждый оборот.</p>
+  </div>
+  <div style="position:absolute;left:56px;top:380px;width:848px;height:52px;background:#03045e;border-radius:10px;padding:9px 14px;">
+    <p style="margin:0;font-size:13.5px;line-height:18px;color:#caf0f8;"><span style="font-weight:700;color:#00b4d8;">5 · </span>Конфигурация объявляется владельцем: путь снимка, состав индексов, таймауты и имена таблиц не вычисляются на стороне агента.</p>
+  </div>
+  <div style="position:absolute;left:56px;top:442px;width:416px;height:52px;background:#caf0f8;border-radius:10px;padding:9px 14px;">
+    <p style="margin:0;font-size:13px;line-height:18px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">6 · </span>«Не поднялось» отличается от «пусто»: отказ индекса и отказ данных — разные состояния.</p>
+  </div>
+  <div style="position:absolute;left:488px;top:442px;width:416px;height:52px;background:#caf0f8;border-radius:10px;padding:9px 14px;">
+    <p style="margin:0;font-size:13px;line-height:18px;color:#03045e;"><span style="font-weight:700;color:#0077b6;">7 · </span>Каждое архитектурное правило закрыто стражем: пустой обход стражем считается провалом.</p>
+  </div>
+
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#0077b6"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#caf0f8" font-family="Times New Roman, serif">29</text></svg>
+</div></div>
+
+<!-- ================= 30 КАРТА ================= -->
+<div class="slide" id="s30"><div class="slide-content" style="background:#03045e;">
+  <p style="position:absolute;left:56px;top:48px;margin:0;font-size:13px;letter-spacing:3px;color:#90e0ef;">КУДА ЧТО МЕНЯТЬ</p>
+  <p style="position:absolute;left:56px;top:76px;margin:0;font-size:40px;font-weight:700;color:#caf0f8;">Карта изменений</p>
+  <p style="position:absolute;left:56px;top:130px;margin:0;font-size:17px;color:#90e0ef;">Правка всегда начинается с вопроса «какой документ это правит» — иначе правило появится в коде без контракта.</p>
+
+  <div style="position:absolute;left:56px;top:186px;width:416px;height:118px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:15px;font-weight:700;color:#03045e;">Правило поведения</p>
+    <p style="margin:0;font-size:12px;line-height:17px;color:#03045e;">docs/TARGET_ARCHITECTURE.md: принципы, инварианты, запреты.<br>Правка поведения сверяется с ним до и после.</p>
+  </div>
+  <div style="position:absolute;left:56px;top:316px;width:416px;height:118px;background:#caf0f8;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:15px;font-weight:700;color:#03045e;">Контракт компонента</p>
+    <p style="margin:0;font-size:12px;line-height:17px;color:#03045e;">openspec/specs/&lt;домен&gt;/&lt;компонент&gt;/spec.md: 19 разделов.<br>Форму проверяют реестр и валидатор.</p>
+  </div>
+  <div style="position:absolute;left:56px;top:438px;width:416px;height:62px;background:#caf0f8;border-radius:12px;padding:10px 16px;">
+    <p style="margin:0;font-size:12px;line-height:17px;color:#03045e;">Описание реализации — docs/ARCHITECTURE.md и подсистемные документы.</p>
+  </div>
+
+  <div style="position:absolute;right:56px;top:186px;width:416px;height:118px;background:#0077b6;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:15px;font-weight:700;color:#caf0f8;">Код</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">Runtime и сборка — lib/core и lib/services. Платформенные операции — mcp-platform, состав объявляет platform.json.</p>
+  </div>
+  <div style="position:absolute;right:56px;top:316px;width:416px;height:118px;background:#0077b6;border-radius:12px;padding:14px 16px;">
+    <p style="margin:0 0 6px 0;font-size:15px;font-weight:700;color:#caf0f8;">Схема</p>
+    <p style="margin:0;font-size:12.5px;line-height:18px;color:#90e0ef;">DDL — sql/, применение — tools/migrate.py, тестовый контур — отдельные таблицы с суффиксом.</p>
+  </div>
+  <div style="position:absolute;right:56px;top:438px;width:416px;height:62px;background:#00b4d8;border-radius:12px;padding:10px 16px;">
+    <p style="margin:0;font-size:12px;line-height:17px;color:#03045e;">Проверка: страж или тест, падающий на подсаженном дефекте.</p>
+  </div>
+
+  <p style="position:absolute;left:56px;bottom:26px;margin:0;font-size:11px;color:#90e0ef;">Навигация: стрелки или пробел, переход по клику. Слайды 4–28 содержат ссылки на источники.</p>
+  <svg style="position:absolute;right:32px;bottom:24px;" width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="18" fill="#caf0f8"/><text x="18" y="18" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#03045e" font-family="Times New Roman, serif">30</text></svg>
+</div></div>
+
+<script>
+var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+var current = 0;
+function scaleSlide() {
+  slides.forEach(function (s) {
+    var slide = s.querySelector('.slide-content');
+    if (!slide) return;
+    var scale = Math.min(window.innerWidth / 960, window.innerHeight / 540);
+    slide.style.transform = 'scale(' + scale + ')';
+    slide.style.transformOrigin = 'center center';
+  });
+}
+function show(i) {
+  current = Math.max(0, Math.min(slides.length - 1, i));
+  slides.forEach(function (s, idx) { s.classList.toggle('active', idx === current); });
+  location.hash = 's' + (current + 1);
+}
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { show(current + 1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { show(current - 1); e.preventDefault(); }
+  if (e.key === 'Home') { show(0); e.preventDefault(); }
+  if (e.key === 'End') { show(slides.length - 1); e.preventDefault(); }
+});
+document.addEventListener('click', function (e) { show(current + 1); });
+var start = parseInt((location.hash || '').replace('#s', ''), 10);
+if (start > 0) { current = start - 1; }
+window.addEventListener('load', function () { scaleSlide(); show(current); });
+window.addEventListener('resize', scaleSlide);
+</script>
+
+</body>
+</html>
