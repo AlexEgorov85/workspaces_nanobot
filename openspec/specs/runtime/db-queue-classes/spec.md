@@ -351,16 +351,32 @@
 
 1. **Приватный API пула закрыт.** Ни один производственный модуль вне
    `mcp-platform/libs/enterprise_data` MUST NOT ссылаться на `_Job`,
-   `DBManager`,
-   `_submit`, `_get_manager`, `_acquire_lease`, `PoolTimeoutError`.
-   Исключение одно и объявленное:
-   `mcp-platform/servers/enterprise/server.py:157-162` вызывает
-   `set_pool_config` / `set_job_class_config` — это штатный запуск.
-2. **Сырое соединение наружу не отдаётся.** `pool.run(fn)` сегодня
-   отдаёт вызывающему сырой `psycopg2`-conn, тогда как аренда отдаёт
-   прокси (`_ConnectionProxy`). Публичные точки входа обязаны отдавать
-   прокси, и `psycopg2` MUST NOT подниматься выше
-   `mcp-platform/libs/enterprise_data`.
+   `DBManager`, `_submit`, `_get_manager`, `_acquire_lease`,
+   `PoolTimeoutError`, `PoolBusyError` — закрытый список `PRIVATE_POOL_API`
+   (`mcp-platform/tests/test_db_job_classes.py:71`). Исключения объявлены
+   поимённо в `PRIVATE_API_EXCEPTIONS` (там же `:85`), и их **четыре**:
+   `servers/enterprise/server.py` — `set_pool_config` /
+   `set_job_class_config`, штатный запуск composition root;
+   `servers/enterprise/build_index.py` и `servers/enterprise/load_snapshot.py`
+   — по `set_pool_config` каждый, это отдельные процессы со своим пулом;
+   `capabilities/data/service/main.py` — по `PoolBusyError`, потому что отказ
+   пула переводит в свой счётчик сервис данных, а не владелец пула.
+2. **Соединение наружу не создаётся, а уже созданное — передаётся.** Граница
+   проходит по `psycopg2`, а не по объекту соединения. Вне
+   `mcp-platform/libs/enterprise_data` MUST NOT импортировать `psycopg2` и
+   MUST NOT создавать соединение; это и ловит страж границ. Но `run(fn)`
+   (`db.py:1561`) **отдаёт вызывающему сырой `psycopg2`-conn** — и это
+   объявленный контракт, а не утечка: его докстринг прямо называет это
+   невы транзакционным путём и предупреждает не звать внутри публичного API
+   модуля. Причина в том, что `_ConnectionProxy` привязан к аренде и
+   транзакции (`_lease_id`, `_audience`), а у `run()` транзакции нет по
+   построению, и вызывающему нужен доступ к объекту соединения целиком —
+   например, чтобы выставить `SET statement_timeout` на время вызова
+   (`capabilities/data/service/main.py:812-819`), чего прокси не умеет.
+   Единственная точка такой передачи сейчас одна, и она перечислена.
+   Текстовый страж передачу объекта по вызову не видит в принципе: модуль
+   не пишет `import psycopg2` и не называет запрещённых имён. Это признанное
+   слепое место, а не пропуск проверки.
 3. **Классификация не обходится.** Правила 1 и 2 из
    `mcp-platform/tests/test_db_job_classes.py`: покрытие реестра и
    совпадение класса в сигнатуре с реестром.
@@ -383,6 +399,17 @@
 - **КОГДА** production-модуль вне `libs/enterprise_data` ссылается на
   `DBManager` или `_submit`
 - **ТОГДА** страж SHALL упасть с указанием модуля и имени
+
+#### Scenario: Передача уже созданного соединения
+
+- **КОГДА** production-модуль вне `libs/enterprise_data` получает объект
+  соединения параметром колбэка `run(fn)`, не импортируя `psycopg2`
+  и не создавая соединение сам
+- **ТОГДА** страж границ SHALL пройти — он ловит создание соединения и
+  приватный API, а не передачу уже созданного объекта
+- **И** место такой передачи SHALL быть перечислено в этом требовании явно
+- **И** добавление второго такого места SHALL считаться расширением
+  объявленного исключения, а не реализацией общей практики
 
 ### Requirement: Значения пула приходят из platform.json
 
