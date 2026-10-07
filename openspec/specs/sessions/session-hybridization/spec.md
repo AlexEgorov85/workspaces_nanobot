@@ -62,16 +62,12 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 > работает»: имя события, которого не публикует ни один код. Нормативный текст
 > и остальные четыре сценария перенесены дословно.
 >
-> **Это требование stale шире, чем эта правка.** Сценарий «Зеркалирование
-> agent_session_messages (full re-read)» всё ещё показывает `utils.db.transaction()`
-> и `SessionMirror._sync_cycle()`, которых в коде нет; «Single-flight защита от
-> перекрытия циклов» задаёт backoff как `min(interval, interval * 2^n)` — код
-> использует `max(interval, backoff)` с потолком `_BACKOFF_CAP_SEC`, и старый
-> `min` в докстринге прямо назван ошибкой; «Метрики sync-сервиса» перечисляет 16
-> метрик, из которых в `get_stats()` не осталось ни одной из упомянутых
-> `pool_*` / `rows_synced_total` / `stale_*`. Всё это требует отдельной правки
-> (`MODIFIED` с проверкой каждого имени метрики) и сюда не входит — см.
-> «Известные смежные расхождения» в `proposal.md`. Заголовки сценариев
+> **Правка 2026-10-07.** Названные здесь расхождения закрыты: сценарий
+> «Зеркалирование agent_session_messages (full re-read)» переписан по
+> `MirrorPoller._sync_changed()`, «Single-flight защита от перекрытия циклов»
+> задаёт настоящую формулу backoff, «Метрики sync-сервиса» перечисляет
+> фактические ключи `get_stats()`, а «Удалённая upstream-сессия → diff-based
+> cleanup в PG» больше не показывает прямой `SELECT`. Заголовки сценариев были
 > сохранены все: архив отказывается выбрасывать сценарий из `MODIFIED`-блока.
 
 #### Scenario: SessionMirror зеркалит в PG
@@ -99,30 +95,33 @@ deploy, observability и disaster-recovery. Запись в PG MUST
 
 #### Scenario: Зеркалирование agent_session_messages (full re-read)
 
-- **WHEN** `SessionMirror._sync_cycle()` обрабатывает
-  сессию, для которой `agent_session_meta.updated_at`
-  в PG < `upstream_session.updated_at`
+- **WHEN** цикл проходит по сессии, у которой дайджест файла разошёлся с
+  `agent_session_meta.source_digest` в зеркале
+  (`MirrorPoller._sync_changed()` — `lib/gateway/mirror/mirror_poller.py:367-401`)
 - **THEN** сервис загружает полный snapshot через
-  `session_manager.read_session_snapshot(key)` (sync API,
-  возвращает `Session`-объект с полным списком `messages`).
-- **AND** записывает сообщения в `agent_session_messages`
-  через явную **транзакцию** (НЕ autocommit):
-  ```python
-  with utils.db.transaction() as conn:
-      conn.execute("DELETE FROM agent_session_messages WHERE session_key = %s", (key,))
-      conn.execute("INSERT INTO agent_session_messages (...) VALUES (...)", [...])
-  ```
-  `transaction()` оборачивает в BEGIN/COMMIT; на исключении —
-  ROLLBACK автоматически. Атомарность per session_key
-  гарантируется.
-- **AND** читатели (`PostgresChannel`, `history_search`)
-  используют READ COMMITTED (default в PG); они видят
-  либо старую версию сообщений (до DELETE), либо новую
-  (после INSERT), но НЕ промежуточное состояние (после
-  DELETE и до INSERT) — благодаря явной транзакции.
-- **AND** если `agent_session_meta.source_digest` в PG ==
-  `source_digest` файла сессии — sync пропускает эту сессию, содержимое
-  идентично.
+  `SessionMirror.read_source()` → `session_manager.read_session_snapshot(key)`
+  (sync API, возвращает `Session`-объект с полным списком `messages`),
+  и вызов уходит в `asyncio.to_thread`: чтение файла блокирующее, а
+  event loop шлюза обслуживает ещё и обороты
+  (`lib/gateway/mirror/session_mirror.py:195-196`; `mirror_poller.py:389`)
+- **AND** агент MUST NOT обращаться к PostgreSQL в этой точке: сравнение
+  «зеркало против источника» и сама запись MUST выполняться платформой
+  одной транзакцией внутри операции `data.mirror_session`
+  (`mirror_poller.py:394-397`; запрет прямого доступа объявлен
+  требованием «Правила использования пула PG-соединений»)
+- **AND** решение о записи MUST возвращаться вердиктом операции, а не
+  вычисляться агентом: `after_write()` считает запись только для вердиктов
+  вне `VERDICTS_WITHOUT_WRITE` — `unchanged`, `skipped_equal`,
+  `skipped_within_tolerance`, `skipped_stale`
+  (`lib/gateway/mirror/session_mirror.py:218-228`;
+  список — `mirror_poller.py:86-91`)
+- **AND** читатели (`PostgresChannel`, `data.history_search`)
+  используют READ COMMITTED (default в PG); транзакция платформы означает,
+  что они видят либо старую версию сообщений, либо новую, но НЕ
+  промежуточное состояние между удалением и вставкой
+- **AND** совпавший дайджест MUST обрывать разбор ДО чтения источника и
+  ДО обращения к данным: без этой проверки каждый проход читал и
+  переписывал всё целиком (`mirror_poller.py:383-387`)
 - **AND** если метки времени равны, но дайджесты разошлись — sync
   ВЫПОЛНЯЕТСЯ. Прежняя формулировка («identical `updated_at` ⇔ identical
   content») была ложным инвариантом: `JsonlSessionStore.update_metadata`
@@ -139,6 +138,14 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   PG-сессии без upstream-двойника считаются устаревшими
   и удаляются cleanup-циклом (см. scenario «Удалённая
   upstream-сессия → diff-based cleanup в PG»).
+
+> Правка 2026-10-07. Прежняя редакция этого сценария показывала
+> `SessionMirror._sync_cycle()` и `with utils.db.transaction() as conn:`.
+> Ни того, ни другого в модуле нет: цикл живёт в `MirrorPoller`, а
+> транзакцию ведёт платформа (поиск по `lib/gateway/mirror/*.py` по
+> `utils.db` даёт 0 совпадений). Правку `2026-10-04` внесла в канон
+> требование «Правила использования пула PG-соединений», но до этого
+> сценария не дошла — он был объявлен «stale шире, чем эта правка».
 
 #### Scenario: PG недоступен — hot path работает
 
@@ -176,46 +183,57 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   `stop()` через `_lifecycle.shutdown` дожидается текущей
   итерации, иначе корутина потерялась бы молча.
 - **AND** накопление лага предотвращается через
-  экспоненциальный backoff при ошибках PG: если
-  предыдущий цикл упал, задержка до следующего =
-  `min(sync_interval_sec, sync_interval_sec * 2^consecutive_failures)`
-  (cap = `sync_interval_sec * 2^5` = 16 минут при дефолте).
+  экспоненциальный backoff при ошибках PG: если предыдущий цикл упал,
+  задержка до следующего прохода равна
+  `min(max(sync_interval_sec, 1.0 * 2^min(consecutive_failures, 32)), 960)`
+  секунд — `MirrorPoller._compute_delay()`,
+  `lib/gateway/mirror/mirror_poller.py:318-338`, константы
+  `_BACKOFF_BASE_SEC = 1.0` и `_BACKOFF_CAP_SEC = 16 * 60.0` (`:55-56`).
+  Отказ MUST **отодвигать** следующую попытку, а не приближать её:
+  прежний `min` при отказе стучался чаще штатного (2 с против 30 с), то
+  есть год отказа зеркала выглядел как усердная работа, а потолок
+  16 минут был недостижим — показатель ограничивался пятёркой и рост
+  всегда упирался в 32 с.
 
 #### Scenario: Метрики sync-сервиса
 
 - **WHEN** `SessionMirror` работает
-- **THEN** следующие метрики доступны через
-  `SessionMirror.get_stats() -> dict`:
-  - `cycles_total`: количество выполненных циклов;
-  - `cycles_failed_total`: количество упавших циклов;
-  - `cycles_skipped_pool_busy`: циклов пропущено из-за исчерпания
-    пула (D-Pool.5);
-  - `consecutive_failures`: счётчик подряд упавших;
-  - `last_success_ts` (Unix timestamp): время последнего
-    успешного цикла;
-  - `last_success_lag_seconds`: разница между
-    `last_success_ts` и текущим временем;
-  - `pool_size`: текущий размер пула `utils.db` (`int | None`);
-  - `pool_available`: свободные соединения в пуле (`int | None`);
-  - `pool_wait_seconds`: время последнего цикла, включая ожидание
-    lease'а (D-Pool.6);
-  - `rows_synced_total`: количество синхронизированных
-    сессий (метаданных);
-  - `messages_synced_total`: количество синхронизированных
-    сообщений;
-  - `upstream_session_count`: количество сессий в
-    `list_sessions()` на последнем успешном цикле;
-  - `pg_session_count`: количество строк в
-    `agent_session_meta` на последнем успешном цикле;
-  - `stale_sync_skipped_total`: количество sync-пропусков из-за
-    `pg > jsonl + stale_tolerance` (включая dedup TTL, см.
-    requirement «Stale-detection и reverse-lag detection»);
-  - `stale_detected_total`: количество уникальных событий
-    `session_stale_detected` (после dedup TTL);
-  - `sync_lag_exceeded_total`: количество событий
-    `sync_lag_exceeded`.
-- **AND** эти метрики экспортируются в health-check endpoint
-  через `RuntimeHealth` (см. `lib/services/runtime_health.py`).
+- **THEN** `SessionMirror.get_stats() -> dict` возвращает счётчики
+  механизма (`MirrorPoller.get_stats()` —
+  `lib/gateway/mirror/mirror_poller.py:553-582`):
+  - `cycles_total`, `cycles_failed_total`, `consecutive_failures`;
+  - `last_cycle_seconds`, `last_success_ts`,
+    `last_success_lag_seconds`;
+  - `source_count`, `mirror_count` — снимок с последнего успешного
+    прохода;
+  - `written_total`, `skipped_unchanged_total`, `unreadable_total`,
+    `source_missing_total`;
+  - `cleanup_guarded_total`, `deleted_total`;
+  - `sync_interval_sec`, `missing_cycles_threshold`;
+  - `resource`, `enabled`, `disabled_reason`, `replica_id`.
+- **AND** `SessionMirror.extra_stats()` добавляет ресурс-зависимые
+  ключи (`lib/gateway/mirror/session_mirror.py:230-242`):
+  `messages_written_total`, `skipped_stale_total`,
+  `stale_tolerance_seconds`, `sync_lag_threshold_seconds`,
+  `upstream_session_count`, `mirror_session_count`,
+  `sessions_written_total`, `snapshot_missing_total`,
+  `cleanup_guarded_total`, `deleted_sessions_total`.
+- **AND** метрик пула в снимке MUST NOT быть: после перевода зеркала
+  на операции платформы у него нет ни пула, ни ожидания lease'а.
+  Прежняя редакция перечисляла `pool_size` / `pool_available` /
+  `pool_wait_seconds`, `rows_synced_total`, `messages_synced_total`,
+  `pg_session_count`, `cycles_skipped_pool_busy`,
+  `stale_sync_skipped_total`, `stale_detected_total`,
+  `sync_lag_exceeded_total` — ни одного такого ключа в `get_stats()`
+  не осталось.
+- **AND** экспорта снимка наружу MUST NOT быть обещан: вне тестов
+  `get_stats()` никто не зовёт, а `RuntimeHealth`
+  (`lib/services/runtime_health.py`) о зеркале не знает — поиск по
+  его исходнику не даёт ни одного совпадения.
+
+> Правка 2026-10-07. Список имён переписан по фактическому
+> `get_stats()`. Прежние 16 метрик описывали зеркало, ходившее в
+> PostgreSQL напрямую через пул `utils.db`.
 
 ### Requirement: Multi-instance изоляция через replica_id в ключе
 
@@ -319,29 +337,29 @@ Leader-election между репликами **не применяется**, �
 
 ### Requirement: Stale-detection и reverse-lag detection
 
-`SessionMirror` SHALL детектировать две аномалии и
-публиковать через `DbLoggingService.try_log_event(...)` события
-для observability:
+Зеркало SHALL различать две аномалии и публиковать по каждой
+`agent.degraded` уровнем WARN. Само сравнение MUST делать платформа
+в своей транзакции: агент судит по вердикту операции
+`data.mirror_session`, а не сравнивает метки времени сам — прямого
+доступа к `agent_session_meta` у него нет.
 
-1. **Stale (PG свежее JSONL):** если в PG
-   `agent_session_meta.updated_at` для ключа `K` больше
-   `upstream_session.updated_at` для того же `K` более чем на
-   `stale_tolerance_seconds` (default `120`) — sync для этого
-   ключа SHALL пропускаться (`continue`), и SHALL публиковаться
-   событие `event_type="session_stale_detected"` с
-   `payload={"session_key": K, "jsonl_updated_at": ...,
-   "pg_updated_at": ...}`.
-2. **Reverse lag (JSONL свежее PG):** если
-   `upstream_session.updated_at` больше PG `updated_at` более
-   чем на `sync_lag_threshold_seconds` (default `3600`) — sync
-   для этого ключа SHALL выполняться нормально (LWW — mirror
-   обновится), и SHALL публиковаться событие
-   `event_type="sync_lag_exceeded"` с теми же полями.
+1. **Stale (зеркало впереди файла):** платформа возвращает
+   `verdict="skipped_stale"`. Агент инкрементирует
+   `skipped_stale_total` и публикует `agent.degraded` с `payload`
+   `{"session_key": K, "replica_id": …, "jsonl_updated_at":
+   result["updated_at"], "pg_updated_at": result["previous_updated_at"],
+   "tolerance_seconds": …}`.
+2. **Reverse lag (файл впереди зеркала):** платформа возвращает
+   признак `sync_lag_exceeded`. Запись при этом выполняется, агент
+   публикует `agent.degraded` с `payload`
+   `{"session_key": K, "replica_id": …, "sync_lag_seconds": …,
+   "threshold_seconds": …}`.
 
 Параметры SHALL быть конфигурируемыми через
-`gateway.session_cold_sync.stale_tolerance_seconds` и
-`sync_lag_threshold_seconds` (см. `SessionColdSyncSettings`
-в `lib/core/project_settings.py`).
+`gateway.session_cold_sync.stale_tolerance_seconds` (default `120`) и
+`sync_lag_threshold_seconds` (default `3600`); они приходят в
+`SessionMirror` при сборке — `lib/core/application_context.py:1727-1730`,
+класс `SessionColdSyncSettings` — `lib/core/project_settings.py:157`.
 
 Stale-detection — защита cold-storage от перезаписи устаревшими
 upstream-данными (сценарии «volume restore», «host migration»,
@@ -350,16 +368,26 @@ observability для диагностики сломанного sync.
 
 #### Scenario: Stale сессия — sync пропущен, событие опубликовано
 
-- **WHEN** `SessionMirror._sync_session(key)` обнаруживает
-  `pg.updated_at > jsonl.updated_at + stale_tolerance`
-- **THEN** sync для этого ключа SHALL быть пропущен (никаких
-  `INSERT`/`UPDATE` в `agent_session_meta` /
-  `agent_session_messages`).
-- **AND** через `DbLoggingService` SHALL быть опубликовано
-  событие `event_type="session_stale_detected"` с `payload`,
-  содержащим `session_key`, `jsonl_updated_at`, `pg_updated_at`.
-- **AND** метрика `stale_sync_skipped_total` SHALL быть
-  инкрементирована (включая повторные skip после dedup TTL).
+- **WHEN** операция `data.mirror_session` возвращает для ключа `K`
+  `verdict="skipped_stale"`
+- **THEN** запись для этого ключа MUST NOT выполняться, а
+  `skipped_stale_total` MUST быть инкрементирован
+  (`lib/gateway/mirror/session_mirror.py:224-226`)
+- **AND** `agent.degraded` MUST быть опубликован с `payload`,
+  содержащим `session_key`, `replica_id`, `jsonl_updated_at`,
+  `pg_updated_at`, `tolerance_seconds`
+  (`session_mirror.py:246-271`)
+- **AND** повторная публикация по тому же ключу MUST быть подавлена
+  в течение `_STALE_LOG_DEDUP_TTL` (60 с, `mirror_poller.py:61`):
+  событие одно и то же из цикла в цикл, пока сессию не починят, и без
+  дедупликации журнал забивается одинаковыми строками ровно тогда,
+  когда читать есть что
+
+> Правка 2026-10-07. Прежняя редакция называла `event_type=
+> "session_stale_detected"`, счётчик `stale_sync_skipped_total` и
+> метод `SessionMirror._sync_session()`. Ни одного из них в коде нет:
+> событие публикуется как `agent.degraded`, счётчик называется
+> `skipped_stale_total`, а решение о пропуске принимает платформа.
 
 #### Scenario: Equal или within-tolerance PG-сессия — silent skip
 
@@ -372,14 +400,19 @@ observability для диагностики сломанного sync.
 
 #### Scenario: Reverse lag — sync выполняется, событие опубликовано
 
-- **WHEN** `SessionMirror._sync_session(key)` обнаруживает
-  `jsonl.updated_at > pg.updated_at + sync_lag_threshold`
-- **THEN** sync для этого ключа SHALL выполниться нормально
-  (LWW — mirror обновится).
-- **AND** через `DbLoggingService` SHALL быть опубликовано
-  событие `event_type="sync_lag_exceeded"`.
-- **AND** метрика `sync_lag_exceeded_total` SHALL быть
-  инкрементирована.
+- **WHEN** операция `data.mirror_session` возвращает для ключа `K`
+  признак `sync_lag_exceeded`
+- **THEN** запись для этого ключа MUST выполниться: решение о
+  перезаписи принимает платформа, агент LWW не считает
+- **AND** `agent.degraded` MUST быть опубликован с `payload`
+  `{"session_key": K, "replica_id": …, "sync_lag_seconds": …,
+  "threshold_seconds": …}` (`session_mirror.py:273-285`)
+- **AND** отдельного счётчика у этой аномалии MUST NOT быть: ключа
+  `sync_lag_exceeded_total` в `get_stats()` нет, а прежняя редакция
+  требовала его инкрементировать
+
+> Правка 2026-10-07 — по факту `after_write()` и `_log_lag()`
+> (`lib/gateway/mirror/session_mirror.py:218-228,273-285`).
 
 #### Scenario: Stale-детект как предпосылка для session-recovery
 
@@ -482,17 +515,24 @@ SHALL всегда писаться первым; PG SHALL обновлятьс�
 
 - **WHEN** `SessionManager.delete_session(key)` удаляет
   upstream JSONL-сессию
-- **THEN** в следующем sync-цикле
-  `SessionMirror._sync_cycle()` сравнивает
-  `upstream_keys = {s["key"] for s in session_manager.list_sessions()}`
-  с `pg_keys = {row["session_key"] for row in SELECT session_key FROM agent_session_meta}`.
-- **AND** для каждого `key ∈ pg_keys \ upstream_keys`
-  (т.е. сессия есть в PG, но НЕ в upstream JSONL):
-    - удаляет строки из `agent_session_meta` и
-      `agent_session_messages` для этого `session_key`;
-    - логирует факт через
-      `try_log_event(event_type="session_cold_sync_deleted",
-      payload={"session_key": key})` для observability.
+- **THEN** в следующем проходе `MirrorPoller._cleanup_absent()`
+  передаёт платформе список того, что осталось на диске, и порог:
+  `data.cleanup_session_mirror` с аргументами `replica_id`,
+  `present_keys`, `delete_after_missed_cycles`
+  (`lib/gateway/mirror/mirror_poller.py:403-429`)
+- **AND** разность MUST вычислять платформа, а не агент: агент
+  выполняет ни одного SQL и не знает, что лежит в зеркале, — он
+  сообщает только `present_keys`, а решение о пропуске порога и
+  удалении принимает операция в своей транзакции
+- **AND** пустой список источника MUST NOT превращаться в «удалить
+  всё»: если `guard_empty_source()` сработал, уборка пропускается,
+  `cleanup_guarded_total` растёт, а `agent.degraded` называет причину
+  и текущий `mirror_count` (`mirror_poller.py:405-418`)
+- **AND** каждая удалённая сессия логируется через
+  `_log_deleted()`, который публикует **`agent.degraded`** с
+  `payload={"key": key}` (`mirror_poller.py:542-549`).
+  Имя `session_cold_sync_deleted` MUST NOT упоминаться: его не
+  публикует ни один код репозитория.
 - **AND** upstream JSONL — единственный source of truth. Если
   историческая сессия осталась в PG до deploy (без upstream
   двойника), оператор должен выполнить отдельный скрипт
