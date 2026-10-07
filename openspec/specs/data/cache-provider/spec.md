@@ -38,7 +38,7 @@ Snapshot-путь MUST быть единым для всех процессов:
 
 Режим открытия (`READ_WRITE` или `READ_ONLY`) определяет владелец файла снимка; `CacheAccessMode` объявлен на платформе (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:46`). Слой владения **снят** (change `drop-local-cache-read-from-pg`): claim, heartbeat, fencing и таблица `agent_cache_ownership` не выполняются и не существуют.
 
-Skills (`audit_analyzer`, `legal_summarizer`) MUST читать снимок через операции capability `data` — модель получает их как `mcp_enterprise_*` с настоящими `inputSchema`. Прямого доступа к файлу снимка у них нет, и открывать его им не нужно: файл вообще не открывает агент.
+Навык `audit_analyzer` MUST получать данные через операции capability `audit` — модель получает их как `mcp_enterprise_*` с настоящими `inputSchema`. Прямого доступа к файлу снимка у него нет, и открывать его не нужно: файл вообще не открывает агент. Навыка `legal_summarizer` в дереве агента **не осталось** — предмет переехал на платформу (`mcp-platform/libs/legal_summarizer/`, capability `legal_summarizer`); в `workspace/skills/` остались `audit_analyzer` и `enterprise_mcp`.
 
 #### Scenario: обнаружение NFS пути
 
@@ -66,7 +66,7 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST читать снимок ч�
 - **КОГДА** `gateway.enable_audit=False`, но `gateway.cache` секция настроена
 - **ТОГДА** `CacheProvider` MUST быть создан (cache runtime существует)
 - **AND** отдельной подсистемы sync в агенте MUST NOT быть создано: `CacheSyncService` **снят** вместе с кэш-кластером
-- **AND** Skills (`audit_analyzer`, `legal_summarizer`) MUST иметь доступ к cache через `CacheProvider`
+- **AND** навык `audit_analyzer` MUST иметь доступ к данным через операции capability `audit`, а не через интерфейс агента: агентский `CacheProvider` **снят**
 - **AND** если процесс получил ownership cache resource → `READ_WRITE` access НЕЗАВИСИМО от `enable_audit` (другие runtime-компоненты MAY выполнять cache mutations через `CacheProvider`)
 
 ### Requirement: единый интерфейс доступа
