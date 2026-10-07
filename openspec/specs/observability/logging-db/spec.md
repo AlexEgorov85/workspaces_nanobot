@@ -480,12 +480,20 @@ The system SHALL обеспечивать единое поведение
 `DbLoggingService.try_log_event(svc, log_event,
 *, producer: str, event_type: str) -> bool`,
 публикуемую как часть `DbLoggingService` API.
-Каждый producer (включая `ContextCompactionService`,
+Каждый producer вызывает именно её, а не собственную
+обёртку с собственным уровнем логирования.
+
+Перечень producer'ов в требовании — **примеры, а не
+закрытый список**, и он обязан состоять из
+существующих. Правило держится вызовами
+`try_log_event` в `ContextCompactionService`,
+`MirrorPoller`, `FallbackTurnDeliveryFactory`,
+`RepeatGuardHook` и `PostgresChannel`; именно они
+перечислены ниже. Прежний перечень называл
 `PgDuckDbSyncService`, `DuckDbCacheStore`,
-`PreloadService`, `ApplicationContext`-замены
-`_record_sync_skipped`) вызывает именно её, а
-не собственную обёртку с собственным уровнем
-логирования.
+`PreloadService` и `ApplicationContext._record_sync_skipped`
+— все четыре удалены, и канон объяснял действующий
+инвариант через классы, которых в проекте нет.
 
 #### Scenario: Producer при недоступности сервиса
 
@@ -499,8 +507,7 @@ The system SHALL обеспечивать единое поведение
   ровно один раз с producer-префиксом и event_type.
 - **AND** producer-вызов (например,
   `ContextCompactionService.compact(...)`,
-  `PgDuckDbSyncService._log_sync_event(...)`,
-  `PreloadService._emit_health_event(...)`)
+  `RepeatGuardHook.before_execute_tool(...)`)
   SHALL не бросить исключение и не вызвать
   прямой SQL INSERT.
 
@@ -514,6 +521,16 @@ The system SHALL обеспечивать единое поведение
 - **AND** НЕ должно быть записей уровня `DEBUG`,
   `INFO`, `ERROR` или `EXCEPTION` от producer'ов
   в этом сценарии.
+
+#### Scenario: Примеры в требовании — существующие классы
+
+- **WHEN** канон перечисляет producer'ов правила
+- **THEN** каждый названный класс и метод SHALL
+  находиться в дереве агента
+- **AND** правило, требующее перечисления, SHALL
+  перечислять только живые примеры, иначе читатель
+  идёт проверять инвариант и не находит ни носителя,
+  ни примера
 
 ### Requirement: Skill invocation is out of scope
 
@@ -641,67 +658,6 @@ The system SHALL записывать событие `context_compacted`
   <reason>)"` (НЕ DEBUG, НЕ INFO, НЕ ERROR).
 - **AND** прямой `INSERT INTO "<schema>"."<table>"`
   SHALL NOT быть выполнен.
-
-### Requirement: Sync-события через DbLoggingService
-
-The system SHALL записывать все sync-события PG→DuckDB
-(`sync_service_started`, `sync_initial_load_started`,
-`sync_table_loaded`, `sync_initial_load_done`,
-`sync_initial_load_error`, `sync_table_missing`,
-`sync_publish_failed`, `sync_publish_skipped`,
-`sync_dispatch_skipped`, `sync_dispatch_failed`)
-через `DbLoggingService.log_sync_event(...)`.
-Никаких прямых `INSERT` или fallback-обёрток
-(`emit_sync_event` / `record_sync_event` /
-`record_event`) SHALL NOT быть.
-
-#### Scenario: Sync-событие через DbLoggingService
-
-- **WHEN** `PgDuckDbSyncService` или `DuckDbCacheStore`
-  эмитят sync-событие и `db_logging_service`
-  сконфигурирован и запущен
-- **THEN** ровно один `LogEvent` SHALL быть поставлен
-  в очередь `DbLoggingService` (через `log_sync_event`).
-- **AND** `get_stats()["written_by_type"][event_type]`
-  SHALL инкрементироваться после успешного flush'а.
-
-#### Scenario: Sync-событие при недоступности сервиса — no-op
-
-- **WHEN** `db_logging_service is None` ИЛИ
-  `db_logging_service.is_running() == False`
-- **AND WHEN** sync-код вызывает helper для эмита
-  (`PgDuckDbSyncService._log_sync_event` или
-  `PreloadService._emit_health_event` или
-  `DuckDbCacheStore` caller's)
-- **THEN** helper SHALL обеспечивать no-op for
-  business (без `INSERT` и без `record_sync_event`
-  fallback).
-- **AND** sync-операция SHALL NOT быть прервана
-  (sync-код не должен падать из-за отсутствия
-  observability-сервиса).
-- **AND** `DbLoggingService.try_log_event(...)` SHALL
-  зафиксировать потерю события на уровне
-  `WARNING` (НЕ DEBUG, НЕ INFO, НЕ ERROR) —
-  единый уровень для всех producer'ов согласно
-  Requirement «Uniform logging behavior при
-  недоступности сервиса».
-
-#### Scenario: preload health-summary через DbLoggingService
-
-- **WHEN** `PreloadService.preload_vector_indexes(store)`
-  завершил прогрев FAISS-индексов (или упал)
-- **THEN** ровно один `LogEvent` с
-  `event_type="vector_index_preload_health"` SHALL
-  быть записан через
-  `db_logging_service.log_sync_event(...)` с payload
-  `declared` / `loaded` / `missing` / `orphan` /
-  `stale` (snapshot текущей реализации
-  `PreloadService.compute_index_health`).
-- **AND** payload SHALL содержать **те же** ключи,
-  что и существующий snapshot в
-  `workspace/TOOLS.md` секции
-  «vector_index_preload_health» —
-  изменение контракта payload отдельный change.
 
 ### Requirement: No fallback writer при недоступности DbLoggingService
 
@@ -910,15 +866,20 @@ MUST оставаться писателем, но MUST NOT быть храни�
 ### Requirement: Producers не читают logging-DB конфиг
 
 Runtime-producers structured events
-(`ContextCompactionService`, `PgDuckDbSyncService`,
-`DuckDbCacheStore`, `PreloadService`,
-`PostgresChannel`, hook'и) SHALL NOT читать
+(`ContextCompactionService`, `MirrorPoller`,
+`FallbackTurnDeliveryFactory`, `RepeatGuardHook`,
+`PostgresChannel`) SHALL NOT читать
 `logging.db.*` или `channels.postgres.dsn` напрямую
 для целей INSERT в `agent_gateway_logs`. Они SHALL
 получать уже сконфигурированный `db_logging_service`
 через composition root (`ApplicationContext._make_*`)
 и вызывать его методы без знания DSN, `table_name`,
 `schema`.
+
+Перечень — примеры живых носителей инварианта;
+прежний называл `PgDuckDbSyncService`,
+`DuckDbCacheStore` и `PreloadService`, которых в
+проекте нет.
 
 #### Scenario: Producer не импортирует SETTINGS для logging
 
