@@ -513,8 +513,8 @@ Capability **не** отвечает за SQL-генерацию, за вект�
 
 | Ключ | Назначение |
 |---|---|
-| `mcp-platform/platform.json → postgres` | размеры пула, `reserved_workers`, `pool_timeout`, `queue_maxsize`, бэкофф, повторы (`mcp-platform/platform.json:11`) |
-| `mcp-platform/platform.json → postgres.reserved_workers` | сколько первых воркеров берут только рантайм-работу (`:13`) |
+| `mcp-platform/platform.json → pool` | размеры пула, `reserved_workers`, `pool_timeout`, `queue_maxsize`, бэкофф, повторы (`mcp-platform/platform.json:11`). Секция называется `pool`, а не `postgres`: её читает `pool_config` и передаёт `set_pool_config` (`mcp-platform/servers/enterprise/server.py:152`, `:159`) |
+| `mcp-platform/platform.json → pool.reserved_workers` | сколько первых воркеров берут только рантайм-работу (`:13`) |
 | `mcp-platform/platform.json → job_classes` | по одной записи на аудиторию: потолок времени, глубина очереди, ожидание, leases (`:23`) |
 | `mcp-platform/platform.json → data.statement_timeout_ms` | значение по умолчанию **для класса, который не объявил своё** (`:106`) |
 | `mcp-platform/platform.json → data.log_table` | таблица журнала; имя перекрывается профилем контура |
