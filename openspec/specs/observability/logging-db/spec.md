@@ -532,57 +532,6 @@ The system SHALL обеспечивать единое поведение
   идёт проверять инвариант и не находит ни носителя,
   ни примера
 
-### Requirement: context_compacted через DbLoggingService
-
-The system SHALL записывать событие `context_compacted`
-в `agent_gateway_logs` через `DbLoggingService.log_event`
-(LogEvent с `event_type="context_compacted"`). Никаких
-прямых `INSERT` из `ContextCompactionService`
-или из `workspace.utils.event_log` (этот модуль
-удалён) SHALL NOT происходить.
-
-#### Scenario: Ручной /compact пишет context_compacted
-
-- **WHEN** `ContextCompactionService.compact()` (slash,
-  CLI `/compact`, tool `compact_context`) завершился
-  с `archived_msgs > 0`
-- **THEN** `DbLoggingService.log_event(LogEvent(...))`
-  SHALL быть вызван с `event_type="context_compacted"`,
-  `actor="system"`, `name="consolidator"`, payload
-  содержит `mode` / `archived_msgs` / `kept_msgs` /
-  `tokens_before` / `tokens_after` / `summary` /
-  `raw_dump`.
-
-#### Scenario: Авто compact пишет context_compacted
-
-- **WHEN** `runtime_patcher._wrap_auto_compact_archive`
-  или `_wrap_maybe_consolidate_by_tokens` вызвал
-  `ContextCompactionService.record_external_compaction(...)`
-  после успешной архивации
-- **THEN** `record_external_compaction` SHALL
-  делегировать в `_notify` так же, как `compact()`,
-  и `context_compacted` SHALL быть записан через
-  `DbLoggingService.log_event(...)`.
-
-#### Scenario: compaction не падает при недоступности сервиса
-
-- **WHEN** `db_logging_service is None` ИЛИ
-  `db_logging_service.is_running() == False`
-- **AND WHEN** `ContextCompactionService.compact(...)`
-  завершил сжатие успешно
-- **THEN** `compact(...)` SHALL вернуть успешный
-  отчёт (`ok=True`, `archived_msgs > 0`).
-- **AND** `DbLoggingService.try_log_event(...)` SHALL
-  обеспечивать no-op for business (событие не
-  записано, compaction продолжается).
-- **AND** `logger.warning(...)` SHALL быть вызван
-  ровно один раз с сообщением вида
-  `"ContextCompactionService: structured event
-  context_compacted not persisted (DbLoggingService
-  <reason>)"` (НЕ DEBUG, НЕ INFO, НЕ ERROR).
-- **AND** прямой `INSERT INTO "<schema>"."<table>"`
-  SHALL NOT быть выполнен.
-
 ### Requirement: No fallback writer при недоступности DbLoggingService
 
 The system SHALL NOT иметь fallback-механизма
@@ -650,61 +599,6 @@ fallback на `agent_question_runs`-таблицу
   `DbLoggingService`.
 - **AND** тест SHALL НЕ мокать и НЕ вызывать
   удалённый `workspace.utils.event_log`.
-
-### Requirement: notify_in_history не управляет structured event logging
-
-The system SHALL разделять два concerns:
-(a) UI-уведомление о сжатии в
-`agent_conversation_messages` (заметка видна в чате);
-(b) observability-trail в
-`agent_gateway_logs` (событие `context_compacted`
-доступно через `data.history_search`).
-
-Настройка `gateway.compact.notify_in_history` SHALL
-управлять **только** concern (a) — записью
-`_write_history_notice` в `agent_conversation_messages`.
-Событие `context_compacted` SHALL записываться через
-`DbLoggingService.log_event(...)` **всегда**, пока
-`gateway.compact.enabled=True`, независимо от
-`notify_in_history`.
-
-#### Scenario: notify_in_history=true — оба side-effect'а
-
-- **WHEN** `gateway.compact.notify_in_history=true`
-- **AND WHEN** compaction завершился с
-  `archived_msgs > 0`
-- **THEN** `_write_history_notice` SHALL быть вызван
-  и SHALL записать строку в
-  `agent_conversation_messages`
-  (`metadata.kind="context_compact"`).
-- **AND** `DbLoggingService.log_event` SHALL быть
-  вызван и SHALL поставить `context_compacted`
-  в очередь.
-
-#### Scenario: notify_in_history=false — только structured event
-
-- **WHEN** `gateway.compact.notify_in_history=false`
-- **AND WHEN** compaction завершился с
-  `archived_msgs > 0`
-- **THEN** `_write_history_notice` SHALL NOT быть
-  вызван (никакой записи в
-  `agent_conversation_messages`).
-- **AND** `DbLoggingService.log_event` SHALL всё
-  равно быть вызван и SHALL поставить
-  `context_compacted` в очередь.
-- **AND** `data.history_search(event_type="context_compacted",
-  session_scope="current")` SHALL находить событие
-  для recovery после compaction.
-
-#### Scenario: record_external_compaction наследует decoupled поведение
-
-- **WHEN** `runtime_patcher` вызывает
-  `ContextCompactionService.record_external_compaction(...)`
-  с `archived_msgs > 0`
-- **THEN** `record_external_compaction` SHALL
-  делегировать в `_notify`, и `_record_event_log`
-  SHALL быть вызван **даже** если
-  `notify_in_history=false` (как и для `compact()`).
 
 ### Requirement: agent_question_runs как отдельная aggregate-модель
 
@@ -1249,6 +1143,95 @@ out of scope»: вызов функциональности Skill инструм
   тем же `tool_call_id`
 - **И** агентские `tool_call` / `tool_result` для этого
   вызова SHALL NOT быть записаны
+
+### Requirement: agent.compacted через DbLoggingService
+
+The system SHALL записывать событие `agent.compacted` в `agent_gateway_logs` через
+`DbLoggingService.try_log_event(...)` (вызов `svc.log_event(LogEvent(...))`
+внутри). Имя `context_compacted` SHALL использоваться только как префикс
+`event_id` (`f"context_compacted:{session_key}"`,
+`lib/services/context_compaction.py:480`) и SHALL NOT использоваться как
+`event_type`.
+
+Никаких прямых `INSERT` из `ContextCompactionService` SHALL NOT происходить.
+
+#### Scenario: Ручной /compact пишет agent.compacted
+
+- **WHEN** `ContextCompactionService.compact()` (slash, CLI `/compact`, tool
+  `compact_context`) завершился с `archived_msgs > 0`
+- **THEN** `DbLoggingService` SHALL поставить `LogEvent` с
+  `event_type="agent.compacted"`, `actor="system"`, `name="consolidator"` и
+  payload, содержащим `mode` / `archived_msgs` / `kept_msgs` / `tokens_before` /
+  `tokens_after` / `summary` / `raw_dump`
+
+#### Scenario: Авто-сжатие пишет agent.compacted
+
+- **WHEN** канал (`postgres_channel` либо `redis_channel`) отдал `OutboundMessage`
+  с `event` типа `ContextCompactionEvent`, и `CompactionEventSubscriber.feed()`
+  обработал его
+- **THEN** `notify_session_compacted(session_key, phase, compaction_id)` SHALL
+  записать `agent.compacted` через `_record_event_log` для **любой** фазы
+- **AND** `_write_history_notice` SHALL быть добавлен только для
+  `phase="succeeded"` и только при `notify_in_history=True`
+- **AND** замеров в этом пути SHALL NOT быть: `tokens_before`, `tokens_after`,
+  `archived_msgs` остаются `0`, потому что событие несёт только `compaction_id`
+  и `phase`
+- **AND** метод `ContextCompactionService.record_external_compaction` SHALL NOT
+  существовать: вызывающих у него не было, а авто-сжатие обслуживает
+  `notify_session_compacted`
+
+#### Scenario: compaction не падает при недоступности сервиса
+
+- **WHEN** `db_logging_service is None` ИЛИ `db_logging_service.is_running() == False`
+- **AND WHEN** `ContextCompactionService.compact(...)` завершил сжатие успешно
+- **THEN** `compact(...)` SHALL вернуть успешный отчёт (`ok=True`,
+  `archived_msgs > 0`)
+- **AND** `DbLoggingService.try_log_event(...)` SHALL обеспечивать no-op for
+  business (событие не записано, compaction продолжается)
+- **AND** `logger.warning(...)` SHALL быть вызван ровно один раз на уровне
+  **WARNING** (НЕ DEBUG, НЕ INFO, НЕ ERROR); требуемый состав сообщения задан
+  требованием «try_log_event contract» и здесь не дублируется
+- **AND** прямой `INSERT INTO "<schema>"."<table>"` SHALL NOT быть выполнен
+
+### Requirement: notify_in_history не управляет structured event logging, а agent.compacted пишется всегда
+
+The system SHALL разделять два concerns: (a) UI-уведомление о сжатии в
+`agent_conversation_messages` (заметка видна в чате); (b) observability-trail в
+`agent_gateway_logs` (событие `agent.compacted` доступно через
+`data.history_search`).
+
+Настройка `gateway.compact.notify_in_history` SHALL управлять **только** concern
+(a). Событие `agent.compacted` SHALL записываться **всегда**, пока
+`gateway.compact.enabled=True`, независимо от `notify_in_history`.
+
+#### Scenario: notify_in_history=true — оба side-effect'а
+
+- **WHEN** `gateway.compact.notify_in_history=true`
+- **AND WHEN** compaction завершился с `archived_msgs > 0`
+- **THEN** `_write_history_notice` SHALL быть вызван и SHALL записать строку в
+  `agent_conversation_messages` (`metadata.kind="context_compact"`)
+- **AND** `agent.compacted` SHALL быть поставлен в очередь журнала
+
+#### Scenario: notify_in_history=false — только structured event
+
+- **WHEN** `gateway.compact.notify_in_history=false`
+- **AND WHEN** compaction завершился с `archived_msgs > 0`
+- **THEN** `_write_history_notice` SHALL NOT быть вызван (никакой записи в
+  `agent_conversation_messages`)
+- **AND** `agent.compacted` SHALL всё равно быть записан в очередь журнала
+- **AND** `data.history_search(event_type="agent.compacted",
+  session_scope="current")` SHALL находить событие для recovery после compaction
+
+#### Scenario: авто-сжатие наследует decoupled поведение
+
+- **WHEN** `CompactionEventSubscriber.feed()` обработал `ContextCompactionEvent`
+  с `phase="succeeded"` при `notify_in_history=false`
+- **THEN** `_record_event_log` SHALL быть вызван **даже** при выключенной записи в
+  историю, а `_write_history_notice` SHALL NOT быть вызван
+- **AND** инвариант SHALL проверяться на живом пути `notify_session_compacted`
+  (`tests/test_compaction_event_subscriber.py::
+  TestNotifySessionCompactedPublicAPI::test_notify_in_history_false_skips_history_notice`),
+  а не на удалённом методе
 
 ## Responsibility
 
