@@ -110,7 +110,7 @@
   прокси транзакций — цепочку `файл:строка <- файл:строка …` (4-й кадр + chain
   до 8). Метка печатается в лог активности (`взял job [...путь...] N`) и в
   loguru-строке воркера. По ней видно, какой модуль генерирует запрос (например,
-  постоянный поток `nanobot/agent/loop.py` → `list_sessions` — см. §
+  постоянный поток `nanobot/agent/loop.py` (пакет `nanobot`, нет в дереве репозитория) → `list_sessions` — см. §
   «Управление сжатием контекста»). Метка `[unknown]` остаётся только при
   сбое разрешения кадров стека (патологический случай) — в штатном режиме
   каждая задача несёт тег вызывающей стороны.
@@ -212,8 +212,8 @@
 `lib/core/application_context.py` при старте ничего не регистрирует.
 `config.json` остаётся источником настроек навыка, которые агент читает как
 есть, а состав снимка объявляет capability `data` платформы
-(`mcp-platform/platform.json` → `audit.tables`). Никакого `register.py` по-прежнему
-не требуется.
+(`mcp-platform/platform.json` → `audit.tables`). Никакого `register.py` — такого файла нет в дереве репозитория
+не существует и не требуется.
 
 > Примечание: ретраи *генерации* SQL в режиме `generated_sql` захардкожены в
 > `generated_sql_mode.py` (`MAX_RETRIES = 3` → до 4 попыток) и от `cli_max_retries`
@@ -234,12 +234,12 @@ DSN подключается только через `channels.postgres.dsn` в 
 > 2026-10-01 из агента снесены сами модули кластера: `duckdb_cache_store.py`,
 > `cache_provider.py`, `cache_provider_impl.py`, `cache_load_service.py`.
 > Сняты и прочие его части: `preload_service.py`, `vector_index_service.py`,
-> снятый `lib/utils/duckdb_query.py`, снятый `lib/core/skill_config.py`, а также
+> снятый `lib/utils/duckdb_query.py`, удалённый `b8d3637` `lib/core/skill_config.py`, а также
 > заменены на платформу `tools/build_vectors.py` и `tools/check_indexes.py`
 > (вместо них — `mcp-platform/servers/enterprise/build_index.py` и операция
 > `vectors.index_stats`).
 > Из `requirements.txt` агента убраны `duckdb`, `faiss-cpu`, `numpy`, `pyarrow`.
-> `TableRegistry`, `skill_registration.py` и `infra_registration.py` тоже сняты
+> `TableRegistry`, `skill_registration.py` и `infra_registration.py` тоже удалены
 > вместе с реестром: состав снимка объявляет capability `data`
 > (`mcp-platform/platform.json → audit.tables`).
 >

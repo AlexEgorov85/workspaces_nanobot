@@ -63,9 +63,11 @@ Upstream там уже санитайзит: `_sanitize_persisted_blocks` зам
 
 `TurnDelivery.fail` содержит **хардкоженный литерал** `content="Sorry, I
 encountered an error."` (`turn_delivery.py:341`). Конфига для этой строки нет
-ни в `config/schema.py`, ни в `AgentRunSpec` (там есть `error_message`, но он
+ни в `config/schema.py` (пакет `nanobot`; нет в дереве репозитория)
+, ни в `AgentRunSpec` (там есть `error_message`, но он
 обслуживает другую ветку — `final_content = clean or spec.error_message or
-_DEFAULT_ERROR_MESSAGE` в `runner.py`, и `AgentLoop` его не передаёт).
+_DEFAULT_ERROR_MESSAGE` в `runner.py` (пакет `nanobot`; нет в дереве репозитория)
+, и `AgentLoop` его не передаёт).
 
 Но объект подменяем:
 
@@ -231,12 +233,12 @@ MCP LLM-вызов происходит в отдельном процессе, 
 
 | Модуль | строк | Что умеет | Наш аналог |
 |---|---:|---|---|
-| `agent/context_governance.py` | 1018 | persist результатов, бюджет контекста, compaction по давлению, `ContextWindowExceededError` | `context_governor` |
-| `session/recovery.py` | 940 | `scan` / `admit` / `turn_completed` / `handle_action`, `RecoveryStateEvent` | — |
-| `agent/memory.py` | 1297 | память агента | — |
-| `triggers/` | ~1000 | локальный стор триггеров и раннер | — |
-| `llm_usage/` | 775 | метрики вызовов в SQLite, `source_from_request` | частично `agent_question_runs` |
-| `agent/autocompact.py` | 134 | авто-сжатие | — |
+| `agent/context_governance.py` (нет в дереве репозитория) | 1018 | persist результатов, бюджет контекста, compaction по давлению, `ContextWindowExceededError` | `context_governor` |
+| `session/recovery.py` (нет в дереве репозитория) | 940 | `scan` / `admit` / `turn_completed` / `handle_action`, `RecoveryStateEvent` | — |
+| `agent/memory.py` (нет в дереве репозитория) | 1297 | память агента | — |
+| `triggers/` (нет в дереве репозитория) | ~1000 | локальный стор триггеров и раннер | — |
+| `llm_usage/` (нет в дереве репозитория) | 775 | метрики вызовов в SQLite, `source_from_request` | частично `agent_question_runs` |
+| `agent/autocompact.py` (нет в дереве репозитория) | 134 | авто-сжатие | — |
 
 ---
 

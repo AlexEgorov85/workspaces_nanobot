@@ -52,7 +52,8 @@ tests/test_e2e_600_page.py
 ```
 
 Полный прогон по всему `tests/` невозможен: модуль
-`tests/test_context_compaction_log.py` падает на сборе с
+`tests/test_context_compaction_log.py` (нет в дереве репозитория)
+падал на сборе с
 `ImportError: cannot import name '_async_record' from lib.services.context_compaction`.
 Это **внешний тест** к `legal_summarizer`, его регрессия вне scope
 skill'а. Документируем как known-issue и используем ограниченный прогон

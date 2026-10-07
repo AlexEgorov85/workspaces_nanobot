@@ -3,6 +3,13 @@
 **Статус:** заменяет раздел «Целевая схема» в `MIGRATION.md` и 4 сервера в `architecture.html`.
 **Ветка:** `refactor/mcp-platform` · **BASE_COMMIT:** `8ef9d08`
 
+> **Как читать пути в этом документе.** Таблицы описывают состояние на
+> `BASE_COMMIT` из шапки, а не текущее дерево. Файлы, помеченные ниже
+> «удалён `<commit>`», сняты по ходу миграции — их строки в таблицах
+> оставлены как план, а не переписаны. Пути к модулям библиотеки
+> `nanobot-ai==0.3.5` (`.venv/.../site-packages/nanobot/`) в дереве
+> репозитория не лежат.
+
 ---
 
 ## 1. Решение
@@ -49,7 +56,8 @@
 **Верен вывод про слой владения — но не про снимок.** Довод «лишняя абстракция»
 работает против координатора владения, heartbeat'а и fencing'а, и они уже
 удалены: change `drop-local-cache-read-from-pg` снял `CacheOwnershipCoordinator`
-(438 строк) и `pg_duckdb_sync_service.py` (798 строк). Снимок после этого
+(438 строк) и `pg_duckdb_sync_service.py` (798 строк; файл удалён
+коммитом `cff3a41`). Снимок после этого
 остался рабочим — он и есть то, что работает в релизе 2.5.3.
 
 **Что теряется при удалении снимка.** Реестр `public.agent_predefined_scripts`
@@ -243,7 +251,7 @@ capability по-своему: откуда брать идентичность, 
 | События вызова | `execution/logger.py` | конвейер |
 | Девять шагов | `execution/pipeline.py` | конвейер |
 | Файлы сессии, вложения | `session/workspace.py`, `session/artifact_store.py` | платформа |
-| Словарь типов и писатель | `eventing/` | платформа |
+| Словарь типов и писатель | `libs/enterprise_common/eventing/` | платформа |
 
 **Значений в коде нет.** Пороги, предел времени, белый список полей
 аргументов и флаги — в `platform.json`, секция `execution`. Разрешаются по
@@ -367,9 +375,11 @@ handler'а и частично загруженные наборы — и реш
 **Граница безопасности.** Автообнаружение — это не доверие. Каталог `tools/`
 является доверенной зоной: туда попадает только код репозитория, и весь
 каталог исполняется с правами процесса сервера. Отдельный манифест
-`tool.json` + `entrypoint` (loader перестаёт угадывать точку входа) — это
+`tool.json` (не создан: нет в дереве ни манифеста с таким именем, ни ключа
+`entrypoint`) + `entrypoint` (loader перестаёт угадывать точку входа) — это
 правильное следующее усложнение, когда инструментов станет много; оно меняет
-loader, а не registry, и не требует переписывания инструментов.
+loader, а не registry, и не требует переписывания инструментов. Замысел остаётся
+нереализованным: загрузчик по-прежнему угадывает точку входа по файлу.
 
 **Один процесс, внутри — много capability.** `ToolDefinition` + `ToolRegistry` +
 загрузчик — одна реализация в `libs/enterprise_common`, а все capability —
@@ -460,7 +470,7 @@ Capability `data` — инфраструктура, и операций в не�
 | `workspace/utils/jsonb.py` | 52 | Декодирование JSONB — формат провода PostgreSQL |
 | `workspace/utils/clean_text.py` | 44 | Чистка control-символов, потому что PostgreSQL их не принимает в `text` |
 | `lib/utils/sql_safety.py` | 425 | AST-политика. **Охраняет вывод LLM**, а не вызов снаружи |
-| `workspace/tools/history_search_tool.py` | 602 | Поиск по `agent_gateway_logs` — именованная операция чтения |
+| `workspace/tools/history_search_tool.py` | 602 | Поиск по `agent_gateway_logs` — именованная операция чтения. Файл удалён `1f22aab`, ныне `mcp-platform/servers/enterprise/capabilities/data/tools/history_search.py` |
 | `benchmarks/db.py` | 340 | `BenchmarkDB` — именованная операция записи |
 | `tools/migrate.py` | 252 | Раннер миграций схемы |
 | `tools/apply_test_profile_tables.py` | 97 | Применение DDL тест-профиля |
@@ -478,7 +488,8 @@ Capability `data` — инфраструктура, и операций в не�
 `db_logging_bus.py` при этом **остаётся в агенте**: он знает форму сообщений
 nanobot, писатель — нет.
 
-**Оговорка по `history_search_tool.py`:** его гарантия изоляции привязана к
+**Оговорка по `history_search_tool.py` (файл удалён `1f22aab`, скры оговорку
+перенесённой в платформу реализации):** его гарантия изоляции привязана к
 `nanobot.agent.tools.context.RequestContext`. Если перенести SQL, не перенеся
 идентичность, инструмент начнёт отдавать глобальные результаты. Изоляция по
 `session_id` / `user_id` должна стать частью контракта операции, а не заботой
@@ -513,12 +524,12 @@ capability `audit` — туда, где лежит реестр скриптов
 
 | Модуль | Строк | Почему |
 |---|---:|---|
-| `scripts/predefined/db_loader.py` | ~150 | Реестр `public.agent_predefined_scripts`. Переносится как есть, диалект снимка сохраняется — см. §1.1 |
+| `scripts/predefined/db_loader.py` | ~150 | Реестр `public.agent_predefined_scripts`. Переносится как есть, диалект снимка сохраняется — см. §1.1. Файл удалён `ac28d29` вместе с остальным `scripts/` скилла, ныне `mcp-platform/libs/audit/registry_loader.py` |
 | `scripts/predefined/validator.py` | ~200 | Типы, обязательность, значения по умолчанию |
 | `scripts/predefined/builder.py` | ~230 | Сборка шаблона, параметризация, авто-`LIMIT` |
-| `scripts/predefined/mode.py` | ~200 | Конвейер `audit.run_script` |
-| `scripts/generated_sql_mode.py` | ~280 | Пайплайн генерации, `<NO_MATCH>`, `EXPLAIN` |
-| `scripts/llm.py`, `scripts/skill_config.py` | ~120 | Резолв LLM и таблиц — через `libs/llm` и `libs/enterprise_common` |
+| `scripts/predefined/mode.py` | ~200 | Конвейер `audit.run_script` (удалён `ac28d29`) |
+| `scripts/generated_sql_mode.py` | ~280 | Пайплайн генерации, `<NO_MATCH>`, `EXPLAIN` (удалён `ac28d29`) |
+| `scripts/llm.py`, `scripts/skill_config.py` | ~120 | Резолв LLM и таблиц — через `libs/llm` и `libs/enterprise_common`. Оба файла удалены `ac28d29`, резолв живёт в конфиге платформы |
 
 Три операции: `audit.list_scripts`, `audit.run_script`, `audit.generate_sql`. Ни одна не принимает
 SQL от вызывающей стороны. Подробные контракты — `MCP-CONTRACTS.md` §4,
@@ -550,7 +561,7 @@ chunk_overlap, metric).
 
 | Модуль | Строк | Почему |
 |---|---:|---|
-| `workspace/utils/office_files.py` | 304 | Парсинг PDF/DOCX/XLSX/PPTX. Внутренняя зависимость, не capability агента |
+| `workspace/utils/office_files.py` | 304 | Парсинг PDF/DOCX/XLSX/PPTX. Внутренняя зависимость, не capability агента. Файл удалён `84c1c3c` при переносе домена, ныне `mcp-platform/libs/office/parser.py` |
 | `workspace/skills/office_files/SKILL.md` | — | Документирует этот модуль |
 | `workspace/skills/legal_summarizer/**` | ~30 000 | Доменная логика. Ноль импортов `nanobot`, ноль обращений к БД |
 | `workspace/skills/audit_analyzer/**` | ~2 500 | Доменная логика поверх data/vector |
@@ -579,8 +590,8 @@ chunk_overlap, metric).
 
 | Модуль | Строк | Что меняется |
 |---|---:|---|
-| `lib/core/skill_registration.py` | 98 | Остаётся: объявления таблиц по-прежнему описывают состав снимка |
-| `lib/core/skill_config.py` | 325 | `get_in_memory_cache_path` и `build_cache_provider` уходят из агента вместе с кэш-API |
+| `lib/core/skill_registration.py` | 98 | По плану остаётся: объявления таблиц по-прежнему описывают состав снимка. Файл удалён `8d63240` вместе с кластером реестра |
+| `lib/core/skill_config.py` | 325 | `get_in_memory_cache_path` и `build_cache_provider` уходят из агента вместе с кэш-API. Файл удалён `b8d3637` |
 | `lib/core/project_settings.py` | 759 | Секция `CacheSettings` переезжает в конфиг сервера; остальное остаётся |
 | `lib/services/runtime_health.py` | 210 | Проверки компонент `duckdb_cache` и `vector_search` перенаправляются на capability `data` и `vectors` |
 | `lib/core/application_context.py` | 1816 | 88 строк кэш-обвязки из 1816 уходят из агента: `resolve_cache_path`, `_warn_if_cache_path_on_nfs`, `_init_cache_runtime`, `check_duckdb_cache`, `check_vector_search` |
@@ -590,7 +601,9 @@ chunk_overlap, metric).
 > трогать. Его единственное упоминание кэша — неиспользуемый DI-параметр
 > `cache_store: Any = None` (`:583`) с комментарием «резерв для будущих патчей».
 
-> ⚠️ **`table_registry.py` (347) остаётся целиком.** Имя обманывает: это не
+> ⚠️ **`table_registry.py` (347) по плану остаётся целиком.** Файл удалён
+> коммитом `8d63240` вместе с кластером реестра, поэтому ниже — описание
+> состояния на `BASE_COMMIT`. Имя обманывает: это не
 > маппинг PG→DuckDB, а реестр ресурсов с тремя потребителями:
 > * `resources_by_label("scripts_registry")` — резолвит **таблицу PostgreSQL**
 >   для `audit_analyzer` (через `skill_config.py:85-102`);
@@ -609,8 +622,8 @@ chunk_overlap, metric).
 
 | Файл | Причина |
 |---|---|
-| `workspace/utils/structure_cache.py` | Импортирует `extract_structure`, которого **нет** в проекте. `ImportError` |
-| `tools/extract_office_structure.py` | То же самое |
+| `workspace/utils/structure_cache.py` | Импортирует `extract_structure`, которого **нет** в проекте. `ImportError`. Файл удалён `bf3ab48` |
+| `tools/extract_office_structure.py` | То же самое; удалён тем же `bf3ab48` |
 | `sql/vectors/create_vector_index_config.sql` | Помечен в шапке как LEGACY, кодом не читается |
 | `sql/vectors/create_vector_index_store.sql` | Таблица уже удалена миграцией `V003` |
 | `workspace/skills/audit_analyzer/err1.log` | Случайный артефакт в каталоге skill'а |
@@ -633,13 +646,15 @@ chunk_overlap, metric).
 | `workspace/hooks/debug_stream_diag.py` | 72 | Сам помечен как временный диагностический |
 | `scripts/backfill_media_aw.py` | 148 | Одноразовый бэкфилл media-JSONB |
 
-Шесть строк прежнего списка закрыты удалением, а не правкой: `tools/release_v251.py`,
-`tools/release_v252.py`, `tools/demo_internal_fallback.py` и
+Шесть строк прежнего списка закрыты удалением, а не правкой. Удалёнными
+(нет в дереве) оказались: `tools/release_v251.py`,
+`tools/release_v252.py` (удалён), `tools/demo_internal_fallback.py` (удалён) и
 `tools/smoke_post_cleanup.py` — коммит `65f8be0`; `tools/test_audit.py` и
-`workspace/tools/example.py` — `dcce296`. Кандидат на удаление, которого в дереве уже
+`workspace/tools/example.py` — `dcce296`. Перечисленные имена в дереве не остались
+ни в одном из этих видов. Кандидат на удаление, которого в дереве уже
 нет, — не кандидат, а заставляющий перепроверять то, чего не существует. Опасение
-про `example.py` («шаблон зарегистрирован как живой tool `ExampleTool`») кодом не
-подтверждается — см. §4.8.
+про `example.py` — того самого удалённого файла-шаблона — («шаблон зарегистрирован
+как живой tool `ExampleTool`») кодом не подтверждается — см. §4.8.
 
 ### 4.5 Остаётся в агенте
 
@@ -660,10 +675,10 @@ chunk_overlap, metric).
 | `workspace/utils/session_file_store.py` | 431 | Сессии на диске переживают рестарт |
 | `workspace/utils/session_key.py` | 119 | Одна конвенция имени папки сессии |
 | `workspace/tools/compact_context.py` | 177 | Агент сам сжимает свой промпт |
-| `workspace/tools/legal_summarizer_query.py` | 360 | IPC-шим: запуск legal-сервиса как подпроцесса. **БД не трогает** |
+| `workspace/tools/legal_summarizer_query.py` | 360 | IPC-шим: запуск legal-сервиса как подпроцесса. **БД не трогает**. Файл удалён `1f22aab`, ныне `mcp-platform/libs/legal_summarizer/cli_query.py` |
 | `tools/diagnose_startup.py` | 442 | Сверка стартового лога с каноническим инвентарём |
-| `tools/scan_nanobot_inventory.py` | 176 | Карта зависимостей от nanobot для апгрейда |
-| `tools/audit_nanobot_contracts.py` | 194 | Проверка, что импортируемые символы nanobot существуют |
+| `tools/scan_nanobot_inventory.py` | 176 | Карта зависимостей от nanobot для апгрейда (удалён `65f8be0`) |
+| `tools/audit_nanobot_contracts.py` | 194 | Проверка, что импортируемые символы nanobot существуют (удалён `65f8be0`) |
 
 
 ### 4.6 Модули без владельца — вопрос закрыт
@@ -673,9 +688,9 @@ chunk_overlap, metric).
 
 | Модуль | Строк | Решение |
 |---|---:|---|
-| `lib/services/llm_client.py` | 199 | → `mcp-platform/libs/llm/`, выставляется операцией `enterprise-mcp: llm.complete`. **В агенте больше не используется** |
-| `lib/services/llm_config.py` | 88 | → конфиг `enterprise-mcp`. Провайдер, модель и ключ перестают читаться из `config.json` агента |
-| `lib/core/skill_config.py` | 325 | Теряет смысл: каждый домен читает **свой** конфиг из конфига платформы, а не из `config.json` агента |
+| `lib/services/llm_client.py` | 199 | → `mcp-platform/libs/llm/`, выставляется операцией `enterprise-mcp: llm.complete`. **В агенте больше не используется** (файл удалён `515e56f`) |
+| `lib/services/llm_config.py` | 88 | → конфиг `enterprise-mcp`. Провайдер, модель и ключ перестают читаться из `config.json` агента (файл удалён `515e56f`) |
+| `lib/core/skill_config.py` | 325 | Теряет смысл: каждый домен читает **свой** конфиг из конфига платформы, а не из `config.json` агента. Удалён `b8d3637` |
 
 Про обратный вызов агента через MCP: невозможен и не нужен. Это канал
 управления, а не провайдер инструментов. Домены при этом ходят в `libs/llm`
@@ -759,7 +774,7 @@ enterprise-стек». Разбор — `design.md` §7.1.
 
 | Куда | Что |
 |---|---|
-| Перенести в `mcp-platform` | 10 модулей кэша (`test_duckdb_cache_store.py`, `test_cache_provider_meta.py`, `test_single_cache_interface.py`, `test_cache_no_file_hold.py`, `test_cache_provider_open_failure.py`, `test_cache_provider_mode.py`, `test_cache_load_service.py`, `test_table_registry.py`, `test_skill_cache_boundary.py`, `test_shared_cache_path_across_profiles.py`) — становятся стражами capability `data`; плюс тесты capability `audit`, `vectors` и `libs/document` |
+| Перенести в `mcp-platform` | 10 модулей кэша (`test_duckdb_cache_store.py`, `test_cache_provider_meta.py`, `test_single_cache_interface.py`, `test_cache_no_file_hold.py`, `test_cache_provider_open_failure.py`, `test_cache_provider_mode.py`, `test_cache_load_service.py`, `test_table_registry.py` (удалён `8d63240` вместе с реестром), `test_skill_cache_boundary.py`, `test_shared_cache_path_across_profiles.py`) — становятся стражами capability `data`; плюс тесты capability `audit`, `vectors` и `libs/document` |
 | Переписать | `test_application_context*` (5 файлов) — они на ~300 строк ссылаются на снимаемую подсистему |
 | Обновить | `test_config_keys.py`, `test_project_settings.py` (798) |
 | Добавить | Архитектурный страж сервисов: вне владельцев соединений, индексов, LLM-клиента и снимка запрещены `psycopg2.connect`, `*ConnectionPool`, `create_pool`, импорты `faiss`, `IndexFlatIP`, `duckdb.connect`, `ATTACH` и HTTP-вызовы провайдера |
@@ -782,7 +797,7 @@ enterprise-стек». Разбор — `design.md` §7.1.
 
 | # | Шаг | Основание |
 |---|---|---|
-| 0 | Удалить сломанный мёртвый код (`structure_cache.py`, `extract_office_structure.py`, `table_utils.py`, `retry.py`) | Уже сломан или уже мёртв. Мешают инвентаризации, чинится за минуты |
+| 0 | Удалить сломанный мёртвый код (`structure_cache.py`, `extract_office_structure.py`, `table_utils.py` — все три удалены `bf3ab48`; `retry.py` жив) | Уже сломан или уже мёртв. Мешают инвентаризации, чинится за минуты |
 | 1 | Реестр: `ToolDefinition`, `ToolRegistry`, загрузчик `capabilities/*/tools/*.py`, fail-fast | Нужен раньше любой capability, иначе состав придётся перечислять вручную |
 | 2 | `libs/enterprise_data` ← `workspace/utils/db.py` + `sql_safety` + `jsonb` + `clean_text` | Модуль уже чист и покрыт тестами; это перенос, а не постройка |
 | 3 | capability `data`: журнал (`data.log_events` — батч, `data.log_event` — одиночная, `data.purge_logs`, `data.upsert_question_run`), чтение (`data.history_search`, `data.schema_check`), очередь задач (`data.claim_task`, `data.update_task_status`, `data.unstick_tasks`) и сообщения (`data.append_assistant_message`, `data.delete_assistant_message`, `data.patch_message_metadata`); два входа в очередь; предел стоимости запроса; запрет старта без `sqlglot`; архитектурный страж сервисов | Тонкий слой: схемы инструментов, маппинг ошибок |
@@ -813,7 +828,8 @@ enterprise-стек». Разбор — `design.md` §7.1.
    станет вызовом capability, она идёт **после** старта сервера, а по смыслу
    должна быть **до** — иначе она не сможет сообщить, что сервер не поднялся.
 3. **Redis-канал** — снимает ли однопроцессность (решение §10.1) смысл
-   `redis_channel.py` (378) и `message_exchange.py` (171)?
+   `redis_channel.py` (378, удалён `b8d3637`) и `message_exchange.py` (171,
+   файл жив)? Вопрос снят решением §10.1.
 4. **Предел стоимости запроса к снимку.** Серверный `statement_timeout` — механизм
    PostgreSQL, к DuckDB он неприменим, и объявлять его там было бы ложным
    обещанием. Сегодня единственные ограничения запроса к снимку — AST-политика
@@ -848,8 +864,10 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | `media` и `_tool_audit` | События. Патч `assemble_outbound` удаляется целиком; хук публикует через `turn_context.events`, канал читает |
 
 **Закрыто ранее:** `agent_worker_claims`, `benchmarks/`, `streamlit`,
-`example.py` — см. §10. Разделы «судьба `example.py`» и «судьба `benchmarks/`»
-предыдущих редакций сняты.
+`example.py` — см. §10; из перечисленного в дереве не осталось ничего, все
+пункты сняты удалением (`b11271c`, `dcce296`). Разделы «судьба `example.py`» и
+«судьба `benchmarks/`» (каталога нет в дереве) предыдущих
+редакций сняты.
 
 ---
 
@@ -863,8 +881,8 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | Что уходит | Строк / объём |
 |---|---|
 | `lib/channels/postgres_channel.py` — протокол аренды | ~1 200 из 2 190 (оценка по 85 упоминаниям) |
-| `tools/check_worker_pool_integrity.py` | 201 строка |
-| `sql/workers/` | 2 файла | `sql/migrations/V006__drop_agent_worker_claims.sql` |
+| `tools/check_worker_pool_integrity.py` | 201 строка (удалён `b11271c`) |
+| `sql/workers/` | 2 файла, каталог удалён `b11271c` | `sql/migrations/V006__drop_agent_worker_claims.sql` |
 | Настройки `channels.postgres.*` | **3 ключа:** `claims_table`, `claim_strategy`, `lease_interval`. Остальные (`poll_interval`, `unstick_interval`, `processing_timeout`, `error_retry_delay`, `worker_id`, `max_stuck_retries`, `max_concurrent`) живы в single-режиме | плюс ключ профиля `claims_table` в `PROFILE_OWNED_RUNTIME_KEYS` / `EXPECTED_RUNTIME_TABLE_NAMES` и в `_EXPECTED_KEYS` — иначе `validate_runtime_isolation` падает с `ConfigurationError` |
 | Тесты | 3 файла удалены, 45 тестов |
 | Документация | `lib/channels/README.md`, `AGENTS.md`, `CHANGELOG.md` |
@@ -882,20 +900,24 @@ enterprise-стек». Разбор — `design.md` §7.1.
 
 ### 10.2 Бенчмарки
 
-`benchmarks/` (2 327) + `benchmarks/db.py` (340) + `tools/legal_benchmark.py` (197),
-2 таблицы в `sql/benchmarks/`, ~5 тестовых файлов, секция `benchmark.*`.
+`benchmarks/` (2 327) + `benchmarks/db.py` (340) + `tools/legal_benchmark.py` (197, удалён),
+2 таблицы в `sql/benchmarks/` (каталог удалён), ~5 тестовых файлов, секция `benchmark.*`.
+Всё перечисленное снято удалением `dcce296`: каталогов `benchmarks/` и
+`sql/benchmarks/` в дереве не осталось, файла `tools/legal_benchmark.py` —
+тоже.
 
-Вместе уходят `tools/legacy_audit.py` (484) и `tools/test_audit.py` (735) —
-процессные артефакты, не runtime.
+Вместе уходят `tools/legacy_audit.py` (484, файл жив) и
+`tools/test_audit.py` (735, удалён `dcce296`, в дереве его нет) — процессные
+артефакты, не runtime.
 
 **Потеря:** end-to-end замер качества ответа. 4 101 юнит-тест остаются, но они
 проверяют компоненты, а не ответ пользователю.
 
 ### 10.3 Streamlit
 
-**Выполнено.** Убраны `streamlit_app.py` (669) и
-`lib/services/subprocess_manager.py` (149, существовал **только** для его
-запуска), а также логика spawn в `gateway.py`.
+**Выполнено.** Убраны `streamlit_app.py` (669, нет в дереве) и
+`lib/services/subprocess_manager.py` (149, нет в дереве, существовал **только** для его
+запуска) — оба удалены `dcce296`, — а также логика spawn в `gateway.py`.
 
 `workspace/utils/media.py` (259) сокращён — каналы ещё его читают.
 `test_streamlit_app.py` удалён, `test_profile_lifecycle.py` — частично.
@@ -935,10 +957,12 @@ enterprise-стек». Разбор — `design.md` §7.1.
   передаваемые каждой `AgentTurnHookFactory`: второй канал для per-turn данных,
   чище ключей в `OutboundMessage.metadata`;
 * **`finalize_content(context, content) -> str | None`** вызывается в
-  `agent/runner.py` в трёх местах — **единственная** хук-точка, подменяющая
-  значение;
+  `nanobot/agent/runner.py` — нет в дереве репозитория, это модуль
+  установленного пакета `nanobot-ai==0.3.5` — вызывается в трёх местах,
+  **единственная** хук-точка, подменяющая значение;
 * **`AgentTurnHookFactory = Callable[[AgentTurnHookContext], AgentHook | None]`** —
-  официальная фабрика per-turn хуков, цепочка собирается в `agent/turn_hooks.py`;
+  официальная фабрика per-turn хуков, цепочка собирается в
+  `nanobot/agent/turn_hooks.py` — нет в дереве репозитория, это модуль пакета;
 * **23 события**, в том числе `TurnCompleted` (несёт `outcome`, `failure_kind`,
   `failure_error_kind`, `failure_attempts`), `TurnEndEvent`, `SessionTurnPersisted`,
   `SessionTurnStarted`, `ContextCompactionEvent`, `RecoveryStateEvent`,
@@ -952,7 +976,7 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | 7 | `async_save` | **нашим классом** | `agent.sessions` — наш `PGSessionManager`. Обёртка на `ThreadPoolExecutor` делается при создании в `session_storage.py` |
 | 11 | `session_content_cleanup` | **нашим классом** | Чистка NUL — забота PostgreSQL; `clean_text.py` уже делает это и уезжает в `libs/enterprise_data` |
 | 8 | `session_dir_watch` | **удалить** | Гейт выключен по умолчанию, тестов нет |
-| 1 | `context_governor` | **удалить** | **Upstream уже работает.** `workspace` и `max_tool_result_chars` прокинуты: `config/schema.py` → `AgentLoop` → `AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`. Патч переписывал работающую функцию |
+| 1 | `context_governor` | **удалить** | **Upstream уже работает.** `workspace` и `max_tool_result_chars` прокинуты: `nanobot/config/schema.py` — нет в дереве репозитория, это пакет — → `AgentLoop` → `AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`. Патч переписывал работающую функцию |
 | 4 | `exec_timeout_cap` | **удалить** | `tools.exec.timeout` уже прокинут (`0` = без лимита); остаток — подкласс `ExecTool`. Обоснование «legal 7–10 мин» отпадает с переездом legal в MCP |
 | 5 | `tool_limits` | **удалён 2026-10-03** | Нативной замены нет: конфигурируемых лимитов `read_file`/`list_dir`/`grep` в nanobot не существует. Приняты дефолты — 128K / 200 записей / **2 МБ на файл**. Цена: grep пропускает крупные файлы и возвращает «No matches found», уведомление о пропуске идёт в хвосте |
 | 3 | `exec_limits` | **удалён 2026-10-03** | Вместе с `tool_limits`. Потолок в глобалах модуля внутри `clamp_session_int`, а `maximum` схемы заморожен `deepcopy` при декорации — ни подкласс, ни конфиг не достают. Приняты дефолты: **10 000** по умолчанию, 50 000 потолком |
@@ -987,7 +1011,8 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | **подмена результата tool'а** | **только инструментом или патчем** |
 
 Последняя строка — единственное ограничение, и в 0.3.5 оно ровно одно:
-`after_execute_tool` возвращает `None`, а `execution.py` делает `return result`.
+`after_execute_tool` возвращает `None`, а `nanobot/agent/tools/execution.py` (нет в дереве
+репозитория, это модуль установленного пакета) делает `return result`.
 
 ### Пять правил вместо патча
 

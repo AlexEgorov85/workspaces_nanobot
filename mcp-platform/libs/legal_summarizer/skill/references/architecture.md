@@ -56,7 +56,7 @@ mcp-platform/tests/legal_summarizer/       # developer-only код
 Skill — **self-contained Agent Skill**, а не отдельный Python distribution
 package.
 
-Отдельного `src/` не нужно: домен — обычный пакет
+Отдельного `src/` нет в дереве: домен — обычный пакет
 `libs.legal_summarizer` внутри платформы, и корнем импорта служит
 корень платформы. `cli.py` добавляет в `sys.path` `_PLATFORM_ROOT`
 (`Path(__file__).resolve().parents[2]`, то есть `mcp-platform/`),
@@ -289,9 +289,9 @@ validation.
 
 `tests/` поделён на:
 
-* `tests/unit/` — изолированные тесты подсистем.
-* `tests/integration/` — E2E прогон с mock LLM.
-* `tests/architecture/` — boundary guards.
+* `mcp-platform/tests/legal_summarizer/unit/` — изолированные тесты подсистем.
+* `mcp-platform/tests/legal_summarizer/integration/` — E2E прогон с mock LLM.
+* `mcp-platform/tests/legal_summarizer/architecture/` — boundary guards.
 
 ## Известные ограничения
 

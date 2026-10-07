@@ -40,7 +40,8 @@
 (коммит 60e7b8f)
 
 * **До:** `lib/cli/hook_loader.py::scan_and_register` импортировал
-  `active_files_hook.py` через `dir(mod)`.
+  `active_files_hook.py` (удалён)
+ через `dir(mod)`.
 * **После:** allowlist `_allowed_hook_names()` исключает
   `active_files_hook`. Файл удалён.
 
@@ -53,7 +54,8 @@
 Все breaking changes **зафиксированы в спеке** через
 `openspec/changes/archive/2026-09-27-post-0.3.5-patches-cleanup/design.md`
 (D5, D6, D7) и нормативные требования в
-`specs/`. Тесты, которые **не были обновлены**, считаются
+`openspec/specs/`
+. Тесты, которые **не были обновлены**, считаются
 **pre-existing failures** и будут исправлены в **отдельном
 follow-up change'е**.
 

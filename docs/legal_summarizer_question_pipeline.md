@@ -16,9 +16,9 @@
 
 | Режим CLI | Флаг | LLM-вызовов | Где живёт snapshot |
 |---|---|---:|---|
-| Краткое саммари | `--length brief` | 1 (`direct`) | **manifest** + `result.json` (`op_..._brief`); document-level cache **не создаётся** |
-| Подробное саммари | `--length detailed` | N + reduce | manifest + `result.json` (`op_..._detailed`); **document-level cache создаётся** (через `run_canonical_pipeline`) |
-| Ответ на вопрос | `--question "..."` | 1 (synthesize), если есть doc-cache; иначе full map-reduce | manifest + `result.json` (`op_..._q:...`); document-level cache используется, если уже есть |
+| Краткое саммари | `--length brief` | 1 (`direct`) | **manifest** + `result.json` (файл времени выполнения, нет в дереве репозитория) (`op_..._brief`) ; document-level cache **не создаётся** |
+| Подробное саммари | `--length detailed` | N + reduce | manifest + `result.json` (файл времени выполнения, нет в дереве репозитория) (`op_..._detailed`) ; **document-level cache создаётся** (через `run_canonical_pipeline`) |
+| Ответ на вопрос | `--question "..."` | 1 (synthesize), если есть doc-cache; иначе full map-reduce | manifest + `result.json` (файл времени выполнения, нет в дереве репозитория) (`op_..._q:...`) ; document-level cache используется, если уже есть |
 
 Ключевой факт: **`brief` режим НЕ создаёт document-level cache** — он идёт через
 `application.service._inspection_mod.inspect(...)` минуя `run_canonical_pipeline`.
@@ -43,7 +43,8 @@ return f"op_{h}_{extras_hash}_{length}"
 
 - `brief` + `detailed` для одного и того же файла → **разные `operation_id`** (разный `length` → разный `extras_hash`).
 - `brief` без `--question` и `brief` с `--question` → **разные `operation_id`** (разный `q`).
-- Один и тот же `(text, length, document_path, question)` → один и тот же `operation_id` → `service.run()` сразу отдаёт кэшированный `result.json` (`service.py:334-355`).
+- Один и тот же `(text, length, document_path, question)` → один и тот же `operation_id` → `service.run()` сразу отдаёт кэшированный `result.json` (файл времени выполнения, нет в дереве репозитория; `service.py:334-355`).
+
 
 ### 1.3. Как сейчас отрабатывается `--question`
 
@@ -66,7 +67,8 @@ if (question is not None and document_path is not None and workspace_root is not
 2. Если complete — читает snapshot, восстанавливает `DocumentAnalysis` in-memory.
 3. Делает lexical retrieval через `select_chunks_for_mode` (выбирает ≤8 релевантных chunks).
 4. Один LLM-вызов `llm_document_reduce` для синтеза ответа.
-6. Сохраняет manifest + `result.json` под `operation_id`, выставляет
+6. Сохраняет manifest + `result.json` (файл времени выполнения, нет в дереве репозитория) под
+ `operation_id`, выставляет
    `strategy="document_cache_question"`.
 
 Если document-level cache отсутствует — `_try_question_via_document_cache` возвращает
@@ -78,7 +80,8 @@ if (question is not None and document_path is not None and workspace_root is not
 
 1. Пользователь прислал ГК РФ, попросил «расскажи что в договоре».
 2. Агент в чате вызвал skill **без `--question`** → `brief` режим.
-3. Создался `operation_id=op_cb9363bcdcf4_06876f03_brief`, manifest + `result.json` с кратким саммари. Document-level cache **не создался** (`brief` идёт мимо `run_canonical_pipeline`).
+3. Создался `operation_id=op_cb9363bcdcf4_06876f03_brief`, manifest + `result.json` (файл времени выполнения, нет в дереве репозитория) с кратким
+ саммари. Document-level cache **не создался** (`brief` идёт мимо `run_canonical_pipeline`).
 4. Пользователь в чате: «а что гарантирует ГК РФ?».
 5. Агент вызвал skill **без `--question`** (вопрос остался в чате, а не в CLI) → тот же `(text, length, path, question=None)` → тот же `operation_id` → `service.run()` отдал кэшированное `brief`-саммари.
 
@@ -187,10 +190,12 @@ DOCUMENT CONTENT
 - **Когда уместно:** это базовая инфраструктурная починка — без неё
   document-cache question mode работает только после `detailed`.
 
-#### B.2 — Хранить все результаты (brief/detailed/question) в одном `result.json`
+#### B.2 — Хранить все результаты (brief/detailed/question) в одном `result.json` (файл времени выполнения, нет в дереве репозитория)
 
-Перейти от «один `operation_id` → один `result.json`» к «один
-`(text, document_path)` → один `result.json` с полями `brief`, `detailed`,
+
+Перейти от «один `operation_id` → один `result.json`» (файл времени выполнения, нет в дереве репозитория)
+ к «один
+`(text, document_path)` → один `result.json` (файл времени выполнения, нет в дереве репозитория) с полями `brief`, `detailed`,
 `questions[]`».
 
 - **Плюсы:** один файл на документ — проще отлаживать, видно все три режима.
@@ -199,7 +204,8 @@ DOCUMENT CONTENT
   подробное, а вот ответы на вопросы».
 - **Плюсы:** переиспользование analysis между режимами становится очевидным
   (один manifest = один document-cache).
-- **Минусы:** меняется схема `result.json` — нужно мигрировать существующие
+- **Минусы:** меняется схема `result.json` (файл времени выполнения, нет в дереве репозитория)
+ — нужно мигрировать существующие
   манифесты или поддерживать обратную совместимость.
 - **Минусы:** `operation_id` теряет смысл «уникального идентификатора
   операции». Нужно ввести `document_id` как первичный ключ и хранить список
@@ -294,7 +300,8 @@ DOCUMENT CONTENT
 ### Долгосрочно: B.2 (единый result.json)
 
 Если нужно радикально упростить — перейти на схему «один документ = один
-`result.json` с полями `brief` / `detailed` / `questions[]`». Это можно
+`result.json` (файл времени выполнения, нет в дереве репозитория) с полями
+ `brief` / `detailed` / `questions[]`». Это можно
 сделать второй итерацией, после стабилизации B.1.
 
 ---
@@ -366,7 +373,8 @@ DOCUMENT CONTENT
 | Per-chunk summary (level 2 cache) | Отсутствует — brief не делает LLM-summary chunks |
 | `Chunk.text` (level 3 cache, lossless fallback) | Усечённый текст + маркеры `[BRIEF: section content truncated]` |
 
-**Вывод:** даже при наличии `result.json` с brief-саммари, этот саммари —
+**Вывод:** даже при наличии `result.json` (файл времени выполнения, нет в дереве репозитория) с brief-саммари
+, этот саммари —
 это **не источник данных для question**, а **продукт**. Сохранять нужно
 **canonical chunks + structure + physical**, а не brief chunk.
 
@@ -459,7 +467,8 @@ snapshot создаётся один раз для документа, даль�
 
 Допустим, реализовали 6.A. Тогда:
 
-1. `brief` создал `result.json` с кратким саммари + создал snapshot
+1. `brief` создал `result.json` (файл времени выполнения, нет в дереве репозитория) с кратким
+ саммари + создал snapshot
    (canonical chunks + structure + physical).
 2. `--question "что гарантирует"` → `_try_question_via_document_cache`:
    - snapshot complete → идём дальше.
@@ -480,7 +489,8 @@ snapshot создаётся один раз для документа, даль�
    - Если превышен `DOCUMENT_REDUCE_INPUT_BUDGET_CHARS` — обрезаются
      source text'ы до равной доли, **summaries не обрезаются**.
 4. Один LLM-вызов `llm_document_reduce` для синтеза.
-5. Результат сохраняется в manifest + `result.json` под
+5. Результат сохраняется в manifest + `result.json` (файл времени выполнения, нет в дереве репозитория) под
+
    `operation_id=op_..._q:что гарантирует_brief`.
 
 **Если ответ неполный** (например, «что гарантирует» — а в документе это
@@ -524,5 +534,6 @@ full detailed pipeline? Или пользователь должен сам эт
 
 4. **Сколько раз имеет смысл делать разные режимы для одного файла?**
    Если пользователь задал 50 вопросов — это 50 `operation_id`, 50
-   манифестов, 50 `result.json`. Не разрастается ли это? Может быть,
-   `questions[]` хранить как массив в одном `result.json` (вариант B.2)?
+   манифестов, 50 `result.json` (файл времени выполнения, нет в дереве репозитория).
+ Не разрастается ли это? Может быть,
+   `questions[]` хранить как массив в одном `result.json` (файл времени выполнения, нет в дереве репозитория)?

@@ -19,7 +19,7 @@ This file documents non-obvious constraints and usage patterns.
 
 Инструмента `glob` в наборе **нет**. Реестр нано-агента объявляет
 `read_file`, `write_file`, `edit_file`, `list_dir`, `find_files`, `grep` и
-`web_search` (`nanobot/agent/tools/`); отдельного `glob` среди них нет, а
+`web_search` (реестр установленного пакета `nanobot-ai`, модуль `agent/tools`); отдельного `glob` среди них нет, а
 `entry_type="dirs"`, `head_limit` и `offset` — параметры несуществующего
 инструмента.
 
@@ -48,7 +48,7 @@ This file documents non-obvious constraints and usage patterns.
 ## data.history_search — поиск по долговечному журналу агента
 
 Операция платформы, а не кастомный tool: прежняя обёртка
-`workspace/tools/history_search_tool.py` снята change'ом
+`workspace/tools/history_search_tool.py` удалена change'ом
 `2026-10-03-mcp-native-tools` (п. D6), и модель зовёт операцию напрямую.
 Ищет по `agent_gateway_logs` — журналу, который переживает context compaction
 (в отличие от `agent_conversation_messages`). Полезно, когда пользователь
@@ -322,8 +322,8 @@ JSON-string. Изменение формы данных требует отде�
 - `focus` (опц.) — предмет фокуса, например `аренда`.
 - `question` (опц.) — конкретный вопрос к документу.
 - `confirmed` — `true` запускает разбор; без него операция возвращает
-  `confirmation_required` и **делает ноль LLM-вызовов**. Имя параметра именно такое:
-  `mcp-platform/servers/enterprise/tools/analyze_document.py:962`.
+  `confirmation_required` и **делает ноль LLM-вызовов**. Имя параметра именно такое —
+  `mcp-platform/servers/enterprise/tools/analyze_document.py`.
 - `operation_id` (опц.) — идентификатор из шага 1; нужен для запуска и для
   повторного входа.
 
@@ -361,7 +361,7 @@ JSON-string. Изменение формы данных требует отде�
 Платформенная операция capability `platform` — как `platform.read_result`. Она была операцией capability `legal_summarizer` и
 переехала, потому что чтение состояния операции есть работа с файлами сессии, а у
 capability-операции нет доступа к сессии вызова. Прежний кастомный tool
-`workspace/tools/legal_summarizer_query.py` снят ещё раньше, change'ом
+`workspace/tools/legal_summarizer_query.py` удалён ещё раньше, change'ом
 `2026-10-03-mcp-native-tools` (п. D6); реализация —
 `mcp-platform/servers/enterprise/tools/query_operation.py`.
 

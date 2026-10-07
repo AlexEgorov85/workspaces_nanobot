@@ -92,8 +92,8 @@ diagnostics в startup-баннере. **НЕ** означает startup-abort
 | `AgentHook` | 18 методов, в т.ч. `after_execute_tool`, `on_error`, `on_finally`, `before_iteration` | наблюдение и побочные эффекты |
 | `AgentTurnHookContext.events: EventSink` | `publish: Callable[[AgentEvent], Awaitable[None]]` + `accepts(type)` для пропуска дорогого производства без потребителя | **публикация событий из хука — штатный механизм** |
 | `AgentTurnHookContext.metadata` / `.attributes` | мутабельные `dict`, передаваемые каждой `AgentTurnHookFactory` | второй канал для per-turn данных, чище ключей в `OutboundMessage.metadata` |
-| `AgentTurnHookFactory` | `Callable[[AgentTurnHookContext], AgentHook \| None]`; цепочка собирается в `agent/turn_hooks.py` | официальная фабрика per-turn хуков |
-| `finalize_content(ctx, content) -> str \| None` | вызывается в `agent/runner.py` в трёх местах | **единственная хук-точка, подменяющая значение** |
+| `AgentTurnHookFactory` | `Callable[[AgentTurnHookContext], AgentHook \| None]`; цепочка собирается в `agent/turn_hooks.py` (нет в дереве репозитория) | официальная фабрика per-turn хуков |
+| `finalize_content(ctx, content) -> str \| None` | вызывается в `agent/runner.py` (нет в дереве репозитория) в трёх местах | **единственная хук-точка, подменяющая значение** |
 | 23 события | `TurnCompleted` (несёт `outcome`, `failure_kind`, `failure_error_kind`, `failure_attempts`), `SessionTurnPersisted`, `SessionTurnStarted`, `ContextCompactionEvent`, `RecoveryStateEvent`, `RetryStatusEvent`, `RetryWaitEvent` | замена инъекции в `metadata` подпиской |
 | ~~`TurnEndEvent`~~ | **не существует в 0.3.5** | проверено инспекцией установленного пакета: в `nanobot.agent` есть `AgentEvent`, `StreamDeltaEvent`, `StreamEndEvent`, `StreamedResponseEvent`, `TurnContext`, `EventSink`, `TurnRoute`, `RetryStatusEvent`. Модуля `nanobot.agent.events` нет. Пункты плана, ссылающиеся на `TurnEndEvent`, нереализуемы как написаны (ADR `turn-delivery-public-extension.md`) |
 
@@ -110,7 +110,8 @@ diagnostics в startup-баннере. **НЕ** означает startup-abort
 
 Хук **не может только одно**: заменить значение, которое фреймворк передаёт
 дальше, не используя возвращаемое значение хука. В 0.3.5 такой случай ровно
-один. Проверено в `nanobot/agent/tools/execution.py`:
+один. Проверено в `nanobot/agent/tools/execution.py` (нет в дереве репозитория)
+:
 
 ```python
 result = await tool.execute(**params)          # или tools.execute(...)

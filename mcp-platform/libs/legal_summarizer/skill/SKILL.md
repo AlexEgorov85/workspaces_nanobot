@@ -103,7 +103,7 @@ python "<абсолютный_путь_к_репозиторию>\mcp-platform\l
 - Этот файл раньше называли
   `C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.py`.
   Такого пути **не существует и не существовало**: каталога
-  `workspace/skills/legal_summarizer/scripts/` в репозитории нет, а
+  `workspace/skills/legal_summarizer/scripts/` в проекте не существует, а
   `SkillsLoader` его и не читал бы. Фактический вход домена —
   `mcp-platform/libs/legal_summarizer/cli.py`, он и лежит в репозитории
   (см. строку bash-варианта ниже, где путь указан относительно корня).
@@ -298,8 +298,9 @@ exit code, снято вместе с агентской обёрткой (chang
 Это **независимые источники**:
 
 - `chunks_total` (поле `--field stats`) — логический/плановый счётчик
-  чанков из manifest; отражает `chunks_total: N` в `manifest.json`,
-  подсчитанный при планировании прогона.
+  чанков из manifest; отражает `chunks_total: N` в манифесте прогона
+  (манифест пишется в каталоге операции на диске, в дереве репозитория
+  такого файла нет), подсчитанный при планировании прогона.
 - `chunks` (поле `--field chunks`) — массив **физических** partial-файлов
   в `<op>/chunks/*.json`, обрезанных по `--max-chunk-summary-chars`.
 

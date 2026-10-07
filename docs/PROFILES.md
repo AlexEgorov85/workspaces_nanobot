@@ -38,7 +38,8 @@ session_manager.json      ← per-deploy override (опционально)
 - **`config.json`** — базовая конфигурация. Без оверлея = prod.
 - **`profiles/test.jsonc`** — оверлей для test. Содержит **только** 5
   profile-owned runtime-ключей (см. ниже). Любые другие ключи → fail-fast.
-- **`session_manager.json`** — historical per-deploy override (pool,
+- **`session_manager.json` (исторический override, нет в дереве репозитория)
+** — historical per-deploy override (pool,
   timeouts). Применяется на шаге 2 (после `config.json`, до профиля),
   поэтому **не может** перетереть profile-owned runtime-таблицы.
 
@@ -172,8 +173,10 @@ search, Memory, Logging, Prompts, Runtime patches, что и в gateway.
 Различие — только в profile и transport (CLI == in-memory bus).
 
 **Streamlit удалён в фазе 1** миграции `enterprise-mcp-platform`: `streamlit_app.py`,
-`lib/services/subprocess_manager.py` и секция `streamlit.*` из `config.json`
-не существуют, как и `test_streamlit_app.py`. Живы два entrypoint — `gateway.py`
+`lib/services/subprocess_manager.py` (удалён `dcce296`)
+ и секция `streamlit.*` из `config.json`
+не существуют, как и `test_streamlit_app.py` (удалён)
+. Живы два entrypoint — `gateway.py`
 и `cli_agent.py`; оба получают профиль через `argv`.
 
 ### Без `--profile`
@@ -208,7 +211,8 @@ search, Memory, Logging, Prompts, Runtime patches, что и в gateway.
 касается только выбора профиля.
 
 Деплои должны передавать `--profile` через `command:` в
-`docker-compose.yml` / k8s manifest / systemd unit / GitHub Actions.
+`docker-compose.yml` (нет в дереве репозитория; это пример дескриптора деплоя)
+ / k8s manifest / systemd unit / GitHub Actions.
 
 ## Профиль всегда приходит через argv
 
@@ -222,7 +226,8 @@ search, Memory, Logging, Prompts, Runtime patches, что и в gateway.
 ```
 
 **Историческая справка.** Правило было сформулировано, когда третий entrypoint
-существовал: `gateway.py` spawn'ил `streamlit_app.py` через
+существовал: `gateway.py` spawn'ил `streamlit_app.py` (удалён)
+ через
 `lib/services/subprocess_manager.py::spawn_streamlit` и передавал профиль так:
 
 ```python
@@ -251,7 +256,8 @@ proc = subprocess.Popen(
 
 **Ключевое:** profile overlay (шаг 4) — последний перед валидацией. Это
 гарантирует, что profile-owned runtime-ключи **immutable после применения
-профиля**. Даже если `session_manager.json` или `config.json` содержат
+профиля**. Даже если `session_manager.json` (нет в дереве репозитория)
+ или `config.json` содержат
 prod-имена — профиль их перетирает.
 
 ## Валидация (hard-fail, не warning)

@@ -24,8 +24,8 @@
 
 0. **Удалить таблицы бенчмарков.** `sql/migrations/V007__drop_benchmark_tables.sql`
    содержит `DROP TABLE IF EXISTS public.agent_benchmark_results;` и
-   `public.agent_benchmark_runs;` — применяется штатно. DDL `sql/benchmarks/`
-   удалён.
+   `public.agent_benchmark_runs;` — применяется штатно. DDL `sql/benchmarks/` удалён.
+
 1. **Удалить таблицу аренды.** `sql/migrations/V006__drop_agent_worker_claims.sql`
    (`python tools/migrate.py --apply`) содержит `DROP TABLE IF EXISTS
    public.agent_worker_claims;` — runner выполняет SQL как есть, подстановок
@@ -125,13 +125,16 @@
 **Автоматические изменения** (ничего делать не нужно для greenfield):
 
 - Добавлен `SessionColdSyncService` в
-  `lib/services/session_cold_sync_service.py` — фоновый daemon-поток
+  `lib/services/session_cold_sync_service.py` (удалён `39dcb4a`; механизм живёт в `lib/gateway/mirror/session_mirror.py`)
+ — фоновый daemon-поток
   с per-transaction advisory lock, батчами по 50 сессий.
-- Добавлен `lib/services/llm_usage_store_factory.py` — фабрика
+- Добавлен `lib/services/llm_usage_store_factory.py` (удалён `c439ef3`)
+ — фабрика
   `LLMUsageStore` с дефолтом
   `<get_runtime_subdir("usage")>/usage.db`. **Позже удалён:** хранилище создаёт
   библиотека (`nanobot.llm_usage.get_llm_usage_store()`).
-- Добавлен `lib/services/llm_observer.py` —
+- Добавлен `lib/services/llm_observer.py` (удалён `c439ef3`)
+ —
   `wrap_provider_snapshot_loader` подключает observer-pipeline. **Позже удалён:**
   подписка observer'а свёрнута в `AgentFactory._wrap_provider_snapshot_loader`.
 - `PGSessionManager` теперь — тонкий compatibility layer
@@ -358,7 +361,8 @@ LLM-вызовы в production):
 
 **breaking changes v2.0.0**:
 
-- Конфигурация векторных индексов переехала из файлов `.faiss` и `project.json`
+- Конфигурация векторных индексов переехала из файлов `.faiss` и `project.json` (удалён `c439ef3`)
+
   в таблицу `public.agent_vector_index_config` (управление через SQL). Это был
   адрес на момент v2.0.0: таблица с тех пор — legacy-артефакт, который код не
   читает, а состав индексов объявляет `mcp-platform/platform.json` →
@@ -425,7 +429,8 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
   адрес настройки: сегодня состав индексов и storage-таблица объявлены в
   `mcp-platform/platform.json` (`vectors.indexes` / `vectors.storage_table`).
 - **Бенчмарки** (`public.agent_benchmark_runs`, `public.agent_benchmark_results`) — без миграции;
-  DDL в `sql/benchmarks/`.
+  DDL в `sql/benchmarks/` (каталог удалён)
+.
 - **`agent_gateway_logs` / `agent_question_runs`** — новые таблицы:
   `sql/logs/create_public_agent_gateway_logs.sql`,
   `sql/logs/create_public_agent_question_runs.sql`.

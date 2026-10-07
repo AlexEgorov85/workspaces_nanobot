@@ -176,7 +176,9 @@ python -m servers.enterprise.server --capabilities llm
    берётся из `container`.
 3. Создать `tools/<operation>.py` для каждой операции (§ «Как добавить инструмент»).
 4. Описать `server.py` как bootstrap реестра — без `@mcp.tool()` вручную.
-5. Добавить `tests/test_service.py` и тест загрузки реестра.
+5. Добавить тест сервиса новой capability (имя по её названию, как
+   `tests/test_data_service.py` и `tests/test_llm_service.py`) и тест
+   загрузки реестра.
 6. Проверить: `pytest` в `mcp-platform/` зелёный, `server.py` запускается
    без установленного nanobot, архитектурный страж не падает.
 7. Только после этого — подключать к агенту через `config.json::mcpServers`.

@@ -1,6 +1,7 @@
 # Release Process
 
-Полная процедура выпуска нового релиза. Минимум ручных шагов, всё через `tools/release_vX_Y_Z.py` + git-flow.
+Полная процедура выпуска нового релиза. Минимум ручных шагов, всё через `tools/release_vX_Y_Z.py` (нет в дереве репозитория; одноразовый шаблон)
+ + git-flow.
 
 ## 0. Семантика версий
 
@@ -117,7 +118,8 @@ release_v*_payload.json
 .venv/Scripts/python.exe tools/release_v252.py --curl
 ```
 
-Если что-то не так — правь `tools/release_v252.py` (epigraph, секции), повторяй.
+Если что-то не так — правь `tools/release_v252.py` (удалён `65f8be0`)
+ (epigraph, секции), повторяй.
 
 ## 3. Коммит в master
 

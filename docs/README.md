@@ -92,7 +92,8 @@ reference** по своей подсистеме; README в корне — эт�
 ## Конвенция именования
 
 - `*.md` в корне `docs/` — навигационные / операционные документы.
-- `docs/architecture/` — каталоги инвентарей (генерируются из кода) и `decisions/`.
+- `docs/architecture/` — каталоги инвентарей (генерируются из кода) и `architecture/decisions/`
+.
 - `docs/*-architecture.md` — архитектурные контракты (skill/tool).
 - `docs/*-inventory.md` — инвентаризация компонентов.
 - `openspec/changes/archive/` — исторические process/baseline/audit-заметки (не актуальны).

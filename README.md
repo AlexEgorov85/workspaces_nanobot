@@ -130,7 +130,7 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 > Имена таблиц/индексов выше — значения текущей инсталляции (REFERENCE). Они
 > настраиваются в `config.json` (`channels.postgres.*`, `logging.db.*`) и в
 > `mcp-platform/platform.json` (`audit.tables`, `vectors.indexes`) — и в других
-> развёртываниях могут отличаться. Файла `project.json` больше нет: его секции
+> развёртываниях могут отличаться. Файла `project.json` нет в проекте: его секции
 > переехали в `config.json` (`gateway.agent.<name>`) либо в конфиг платформы.
 
 Состав таблиц снимка и векторных индексов объявляет платформа:
@@ -257,8 +257,8 @@ CLI/skill) и `TestWarnIfPublishPathOnNfs` (2 кейса); все ранее
 
 **Audit-analyzer three-mode contract (`a396c27`).** `audit_analyzer`
 свёрнут в три равноправных режима — `predefined`, `vector`,
-`generated_sql` — **без fallback между ними**. Удалён
-`scripts/column_hints.py` и прежний registry: схема передаётся в LLM
+`generated_sql` — **без fallback между ними**.
+Удалён `scripts/column_hints.py` и прежний registry: схема передаётся в LLM
 через `CacheProvider.get_schema()` +
 `lib.utils.sql_safety.format_schema`, few-shot — через
 `predefined.db_loader.load_all`. Если выбранный режим неприменим,
@@ -300,7 +300,8 @@ lifecycle-deadlock `postgres_channel` при `stream_end` с пустым delta 
 + удаление `tools/generate_predefined_scripts_sql.py` (`79e0e63`),
 `tools/build_vectors.py --validate-only` + ETA прогресса (`8b70383`), стабилизация
 порядка таблиц в `lib/utils/duckdb_query.build_schema` (`a8e03e8`), перенос тестов
-`audit_analyzer` в `workspace/skills/audit_analyzer/tests/` (`10771cc`),
+`audit_analyzer` в `workspace/skills/audit_analyzer/tests/` — каталог удалён `ac28d29`,
+тесты переехали в `tests/`; сам перенос — `10771cc`),
 синхронизация архитектурной документации и README «Что нового».
 
 Изменения конфигурации: `config.json` — провайдер LLM `qwen3.6-35b-a3b` через

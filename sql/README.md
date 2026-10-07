@@ -50,7 +50,7 @@ sql/
 │   └── create_vector_index_store.sql                    #   public.agent_vector_index_store — DEPRECATED (V003)
 │
 ├── comments/                                            # массовые COMMENT ON (сгенерировано)
-│   └── apply_all_comments.sql                           #   tools/generate_comments_sql.py
+│   └── apply_all_comments.sql                           #   генератор удалён 2026-10-02
 │
 ├── migrations/                                          # версионные миграции схемы
 │   ├── schema_migrations.sql                            #   tracking-таблица public.schema_migrations
@@ -68,8 +68,10 @@ sql/
 │   │                                                     #   колонки/индексы/ключ, объявленные DDL,
 │   │                                                     #   но не доехавшие до существующих баз
 │   ├── V013__test_profile_session_mirror_replica_key.sql #   test-зеркало сессий в боевой форме
-│   └── V014__drop_conversation_messages_e2e_artifact.sql
-│                                                       #   DROP артефакта разовой проверки очереди
+│   ├── V014__drop_conversation_messages_e2e_artifact.sql
+│   │                                                     #   DROP артефакта разовой проверки очереди
+│   ├── V015__anchor_identity_contract_comment.sql       #   COMMENT к request_id в журнальных таблицах
+│   └── V016__test_profile_journal_event_time_backfill.sql #   доведение agent_gateway_logs_test до боевой формы
 │
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)
@@ -110,10 +112,10 @@ python tools/migrate.py --baseline          # штамповать сущест�
   реальное имя таблицы оператор подставляет и выполняет DROP вручную;
 - существующая БД: после первой установки выполнить `--baseline`
   (V001 не содержит DDL — только точка отсчёта);
-- новые изменения схемы — новый файл `V015__*.sql` и далее; ретроактивно
+- новые изменения схемы — новый файл `V017__*.sql` и далее; ретроактивно
   менять применённые миграции нельзя. Номера не переиспользуются: в истории
-  уже был `V005__create_agent_cache_ownership.sql` (удалён вместе с
-  `cache_ownership.py`), и базы, где он применился, хранят `005` в
+  уже был `V005__create_agent_cache_ownership.sql` — удалён `cff3a41` вместе с
+  удалённым `cache_ownership.py`; базы, где он применился, хранят `005` в
   `public.schema_migrations`.
 
 ---
@@ -151,21 +153,22 @@ psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_reports.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_report_items.sql
 
 # 7. Домен audit_analyzer — таблицы навыка
-#    (oarb.audit_vectors = storage_table из project.json::gateway.vector.index)
+#    (oarb.audit_vectors = storage_table из mcp-platform/platform.json::vectors)
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_vectors.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_predefined_scripts.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/seed_predefined_scripts.sql
 
-# 8. Сборка векторных индексов (конфиг — только project.json::gateway.vector.index.indexes)
-python tools/build_vectors.py --full-rebuild
+# 8. Сборка векторных индексов (состав — только mcp-platform/platform.json::vectors.indexes)
+cd mcp-platform && python -m servers.enterprise.build_index --full-rebuild
 ```
 
 Векторная инфраструктура **не** требует DDL: FAISS собирается в памяти из
-DuckDB-снапшота `gateway.vector.index.storage_table`, а декларация индексов
-читается из `project.json`. Файлы `sql/vectors/*` — legacy (`agent_vector_index_config`
-кодом не читается, `agent_vector_index_store` удалён миграцией V003) и на
-новых инстансах не применяются. Аналогично `sql/audit_analyzer/seed_default_indexes.sql`
-сидит в legacy-таблицу; актуальные индексы объявлены в `project.json`.
+DuckDB-снапшота, а таблица-хранилище векторов и состав индексов объявлены
+в `mcp-platform/platform.json` (`vectors.storage_table`, `vectors.indexes`).
+Файлы `sql/vectors/*` — legacy (`agent_vector_index_config` кодом не читается,
+`agent_vector_index_store` удалён миграцией V003) и на новых инстансах не
+применяются. Аналогично `sql/audit_analyzer/seed_default_indexes.sql` сидит
+в legacy-таблицу; актуальные индексы объявлены в `mcp-platform/platform.json`.
 
 ---
 
@@ -179,8 +182,8 @@ DuckDB-снапшота `gateway.vector.index.storage_table`, а деклара�
 
 **Один файл = одна таблица.** `COMMENT ON TABLE / COLUMN` пишутся прямо в
 файле создания таблицы; каталог `sql/comments/` содержит только сгенерированный
-сводный `apply_all_comments.sql` (генератор — `tools/generate_comments_sql.py`,
-применять вручную при необходимости).
+сводный `apply_all_comments.sql` (генератор `tools/generate_comments_sql.py`
+удалён 2026-10-02, файл самодостаточен; применять вручную при необходимости).
 Индексы в create-скриптах не создаются — только таблица и комментарии.
 
 DDL **не хранится** рядом с кодом компонента (`lib/<component>/sql/`).

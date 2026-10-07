@@ -96,7 +96,7 @@ LLM-вывода. Причина не в JSONL, а в PostgreSQL, поэтому
 }
 ```
 
-Источник — `config.json` (не `project.json`: такого файла в проекте нет).
+Источник — `config.json` (не `project.json`: такого файла нет в проекте).
 
 > **v2.0.0+:** таблицы названы `agent_session_meta` / `agent_session_messages`
 > (единый `agent_`-префикс). DDL в `sql/session/` —

@@ -261,7 +261,8 @@ PostgreSQL.
 > `mcp-platform/platform.json → audit.tables` (объектная форма
 > `{"name": ..., "label": ...}`) и разбирается при построении конфигурации
 > capability в `mcp-platform/servers/enterprise/server.py::_audit_config`.
-> Прежний владелец — `TableResource.label` в `lib/services/table_registry.py` и
+> Прежний владелец — `TableResource.label` в `lib/services/table_registry.py` (удалён `8d63240`)
+ и
 > lookup `TableRegistry.resources_by_label()` — снят 2026-10-01 вместе с
 > локальным кэшем.
 
@@ -354,7 +355,8 @@ Capability может объявить свою метку и находить �
 Tool `legal_summarizer_query` и IPC-протокол к `cli_query.py` **удалены**;
 §11.1–11.4 описывали вещь, которой в репозитории нет уже в трёх местах сразу:
 сам tool снят (change `2026-10-03-mcp-native-tools`, п. D6), навык
-`workspace/skills/legal_summarizer/` уехал на платформу раньше, а IPC-граница
+`workspace/skills/legal_summarizer/` (нет в дереве репозитория)
+ уехал на платформу раньше, а IPC-граница
 (subprocess) исчезла вместе с ним. Таблицы exit code × status и перечень
 manifest-причин описывали протокол, которого больше нет.
 

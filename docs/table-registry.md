@@ -8,7 +8,7 @@
 
 Skill объявлял свои PG-таблицы и векторные индексы в `config.json`, декларации
 превращались в dataclass-ресурсы `TableResource` / `VectorResource` и
-регистрировались в `lib/services/table_registry.py`. Знание о том, что грузить
+регистрировались в `lib/services/table_registry.py` (удалён `8d63240`). Знание о том, что грузить
 в локальный DuckDB-снимок, бралось оттуда; оттуда же шёл lookup по `label` и по
 track-колонке.
 
@@ -18,12 +18,12 @@ track-колонке.
 не остался: снятый снимок вместе с ним унёс единственного потребителя, а
 skill'ы получили доступ к данным через операции capability `audit` по MCP, а не
 через собственный доступ к кэшу. Декларативная регистрация
-(`lib/core/skill_registration.py`, `lib/core/infra_registration.py`,
+(оба удалён `8d63240`: `lib/core/skill_registration.py`, `lib/core/infra_registration.py`,
 `ApplicationContext._auto_register_skills`) исчезла вместе с реестром.
 
-Снятые модули: `lib/services/table_registry.py`,
-`lib/core/skill_registration.py`, `lib/core/infra_registration.py`,
-`lib/core/skill_config.py`, `lib/services/duckdb_cache_store.py`,
+Снятые модули: `lib/services/table_registry.py` (удалён `8d63240`),
+`lib/core/skill_registration.py`, `lib/core/infra_registration.py` (оба удалён `8d63240`),
+`lib/core/skill_config.py` (удалён `b8d3637`), `lib/services/duckdb_cache_store.py` (удалён `caf81b7`),
 `lib/services/cache_provider.py`, `lib/services/cache_load_service.py`,
 `lib/services/cache_provider_impl.py`, `lib/services/text_splitter.py`,
 `lib/services/vector_index_service.py`, `lib/services/preload_service.py`.

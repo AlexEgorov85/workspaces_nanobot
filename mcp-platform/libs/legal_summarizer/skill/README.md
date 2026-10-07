@@ -93,9 +93,9 @@ Agent
 [`prompts/`](prompts/) — markdown-файлы, загружаются через
 `legal_summarizer.llm.prompts_runtime.load_prompt`:
 
-* `summarize_system.md` — system prompt для map-phase.
-* `section_reduce_system.md` — system prompt для section reduce.
-* `reduce_system.md` — system prompt для document reduce.
+* `prompts/summarize_system.md` — system prompt для map-phase.
+* `prompts/section_reduce_system.md` — system prompt для section reduce.
+* `prompts/reduce_system.md` — system prompt для document reduce.
 
 ## Как запускать тесты
 

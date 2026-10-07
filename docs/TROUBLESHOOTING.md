@@ -125,9 +125,9 @@ capability `data`. Агент в обоих не участвует — `CacheLo
 ## Бенчмарки и оценка
 
 Подсистема бенчмарков качества удалена в фазе 1 миграции
-`enterprise-mcp-platform`: пакет `benchmarks/` (runner, evaluator, scorer,
-loader, reporter, db, hooks, models), скрипты `tools/legal_benchmark.py`,
-`tools/test_audit.py`, таблицы
+`enterprise-mcp-platform`: пакет `benchmarks/` (удалён; runner, evaluator, scorer,
+loader, reporter, db, hooks, models), скрипты `tools/legal_benchmark.py` (удалён),
+`tools/test_audit.py` (удалён), таблицы
 `agent_benchmark_runs` / `agent_benchmark_results` и секция `benchmark.*`
 в `config.json`. Разделы этого файла про LLM-судью и загрузчик YAML- suites
 больше не применимы.
@@ -140,14 +140,14 @@ loader, reporter, db, hooks, models), скрипты `tools/legal_benchmark.py`,
 **Не путать** с каталогом `tests/benchmarks/` — он остался: это тесты
 quality-бенчмарков навыка `legal_summarizer` (проверка golden-датасета
 `required_facts` и наличие canonical-модулей скилла), а не тесты пакета
-`benchmarks/`.
+`benchmarks/` (удалён).
 
 ---
 
 ## Web-UI
 
 Streamlit-UI удалён в фазе 1 миграции `enterprise-mcp-platform`
-(`streamlit_app.py`, `lib/services/subprocess_manager.py`, секция `streamlit.*`,
+(`streamlit_app.py` и `lib/services/subprocess_manager.py` — оба удалён, секция `streamlit.*`,
 связанные тесты). Диагностика зависшего UI теперь сводится к каналу:
 задача в `processing` дольше `processing_timeout` вернёт в пул `_unstick_loop`,
 см. `docs/ARCHITECTURE.md` § «Воркеры не берут задачи».

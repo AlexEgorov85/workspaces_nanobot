@@ -206,7 +206,7 @@ change'а убирает и эту цену. Удаление выбросило
 Это единственная оставшаяся нерешённая проблема, и она **не в моём срезе**.
 Дельта `enterprise-mcp-platform → runtime/patch-to-hook` правильно фиксирует,
 что хук не может подменить значение, передаваемое дальше, и называет
-`nanobot/agent/tools/execution.py`. Но три расхождения с моим коммитом
+`nanobot/agent/tools/execution.py` (нет в дереве репозитория). Но три расхождения с моим коммитом
 `72e1873`:
 
 1. **Каталог патчей.** Дельта оперирует нумерацией 1–12 от каталога **до фазы 6**
@@ -441,7 +441,7 @@ self-defeating состояние, которое пункт называет. �
 **Зачем:** 108 незакоммиченных записей `git status`, включая снос кластера снимка и 16 файлов тестов. Всё это зелёное, но не зафиксировано. Это единственный реальный риск потери работы прямо сейчас.
 
 1. Разложить изменения на коммиты по смыслу: tombstone-снос кластера снимка → правки тестов → tombstone-снос слоя `audit_analyzer` → документация → мусор в корне.
-2. Разобрать мусор: `.tmp_*.md`, `.tmp_*.py`, `.tmp_probe_out.txt`, `dump.txt`, `tests/test_user_stop_signal.dump`, `mcp-platform/.tmp_*`, `mcp-platform/.sessions_demo/`, `mcp-platform/.tmp_nopg/`.
+2. Разобрать мусор: `.tmp_*.md`, `.tmp_*.py`, `.tmp_probe_out.txt`, `dump.txt`, `tests/test_user_stop_signal.dump`, `mcp-platform/.tmp_*`, `mcp-platform/.sessions_demo/`, `mcp-platform/.tmp_nopg/` (оба удалён).
 3. Решить судьбу `docs/audit/reports/**` (13 файлов, не отслеживаются, не относятся ни к одному change'ю): либо принять как артефакт аудита и закоммитить, либо снести. Решение — **снести**: ни один change' их не упоминает, а незакоммиченный отчёт без change' через месяц станет мусором.
 
 **Гейт 0:** `python -m pytest tests/ -q` → 0 failed; `git status --short` содержит только осознанные артефакты.
@@ -495,7 +495,7 @@ self-defeating состояние, которое пункт называет. �
 1. Кластер снимка (9 файлов): `lib/services/_cache_provider.py`, `_duckdb_cache_store.py`, `_cache_provider_impl.py`, `_cache_load_service.py`, `_preload_service.py`, `_vector_index_service.py`, `lib/utils/_duckdb_query.py`, `tools/_build_vectors.py`, `tools/_check_indexes.py`.
 2. Тесты кластера (16 файлов + `tests/integration/_test_vector_build_e2e.py`).
 3. Слой `audit_analyzer` (11 Python-файлов + 2 каталога: `workspace/skills/audit_analyzer/scripts/_removed_predefined/`, `_removed_tests/`), плюс 6 тестов агента.
-4. `lib/services/llm_client.py`, затем `lib/services/llm_config.py`, затем `lib/utils/retry.py`, затем `tests/test_llm_config.py`. Пункт 3.13 после этого закрывается окончательно, и `xfail` в `tests/test_llm_goes_through_mcp.py` становится зелёным.
+4. `lib/services/llm_client.py`, затем `lib/services/llm_config.py` (оба удалён `515e56f`), затем `lib/utils/retry.py`, затем `tests/test_llm_config.py`. Пункт 3.13 после этого закрывается окончательно, и `xfail` в `tests/test_llm_goes_through_mcp.py` становится зелёным.
 5. `sql/vectors/create_vector_index_config.sql`, `sql/vectors/create_vector_index_store.sql`, `mcp-platform/servers/enterprise/capabilities/data/tools/_claim_task.py`, `_update_task_status.py`.
 6. `httpx` из `requirements.txt` агента: единственные импортёры — `lib/services/llm_client.py:156` (сносится) и `mcp-platform/libs/llm/client.py:172` (своя копия платформы, ей пакет нужен).
 7. `PENDING-DELETIONS.md` — превратить в протоку «снос выполнен», а не в список долгов.
@@ -537,7 +537,7 @@ self-defeating состояние, которое пункт называет. �
 1. 11.1 — перенос домена в `mcp-platform`. Домен чистый: ноль импортов `nanobot`, ноль обращений к БД, ноль DuckDB, поэтому перенос ничего не ломает в агенте.
 2. 11.2 — переписать архитектурные guard-тесты legal под новый расклад файлов.
 3. 11.4 — разложить по capability `capabilities/legal_summarizer/{skill/SKILL.md, tools/*.py, service/}`.
-4. 11.3 — `workspace/tools/legal_summarizer_query.py` (366 строк, сейчас поднимает **подпроцесс** skill'а с `ENTERPRISE_*` в env) → MCP-вызов, ~30 строк.
+4. 11.3 — `workspace/tools/legal_summarizer_query.py` (удалён `1f22aab`; 366 строк, поднимал **подпроцесс** skill'а с `ENTERPRISE_*` в env) → MCP-вызов, ~30 строк.
 5. 11.5 — привязать кэш документа к `session_id` контракта. Сейчас ключ резолвится как `SESSION_KEY` из env → fallback на имя файла → `__nosession__`, причём `SESSION_KEY` **не выставляется нигде в репозитории**, то есть кэш оказывается в папке, названной по документу, а не по сессии. Корень кэша перестаёт выводиться из `Path(__file__).parents[N]` и задаётся конфигурацией; `document_id` — по контент-хешу.
 6. 6.12 — две копии парсера: домен получает уже извлечённый текст, дублирование запрещено.
 7. Снятие `exec_timeout_cap` — после переноза (условие удаления из документации фазы 6).
@@ -548,7 +548,7 @@ self-defeating состояние, которое пункт называет. �
 
 ### Этап 7 — Миграции и осиротевшие таблицы (Р7)
 
-1. Написать `sql/migrations/V008__drop_orphaned_tables.sql`: `agent_cache_ownership`, `agent_vector_index_config`.
+1. Написать `sql/migrations/V008__drop_orphaned_tables.sql` (файл так и не создан, нет в дереве репозитория: номер V008 занят `sql/migrations/V008__agent_gateway_logs_event_time_columns.sql`): `agent_cache_ownership`, `agent_vector_index_config`.
 2. Применить V006 → V007 → V008 к живому стенду (`python tools/migrate.py --apply`).
 3. Обновить `docs/DATABASE.md` и `sql/README.md` под фактический состав таблиц.
 4. Проверить: `agent_predefined_scripts` **остаётся** — он живой, его читает capability `audit`.

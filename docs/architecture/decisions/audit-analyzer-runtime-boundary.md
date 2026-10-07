@@ -21,13 +21,13 @@ ADR сохранён как история ревзии, но **читать е�
 | `lib/services/cache_provider.py` (ABC `CacheProvider`, `CacheIngestion`, `CacheStore`, `open_cache_provider`) | перенесён в capability `data` платформы, фаза 5 `enterprise-mcp-platform` |
 | `CacheOwnershipCoordinator`, fencing, `agent_cache_ownership` | сняты целиком, `drop-local-cache-read-from-pg` |
 | `CacheLoadService`, `PgDuckDbSyncService` | сняты, фаза 5 `enterprise-mcp-platform` |
-| `preload_service.py`, `vector_index_service.py`, `cache_provider_impl.py`, `duckdb_query.py`, `table_utils.py`, `sql_safety.py` | сняты, фазы 5 и 9 |
+| `preload_service.py`, `vector_index_service.py`, `cache_provider_impl.py`, `duckdb_query.py`, `table_utils.py` (удалён) , `sql_safety.py` | сняты, фазы 5 и 9 |
 | `resolve_publish_path` (`application_context.py`) | снят вместе с кэш-обвязкой |
 | `publish()` — копирование файла сам на себя | метода нет: снимок вообще не публикуется, файл не удерживается между операциями |
 | `gateway.cache.local_path` | настройки больше нет; путь снимка объявляет `mcp-platform/platform.json → data.snapshot_path` |
 | `workspace/skills/audit_analyzer/scripts/cli.py` | удалён, фаза 9 `enterprise-mcp-platform`: навык перестал владеть данными |
 | `benchmarks/runner.py` | удалён, фаза 1.5 |
-| `build_cache_provider`, `get_in_memory_cache_path`, `get_vector_index_path` из `lib/core/skill_config.py` | сняты, фаза 5 |
+| `build_cache_provider`, `get_in_memory_cache_path`, `get_vector_index_path` из `lib/core/skill_config.py` (удалён `b8d3637`) | сняты, фаза 5 |
 
 **Раздел «Проверка соответствия» ниже описывает тесты, которых больше
 нет.** Таблица приведена в соответствие с фактом; историческая часть
@@ -89,7 +89,7 @@ Layout и Configuration), `openspec/specs/` и
 | Эпоха | Состояние | Agent-entry point |
 |---|---|---|
 | A | `cli.py` → `predefined_mode.run(db)` / `sql_mode.run(db)`, vector инлайн | CLI |
-| B | `dd4ecdf`: + `workspace/tools/audit_analyzer_tool.py` (3 tool'а) поверх CLI | CLI **и** tools |
+| B | `dd4ecdf`: + `workspace/tools/audit_analyzer_tool.py` (удалён `9a4e201`) (3 tool'а) поверх CLI | CLI **и** tools |
 | C | `b62fa5d`, `c8d42df`, `6a7554e`: 4–5 tool'ов в `workspace/tools/` | tools |
 | D | `fac5cf5` «полностью tool-only»: удалены **все** skill-скрипты, включая `cli.py` (−2418 строк) | только tools |
 | E | `12bf182`: удалены `vector_search_tool.py` + `duckdb_query_tool.py` | остатки tools |
@@ -100,11 +100,11 @@ Layout и Configuration), `openspec/specs/` и
 
 | Файл | Добавлен | Удалён |
 |---|---|---|
-| `workspace/tools/vector_search_tool.py` | `c8d42df` | `12bf182` |
-| `workspace/tools/duckdb_query_tool.py` | `d8a3d39` / `fe8c8ed` | `12bf182` |
-| `workspace/tools/nl_sql_generate.py` | `b62fa5d` | `468a3db` |
-| `workspace/tools/column_descriptions.py` | `b62fa5d` | `468a3db` |
-| `workspace/tools/run_predefined_script.py` | `6a7554e` | `468a3db` |
+| `workspace/tools/vector_search_tool.py` (удалён `12bf182`) | `c8d42df` | `12bf182` |
+| `workspace/tools/duckdb_query_tool.py` (удалён `12bf182`) | `d8a3d39` / `fe8c8ed` | `12bf182` |
+| `workspace/tools/nl_sql_generate.py` (удалён `468a3db`) | `b62fa5d` | `468a3db` |
+| `workspace/tools/column_descriptions.py` (удалён `468a3db`) | `b62fa5d` | `468a3db` |
+| `workspace/tools/run_predefined_script.py` (удалён `468a3db`) | `6a7554e` | `468a3db` |
 
 `run_predefined_script` никогда не было именем Python-функции (поиск
 `def run_predefined_script` по всем ревизиям — пусто): это строковый
@@ -113,7 +113,8 @@ Layout и Configuration), `openspec/specs/` и
 проекта означает конфиг tool'а.
 
 Ключевое: в эпохах C и E tool-слой **уже был** тонким оркестратором над
-существующими сервисами. `workspace/tools/run_predefined_script.py`
+существующими сервисами. `workspace/tools/run_predefined_script.py` (удалён `468a3db`)
+
 прямо декларировал: «Tool **не** подключается к БД напрямую, **не**
 валидирует SQL сам, **не** делает parameter substitution строкой. Только
 оркестрация существующих сервисов» — `PredefinedScriptRegistry` →
@@ -234,7 +235,8 @@ Skill ↔ Tool, и чинятся независимо от настоящего
 существует. Вторая — граница интерфейса: прежде skill получал провайдера из
 `PostgresDuckDbProvider` со своим `duckdb.connect`, то есть в обход. Этой
 реализации в рантайме больше нет (она осталась только в доктрингах как история);
-`lib/core/skill_config.py` делегирует единственной точке создания
+`lib/core/skill_config.py` (удалён `b8d3637`)
+ делегирует единственной точке создания
 `open_cache_provider(mode=READ_ONLY)`, которая возвращает `DuckDbCacheStore`.
 Обе поломки сняты, дефект переведён в «закрыт».
 
@@ -279,7 +281,8 @@ Skill ↔ Tool, и чинятся независимо от настоящего
    `duckdb_cache_store.py:381-391` перекрыт `@classmethod open(cls, path, mode)`
    (`:432-459`) в теле того же класса — имя `open` принадлежит classmethod,
    тело метода недостижимо. Docstring `:385-389` называет callers
-   `gateway.py` и `benchmarks/runner.py`; оба зовут `connect()`
+   `gateway.py` и `benchmarks/runner.py` (удалён `dcce296`)
+; оба зовут `connect()`
    (`gateway.py:158`, `benchmarks/runner.py:618`). Инвариант «у каждой
    сущности один `open`» проверяется grep'ом в
    `cache-architecture-alignment` §5.9.

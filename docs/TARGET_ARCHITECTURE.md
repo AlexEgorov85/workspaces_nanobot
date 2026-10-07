@@ -181,7 +181,7 @@ cache/refresh policy, FAISS-бэкенд, sync-параметры, model/provide
   единственный источник конфига — `gateway.vector.index.indexes.*`.
 
 Обратной совместимости нет (fail-fast через runtime-проверку, не
-через Pydantic): старый `project.json` с этими секциями стартует, но
+через Pydantic): старый `project.json` (удалён `c439ef3`) с этими секциями стартует, но
 runtime их **не читает**.
 
 ---
@@ -216,8 +216,8 @@ workspace/tools/
 
 В будущем допустимы другие независимые Tools, если они представляют самостоятельную generic capability.
 
-> **Generic tools `duckdb_query_tool.py` / `vector_search_tool.py` не
-> существуют.** Капабилити «свободный SQL» и «semantic search» не являются
+> **Generic tools `duckdb_query_tool.py` / `vector_search_tool.py` удалены `12bf182` и не существуют.**
+> Капабилити «свободный SQL» и «semantic search» не являются
 > Agent-facing capability: агент не должен выбирать их самостоятельно —
 > это внутренние операции доменного Skill'а.
 > Прямой доступ агента к свободному SQL и vector-search демонтирован.

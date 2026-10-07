@@ -25,7 +25,8 @@
 ### 1. `finalize_content` не видит текст ошибки
 
 `AgentHook.finalize_content(context, content) -> str | None` существует и
-вызывается — трижды, из `agent/runner.py` (строки 588, 629, 1214). Но все
+вызывается — трижды, из `agent/runner.py` (нет в дереве репозитория)
+ (строки 588, 629, 1214). Но все
 три вызова находятся на пути ответа модели (`response.content`).
 
 Текст ошибки рождается в другом месте — `agent/turn_delivery.py:341`, внутри

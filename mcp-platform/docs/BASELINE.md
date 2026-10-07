@@ -102,7 +102,8 @@ worker-пула (`NANOBOT_INTEGRATION=1` / `NANOBOT_LIVE_E2E=1`), которые
 ## Дельта фазы 1.5–1.7 — бенчмарки, Streamlit, шаблон tool'а
 
 Корневой прогон: **`4 failed, 3664 passed, 31 skipped, 1 xpassed` за 171 с**
-(без `tests/test_legal_summarizer_running_subprocess.py` — см. ниже).
+(без `tests/test_legal_summarizer_running_subprocess.py` — файл удалён
+коммитом `c645d22` при приёмке сноса скилла; см. ниже).
 Падения — те же четыре предсуществующих, ни одного нового.
 
 | | После 1.1–1.4 | После 1.5–1.7 | Дельта |
@@ -110,25 +111,32 @@ worker-пула (`NANOBOT_INTEGRATION=1` / `NANOBOT_LIVE_E2E=1`), которые
 | Сбор тестов | 4 035 | 3 605 в `tests/` | −430 |
 | passed | 3 999 | 3 664 | −335 |
 
-Что ушло: 8 файлов `tests/test_benchmarks_*.py`, `tests/test_streamlit_app.py`,
-`tests/test_subprocess_manager.py`; секция «D.3 Streamlit invocation tests» из
+Что ушло: 8 файлов `tests/test_benchmarks_*.py`,
+`tests/test_streamlit_app.py` (удалён `dcce296`),
+`tests/test_subprocess_manager.py` (удалён `dcce296`); секция «D.3 Streamlit invocation tests» из
 `test_profile_lifecycle.py` (5 тестов), `TestStreamlitEnabled` из
 `test_gateway.py`, `test_example_tool_is_optional` из
 `test_runtime_inventory.py`, плюс −2 параметра у
 `test_dependency_direction`/`test_single_cache_interface`-style гардей из-за
 удалённых `lib/`, `workspace/` и `tools/` модулей.
 
-**Осторожно с полным прогоном.** `tests/test_legal_summarizer_running_subprocess.py`
-не только флакует, но и **подвешивает** прогон: родительский pytest ждёт
-дочерний процесс, который не завершается. В этом сеансе он дважды
+**Осторожно с полным прогоном.** Файл
+`tests/test_legal_summarizer_running_subprocess.py` — удалён `c645d22`, в дереве
+его нет — не только флакует, но и **подвешивает** прогон: родительский pytest
+ждёт дочерний процесс, который не завершается. В этом сеансе он дважды
 останавливал полный прогон. Обход при верификации:
 `--ignore=tests/test_legal_summarizer_running_subprocess.py`, а сам файл
 гнать изолированно (проходит). Это предсуществующий дефект, не регрессия
 миграции; `pytest-timeout` в проекте не установлен, поэтому страховки нет.
+Оговорка остаётся исторической: файла, к которому она относится, в дереве
+уже нет.
 
 **Ещё найдено, не исправлено:** `tools/generate_comments_sql.py` падает на
-чистом клоне — читает `workspace/skills/audit_analyzer/cache/schema.json`,
-а каталог `cache/` игнорится git. `sql/comments/apply_all_comments.sql`
+чистом клоне — читает `workspace/skills/audit_analyzer/cache/schema.json`, удалён
+вместе с переводом скилла на tool-only (`fac5cf5`), а каталог
+`cache/` игнорился git. В дереве не остался и сам
+`tools/generate_comments_sql.py`.
+`sql/comments/apply_all_comments.sql`
 поэтому правился вручную.
 
 ## Baseline платформы
@@ -186,9 +194,9 @@ cd mcp-platform && python -m pytest -q
 
 | Что | Тестов | Почему |
 |---|---|---|
-| `tests/test_table_utils.py` удалён | −7 | прямые тесты мёртвой функции |
-| Параметризованные стражи | −12 | `table_utils.py` / `structure_cache.py` были параметрами: `test_dependency_direction.py`, `test_single_cache_interface.py`, `test_storage_hybridization.py`, `test_unified_event_logging_pipeline.py`, `test_remove_vector_index_store_guards.py` |
-| `CORE_SERVICES` в `test_core_infrastructure_independence.py` | −2 | `table_utils.py` был живым параметром в `test_no_routing` и `test_no_audit_identifiers`; запись убрана вместе с файлом (`pg_duckdb_sync_service.py` там же была, но уже отфильтровывалась по `.exists()`) |
+| `tests/test_table_utils.py` удалён `bf3ab48` | −7 | прямые тесты мёртвой функции |
+| Параметризованные стражи | −12 | `table_utils.py` / `structure_cache.py` (оба удалены `bf3ab48`) были параметрами: `test_dependency_direction.py`, `test_single_cache_interface.py`, `test_storage_hybridization.py`, `test_unified_event_logging_pipeline.py`, `test_remove_vector_index_store_guards.py` |
+| `CORE_SERVICES` в `test_core_infrastructure_independence.py` | −2 | `table_utils.py` был живым параметром в `test_no_routing` и `test_no_audit_identifiers`; запись убрана вместе с файлом (`table_utils.py` удалён `bf3ab48`; `pg_duckdb_sync_service.py` там же была — удалена `cff3a41`, — но уже отфильтровывалась по `.exists()`) |
 | **Итого** | **−21** | |
 
 Необъяснённой потери нет: 4101 − 7 − 12 − 2 = 4080.

@@ -252,9 +252,11 @@ observability). Событие не блокирующее: sync всё равн
   в lifecycle.
 - `lib/core/project_settings.py` — `UsageStoreSettings`,
   `SessionColdSyncSettings`.
-- ~~`lib/services/llm_usage_store_factory.py`~~ — **снят**: хранилище создаёт
+- ~~`lib/services/llm_usage_store_factory.py` (удалён `c439ef3`)
+~~ — **снят**: хранилище создаёт
   библиотека (`nanobot.llm_usage.get_llm_usage_store()`).
-- ~~`lib/services/llm_observer.py`~~ — **снят**: подписка observer'а свёрнута в
+- ~~`lib/services/llm_observer.py` (удалён `c439ef3`)
+~~ — **снят**: подписка observer'а свёрнута в
   `AgentFactory._wrap_provider_snapshot_loader`.
 - `lib/services/runtime_health.py` — агрегация метрик.
 - `tests/test_storage_hybridization.py` — архитектурные гарды.

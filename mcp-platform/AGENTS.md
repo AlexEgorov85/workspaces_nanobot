@@ -74,7 +74,8 @@ git grep -l '`platform`' -- 'openspec/specs/*/spec.md' 'openspec/specs/*/*/spec.
 ## Change, которые трогают это дерево
 
 Из 33 незакрытых change **26 упоминают `mcp-platform/`** в файлах change, и 21 —
-уже в `proposal.md` (23 получалось при подсчёте вместе с `archive/`: 21 + 2 оттуда).
+уже в `proposal.md` (23 получалось при подсчёте вместе с
+`openspec/changes/archive/`: 21 + 2 оттуда).
 Найти свои:
 
 ```bash

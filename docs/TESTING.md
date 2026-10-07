@@ -144,8 +144,8 @@ $env:NANOBOT_LIVE_E2E="1"; python -m pytest tests/test_gateway_live_media_e2e.py
 $env:DATABASE_URL="postgresql://..."; python -m pytest tests/integration -q
 ```
 
-> Модулей `test_transcription_service.py`, `test_subprocess_manager.py`,
-> `test_preload_service.py`, `test_cache_store.py` и `test_sync_service.py` в
+> Модулей `test_transcription_service.py`, `test_subprocess_manager.py` (оба удалён),
+> `test_preload_service.py`, `test_cache_store.py` и `test_sync_service.py` (тоже удалён) в
 > дереве нет: голос разбирает базовый класс `nanobot`, а локальный кэш и
 > загрузчик снимка снесены (кэш принадлежит capability `data` платформы).
 > Скилл `audit_analyzer` обезличен, поэтому прежний

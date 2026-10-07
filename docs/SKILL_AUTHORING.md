@@ -23,8 +23,8 @@
 | Модель | capability `llm`; настройки и параметры эмбеддера — `platform.json` → `llm` | у агента LLM-клиента нет |
 | Снимок данных | capability `data`; путь — `platform.json` → `data.snapshot_path` | у агента нет |
 | Объявление навыка | `config.json → gateway.agent.skills.<name>`; форма — `lib/core/project_settings.py` | объявление есть, регистрирующего потребителя нет (§4) |
-| Runtime API для skill'ов (`lib/core/skill_config.py`) | — | **снят**, §5 |
-| Реестр ресурсов (`table_registry.py`, `skill_registration.py`, `infra_registration.py`) | — | **снят**, §6 |
+| Runtime API для skill'ов (`lib/core/skill_config.py` — удалён `b8d3637`) | — | **снят**, §5 |
+| Реестр ресурсов (`table_registry.py`, `skill_registration.py`, `infra_registration.py` — удалён `8d63240`) | — | **снят**, §6 |
 | CLI навыка (`scripts/cli.py`), `scripts/skill_config.py` | — | **удалены**: доступ к данным даёт tool агента (§7) |
 | Валидация SQL (`lib/utils/sql_safety.py`) | `mcp-platform/libs/enterprise_data/sql_safety.py` | уехала на платформу |
 
@@ -37,7 +37,7 @@
 платформы).
 
 > Устаревший документ: `docs/table-registry.md` описывает снятый реестр
-> ресурсов (`table_registry.py`, `scripts/register.py`, `_auto_register_skills`)
+> ресурсов (`table_registry.py` — удалён, `scripts/register.py`, `_auto_register_skills`)
 > и как образец не годится — §6.
 
 ---
@@ -145,8 +145,8 @@ workspace/skills/<skill_name>/
 `embed()`). За данными skill не ходит: к ним обращается tool агента (§7).
 
 > Прежняя структура навыка (`predefined/`, `scripts/cli.py` с
-> `--mode predefined|vector|generated_sql`, `scripts/skill_config.py`,
-> `scripts/generated_sql_mode.py`, `providers.py`) **снята**: это был Python-слой,
+> `--mode predefined|vector|generated_sql`, `scripts/skill_config.py` (удалён),
+> `scripts/generated_sql_mode.py`, `providers.py` — оба удалён) **снята**: это был Python-слой,
 > который сам открывал снимок и строил запросы. Сейчас таких файлов в
 > `workspace/skills/audit_analyzer/` нет, и возвращать их не нужно — данные
 > обслуживает capability `audit`; возврат CLI ловит
@@ -178,9 +178,9 @@ workspace/skills/<skill_name>/
 
 ### 2.4 Чего НЕ должно быть
 
-- **Никаких `register.py`** — мёртвый паттерн. Регистрации ресурсов больше нет
+- **Никаких `register.py`** (удалён) — мёртвый паттерн. Регистрации ресурсов больше нет
   (§6): объявление навыка — это данные в `config.json`, а не код.
-- **Никаких `scripts/skill_config.py`** — снятый модуль `lib/core/skill_config.py`
+- **Никаких `scripts/skill_config.py`** (удалён) — снятый модуль `lib/core/skill_config.py` (удалён `b8d3637`)
   снят (§5). Параметры прогона skill берёт из своей секции в `config.json`.
 - **Никаких `scripts/cli.py` с `--mode ...`** — CLI навыка удалён; возврат ловит
   `tests/test_docs_consistency.py::test_readme_md_describes_the_live_audit_analyzer_entrypoint`.
@@ -292,7 +292,7 @@ audit платформы — каталог готовых скриптов, и�
   («выполни семантический поиск по индексу `audits_index'`»), не в терминах
   Python («call `VectorSearchTool.execute(...)`»). См. `skill-tool-architecture.md` §5.
 - ❌ Дублировать полную схему БД в SKILL.md. Используйте progressive
-  disclosure — большие reference-файлы выносите в `references/`.
+  disclosure — большие reference-файлы выносите в `references/` (у skill'ов агента такого каталога нет в дереве репозитория; живой пример — `mcp-platform/libs/legal_summarizer/skill/references/`).
 - ❌ Подмешивать «как именно реализован Python внутри runtime» —
   skill описывает capability, а не код.
 
@@ -451,9 +451,9 @@ Pydantic-валидация выполняется на старте в `Applica
 
 ## 5. Runtime API для skill'ов
 
-> **Раздел описывает снятый API.** Модуля `lib/core/skill_config.py` в проекте
+> **Раздел описывает снятый API.** Модуля `lib/core/skill_config.py` (удалён `b8d3637`) в проекте
 > нет: skill больше не получает доступ к данным, DuckDB-снимку и векторным
-> индексам сам. Реестр ресурсов (`table_registry.py`), декларативная регистрация
+> индексам сам. Реестр ресурсов (`table_registry.py` — удалён `8d63240`), декларативная регистрация
 > (`skill_registration.py`) и `infra_registration.py` снесены вместе с ним
 > (фаза 5, 2026-10-01). Живой инвентарь — `docs/skill-tool-inventory.md`.
 
@@ -468,7 +468,7 @@ capability `llm`.
 
 ## 6. Реестр ресурсов (снят)
 
-> **Раздел описывает снятую подсистему.** `lib/services/table_registry.py`,
+> **Раздел описывает снятую подсистему.** `lib/services/table_registry.py` (удалён `8d63240`),
 > `lib/core/skill_registration.py` и `lib/core/infra_registration.py` удалены
 > вместе с локальным кэшем (фаза 5, 2026-10-01). Реестра ресурсов с владельцем
 > у него больше нет: состав таблиц снимка объявляет capability `data` платформы
@@ -680,8 +680,8 @@ assert "session_id" not in {"q"}             # доменный аргумент
 
 ### 9.3 Что НЕ нужно тестировать
 
-Не пишите тестов регистрации (`register.py`, `_ensure_registered()`,
-`tests/test_skill_register.py`): регистрации больше нет (§6), и такой тест
+Не пишите тестов регистрации (`register.py` — удалён, `_ensure_registered()`,
+`tests/test_skill_register.py` — удалён): регистрации больше нет (§6), и такой тест
 проверял бы код, которого не существует. Лучше покройте доменную логику
 навыка и границы его собственного tool'а, если он есть.
 
@@ -729,7 +729,7 @@ pytest tests/test_mcp_identity_hook.py               -v
 
 ✅ Соблюдайте storage policy из `workspace/AGENTS.md` — относительные пути.
 
-✅ Используйте progressive disclosure — большие знания выносите в `references/` (TARGET §10, §25).
+✅ Используйте progressive disclosure — большие знания выносите в `references/` (у skill'ов агента такого каталога нет в дереве репозитория; TARGET §10, §25).
 
 ✅ Запускайте архитектурные тесты (см. §10).
 
@@ -743,7 +743,7 @@ pytest tests/test_mcp_identity_hook.py               -v
 
 ❌ Прятать домен-логику в `lib/services` (TARGET §22.9).
 
-❌ Создавать `register.py` или `scripts/skill_config.py` — оба сняты (§5, §6).
+❌ Создавать `register.py` или `scripts/skill_config.py` (оба удалён) — (§5, §6).
 
 ❌ `pip install` в коде skill'а. Все библиотеки в `requirements.txt`.
 
@@ -796,7 +796,7 @@ skill'а — `mcp-platform/libs/enterprise_client/llm.py`.
 
 9. ☐ Каталог `workspace/skills/<name>/SKILL.md` создан; `scripts/` — только если
    навыку есть что считать самому (§2.2). `scripts/cli.py` и
-   `scripts/skill_config.py` не заводятся.
+   `scripts/skill_config.py` (удалён) не заводятся.
 10. ☐ В `config.json` добавлена секция `gateway.agent.skills.<name>` с
     параметрами прогона (§4.1); физические таблицы в skill'е не упоминаются.
 11. ☐ Состав доступных таблиц совпадает с `mcp-platform/platform.json` → `audit`.

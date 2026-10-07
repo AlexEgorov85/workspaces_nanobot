@@ -148,7 +148,7 @@ readiness не входят: снимком и индексами владеет
   опционально обернув `publish_inbound`/`publish_outbound` async-логгерами
   из `db_logging_bus.py` (`_wrap_bus_publish`). **Без monkey-patch'ей**:
   оригинальные методы шины сохраняются в замыкании. Отдельного
-  `bus_factory.py` в `lib/core/` нет.
+  `bus_factory.py` в `lib/core/` не существует.
 
 ### `lib/services/`
 
@@ -158,7 +158,7 @@ readiness не входят: снимком и индексами владеет
 | Сервис | Мотивация (почему выделен) |
 |--------|---------------------------|
 | `config_service.py` | Дубликат `_load_runtime_config` + `SETTINGS`-аксессора между gateway и cli. Pre-resolve `${PROVIDER_API_KEY}` от .secrets.env (см. ниже). |
-| `session_storage.py` | Выбор режима хранения сессий (auto / postgres / file) с поддержкой `session_manager.json` override. `postgres` означает включённое холодное зеркало сессий; менеджер сессий во всех режимах — класс библиотеки `SessionManager` поверх `SanitizingSessionStore`. |
+| `session_storage.py` | Выбор режима хранения сессий (auto / postgres / file) с поддержкой override-файла `session_manager.json` (per-deploy, нет в дереве репозитория). `postgres` означает включённое холодное зеркало сессий; менеджер сессий во всех режимах — класс библиотеки `SessionManager` поверх `SanitizingSessionStore`. |
 | `runtime_patcher.py` | Все 6 monkey-patch'ей upstream `nanobot.agent.loop.AgentLoop` в одном классе с fallback при изменении API nanobot. Применяется через `apply_all()` из `ApplicationContext.create()`. **НЕ** занимается регистрацией project tools (вынесено в `project_tool_loader.py`). Полный каталог — `docs/architecture/runtime-patcher-inventory.md`. |
 | `project_tool_loader.py` | Stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(...) -> ProjectToolsLoadResult`. Вызывается из `ApplicationContext.create()` сразу после `apply_all()` как независимый stage composition root'а. **НЕ** компонент (нет lifecycle/state/config — критерии `openspec/specs/architecture/component-model/spec.md`). |
 | `channel_factory.py` | `ChannelManager` + Postgres-канал (второй транспорт, Redis, снят — один канал, PostgreSQL). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
@@ -823,7 +823,7 @@ async def _notify(self, session_key, report):
 **Механизм.** `nanobot.utils.prompt_templates._environment()` кэшируется
 `@lru_cache` и возвращает один и тот же `Environment`; `apply_template_overrides()`
 меняет у него `loader` на `ChoiceLoader`, который сначала ищет файл в
-`workspace/overrides/`, затем в штатных `templates/`. Мутация того же объекта
+`workspace/overrides/`, затем в штатном `templates` пакета `nanobot` (нет в дереве репозитория). Мутация того же объекта
 видна всем `render_template(...)`, патчить функцию не нужно. Идемпотентен;
 при отсутствии каталога — no-op (используются штатные шаблоны).
 
@@ -839,7 +839,7 @@ async def _notify(self, session_key, report):
   Consolidator извлекал бы факты на английском даже из русских диалогов.
   Это делает его единственным источником инструкции для
   `Consolidator.compact_idle_session` / `maybe_consolidate_by_tokens`
-  (render `nanobot/agent/memory.py` при каждом сжатии).
+  (render `nanobot/agent/memory.py` пакета `nanobot`; нет в дереве репозитория).
 
 **Тесты:** `tests/test_consolidator_locale.py` — приоритет override-файла,
 fallback на штатный шаблон при отсутствии файла, идемпотентность, no-op при
@@ -1115,8 +1115,8 @@ else:
 
 1. **exec/shell**: nanobot режет вывод команды до
    `MAX_OUTPUT_CHARS = 50K` символов и вставляет маркер
-   `... (19,761 chars truncated) ...` (`nanobot/agent/tools/shell.py`,
-   `exec_session.py`), отбрасывая середину. Persist потом сохраняет
+   `... (19,761 chars truncated) ...` (`nanobot/agent/tools/shell.py` — нет в дереве репозитория,
+   `exec_session.py` — тоже нет в дереве репозитория), отбрасывая середину. Persist потом сохраняет
    «голову+хвост» — данные теряются безвозвратно.
 2. **История сессии**: `AgentLoop._save_turn` усекает строковый результат
    инструмента до `max_tool_result_chars = 16K` символов, если результат не
@@ -1243,7 +1243,7 @@ web-fetch/search, `repeated_workspace_violation_error`): те — модульн
 - `lib/utils/outbound_meta.py` — единый фильтр служебных outbound
   (`system`, `audit`, `tool_audit`, `_assemble_outbound`-артефакты).
 - `SessionFileStore` (`workspace/utils/session_file_store.py`) — общий стор
-  вложений в `data_store/sessions/<key>/files/attachments/` (рядом `files/results/` —
+  вложений в `data_store/sessions/<key>/files/attachments/` (рядом `files/results/` — каталог рантайма, нет в дереве репозитория —
   выгрузки инструментов). Каталог сессии даёт резолвер
   `lib/services/session_files.py`; собственную раскладку хранилище больше не выводит.
 
@@ -1870,9 +1870,9 @@ nanobot/
 ---
 ## legal_summarizer — где домен живёт сейчас
 
-Раздел описывал внутреннюю структуру `workspace/skills/legal_summarizer/scripts/`:
-Python-пакет, CLI-обёртки `cli.py` / `cli_query.py`, слои `domain/`,
-`document/`, `infrastructure/`. **В агенте этого каталога нет** — навык уехал
+Раздел описывал внутреннюю структуру `workspace/skills/legal_summarizer/scripts/` (нет в дереве репозитория):
+Python-пакет, CLI-обёртки `cli.py` / `cli_query.py`, слои `domain`,
+`document`, `infrastructure`. **В агенте этого каталога нет** — навык уехал
 на платформу целиком, и раздел описывал путь, который в дереве агента
 отсутствует уже несколько фаз (change `enterprise-mcp-platform`, фаза 11).
 

@@ -31,7 +31,7 @@ generic-инструментов для произвольного SQL и век
 | `platform.read_result` operation | `mcp-platform/servers/enterprise/tools/read_result.py` | Платформенная операция | — | чтение результата, сохранённого по порогу, по ссылке `session://results/...` | `SessionWorkspace` / `ArtifactStore` (владелец — платформа, capability доступа не имеют) | active |
 | `compact_context` tool | `workspace/tools/compact_context.py` | Tool | — | — | `lib/services/context_compaction.py` | active |
 | `document_read` tool | `workspace/tools/document_read.py` | Tool | — | — | извлечение текста на платформе | active |
-| ~~`legal_summarizer`~~ Skill | ~~`workspace/skills/legal_summarizer/`~~ | Skill (domain) | — | — | — | **уехал в платформу**: каталога в `workspace/skills/` нет, домен живёт в capability `legal_summarizer` |
+| ~~`legal_summarizer`~~ Skill | ~~`workspace/skills/legal_summarizer/` (нет в дереве репозитория) ~~ | Skill (domain) | — | — | — | **уехал в платформу**: каталога в `workspace/skills/` нет, домен живёт в capability `legal_summarizer` |
 | ~~`office_files`~~ Skill | ~~`workspace/skills/office_files/`~~ | Skill (domain) | — | — | — | **удалён**: каталога в `workspace/skills/` нет |
 
 Два Skill'а в `workspace/skills/`, два Tool'а в `workspace/tools/` — оба
@@ -48,27 +48,27 @@ generic-инструментов для произвольного SQL и век
 
 | component | бывший путь | замена |
 |---|---|---|
-| `audit_analyzer_query` tool | `workspace/tools/audit_analyzer_query.py` | `mcp_enterprise_{audit_list_scripts,audit_run_script,audit_generate_sql,vectors_vector_search}` — с настоящими схемами операций |
-| `legal_summarizer_query` tool | `workspace/tools/legal_summarizer_query.py` | `mcp_enterprise_platform_query_operation` |
-| `history_search` tool | `workspace/tools/history_search_tool.py` | `mcp_enterprise_data_history_search`; область видимости задаёт личность вызова, а не аргумент модели |
-| `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | `mcp_enterprise_audit_run_script` (произвольного SQL у агента нет) |
-| `vector_search` tool | `workspace/tools/vector_search_tool.py` | `mcp_enterprise_vectors_vector_search` |
-| `run_predefined_script` tool | `workspace/tools/run_predefined_script.py` | `mcp_enterprise_audit_run_script`; каталог — `mcp_enterprise_audit_list_scripts` |
-| `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` | `mcp_enterprise_audit_generate_sql` (запрос строит и проверяет платформа) |
-| `column_descriptions` tool | `workspace/tools/column_descriptions.py` | `SKILL.md` секции «Схема домена» + «SQL guidance» (агент читает сам) |
-| `audit_analyzer_tool.py` | `workspace/tools/audit_analyzer_tool.py` (файл целиком) | `workspace/tools/audit_analyzer_query.py` → далее операции платформы |
-| `audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql` tool | `workspace/tools/audit_analyzer_tool.py` (классы `AuditRunPredefinedScriptTool`, `AuditSearchVectorTool`, `AuditGenerateSqlTool`) | сначала одна операция с ветвлением по аргументу `operation`, затем операции платформы напрямую |
+| `audit_analyzer_query` tool | `workspace/tools/audit_analyzer_query.py` (удалён `1f22aab`) | `mcp_enterprise_{audit_list_scripts,audit_run_script,audit_generate_sql,vectors_vector_search}` — с настоящими схемами операций |
+| `legal_summarizer_query` tool | `workspace/tools/legal_summarizer_query.py` (удалён `1f22aab`) | `mcp_enterprise_platform_query_operation` |
+| `history_search` tool | `workspace/tools/history_search_tool.py` (удалён `1f22aab`) | `mcp_enterprise_data_history_search`; область видимости задаёт личность вызова, а не аргумент модели |
+| `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` (удалён `12bf182`) | `mcp_enterprise_audit_run_script` (произвольного SQL у агента нет) |
+| `vector_search` tool | `workspace/tools/vector_search_tool.py` (удалён `12bf182`) | `mcp_enterprise_vectors_vector_search` |
+| `run_predefined_script` tool | `workspace/tools/run_predefined_script.py` (удалён `468a3db`) | `mcp_enterprise_audit_run_script`; каталог — `mcp_enterprise_audit_list_scripts` |
+| `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` (удалён `468a3db`) | `mcp_enterprise_audit_generate_sql` (запрос строит и проверяет платформа) |
+| `column_descriptions` tool | `workspace/tools/column_descriptions.py` (удалён `468a3db`) | `SKILL.md` секции «Схема домена» + «SQL guidance» (агент читает сам) |
+| `audit_analyzer_tool.py` | `workspace/tools/audit_analyzer_tool.py` (файл целиком, удалён `9a4e201`) | `workspace/tools/audit_analyzer_query.py` (удалён `1f22aab`) → далее операции платформы |
+| `audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql` tool | `workspace/tools/audit_analyzer_tool.py` (файл удалён `9a4e201`; классы `AuditRunPredefinedScriptTool`, `AuditSearchVectorTool`, `AuditGenerateSqlTool`) | сначала одна операция с ветвлением по аргументу `operation`, затем операции платформы напрямую |
 | `audit_analyze.bat` / `audit_analyze.sh` | `workspace/skills/audit_analyzer/audit_analyze.{bat,sh}` | ничего: файлов нет, запуска навыка как CLI не существует |
 | `scripts/__init__.py` (skill) | `workspace/skills/audit_analyzer/scripts/__init__.py` | legacy-фасад (никем не импортировался) |
-| `tests/e2e_test.py` (skill) | `workspace/skills/audit_analyzer/tests/e2e_test.py` | standalone (не pytest) |
-| `scripts/generated/` | `workspace/skills/audit_analyzer/scripts/generated/` | одноразовый dump-скрипт |
+| `tests/e2e_test.py` (skill) | `workspace/skills/audit_analyzer/tests/e2e_test.py` (удалён) | standalone (не pytest) |
+| `scripts/generated/` | `workspace/skills/audit_analyzer/scripts/generated/` (удалён) | одноразовый dump-скрипт |
 | `providers.py` (навыка) | `workspace/skills/audit_analyzer/providers.py` (наброски без регистрации) | удалён |
-| `NlSqlRunner` core | `lib/services/nl_sql_runner.py` | не используется (NL→SELECT pipeline выпилен) |
-| `SchemaFormatter` core | `lib/services/schema_formatter.py` | не используется |
-| `ColumnDescriptionsResolver` core | `lib/services/column_descriptions.py` | не используется |
+| `NlSqlRunner` core | `lib/services/nl_sql_runner.py` (удалён `468a3db`) | не используется (NL→SELECT pipeline выпилен) |
+| `SchemaFormatter` core | `lib/services/schema_formatter.py` (удалён `468a3db`) | не используется |
+| `ColumnDescriptionsResolver` core | `lib/services/column_descriptions.py` (удалён `468a3db`) | не используется |
 | `PredefinedScriptRegistry` core | `lib/services/predefined_script_registry.py` | реестр переехал в capability `audit`; Python `REGISTRY`/`scripts/predefined/scripts.py` отсутствуют |
-| `PredefinedScriptRequestBuilder` core | `lib/services/predefined_script_request.py` | параметры скрипта и подстановка — на стороне capability `audit` |
-| `ParameterValidator` core | `lib/services/predefined_script_validator.py` | не используется |
+| `PredefinedScriptRequestBuilder` core | `lib/services/predefined_script_request.py` (удалён `468a3db`) | параметры скрипта и подстановка — на стороне capability `audit` |
+| `ParameterValidator` core | `lib/services/predefined_script_validator.py` (удалён `468a3db`) | не используется |
 | `workspace.utils.event_log` module | `workspace/utils/event_log.py` (197 строк) | отсутствует — заменён `DbLoggingService.log_event(LogEvent(...))` / `DbLoggingService.try_log_event(...)`; прямой SQL INSERT bypass ликвидирован |
 | `tests/test_event_log.py` | `tests/test_event_log.py` (83 строки) | удалён — тестировал прямой INSERT bypass; заменён `tests/test_unified_event_logging_pipeline.py` (AST + ownership guard'ы) |
 | `tests/test_audit_analyzer_query_tool.py` и соседи | `tests/` | удалены вместе с инструментами; покрытие ушло на платформу (`test_audit_capability.py`, `test_vectors_*`, `test_data_service.py::TestHistorySearchIsolation`) |

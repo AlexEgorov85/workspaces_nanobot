@@ -20,7 +20,8 @@
 
 ### Application subprocess
 
-Application subprocess-приложений больше нет: `streamlit_app.py` и
+Application subprocess-приложений больше нет: `streamlit_app.py` (удалён)
+ и
 `lib/services/subprocess_manager.py` удалены в фазе 1 миграции
 `enterprise-mcp-platform`. Остались два entrypoint — `gateway.py` и
 `cli_agent.py`, профиль получают через `argv` от пользователя. Историческая
@@ -46,7 +47,7 @@ proc = subprocess.Popen(
 
 | Категория | Было (env-based) | Стало |
 |---|---|---|
-| `docker-compose.yml` | `environment: <PROFILE_ENV_VAR>=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
+| `docker-compose.yml` (нет в дереве репозитория; это пример дескриптора деплоя) | `environment: <PROFILE_ENV_VAR>=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
 | Kubernetes Deployment | `env: <PROFILE_ENV_VAR>=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
 | systemd unit | `Environment=<PROFILE_ENV_VAR>=prod` | `ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod` |
 | GitHub Actions | `env: <PROFILE_ENV_VAR>: prod` | `run: python gateway.py --profile=prod` |
@@ -66,7 +67,8 @@ env-переменную для выбора профиля, поэтому ко
 ## ⚙️ Конфигурация `tools.exec` (запуск команд)
 
 Секция `tools.exec` в `config.json` управляет инструментом `exec` (запуск shell-команд).
-Реализация — `nanobot/agent/tools/shell.py` (`ExecTool`, `ExecToolConfig`), точка запуска
+Реализация — `nanobot/agent/tools/shell.py` (нет в дереве репозитория)
+ (`ExecTool`, `ExecToolConfig`), точка запуска
 процесса — `ExecTool._spawn()` (shell.py:515), сборка окружения — `_build_env()`
 (shell.py:695).
 
@@ -144,7 +146,8 @@ env-переменную для выбора профиля, поэтому ко
 * `name` / `description` / `parameters` — стандартные абстрактные проперти.
 * `async execute(...)` возвращает `str` или `ToolResult.error(...)`.
 
-Reference: `nanobot/agent/tools/image_generation.py`
+Reference: `nanobot/agent/tools/image_generation.py` (нет в дереве репозитория)
+
 (`ImageGenerationTool` — самый полный пример) и
 `workspace/tools/document_read.py` (минимальный шаблон).
 
@@ -302,7 +305,8 @@ capability `audit` платформы, отдаваемые модели как 
 - готовый скрипт — `mcp_enterprise_audit_run_script` (каталог — `mcp_enterprise_audit_list_scripts`);
 - vector search — `mcp_enterprise_vectors_vector_search`;
 - NL→SELECT — `mcp_enterprise_audit_generate_sql` (запрос строит и проверяет платформа);
-- runtime-context providers (`providers.py`, инъекция схемы/predefined в system
+- runtime-context providers (`providers.py` (удалён)
+, инъекция схемы/predefined в system
   prompt) — удалены полностью: схема БД и списки скриптов теперь доступны
   по требованию через `--list-scripts` / `--list-indexes`
   (реестр в PostgreSQL).

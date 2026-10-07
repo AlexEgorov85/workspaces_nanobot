@@ -27,15 +27,25 @@ Enterprise-домены уже вынесены в `workspace/skills/` и не �
 Перенос — это в основном **смена места жительства** плюс обёртка в MCP,
 а не вытаскивание кода из агента.
 
+> **Пути в таблице ниже — снимок на `BASE_COMMIT` этого документа.**
+> Ни один из перечисленных каталогов в дереве не остался: скиллы
+> `legal_summarizer` и `office_files` сняты (`c645d22`, `9f9fcf4`), три
+> tool-обёртки агента — `1f22aab`, `office_files.py` переехал в
+> `mcp-platform/libs/office/parser.py`. Колонка «Целевое место» описывала
+> четыре отдельных MCP-сервера, которых не стало: решение «один сервер»
+> из `TARGET-ARCHITECTURE.md` реализовано как `mcp-platform/servers/enterprise/`
+> с capability-каталогами, а домены уехали в `mcp-platform/libs/`. Это
+> описание исходного состояния, а не карта текущего дерева.
+
 ## Карта механизмов
 
 | Механизм | Текущий код | Зависимость от Nanobot | Целевое место | Объём |
 |---|---|---|---|---|
-| Audit analyzer | `workspace/skills/audit_analyzer/` + `scripts/cli.py` | нет | `servers/audit/` | **малый** — CLI-граница уже есть |
-| Legal summarizer | `workspace/skills/legal_summarizer/` + `scripts/cli.py` **и** `workspace/tools/legal_summarizer_query.py` (14.8 KB) | только tool-обёртка | `servers/legal/` | средний — две точки входа, схлопнуть в одну |
-| History / memory | `workspace/tools/history_search_tool.py` (30.6 KB) | да (`Tool`, `ToolContext`) | `servers/memory/` | **средний** — самый крупный tool |
+| Audit analyzer | `workspace/skills/audit_analyzer/` + `scripts/cli.py` | нет | `servers/audit/` — не существует, принят один сервер; домен в `mcp-platform/libs/audit/` | **малый** — CLI-граница уже есть |
+| Legal summarizer | `workspace/skills/legal_summarizer/` + `scripts/cli.py` **и** `workspace/tools/legal_summarizer_query.py` (14.8 KB) | только tool-обёртка | `servers/legal/` — не существует, принят один сервер; домен в `mcp-platform/libs/legal_summarizer/` | средний — две точки входа, схлопнуть в одну |
+| History / memory | `workspace/tools/history_search_tool.py` (30.6 KB) | да (`Tool`, `ToolContext`) | `servers/memory/` — не существует; чтение журнала стало операцией `data.history_search` в `mcp-platform/servers/enterprise/capabilities/data/` | **средний** — самый крупный tool |
 | Context compaction | `lib/services/context_compaction.py` | да | **остаётся в агенте** | не переносится (Фаза 7) |
-| Document / Office | `workspace/skills/office_files/`, `workspace/utils/office_files.py` | нет | `servers/document/` | малый — чистая библиотека |
+| Document / Office | `workspace/skills/office_files/`, `workspace/utils/office_files.py` | нет | `servers/document/` — не существует; разбор офисных файлов в `mcp-platform/libs/office/parser.py` | малый — чистая библиотека |
 | DuckDB / FAISS / vector | `lib/services/cache_provider*.py`, `duckdb_cache_store.py`, `vector_index_service.py` | косвенно | `libs/enterprise_data/` | **высокий риск** — лежит в `lib/` |
 | SQL safety (sqlglot) | `lib/utils/sql_safety.py` | нет | `libs/enterprise_data/` | средний |
 | AgentLoop / RuntimePatcher | `lib/services/runtime_patcher.py` (10 импортов) | да | **не переносим** | вне области |

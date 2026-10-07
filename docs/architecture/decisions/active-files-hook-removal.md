@@ -6,7 +6,8 @@
 
 ## Контекст
 
-`workspace/hooks/active_files_hook.py` — side-channel для активных файлов сессии
+`workspace/hooks/active_files_hook.py` (удалён `60e7b8f`)
+ — side-channel для активных файлов сессии
 (attachments пользователя + файлы агента). Side-channel через `session.metadata`
 с ключами `user_attachments` и `agent_files`.
 
@@ -25,7 +26,8 @@ Side-channel использовался для решения инцидента
 2. Потребителей side-channel-ключей `session.metadata["user_attachments"|"agent_files"]`
    **нет** ни в `lib/`, ни в `workspace/`, ни в `tests/`, ни в `openspec/`,
    ни в `sql/`. Grep по `lib/`, `workspace/`, `tests/`, `openspec/`, `sql/`:
-   только сам файл `active_files_hook.py` (10+ упоминаний).
+   только сам файл `active_files_hook.py` (файл; ныне удалён `60e7b8f`)
+ (10+ упоминаний).
 
 3. Функция `render_active_files_section(...)` (`active_files_hook.py:283`)
    **определена, но нигде не вызывается** (0 упоминаний вне файла).
@@ -41,7 +43,8 @@ Side-channel использовался для решения инцидента
 
 ## Решение
 
-Удалить `workspace/hooks/active_files_hook.py` целиком (370 строк).
+Удалить `workspace/hooks/active_files_hook.py` (удалён `60e7b8f`)
+ целиком (370 строк).
 Вместе с ним удалить упоминания в:
 
 * `docs/ARCHITECTURE.md:1544`

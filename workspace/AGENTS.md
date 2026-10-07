@@ -17,8 +17,8 @@
 ## File Storage Policy
 
 New files are created inside the `files/` directory of **your own session**, and
-always by a **relative** path (`report.csv`, `report/2026/q3.md`). The relative
-structure is preserved: `lib/new_module.py` lands in `files/lib/new_module.py`.
+always by a **relative** path (`report.csv`, `report/2026/<quarter>.md`). The relative
+structure is preserved: `lib/<module>.py` lands in `files/lib/<module>.py`.
 There is no tool that creates a file outside `files/` — do not try to compose one.
 
 Creating and editing are different operations. `edit` of an existing project file
@@ -63,14 +63,14 @@ keeping path` → в БД уходит AW-dict с пустым `mime_type`/`file
 Чтобы этого избежать:
 
 - **Всегда отдавай относительные пути** в `write_file`/`write`/`create_file` —
-  `test/test.md`, `report.csv`, `workspace/skills/...`. `SessionFileRedirectHook`
+  `test/<file>.md`, `report.csv`, `workspace/skills/...`. `SessionFileRedirectHook`
   (см. `workspace/hooks/session_file_redirect_hook.py`) сам перенаправит их в
   `files/` каталога сессии, сохранив структуру исходного пути:
-  `lib/new_module.py` → `files/lib/new_module.py`. У `edit` путь, наоборот, не
+  `lib/<module>.py` → `files/lib/<module>.py`. У `edit` путь, наоборот, не
   меняется — это правка файла проекта.
 - В `message({"media": [...]})` тоже передавай относительные пути —
   `SessionFileRedirectHook` сам найдёт файл в `files/` текущей сессии
-  (а также в `files/attachments/` и `files/results/`) по относительному пути и
+  (а также в `files/attachments/` и `files/results/` — каталоги сессии, в дереве репозитория они отсутствуют) по относительному пути и
   по имени файла и подставит реальный путь. НЕ придумывай абсолютные пути
   вида `/home/<user>/<project>/workspace/<file>` — на сервере их нет.
   Для файлов, которых реально не существует (`Path(p).is_file()` ложно)
@@ -78,8 +78,8 @@ keeping path` → в БД уходит AW-dict с пустым `mime_type`/`file
 
 ## Файлы сессии и вложения
 
-Вложение, присланное пользователем, лежит в `files/attachments/` каталога **твоей**
-сессии. Читать его нужно относительным путём от `files/` — `attachments/<файл>.pdf`:
+Вложение, присланное пользователем, лежит в `files/attachments/` каталога **твоей** сессии (в дереве репозитория он отсутствует).
+Читать его нужно относительным путём от `files/` — `attachments/<файл>.pdf`:
 `document_read` принимает только такой путь и отказывает абсолютному. Имя каталога
 сессии знать не нужно — корень объявляет платформа
 (`mcp-platform/platform.json → execution.session_root`), а `SessionFileRedirectHook`
