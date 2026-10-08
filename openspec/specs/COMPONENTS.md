@@ -69,7 +69,7 @@
 
 | Компонент | Реализация | Спецификация | Статус |
 |-----------|------------|--------------|--------|
-| Profiles | `config.json::profiles` (конфигурация) | [`configuration/profiles`](configuration/profiles/spec.md) | partial |
+| Profiles | `mcp-platform/platform.json::profiles` (оверлей контура, применяет `read_profile_overlay`) | [`configuration/profiles`](configuration/profiles/spec.md) | partial |
 
 ### Data
 
