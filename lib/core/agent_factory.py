@@ -83,8 +83,10 @@ class AgentFactory:
             bus: ``MessageBus`` (см. ``nanobot.bus.queue``) — шина inbound/outbound.
             session_manager: ``PGSessionManager`` или ``SessionManager``.
                 ``None`` — AgentLoop создаст дефолтный JSONL-менеджер.
-            cron_service: ``CronService`` (опционально) — нужен CLI-режиму,
-                в gateway не подключается.
+            cron_service: ``CronService`` (опционально) — подключается
+                только для роли ``gateway`` и только при ``enable_cron``
+                (см. ``ApplicationContext.create()``, design D7
+                «Cron = gateway-only»); CLI-режим cron не подключает.
             db_logging_service: ``DbLoggingService`` (опционально) — если
                 передан, ``AgentLoop`` получает фабрику оборота для
                 ``DatabaseLoggingHook`` (per-turn инстансы, конкурентно-безопасно).

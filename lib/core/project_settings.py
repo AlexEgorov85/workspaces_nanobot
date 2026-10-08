@@ -90,7 +90,7 @@ class StartupSchemaValidationSettings(_StrictOptional):
     """
 
     enabled: bool = True
-    timeout_sec: float = Field(default=5.0, gt=0.0, le=60.0)
+    timeout_sec: float = Field(default=5.0, ge=0.1, le=60.0)
 
 
 class StartupVectorPreloadSettings(_StrictOptional):

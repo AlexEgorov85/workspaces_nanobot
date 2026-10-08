@@ -338,10 +338,13 @@ audit_analyze --mode vector --query 'статусы аудитов' --index-name
 **Как выбирается бэкенд запросов:** CLI строит провайдера
 (`build_cache_provider()`), открывает опубликованный gateway DuckDB-снапшот
 (путь через `table_registry.snapshot_path()`) на чтение и работает по нему.
-Прямого PostgreSQL-бэкенда у CLI нет (см. [DATABASE.md](DATABASE.md)). Кеш создаёт и обновляет
-**gateway** (см. [DATABASE.md](DATABASE.md#-жизненный-цикл-кеша)); CLI про это не знает. Если файла
-кеша нет — CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
+Данных CLI не читает из PostgreSQL напрямую, но **обращается к PG за
+cache-ownership**: `ApplicationContext` создаёт `CacheOwnershipCoordinator`
+с `dsn` и вызывает `try_claim()` при создании кэша (блок не разделён по
+роли, а `gateway.enable_audit` по умолчанию включён). Если кейс не задан —
+CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
 gateway автоматически — запустите его (python gateway.py --profile=prod)».
+Кеш создаёт и обновляет **gateway** (см. [DATABASE.md](DATABASE.md)).
 
 Векторный поиск — параметр `--index-name` (по умолчанию `audits_index`).
 Строковые параметры predefined-скриптов передаются как есть (после

@@ -796,3 +796,39 @@ class TestErrorMessagesSettings:
             },
         })
         assert result.gateway.error_messages.internal_error == "x"
+
+
+class TestStartupSchemaValidationTimeoutBounds:
+    """``gateway.startup.schema_validation.timeout_sec`` — диапазон из
+    спеки ``openspec/specs/runtime/startup-schema-validation/spec.md:281``:
+    ``0.1 ≤ value ≤ 60.0``.
+
+    Поле было объявлено как ``gt=0.0``, то есть принимало значения ниже
+    нижней границы: docstring и нормативная спека обе называли 0.1, код —
+    нет. Тест фиксирует именно границу, потому что «дефолт проходит» эту
+    ошибку не поймал бы.
+    """
+
+    @staticmethod
+    def _validate(value: float) -> None:
+        validate_project_settings({
+            "gateway": {"startup": {"schema_validation": {"timeout_sec": value}}},
+        })
+
+    @pytest.mark.parametrize("value", [0.1, 5.0, 60.0])
+    def test_accepts_values_inside_range(self, value: float) -> None:
+        result = validate_project_settings({
+            "gateway": {"startup": {"schema_validation": {"timeout_sec": value}}},
+        })
+        assert result.gateway is not None
+        assert result.gateway.startup.schema_validation.timeout_sec == value
+
+    @pytest.mark.parametrize("value", [0.0, 0.05, -1.0])
+    def test_rejects_values_below_range(self, value: float) -> None:
+        with pytest.raises(ConfigurationError):
+            self._validate(value)
+
+    @pytest.mark.parametrize("value", [60.1, 1000.0])
+    def test_rejects_values_above_range(self, value: float) -> None:
+        with pytest.raises(ConfigurationError):
+            self._validate(value)
