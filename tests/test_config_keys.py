@@ -164,7 +164,7 @@ def _required_keys():
         ("enterprise_mcp.command", "${NANOBOT_PYTHON}"),
         ("enterprise_mcp.args", ["-m", "servers.enterprise.server"]),
         ("enterprise_mcp.cwd", "${NANOBOT_PROJECT_ROOT}/mcp-platform"),
-        ("enterprise_mcp.tool_timeout_sec", 180.0),
+        ("enterprise_mcp.tool_timeout_sec", 720.0),
     ]
 
 
