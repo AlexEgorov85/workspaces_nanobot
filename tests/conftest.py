@@ -52,23 +52,44 @@ import yaml
 # ---------------------------------------------------------------------------
 
 
+def _init_settings_quietly(config_module) -> None:
+    """Инициализировать ``SETTINGS`` профиля ``test``, глуша только гонку.
+
+    Глотает **только** гонку lifecycle: если к моменту обработки
+    исключения proxy уже инициализирован, значит ``_initialize_settings``
+    бросил «already initialized» — другой тест успел раньше, и это штатная
+    ситуация.
+
+    Всё остальное пробрасывается: whitelist-валидация профиля и загрузка
+    ``profiles/<mode>.jsonc`` выполняются в ``resolve_application_config``
+    (config.py:637) **до** присваивания ``settings._inner_dict``
+    (config.py:642), поэтому при их ошибке ``is_settings_initialized()``
+    остаётся ``False`` — и такой сбой виден, а не замаскирован.
+    Требование: openspec/specs/configuration/profiles/spec.md:193-197.
+    """
+    if config_module.is_settings_initialized():
+        return
+    try:
+        config_module._initialize_settings(profile="test")
+    except config_module.ConfigurationError:
+        if not config_module.is_settings_initialized():
+            raise
+        # Уже инициализировано другим тестом — OK.
+
+
 @pytest.fixture(autouse=True)
 def _bootstrap_config_lifecycle():
     """Lazy-init ``config.SETTINGS`` для legacy-тестов.
 
-    Не скрывает lifecycle-ошибки: если proxy уже инициализирован
-    другим тестом с другим профилем (что невозможно в этом сеансе —
-    ``_initialize_settings`` бросает на повторный вызов), исключение
-    проходит. Новые acceptance-тесты не зависят от этого autouse —
-    они используют subprocess-изоляцию.
+    Решение вынесено в ``_init_settings_quietly`` — там же живёт контракт
+    «глотать только гонку lifecycle», и он покрыт тестом
+    ``tests/test_conftest_lifecycle_fixture.py``.
+
+    Новые acceptance-тесты не зависят от этого autouse — они используют
+    subprocess-изоляцию.
     """
     import config
-    if not config.is_settings_initialized():
-        try:
-            config._initialize_settings(profile="test")
-        except config.ConfigurationError:
-            # Уже инициализировано другим тестом — OK.
-            pass
+    _init_settings_quietly(config)
     yield
 
 
