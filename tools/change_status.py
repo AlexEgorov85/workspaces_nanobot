@@ -66,20 +66,45 @@ def _read(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-def canon_specs() -> dict[str, set[str]]:
-    """{'<категория>/<компонент>': {имена требований}} по канону."""
-    out: dict[str, set[str]] = {}
+def _norm(text: str) -> str:
+    """Сравнение текстов требований не должно зависеть от пустых строк."""
+    return "\n".join(ln.rstrip() for ln in text.strip().splitlines() if ln.strip())
+
+
+def requirement_bodies(text: str) -> dict[str, str]:
+    """{имя требования: тело} — тело строго до следующей строки-заголовка."""
+    lines = text.splitlines()
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(lines):
+        m = REQ_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].lstrip().startswith("#"):
+            j += 1
+        out[m.group(1).strip()] = "\n".join(lines[i + 1:j])
+        i = j
+    return out
+
+
+def canon_specs() -> dict[str, dict[str, str]]:
+    """{'<категория>/<компонент>': {имя требования: текст}} по канону.
+
+    Нужен именно текст, а не только имя: `MODIFIED` поверх требования с
+    другим текстом не добавляет дубль, а молча переписывает канон версией
+    change'а. Различить это по именам нельзя.
+    """
+    out: dict[str, dict[str, str]] = {}
     for cat in sorted(p for p in SPECS_DIR.iterdir() if p.is_dir()):
         for comp in sorted(p for p in cat.iterdir() if p.is_dir()):
             spec = comp / "spec.md"
             if not spec.exists():
                 continue
-            names = {
-                m.group(1).strip()
-                for m in (REQ_RE.match(ln) for ln in _read(spec))
-                if m
-            }
-            out[f"{cat.name}/{comp.name}"] = names
+            out[f"{cat.name}/{comp.name}"] = requirement_bodies(
+                spec.read_text(encoding="utf-8")
+            )
     return out
 
 
@@ -103,29 +128,34 @@ def archived_specs() -> dict[str, set[str]]:
     return out
 
 
-def delta_targets(change: Path) -> dict[str, dict[str, str]]:
-    """{'<категория>/<компонент>': {имя требования: операция}}.
+def delta_targets(change: Path) -> dict[str, dict[str, tuple[str, str]]]:
+    """{'<категория>/<компонент>': {имя требования: (операция, текст)}}.
 
-    Операция возвращается не для красоты: ``MODIFIED`` при уже существующем
-    требовании архив обновляет, а ``ADDED`` — добавит второй заголовок с тем
-    же именем. Без неё эти два случая неразличимы, и оба выглядят в отчёте
-    одинаково.
+    Операция и текст нужны не для красоты. Одно и то же требование, уже
+    лежащее в каноне, дельта может ``ADDED``-ить (второй заголовок с тем же
+    именем), ``MODIFIED``-ить (канон переписывается версией change'а, если
+    тексты разошлись) или ``REMOVED``-ить (живое требование исчезает). По
+    одному имени все три случая неразличимы, и по отчёту они выглядят
+    одинаково — а стоят по-разному.
     """
     sd = change / "specs"
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, tuple[str, str]]] = {}
     if not sd.is_dir():
         return out
     for delta in sorted(sd.rglob("*.md")):
         key = delta.parent.relative_to(sd).as_posix()
+        text = delta.read_text(encoding="utf-8")
+        bodies = requirement_bodies(text)
         op = "?"
-        for ln in _read(delta):
+        for ln in text.splitlines():
             m = OPS_RE.match(ln)
             if m:
                 op = m.group(1)
                 continue
             m = REQ_RE.match(ln)
             if m:
-                out.setdefault(key, {})[m.group(1).strip()] = op
+                name = m.group(1).strip()
+                out.setdefault(key, {})[name] = (op, bodies.get(name, ""))
     return out
 
 
@@ -189,16 +219,30 @@ def main(argv: list[str] | None = None) -> int:
             for name in sorted(names)
             if key in canon and name in canon[key]
         ]
-        # Единственное состояние, где «уже лежит в каноне» — настоящее
-        # препятствие: операция ADDED добавит второй заголовок с тем же
-        # именем, и канон станет противоречивым сам себе. MODIFIED в том же
-        # месте обновляет требование, поэтому дублирования не будет.
-        duplicate = [
-            f"{key.split('/')[-1]}/{name}"
-            for key, names in targets.items()
-            for name, op in sorted(names.items())
-            if op == "ADDED" and key in canon and name in canon[key]
-        ]
+        # Что архив сделает с каноном, если требование в нём уже живёт.
+        # Три исхода различаются, и по одному имени они неразличимы:
+        #   ADDED    — второй заголовок с тем же именем (канон спорит сам с собой)
+        #   REMOVED  — живое требование исчезает
+        #   MODIFIED — канон переписывается версией change'а, если тексты разошлись
+        # Пока задачи открыты, любое из этого означает, что архив применит
+        # частичную работу, — поэтому это препятствие, а не примечание.
+        duplicate: list[str] = []
+        delete: list[str] = []
+        overwrite: list[str] = []
+        for key, names in targets.items():
+            if key not in canon:
+                continue
+            for name, (op, body) in sorted(names.items()):
+                if name not in canon[key]:
+                    continue
+                label = f"{key.split('/')[-1]}/{name}"
+                if op == "ADDED":
+                    duplicate.append(label)
+                elif op == "REMOVED":
+                    delete.append(label)
+                elif op == "MODIFIED" and _norm(canon[key][name]) != _norm(body):
+                    overwrite.append(label)
+        done_work = has_tasks and todo == 0
 
         if not has_tasks:
             blockers.append("нет tasks.md — состояние недоказуемо")
@@ -214,12 +258,21 @@ def main(argv: list[str] | None = None) -> int:
                 "заготовку без обязательных разделов и без записи в реестрах: "
                 + ", ".join(new_paths)
             )
-        if duplicate:
-            blockers.append(
-                f"архив продублирует требований: {len(duplicate)} — операция "
-                "ADDED, а требование уже есть в каноне (MODIFIED обновляет "
-                "без дубля): " + ", ".join(duplicate[:4])
-            )
+        # Опасные операции — препятствие, пока работа change'а не сделана.
+        # Сделана — примечание: снятие требования и переписывание его текста
+        # могут быть именно тем, ради чего change заведён.
+        danger = (("удалит из канона", delete, "REMOVED"),
+                  ("перезапишет текст в каноне", overwrite, "MODIFIED, тексты разошлись"),
+                  ("продублирует", duplicate, "ADDED"))
+        for what, items, why in danger:
+            if not items:
+                continue
+            msg = (f"архив {what} требований: {len(items)} — {why}: "
+                   + ", ".join(items[:4]))
+            if done_work:
+                notes.append(msg)
+            else:
+                blockers.append(msg + " (работа change'а не сделана)")
         if not targets and not has_tasks:
             blockers.append("нет ни дельт, ни tasks.md — нечего архивировать и нечего проверять")
         for key in new_paths:
