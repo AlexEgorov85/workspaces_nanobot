@@ -4,7 +4,7 @@ import argparse
 import os
 import sys
 import types
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -337,6 +337,10 @@ class TestRunVanillaForwardsStorageAndSession:
             captured["kwargs"] = kwargs
             # Возвращаем мок-инстанс, чтобы _run_vanilla мог позвать .stop()
             mock = MagicMock()
+            # Shutdown-API nanobot 0.3.5 — ``aclose()``. Стоит именно
+            # здесь, а не в общем словаре: без него REPL-teardown
+            # уходит в ветку ``except`` и проверка молча теряет смысл.
+            mock.aclose = AsyncMock()
             mock.settings = {"logging": {"db": {"table_name": "agent_gateway_logs_test"}}}
             mock.config = MagicMock()
             mock.config_service = MagicMock()

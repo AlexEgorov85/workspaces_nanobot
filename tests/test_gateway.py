@@ -38,7 +38,11 @@ def _setup_fake_modules():
     loop = types.ModuleType("nanobot.agent.loop")
     agent = MagicMock()
     agent.run = AsyncMock()
-    agent.close_mcp = AsyncMock()
+    # ``aclose()`` — shutdown-API nanobot 0.3.5; ``close_mcp()`` удалён
+    # (openspec/specs/runtime/agent-hooks/spec.md:37-45). Раньше здесь
+    # мокался именно ``close_mcp``, из-за чего тест был зелёным при
+    # вызове несуществующего метода в реальном shutdown.
+    agent.aclose = AsyncMock()
     agent.stop = MagicMock()
     agent.sessions = MagicMock()
     agent.sessions.flush_all = MagicMock(return_value=0)

@@ -463,6 +463,16 @@ async def run_repl(
             await asyncio.gather(bus_task, return_exceptions=True)
         except Exception:
             pass
+        # ``AgentLoop.close_mcp`` удалён в nanobot 0.3.5 — shutdown-API
+        # это ``aclose()`` (контракт: openspec/specs/runtime/agent-hooks/spec.md:37-45).
+        # Раньше здесь стоял только ``agent.stop()``, и MCP-ресурсы не
+        # освобождались при выходе из REPL.
+        try:
+            await agent.aclose()
+        except Exception as exc:
+            from loguru import logger
+
+            logger.warning("agent.aclose() failed during REPL shutdown: {}", exc)
         agent.stop()
         if bg is not None and not bg.done():
             bg.cancel()

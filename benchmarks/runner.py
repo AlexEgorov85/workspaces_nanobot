@@ -721,11 +721,17 @@ async def _run_suite(
         )
         return suite_result
     finally:
-        # Корректный shutdown в стиле gateway.py:158-172
+        # Корректный shutdown в стиле gateway.py:476-489.
+        # ``AgentLoop.close_mcp`` удалён в nanobot 0.3.5 — shutdown-API
+        # это ``aclose()``; контракт зафиксирован в
+        # openspec/specs/runtime/agent-hooks/spec.md:37-45.
         try:
-            await ctx.agent.close_mcp()
-        except Exception:
-            pass
+            await ctx.agent.aclose()
+        except Exception as e:
+            # Раньше здесь стоял ``close_mcp()`` под пустым ``except:
+            # pass`` — метод не существует, AttributeError глох, и
+            # teardown выглядел успешным, не выполнив cleanup.
+            logger.warning("agent.aclose() failed during benchmark shutdown: {}", e)
         try:
             ctx.agent.stop()
         except Exception:
