@@ -35,9 +35,9 @@
   сводки в `stderr` и журнал `agent_gateway_logs`.** Первая половина **выполнена**:
   `_prepare_capabilities` собирает все объявленные и включённые индексы до старта
   event loop, холодного поиска нет. Вторая — нет: сводка посчитана
-  (`mcp-platform/libs/vectors/preload.py:22,57`) и экспортирована
-  (`libs/vectors/__init__.py:47`; в `__all__` — `compute_index_health` на `:66`
-  и `format_index_health_lines` на `:68`), но **производственного вызова нет ни
+  (`mcp-platform/libs/vectors/preload.py:30,65`) и экспортирована
+  (`libs/vectors/__init__.py:50`; в `__all__` — `compute_index_health` на `:69`
+  и `format_index_health_lines` на `:71`), но **производственного вызова нет ни
   одного** — только `mcp-platform/tests/test_vectors_index_health.py`. Порога
   устаревания в требовании **нет**: в `openspec/specs/data/vector-indexes/spec.md`
   на доли устаревших 0 совпадений, в `mcp-platform/libs/vectors/` — 0 совпадений по
@@ -153,11 +153,13 @@
 * **Не публикуем сводку здоровья индексов этим change.** Требование снимается как
   невыполнимое в текущем виде, но сам расчёт в `libs/vectors/preload.py` остаётся и
   не должен быть удалён вместе со спецификацией: возвращать его публикацию —
-  отдельное решение, с владельцем и адресатом. Отдельно: то же событие требует
-  **второй канон** — `openspec/specs/observability/logging-db/spec.md:689-704` (сценарий
-  «preload health-summary через DbLoggingService») предписывает `LogEvent` с
-  `event_type="vector_index_preload_health"` и payload `declared` / `loaded` /
-  `missing` / `orphan` / `stale`, ссылаясь на реализацию
-  `PreloadService.compute_index_health`; `PreloadService` удалён, файла нет. Возврат
-  публикации обязан переписать оба канона разом, иначе после архивации два
-  документа будут требовать невыполнимое и ни один не скажет, что оно неактуально.
+  отдельное решение, с владельцем и адресатом. **Решение владельца принято:
+  публикация не возвращается** — вернуть её можно только новым change'ом, у
+  которого есть адресат (оператор либо capability `data`) и порог.
+  Отдельно, поправка к прежней записи этого абзаца: **второй канон это событие уже
+  не требует.** Живой `openspec/specs/observability/logging-db/spec.md` не содержит
+  ни строки `vector_index_preload_health`, ни сценария «preload health-summary через
+  DbLoggingService» — требование «Sync-события через DbLoggingService» снято архивным
+  change `2026-10-05-logging-db-dead-producers` (`## REMOVED Requirements`). Так что
+  провисшего требования не осталось, а дельте нечего снимать в `logging-db`: при
+  возврате публикации новый change обязан поднять требование в обоих канонах разом.

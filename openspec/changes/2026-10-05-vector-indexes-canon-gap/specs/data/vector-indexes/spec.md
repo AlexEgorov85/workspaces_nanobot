@@ -91,6 +91,38 @@ DuckDB-снапшота`, `Preload health-summary виден оператору 
 (`platform.json → vectors.indexes`), и отдельного «storage table», который кто-то
 регистрирует, больше нет.
 
+### Requirement: Preload health-summary виден оператору и логируется
+
+**Reason**: публиковать сводку нечем. Требование предписывало multi-line вывод
+в `stderr` и ровно один `LogEvent` с
+`event_type="vector_index_preload_health"` от `PreloadService`, а агентский
+`lib/services/preload_service.py` **удалён** — файла нет ни на диске, ни в
+git-индексе. Удалён и сам класс: FAISS-прогрев уехал на платформу, а цикла и
+журнала у процесса платформы нет.
+
+**Расчёт остаётся.** `compute_index_health`
+(`mcp-platform/libs/vectors/preload.py:65`) и `format_index_health_lines`
+(`mcp-platform/libs/vectors/preload.py:30`) экспортированы
+(`mcp-platform/libs/vectors/__init__.py:50`; в `__all__` —
+`mcp-platform/libs/vectors/__init__.py:69` и
+`mcp-platform/libs/vectors/__init__.py:71`) и остаются посчитанными. Снимается
+публикация, а не расчёт. Производственных вызовов нет: единственный вызов —
+`mcp-platform/tests/test_vectors_index_health.py:35`, и это признаёт сам модуль
+(`mcp-platform/libs/vectors/preload.py:20-22`).
+
+**Второй канон это событие уже не требует.** Живой
+`openspec/specs/observability/logging-db/spec.md` не содержит ни строки
+`vector_index_preload_health`, ни требования, которое её предписывало: «Sync-события
+через DbLoggingService» снято архивным change
+`2026-10-05-logging-db-dead-producers`
+(`openspec/changes/archive/2026-10-05-logging-db-dead-producers/specs/observability/logging-db/spec.md:132`).
+Поэтому дельта снимает одно требование в одном каноне: удалять из `logging-db`
+нечего, а `REMOVED` на несуществующем требовании архив отверг бы.
+
+**Решение владельца**: публикация не возвращается. Если она понадобится, это
+отдельный change с новым адресатом — оператор либо capability `data`; он обязан
+вернуть требование здесь и в `logging-db` разом.
+
 ## MODIFIED Requirements
 
 ### Requirement: Hydrated payload берётся из DuckDB-снапшота
@@ -100,6 +132,72 @@ DuckDB-снапшота`, `Preload health-summary виден оператору 
 
 - **WHEN** `group_vector_hits` выдаёт результат с `pk_value=P` и `chunk_index=K`
 - **THEN** система SHALL сделать SELECT `(content, search_text, row_data)` из снапшотной таблицы-источника `WHERE source = <index_name> AND pk_value = P AND chunk_index = K`, чтобы заполнить `SearchResult.content` и `SearchResult.row`.
+
+### Requirement: Индексы собираются на старте платформы; сбой одного не роняет старт
+
+Состав индексов объявляет capability `vectors`
+(`mcp-platform/platform.json → vectors.indexes`), а не агент. Процесс платформы
+SHALL, ДО начала обслуживания запросов, перечислить объявленные индексы и для
+каждого синхронно вызвать `vectors.owner.ensure_index(name)`
+(`mcp-platform/servers/enterprise/server.py:940-965`). Подготовка выполняется
+синхронно до запуска event loop
+(`mcp-platform/servers/enterprise/server.py:1099` — `_prepare_capabilities` до
+`anyio.run`): на старте все операции доступны быстро, ленивых загрузок на
+горячем пути нет.
+
+Сбой MUST NOT ронять старт. Отказ по одному индексу SHALL быть записан в журнал с
+именем индекса, после чего подготовка продолжится следующим
+(`server.py:956-958`). Отказ перечисления объявленных индексов — то же самое:
+ошибка пишется и подготовка завершается без индексов
+(`server.py:948-950`). Процесс, который не смог собрать один из трёх индексов,
+MUST подниматься и обслуживать остальные.
+
+Поиск по несобранному индексу MUST собирать его по требованию, а не отказывать:
+`search` идёт через `_ensure_known` → `ensure_index`
+(`mcp-platform/libs/vectors/owner.py:414-420`, `:244-249`), то есть ровно одна
+сборка на индекс независимо от числа параллельных запросов. Отказ MUST приходить
+тогда и только тогда, когда имя индекса не объявлено и не найдено в снимке —
+`NotFoundError` (`owner.py:416-419`). Расхождение подписи индекса
+(`STALE` / `INVALID`) — отдельная ошибка `IndexIntegrityError` с отдельным кодом
+(`owner.py:362-366`), а не «ничего не найдено».
+
+Прежний текст требования противоречил коду в трёх местах, и все три были
+существенными: называл несуществующий `provider.preload_indexes(db_table)` и
+`self._index_cache`, объявлял устаревшее место объявления
+`gateway.vector.index.indexes.*`, требовал ронять старт на сбое индекса и
+запрещал сборку по требованию — тогда как код именно её и делает
+(`owner.py:414-420`).
+
+#### Scenario: Прогрев на старте платформы
+
+- **WHEN** процесс платформы стартует
+- **THEN** для каждого индекса, объявленного в `platform.json → vectors.indexes`
+  и не помеченного `enabled=false`, `ensure_index` MUST быть вызван ДО начала
+  обслуживания, а состояние индекса — записано в журнал поимённо
+
+#### Scenario: Сбой одного индекса не роняет старт
+
+- **WHEN** `ensure_index` падает для одного из объявленных индексов
+- **THEN** ошибка MUST быть записана с именем этого индекса, подготовка MUST
+  продолжиться по остальным, а процесс MUST подняться
+
+#### Scenario: Отказ перечисления индексов не роняет старт
+
+- **WHEN** перечисление объявленных индексов падает
+- **THEN** ошибка MUST быть записана и подготовка MUST завершиться без индексов,
+  а не поднимать исключение
+
+#### Scenario: Холодный поиск собирает индекс, а не отказывает
+
+- **WHEN** выполняется поиск по объявленному индексу, который ещё не собран
+- **THEN** система MUST собрать его через `ensure_index` и вернуть результат;
+  отказ `_search_error` и требование «не собирать FAISS на лету» к живому коду
+  отношения не имели
+
+#### Scenario: Неизвестное имя индекса
+
+- **WHEN** запрошен индекс, не объявленный и не найденный в снимке
+- **THEN** MUST быть вызван `NotFoundError` с именем индекса
 
 ## ADDED Requirements
 
