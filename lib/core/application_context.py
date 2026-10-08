@@ -104,7 +104,7 @@ def _resolve_enable_kwargs(
     defaults = {
         "enable_db_logging": bool(gateways.get("enable_db_logging", True)),
         "enable_audit": bool(gateways.get("enable_audit", True)),
-        "enable_cron": bool(gateways.get("enable_cron", False)),
+        "enable_cron": bool(gateways.get("enable_cron", True)),
         "print_llm_calls": bool(gateways.get("print_llm_calls", False)),
     }
 
@@ -1902,7 +1902,12 @@ def _make_startup_gate(
 
 
 def _make_cron_service(config: Any) -> Any:
-    """Создать ``CronService`` для CLI-режима (только там он нужен).
+    """Создать ``CronService`` для роли ``gateway`` (только там он нужен).
+
+    Подключается при ``enable_cron`` (дефолт — ``True``, нормативная спека
+    ``openspec/specs/runtime/entrypoints/spec.md:48``) и только для
+    ``role="gateway"`` — см. design D7 «Cron = gateway-only».
+    Явно выключается через ``gateway.enable_cron: false`` в ``project.json``.
 
     ``CronService`` хранит задачи в ``workspace/cron/jobs.json`` —
     путь относительно ``config.workspace_path``. Если директории нет,

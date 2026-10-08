@@ -133,6 +133,15 @@
   `runtime/startup-schema-validation`. Остальные используют английские разделы
   (`## Purpose`, `## Requirements`), поэтому `validate_component_specs.py`
   отклоняет их структурно.
+- **`data/cache-provider:92` против кода — расхождение отложено владельцем.**
+  Спека требует: «Cache lifecycle MUST быть отделён от `gateway.enable_audit`,
+  cache создаётся, если настроена секция `gateway.cache`». Код
+  (`lib/core/application_context.py:359`) создаёт кэш под `if ctx.enable_audit:` —
+  то есть зависимость, которую спека запрещает. Решение владельца от 2026-10-08:
+  код не трогать, реализация принадлежит change `cache-architecture-alignment`
+  (2 из 38 задач). **Дельту этого change при архивировании переносить нельзя** —
+  она объявляет `## ADDED Requirements` для требования, уже существующего в
+  каноне (`cache-provider:92`), и архивирование даст дубликат.
 - **`openspec validate --specs --strict`: 14 passed, 8 failed** — падения уровня
   WARNING «requirement should contain SHALL or MUST» на русскоязычных требованиях.
 

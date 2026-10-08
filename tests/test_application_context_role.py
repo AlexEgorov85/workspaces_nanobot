@@ -174,7 +174,10 @@ class TestDeprecatedKwargsResolver:
         )
         assert result["enable_db_logging"] is True
         assert result["enable_audit"] is False
-        assert result["enable_cron"] is False
+        # Дефолт enable_cron — по нормативной спеке
+        # openspec/specs/runtime/entrypoints/spec.md:48 (enable_cron=True).
+        # Раньше здесь стояло False, и спека этому противоречила.
+        assert result["enable_cron"] is True
         assert result["print_llm_calls"] is False
 
     def test_resolve_with_unknown_kwarg_raises_type_error(self) -> None:
