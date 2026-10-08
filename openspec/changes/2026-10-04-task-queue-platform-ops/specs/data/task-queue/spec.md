@@ -24,7 +24,14 @@
 `mcp-platform/servers/enterprise/capabilities/data/tools/claim_task.py`,
 `mcp-platform/platform.json` (`data.task_table`).
 
-## ADDED Requirements
+Операция дельты — `MODIFIED`, а не `ADDED`. Все пять требований ниже уже
+лежат в каноне (`openspec/specs/data/task-queue/spec.md`), тексты совпадают
+побайтово: спека была заведена в канон коммитом `2affe7e`, тогда как дельта
+осталась в change'е. При `ADDED` архив добавил бы второе требование с тем же
+именем и канон стал бы противоречить сам себе. `MODIFIED` обновляет существующее
+требование, поэтому результат архива — тот же канон без дублей.
+
+## MODIFIED Requirements
 
 ### Requirement: Захват задачи атомарен и берёт не более одной задачи на чат
 
