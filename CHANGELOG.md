@@ -10,6 +10,17 @@
 
 ### Added
 
+- **Порядок старта «DuckDB → векторы → каналы» (change `startup-vector-preload-gate`)**:
+  Каналы (приём вопросов) больше не стартуют, пока не загружены данные и не собраны FAISS-индексы. Раньше preload векторов уезжал в фоновую задачу, а `channels.start_all()` стартовал сразу — первые вопросы обслуживались с пустым FAISS-кэшем, что выглядело как «модель дурит».
+  - `lib/services/startup_gate.py` → `StartupGate`: два явных шага — `wait_for_cache(signal)` (ждёт сигнал `PgDuckDbSyncService` «данные в DuckDB + снапшот опубликован») и `load_vectors()` (ждёт завершения сборки индексов). Фазы `pending → cache_ready → vectors_ready | unavailable | skipped`; фаза читается readiness-проверкой `vector_search`.
+  - **Без таймаутов и ретраев**: готовность определяется сигналом, а не истечением времени — иначе процесс «незаметно» начинал бы отвечать без векторов. Гард — `tests/test_startup_gate.py::TestNoTimeoutsInGate` (AST-проверка вызовов `wait_for`/`sleep`/`timeout=` + проба подсаженным дефектом).
+  - `ThreadSafeSignal`: сигнал из worker-треда синхронизации будит ожидающий loop через `call_soon_threadsafe`. Наивный `asyncio.Event.set()` из чужого потока loop не будит — без таймаутов ожидание зависло бы навсегда уже после загрузки данных.
+  - `gateway.py`: фаза `_run_startup_preparation()` выполняется ДО `GatewayRunner.run_forever` (у подготовки своя семантика отказа — рестарт по backoff повторял бы ошибку по кругу). `_run(ctx)` поднимает каналы, уже зная, что векторы готовы. Сигнал готовности данных выставляется ПОСЛЕ `publish()` снапшота.
+  - Политика `gateway.startup.vector_preload.on_unavailable`: `warn` (дефолт) — degraded-старт с предупреждением; `fail` — `StartupGateError` → `FATAL` + `exit 2`, каналы не подняты. Плюс явные выключатели `enabled` и `await_ready` (старый режим «индексы в фоне»).
+  - Composition: `ApplicationContext.create()` публикует `ctx.startup_gate` (+ `ctx.cache_ready_signal`, `ctx.background_vector_preload`); конфиг типизирован через `StartupVectorPreloadSettings` и задокументирован в `project.json`. Результат фазы пишется событием `startup_vector_preload` в `agent_gateway_logs`.
+  - **Tests**: `tests/test_startup_gate.py` (33), `tests/test_gateway_startup_gate.py` (13) — приёмка проверяет наблюдаемый порядок в реальном `_entrypoint_main` (`cache.connect → sync.start → cache.publish → vector.preload → channels`) и то, что подсаженный дефект порядка её роняет.
+  - **Fix (попутно)**: фикстура fake-модулей в `tests/test_application_context.py` дополнена пакетом `nanobot.agent.tools` (`registry` + `base`) под nanobot 0.3.5 — чинит 8 ранее падавших тестов файла (`ModuleNotFoundError: nanobot.agent.tools`).
+
 - **`change `unify-cli-gateway-architecture` — Stage C/D/B/E/F/7 (композиция CLI/Gateway, CacheProvider mode + ownership, CLI = fixed test profile)**:
   - `sql/migrations/V005__create_agent_cache_ownership.sql` — таблица `public.agent_cache_ownership` (`resource_key`, `owner_id`, `generation`, `acquired_at`, `last_heartbeat_at`, `expires_at`). Фиксированный `resource_key='local_cache'` идентифицирует логический cache resource. `generation` — монотонно растущий fencing token. TTL 60 сек. `INSERT ... ON CONFLICT` под `pg_advisory_xact_lock(hashtext(resource_key))`.
   - `lib/services/cache_ownership.py` — `CacheOwnershipCoordinator` (`try_claim` / `heartbeat` / `release` / `acquire_write_fence`), `CacheAccessMode` (READ_WRITE/READ_ONLY), `ClaimResult` (frozen dataclass), `OwnershipLostError`. Атомарный PG-claim с инкрементом generation при takeover.
