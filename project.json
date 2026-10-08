@@ -350,6 +350,19 @@
     //   auto     — PGSessionManager при наличии dsn, иначе JSONL-файлы
     //   postgres — только PGSessionManager (без dsn — ошибка)
     //   file     — только JSONL-файлы (SessionManager), dsn игнорируется
+    //  startup.vector_preload.* — порядок старта «DuckDB → векторы → каналы».
+    //  Каналы не поднимаются, пока FAISS-индексы не собраны из DuckDB-кэша,
+    //  поэтому первые вопросы уже обслуживаются с готовыми векторами.
+    //  Намеренно БЕЗ таймаутов: порядок держится на сигнале готовности данных,
+    //  пока сигнала нет — каналы закрыты (см. lib/services/startup_gate.py,
+    //  спека openspec/specs/runtime/startup-vector-preload-gate).
+    "startup": {
+      "vector_preload": {
+        "enabled": true,               // false — не готовить векторы на старте вовсе
+        "await_ready": true,          // false — старое поведение: индексы в фоне, каналы сразу
+        "on_unavailable": "warn"      // warn — старт degraded с предупреждением | fail — exit 2
+      }
+    },
     "persist_threshold": 50000,       // Порог байт для выноса результата в файл
     "persist_max_files": 100,         // Макс. файлов в data_store/cache/sessions/
     "persist_max_age_hours": 0,       // 0 = хранить бессрочно

@@ -172,6 +172,16 @@ class ApplicationContext:
     session_storage_service: Any = None
     subprocess_manager: Any = None
     preload_service: Any = None
+    startup_gate: Any = None  # StartupGate (lib/services/startup_gate.py)
+
+    # Стартовый порядок «данные → векторы → каналы». Публикуются
+    # entrypoint'ом (gateway.py), который владеет sync-callback'ом:
+    # ``cache_ready_signal`` — сигнал «PG→DuckDB загружен, снапшот
+    # опубликован» (ThreadSafeSignal); ``background_vector_preload`` —
+    # признак режима ``await_ready=false``, при котором индексы
+    # догружаются уже после старта каналов.
+    cache_ready_signal: Any = None
+    background_vector_preload: bool = False
 
     # Per-turn hook factories (для DatabaseLoggingHook и т.п.), которые
     # ``AgentFactory`` собрала из конфигурации и передала в
@@ -500,6 +510,18 @@ class ApplicationContext:
         # 8. Помощники
         ctx.transcription_service = _make_transcription(ctx.config)
         ctx.preload_service = _make_preload(ctx.settings, ctx.db_logging_service)
+
+        # 8a. StartupGate — «данные → векторы → каналы». Создаётся
+        # после preload_service, потому что именно он готовит векторы.
+        # Вызывает его gateway (``_run``) перед ``channels.start_all()``;
+        # здесь гейт только конфигурируется, чтобы его ``phase`` уже на
+        # старте отражался в readiness.
+        ctx.startup_gate = _make_startup_gate(
+            ctx.settings,
+            ctx.preload_service,
+            ctx.cache_provider,
+            db_logging_service=ctx.db_logging_service,
+        )
 
         ctx.runtime_health.mark_started()
         return ctx
@@ -1100,6 +1122,21 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
                 name="vector_search", required=False, status="DOWN",
                 detail="cache_store has no search_vector method",
             )
+        # Фаза StartupGate важнее наличия метода: до ``vectors_ready``
+        # метод есть всегда, а эмбеддингов в памяти ещё нет — и такой
+        # процесс обслуживает вопросы заметно хуже. Поэтому «ещё грузится»
+        # — это DOWN/DEGRADED, а не UP. Гейт читается поздно (late
+        # binding), т.к. регистрируется раньше, чем создаётся в create().
+        gate = getattr(ctx, "startup_gate", None)
+        if gate is not None and getattr(gate, "config", None) is not None:
+            if getattr(gate.config, "enabled", True) and gate.is_awaiting():
+                return ComponentStatus(
+                    name="vector_search", required=False, status="DOWN",
+                    detail=(
+                        "vector preload not finished yet "
+                        f"(gate: {gate.detail()})"
+                    ),
+                )
         return None
 
     ctx.runtime_readiness.register("postgres", check_postgres, required=True)
@@ -1719,6 +1756,34 @@ def _make_preload(
 
     return PreloadService(
         settings=settings,
+        db_logging_service=db_logging_service,
+    )
+
+
+def _make_startup_gate(
+    settings: Any,
+    preload_service: Any,
+    cache_provider: Any,
+    db_logging_service: Any | None = None,
+) -> Any:
+    """Создать ``StartupGate`` — порядок «данные → векторы → каналы».
+
+    Гейт создаётся всегда (в т.ч. для CLI и при выключенном аудите):
+    его ``phase`` читает readiness-проверка ``vector_search``, поэтому
+    «векторы ещё грузятся» видно и в статусе процесса. Саму подготовку
+    вызывает только gateway (``_run``) — он ждёт её перед
+    ``channels.start_all()``.
+
+    Конфигурация — ``gateway.startup.vector_preload.*``
+    (``VectorPreloadConfig``); при ``enabled=false`` гейт ничего не
+    ждёт, что даёт оператору явный escape hatch.
+    """
+    from lib.services.startup_gate import StartupGate, read_vector_preload_config
+
+    return StartupGate(
+        read_vector_preload_config(settings),
+        preload_service=preload_service,
+        cache_store=cache_provider,
         db_logging_service=db_logging_service,
     )
 

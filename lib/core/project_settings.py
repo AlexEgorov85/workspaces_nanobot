@@ -34,6 +34,7 @@ __all__ = [
     "SkillsSettings",
     "StartupSchemaValidationSettings",
     "StartupSettings",
+    "StartupVectorPreloadSettings",
     "SyncSettings",
     "TableEntry",
     "VectorIndexConfig",
@@ -92,10 +93,41 @@ class StartupSchemaValidationSettings(_StrictOptional):
     timeout_sec: float = Field(default=5.0, gt=0.0, le=60.0)
 
 
+class StartupVectorPreloadSettings(_StrictOptional):
+    """Упорядоченный прогрев векторов перед стартом каналов.
+
+    Реализация — ``lib/services/startup_gate.py`` (``StartupGate``),
+    вызывающий — ``gateway.py`` (фаза подготовки до ``run_forever``).
+    FAISS-индексы собираются **до** старта каналов, поэтому первые
+    вопросы обслуживаются с готовыми векторами. Спека:
+    ``openspec/specs/runtime/startup-vector-preload-gate``.
+
+    Намеренно **нет таймаутов**: порядок держится на сигнале готовности
+    данных, а не на истечении времени. Пока сигнала нет, gateway не
+    принимает вопросы (каналы закрыты) — вместо тихой работы без
+    векторов.
+
+    Attributes:
+        enabled: ``False`` — векторы на старте не готовятся вовсе
+            (осознанный отказ оператора; дефолт ``True``).
+        await_ready: ``False`` — не ждать готовности, ``load_vectors``
+            уходит в фоновую задачу, каналы стартуют сразу (старое
+            поведение). Дефолт ``True``.
+        on_unavailable: ``"warn"`` — стартовать degraded с предупреждением
+            (дефолт); ``"fail"`` — ``StartupGateError``, gateway не
+            стартует (exit 2).
+    """
+
+    enabled: bool = True
+    await_ready: bool = True
+    on_unavailable: Literal["warn", "fail"] = "warn"
+
+
 class StartupSettings(_StrictOptional):
     """Секция ``gateway.startup.*`` — параметры pre-startup валидации."""
 
     schema_validation: StartupSchemaValidationSettings | None = None
+    vector_preload: StartupVectorPreloadSettings | None = None
 
 
 class ErrorMessagesSettings(_StrictOptional):
