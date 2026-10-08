@@ -203,12 +203,18 @@ tool'а, и он отправлял его искать несуществующ
 содержит `V005__create_agent_cache_ownership.sql`. Каноническая
 `openspec/specs/infrastructure/test-profile-tables/spec.md:4` утверждает обратное — применение
 через `tools/apply_test_profile_tables.py`. Неверное имя миграции продублировано в комментариях
-четырёх DDL-файлов (`sql/workers/create_public_agent_worker_claims_test.sql:12`,
+**шести** DDL-файлов (`sql/workers/create_public_agent_worker_claims_test.sql:12`,
 `sql/channels/create_public_agent_conversation_messages_test.sql:8`,
 `sql/session/create_public_agent_session_messages_test.sql:8`,
-`sql/session/create_public_agent_session_meta_test.sql:8`).
+`sql/session/create_public_agent_session_meta_test.sql:8`,
+`sql/logs/create_public_agent_gateway_logs_test.sql:13`,
+`sql/logs/create_public_agent_question_runs_test.sql:9`).
 
-### 4.6 Раздел «Test-профиль» в `sql/README.md` отсутствует
+> Поправка: в первой редакции здесь было «четырёх DDL-файлов» — на деле шесть. Первый
+> grep-вывод показал только четыре (вывод обрезался), и я не перепроверил полноту
+> списка перед тем, как писать его в отчёт.
+
+### 4.6 Раздел «Test-профиль» в `sql/README.md` отсутствовал
 
 `openspec/specs/infrastructure/test-profile-tables/spec.md:40` требует раздел в `sql/README.md`.
 Файл (`sql/README.md`, 209 строк) перечисляет все 6 DDL в дереве каталога (строки 28-49), но
@@ -231,6 +237,15 @@ change `startup-vector-preload-gate` не архивирован (24 задач�
 
 `docs/README.md:112-113` — «component-level normative specs **на русском**».
 Русский шаблон применён к 1 спеке из 22.
+
+### 4.9 Job `docs-lint` в CI красный до наших правок
+
+`.github/workflows/docs-lint.yml:20-27` требует `README.md ≤ 250` строк. Файл — **309 строк**
+и столько же был в HEAD, то есть проверка падает не из-за правок этого аудита.
+`git diff HEAD~3 --stat README.md` показывает `2 insertions(+), 2 deletions(-)`.
+
+Причина та же, что и в §4.1–4.8: `README.md` растёт как «пользовательская выжимка», хотя
+сам же README и `docs/README.md` требуют выносить детали в `docs/`.
 
 ---
 

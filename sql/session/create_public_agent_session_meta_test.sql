@@ -4,8 +4,9 @@
 -- Управляется: lib/session/pg_session_manager.py (PGSessionManager).
 -- Совместимость: Greenplum 6.5 (PostgreSQL 9.4 ядро).
 --
--- Этот файл живёт ТОЛЬКО для psql-ручного применения; для версионированного
--- применения через runner — V005__test_profile_tables.sql.
+-- Этот файл живёт ТОЛЬКО для psql-ручного применения; штатное применение
+-- всех шести test-таблиц — `python tools/apply_test_profile_tables.py`
+-- (миграции схемы test-профиля в репозитории нет).
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.agent_session_meta_test (

@@ -106,6 +106,29 @@ python tools/migrate.py --baseline          # штамповать сущест�
 
 ---
 
+## Test-профиль
+
+Профиль `test` работает по шести runtime-таблицам с суффиксом `_test`
+(`profiles/test.jsonc` перечисляет их в profile-owned ключах). У них
+**нет версионной миграции**: runner применяет только миграции основной
+схемы, а эти таблицы — копии prod-структур, нужные только тестовой БД.
+
+Штатное применение — отдельный tool, который выполняет все шесть
+create-скриптов в одной транзакции (откат при ошибке; скрипты идемпотентны
+за счёт `IF NOT EXISTS`):
+
+```bash
+set DATABASE_URL=postgresql://postgres:1@localhost:5432/postgres
+python tools/apply_test_profile_tables.py
+```
+
+Эквивалент вручную — `psql -f` по каждому из файлов
+`sql/<domain>/create_public_agent_*_test.sql`.
+
+Требование: `openspec/specs/infrastructure/test-profile-tables/spec.md`.
+
+---
+
 ## Порядок применения
 
 ### Минимальная установка (CLI-агент)

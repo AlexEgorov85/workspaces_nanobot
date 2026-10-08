@@ -4,8 +4,9 @@
 -- profiles/test.jsonc (channels.postgres.table_name). Управляется так же:
 -- PostgresChannel / Streamlit UI. Совместимость: Greenplum 6.5.
 --
--- Этот файл живёт ТОЛЬКО для psql-ручного применения (`psql -f`); для
--- версионированного применения через runner — V005__test_profile_tables.sql.
+-- Этот файл живёт ТОЛЬКО для psql-ручного применения (`psql -f`); штатное
+-- применение всех шести test-таблиц — `python tools/apply_test_profile_tables.py`
+-- (миграции схемы test-профиля в репозитории нет).
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
