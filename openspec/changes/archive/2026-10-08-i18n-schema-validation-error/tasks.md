@@ -1,3 +1,17 @@
+> **Состояние на момент архивации (2026-10-08).** Чекбоксы ниже не
+> проставлены: реализация выполнена (`_hint_for_profile`,
+> `_build_config_message`, русские тексты в
+> `lib/services/schema_validation.py`; тесты
+> `test_message_in_russian` и `test_missing_config_keys_message_in_russian`
+> проходят), но `tasks.md` не обновлялся.
+>
+> Change закрыт **с применением дельты** (`+1 added, ~1 modified`):
+> добавлено требование «Сообщение об ошибке для отсутствующих ключей
+> конфига», а требование о сообщении при missing обновлено до версии
+> с actionable-командами по профилям (`tools/migrate.py --apply`,
+> `tools/apply_test_profile_tables.py`) и детерминированной сортировкой
+> по `_EXPECTED_KEYS`.
+
 ## 1. Реализация в `lib/services/schema_validation.py`
 
 - [ ] 1.1 Добавить helper `_hint_for_profile(profile: str) -> str`,
