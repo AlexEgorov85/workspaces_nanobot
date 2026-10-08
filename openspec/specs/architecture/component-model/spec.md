@@ -152,9 +152,16 @@ format_name()
 Пример:
 ```markdown
 - `ApplicationContext.create()` — точка входа для сборки приложения.
-- `ctx.get_service(name)` — доступ к сервисам.
+- `ctx.<service>` — доступ к сервисам.
 - `ctx.start()` / `ctx.stop()` — управление жизненным циклом.
 ```
+
+Сервисы объявлены полями `ApplicationContext`, а не методом-аксессором:
+блок «Сервисы (опциональные)» — `lib/core/application_context.py:165-208`.
+Метода `ctx.get_service(name)` в коде нет, поэтому и в примере его нет:
+пример раздела не имеет права обещать имя, которое не объявлено
+(«Спека обещает несуществующее имя»). `create` —
+`lib/core/application_context.py:248`, `start` — `:722`, `stop` — `:840`.
 
 #### Inputs (Inputs)
 
@@ -303,59 +310,24 @@ format_name()
 
 ### Структура каталога
 
+Единственная норма о размещении — **закрытый перечень категорий**, владелец
+которого `documentation/component-registry`
+(`openspec/specs/documentation/component-registry/spec.md`), а исполняет его
+`VALID_CATEGORIES` (`tools/validate_component_specs.py:228-245`). Спека лежит
+в `<категория>/<компонент>/spec.md`, и категория проверяется по этому
+перечню одинаково — и в записи реестра, и в фактическом расположении файла:
+
 ```text
-openspec/specs/
-├── architecture/
-│   ├── component-model/
-│   ├── application-boundaries/
-│   ├── skill-tool-boundary/
-│   └── dependency-rules/
-├── runtime/
-│   ├── application-context/
-│   ├── agent-runtime/
-│   ├── agent-factory/
-│   ├── message-bus/
-│   ├── lifecycle/
-│   ├── session-context/
-│   └── runtime-patcher/
-├── configuration/
-│   ├── configuration-resolution/
-│   ├── profiles/
-│   └── config-service/
-├── channels/
-│   ├── channel-manager/
-│   ├── postgres-channel/
-│   └── redis-channel/
-├── sessions/
-│   ├── session-storage/
-│   └── postgres-session-manager/
-├── data/
-│   ├── cache/
-│   ├── cache-provider/
-│   ├── duckdb-sync/
-│   ├── vector-indexes/
-│   └── vector-storage/
-├── observability/
-│   ├── event-logging/
-│   ├── database-logging/
-│   └── worker-observability/
-├── skills/
-│   ├── skill-contract/
-│   ├── audit-analyzer/
-│   ├── legal-summarizer/
-│   └── office-files/
-├── infrastructure/
-│   ├── subprocess-management/
-│   ├── transcription/
-│   └── hooks/
-├── interfaces/
-│   ├── cli/
-│   └── gateway/
-├── security/
-│   └── sql-safety/
-└── testing/
-    └── benchmarks/
+architecture   configuration   data           documentation
+infrastructure interfaces       observability  runtime
+sessions       skills           testing        validation
 ```
+
+Раскладка **внутри** категорий — целевая, а не норма: перечислять листья
+здесь нельзя, потому что отсутствие листа не является нарушением, и список
+разъехался бы с деревом при первом же переезде подсистемы. Категория, в
+которой спеки пока нет, — это долг покрытия, а не ошибка расположения, и её
+видно по реестру (`openspec/specs/COMPONENTS.md`).
 
 ### Именование файлов
 

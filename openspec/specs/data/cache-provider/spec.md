@@ -263,8 +263,11 @@ CacheProvider отвечает за:
 ### May Depend On
 
 - PostgreSQL как источника истины
-- конфигурации `gateway.cache.local_path` (путь к DuckDB)
-- конфигурации `gateway.vector.*` (параметры эмбеддинга и индексов)
+- конфигурации агента: ни `gateway.cache.local_path`, ни `gateway.vector.*`
+  в ней не объявляются (в `./config.json` таких ключей нет) — путь снимка
+  объявляет платформа (`mcp-platform/platform.json → data.snapshot_path`),
+  а параметры индексов и таблица хранения векторов — capability `vectors`
+  (`mcp-platform/platform.json → vectors`)
 - состава снимка, объявляемого платформой (`platform.json → data.snapshot_path`): реестра таблиц `TableRegistry` в проекте **не осталось**
 
 ### Must Not Depend On
@@ -359,7 +362,10 @@ vector_db_table="", index_accessor=None, verify=True)`
 
 CacheProvider хранит:
 
-- DuckDB-файл кэша по пути `gateway.cache.local_path`.
+- DuckDB-файл кэша, путь к которому объявляет платформа
+  (`mcp-platform/platform.json → data.snapshot_path`); агент путь не
+  вычисляет, а ключа `gateway.cache.local_path` в конфигурации агента
+  не осталось.
 - Snapshot'ы таблиц PostgreSQL.
 - FAISS-индексы, загруженные в память (`preload_indexes`).
 - Кэш сигнатур индексов для контроля целостности.
@@ -394,9 +400,17 @@ CacheProvider хранит:
 
 ## Configuration
 
-- `gateway.cache.local_path` — путь к локальному DuckDB-файлу (ext4, НЕ NFS).
-- `gateway.vector.index.*` — параметры FAISS-индексов (см. `openspec/specs/data/vector-indexes/spec.md`).
-- `gateway.vector.index.storage_table` — PG-таблица для хранения эмбеддингов (формат `schema.table`, например `oarb.audit_vectors`).
+Конфигурацию агента этот слой не читает: в `./config.json` нет ни `gateway.cache`,
+ни `gateway.vector`. Живые объявления — на платформе:
+
+- `mcp-platform/platform.json → data.snapshot_path` — путь к файлу снимка
+  (`~/.cache/nanobot/duckdb/cache.duckdb` по умолчанию), который процесс
+  читает как `ENTERPRISE_SNAPSHOT_PATH`
+  (`mcp-platform/servers/enterprise/server.py:480-482`); NFS отвергается
+  при открытии
+- `mcp-platform/platform.json → vectors` — параметры FAISS-индексов и
+  инфраструктурная таблица хранения эмбеддингов `schema.table`
+  (`oarb.audit_vectors`); см. `openspec/specs/data/vector-indexes/spec.md`
 
 ## Lifecycle
 
@@ -407,7 +421,12 @@ CacheProvider хранит:
 3. **Инкрементальный sync**: снят вместе с `PgDuckDbSyncService`
    (`lib/services/pg_duckdb_sync_service.py` **снят**) — в системе один writer и он
    известен заранее, гонок за файл не обрабатывается.
-4. **Preload**: `preload_indexes()` прогревает FAISS-индексы в память.
+4. **Preload**: `preload_indexes()` делегирует владельцу индексов
+   (`mcp-platform/libs/enterprise_data/snapshot/store.py:830-832`) и
+   **в production-коде не вызывается** — прогрев на старте идёт поимённо
+   через `ensure_index` владельца индексов
+   (`mcp-platform/servers/enterprise/server.py:955`). Метод остаётся
+   частью `CacheProvider` для диагностики и вызовов capability `vectors`.
 5. **Обслуживание**: обработка запросов `query_sql` / `search_vector` / `get_schema` / `explain`.
 6. **Stale check**: сравнивать метки не с чем — снимок перезаписывается целиком на
    стадии загрузки, а актуальность его фиксирует загрузчик
@@ -443,11 +462,35 @@ CacheProvider хранит:
 
 ## Error Behavior
 
-- **NFS path**: fail fast при старте с явной ошибкой.
-- **Ошибка загрузки снимка**: логирование на платформе, снимок остаётся с устаревшими данными до следующей успешной загрузки. Явной retry-политики у зеркала нет: синхронизация снята вместе с `PgDuckDbSyncService`.
+- **NFS path**: путь отвергается **до** открытия файла
+  (`reject_unsupported_filesystem`,
+  `mcp-platform/libs/enterprise_data/snapshot/store.py:1454`), но **процесс
+  при этом поднимается**: composition root ловит `InfrastructureError` и
+  отдаёт `UnavailableSnapshot` с кодом исходной ошибки
+  (`mcp-platform/servers/enterprise/server.py:496-504`).
+- **Ошибка загрузки снимка**: отказ `SnapshotLoadError`, файл после этого
+  **не обязаны содержать прежние данные** — при пересоздании снимок
+  стирается до загрузки, и рухнувший на середине остаётся пустым, чтобы
+  «почти старый» снимок не читался как свежий
+  (`mcp-platform/servers/enterprise/load_snapshot.py:208-213`); без
+  пересоздания данные обновляются поверх прежних потаблично
+  (`mcp-platform/libs/enterprise_data/loader.py:321`). Загрузка идёт
+  отдельным процессом (`mcp-platform/servers/enterprise/load_snapshot.py:214-222`),
+  поэтому сервер её не ждёт. Явной retry-политики нет: синхронизация снята
+  вместе с `PgDuckDbSyncService`.
 - **Ошибка запроса**: возврат ошибки потребителю; молчаливый fallback на PostgreSQL запрещён.
 - **Stale/invalid index**: `IndexIntegrityError` с статусом `STALE`/`INVALID` и описанием `reason`; вызывающая сторона обязана обработать (например, пересобрать индекс сборщиком capability — `mcp-platform/servers/enterprise/build_index.py`).
-- **Config missing**: fail fast при старте (`ConfigurationError`).
+- **Путь к снимку не задан**: сервер **поднимается**, а снимок заменён на
+  `UnavailableSnapshot` (`mcp-platform/servers/enterprise/server.py:484-488`);
+  операции со снимком отвечают отказом инфраструктуры
+  (`infrastructure_error`,
+  `mcp-platform/libs/enterprise_data/snapshot/unavailable.py:34`).
+  `ConfigurationError` на этом пути не поднимается: он объявлен
+  (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:35`) и достаётся
+  только фабрике, вызванной с пустым путём
+  (`mcp-platform/libs/enterprise_data/snapshot/store.py:1452-1453`), а
+  composition root до неё не доходит. Страж поведения:
+  `mcp-platform/tests/test_snapshot_optional_startup.py`.
 
 ## Invariants
 

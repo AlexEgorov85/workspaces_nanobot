@@ -411,7 +411,11 @@ chunk_size, chunk_overlap, metric, enabled}}`) — `mcp-platform/servers/enterpr
    обращения к одному индексу дают ровно одну сборку, в том числе при прогреве на
    старте. Первичная сборка укладывается в ≤ 5 секунд на эталонной рабочей станции
    для индексов до 20 000 векторов × 1024; величина не изменилась, изменился момент
-   её уплаты — старт платформы вместо первого пользовательского запроса
+   её уплаты — старт платформы вместо первого пользовательского запроса. Отказ по
+   одному индексу старт не роняет: слот уходит в состояние `error` с кодом и
+   текстом, индекс называется в логе, а следующий поиск повторяет сборку в том же
+   процессе (`mcp-platform/servers/enterprise/server.py:952-958`,
+   `mcp-platform/libs/vectors/owner.py:260-278`)
 4. **Поиск**: `vectors.vector_search` эмбедит запрос, сверяет подпись индекса с текущей
    конфигурацией процесса и ищет по FAISS; payload найденных чанков
    (`content` / `search_text` / `row_data`) подтягивается из таблицы-источника по
@@ -517,8 +521,10 @@ chunk_size, chunk_overlap, metric, enabled}}`) — `mcp-platform/servers/enterpr
 ## Implementation
 
 Владелец индексов — capability `vectors`:
-- `mcp-platform/libs/vectors/owner.py:VectorIndexOwner` — ленивая сборка,
-  single-flight, состояние индекса, поиск
+- `mcp-platform/libs/vectors/owner.py:VectorIndexOwner` — сборка по требованию
+  (single-flight, ровно одна на процесс), состояние индекса, поиск;
+  на старте сервера она прогревается поимённо через `ensure_index`
+  (`mcp-platform/servers/enterprise/server.py:952-958`)
 - `mcp-platform/libs/vectors/indexing.py` — `build_faiss_index`, `as_vector`,
   `vector_dimension`
 - `mcp-platform/libs/vectors/signature.py` — `compute_index_signature`,
@@ -546,8 +552,12 @@ chunk_size, chunk_overlap, metric, enabled}}`) — `mcp-platform/servers/enterpr
    состава индексов в конфигурации агента
 2. Проверка единственного пути доступа: FAISS читается только из
    `mcp-platform/libs/vectors/` (code review, grep по `mcp-platform/`)
-3. Проверка ленивой сборки: состояние `missing` до первого поиска и ровно одна
-   сборка на процесс при параллельных обращениях (счётчик `builds`)
+3. Проверка сборки на старте сервера: каждый объявленный и включённый индекс
+   прогрет до старта event loop, выключенный индекс не собирается, а отказ по
+   одному индексу не мешает подняться серверу
+   (`mcp-platform/tests/test_server_bootstrap.py:292-297`, `:308-314`,
+   `:338-364`, `:396`); ровно одна сборка на процесс при параллельных обращениях
+   проверяется отдельно по счётчику `builds`
 4. Проверка payload из источника: `content` и `row` соответствуют строке
    таблицы-источника по `(source, pk_value, chunk_index)`, а не метаданным индекса
 5. Проверка отказов: `not_found` на неизвестный индекс, `stale_index` /
