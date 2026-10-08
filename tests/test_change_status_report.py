@@ -68,6 +68,16 @@ OTHER_BODY = """\
 - **THEN** она достаётся получателю ровно один раз
 """
 
+# Проза совпадает с каноном байт в байт, расходится только сценарий.
+SCENARIO_BODY = """\
+Система SHALL захватывать задачу атомарно.
+
+#### Scenario: Один захват
+
+- **WHEN** канал опрашивает очередь
+- **THEN** он получает сколько угодно задач
+"""
+
 TASKS_DONE = "# Задачи\n\n- [x] 1.1 сделано\n- [x] 1.2 сделано\n"
 TASKS_OPEN = "# Задачи\n\n- [x] 1.1 сделано\n- [ ] 1.2 не сделано\n"
 
@@ -149,6 +159,24 @@ def test_danger_is_a_note_when_work_is_done(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "удалит из канона требований: 1" in out
     assert "!" not in out.split("2026-10-04-demo")[1]
+
+
+def test_modified_with_diverged_scenario_is_a_blocker(tmp_path, monkeypatch, capsys):
+    """Сценарий — часть требования; расхождение в нём тоже опасный `MODIFIED`.
+
+    Прежняя версия обрывала тело на первом ``####`` и сравнивала только прозу:
+    требование с тем же текстом и другим сценарием объявлялось совпадающим,
+    а расхождение обнаруживалось бы уже при архиве.
+    """
+    _world(tmp_path, monkeypatch, "MODIFIED", SCENARIO_BODY, TASKS_OPEN)
+    assert cs.main([]) == 1
+    assert "перезапишет текст в каноне требований: 1" in capsys.readouterr().out
+
+
+def test_same_scenario_modified_is_not_a_blocker(tmp_path, monkeypatch, capsys):
+    _world(tmp_path, monkeypatch, "MODIFIED", SAME_BODY, TASKS_DONE)
+    assert cs.main([]) == 0
+    assert "!" not in capsys.readouterr().out.split("2026-10-04-demo")[1]
 
 
 def test_delta_to_missing_spec_is_a_blocker(tmp_path, monkeypatch, capsys):

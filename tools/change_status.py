@@ -67,12 +67,36 @@ def _read(path: Path) -> list[str]:
 
 
 def _norm(text: str) -> str:
-    """Сравнение текстов требований не должно зависеть от пустых строк."""
-    return "\n".join(ln.rstrip() for ln in text.strip().splitlines() if ln.strip())
+    """Сравнение текстов требований.
+
+    Игнорируются пустые строки и горизонтальные разделители (``---`` и подобные):
+    это оформление блока, а не его содержание. Без этого правила канон и
+    дельта, несущие один и тот же текст, сравниваются как разошедшиеся — и
+    инструмент начинает кричать о перезаписи там, где её нет.
+    """
+    kept = []
+    for ln in text.strip().splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if set(s) <= {"-", "*", "_"} and len(s) >= 3:
+            continue
+        kept.append(ln.rstrip())
+    return "\n".join(kept)
+
+
+BLOCK_END_RE = re.compile(r"^#{1,3}\s")
 
 
 def requirement_bodies(text: str) -> dict[str, str]:
-    """{имя требования: тело} — тело строго до следующей строки-заголовка."""
+    """{имя требования: тело} — проза **вместе со сценариями**.
+
+    Граница тела — заголовок уровня 1–3, а не любой ``#``. Останавливаться на
+    первом ``####`` нельзя: сценарий — часть требования, и архив переписывает
+    его вместе с прозой. Сравнивая только прозу, инструмент объявлял
+    требования совпадающими, пока сценарии расходились, — а расхождение
+    обнаруживалось бы уже при архиве.
+    """
     lines = text.splitlines()
     out: dict[str, str] = {}
     i = 0
@@ -82,7 +106,7 @@ def requirement_bodies(text: str) -> dict[str, str]:
             i += 1
             continue
         j = i + 1
-        while j < len(lines) and not lines[j].lstrip().startswith("#"):
+        while j < len(lines) and not BLOCK_END_RE.match(lines[j]):
             j += 1
         out[m.group(1).strip()] = "\n".join(lines[i + 1:j])
         i = j
