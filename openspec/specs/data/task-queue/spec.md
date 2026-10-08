@@ -29,8 +29,8 @@
 (`lib/channels/queue_ops.py:191` — единственный вызов захвата на стороне
 агента), но пул PostgreSQL в агенте жив: он объявляет `configure`, `execute`,
 `fetchone`, `transaction` (`lib/utils/db.py:35`), поднимается и останавливается
-в composition root (`lib/core/application_context.py:2021`,
-`lib/core/application_context.py:2031`), а настраивается при старте хранилища
+в composition root (`lib/core/application_context.py:2020`,
+`lib/core/application_context.py:2030`), а настраивается при старте хранилища
 сессий (`lib/services/session_storage.py:188`). Пул нельзя удалить до закрытия
 задач 2.1–2.3 change'а
 `openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`: пула-переёмчика

@@ -1016,7 +1016,7 @@ mirror** в отдельной подсистеме шлюза `lib/gateway/mirr
 - зеркало — `lib/gateway/mirror/mirror_poller.py` (механизм) и
   `lib/gateway/mirror/session_mirror.py` (ресурс «сессии»);
 - жизненный цикл — `gateway.py:607-616`;
-- сборка из конфигурации — `lib/core/application_context.py:1713-1754`;
+- сборка из конфигурации — `lib/core/application_context.py:1688-1757`;
 - DDL — `sql/migrations/V010__agent_session_mirror_replica_key.sql`,
   `sql/migrations/V011__agent_session_mirror_indexes.sql`.
 
@@ -1248,8 +1248,8 @@ self._jsonl_store`. Наш `build_session_manager` поэтому одной с�
 
 ## Lifecycle
 
-**Сборка** — `_build_session_mirror(ctx)`
-(`lib/core/application_context.py:1713-1754`). Возвращает `None`, если
+**Сборка** — `_make_session_mirror(ctx)`
+(`lib/core/application_context.py:1688-1757`). Возвращает `None`, если
 `ctx.session_manager is None`. Собирается **после** клиента платформы
 (шаг 7a-0), потому что от него зависит; раньше это было ошибкой сборки.
 
@@ -1456,7 +1456,7 @@ stale_tolerance_seconds` → `ValueError`
 | Потребитель | Что использует | Где |
 |---|---|---|
 | upstream `AgentLoop` и каналы | `build_session_manager(...)` → хот-путь | `lib/session/pg_session_manager.py:85` |
-| `ApplicationContext` | `ctx.session_manager` как источник зеркала | `lib/core/application_context.py:1713` |
+| `ApplicationContext` | `ctx.session_manager` как источник зеркала | `lib/core/application_context.py:1688` |
 | `gateway.py` | `mirror.start()` / выключено-строка | `gateway.py:607-616` |
 | Платформа `enterprise-mcp` | операции `data.mirror_session`, `data.cleanup_session_mirror`, `data.session_mirror_state` | `session_mirror.py:77-80` |
 | `runtime_health` | `get_stats()` зеркала | `lib/services/runtime_health.py:134-137` |

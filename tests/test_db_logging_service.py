@@ -62,7 +62,10 @@ class RecordingWriter:
         self.runs.append(record)
         return self.question_run_written
 
-    def purge_logs(self, *, retention_days, remove_empty_outbound=None):
+    def purge_logs(self, *, retention_days=None, remove_empty_outbound=None):
+        # ``retention_days=None`` — осмысленное значение, а не отсутствие
+        # аргумента: так выглядит вызов без переопределения, и именно его
+        # ждёт платформа, чтобы применить своё правило.
         self.purges.append(
             {
                 "retention_days": retention_days,
@@ -587,15 +590,43 @@ class TestPurge:
 
     def test_purge_old_sends_retention_and_not_empty_outbound(self):
         writer = RecordingWriter(purge_counters={"events": 4, "question_runs": 3})
-        svc = _svc(retention_days=10, mcp_writer=writer)
+        svc = _svc(mcp_writer=writer)
         assert svc.purge_old(10) == (4, 3)
         assert writer.purges == [
             {"retention_days": 10, "remove_empty_outbound": False}
         ]
 
+    def test_periodic_purge_sends_no_overrides(self):
+        """Периодическая чистка не задаёт правило — его объявила платформа.
+
+        Регрессия на второй владельца правила: раньше шаг из worker-цикла
+        звал ``purge_logs`` дважды, с ``retention_days`` из настройки сервиса.
+        Этой настройки нет ни в ``config.json``, ни в ``platform.json``, то
+        есть срок хранения живого журнала задавался дефолтом в чужом модуле,
+        а платформа удаляла запись раньше, чем агент её учитывал.
+        """
+        writer = RecordingWriter(purge_counters={"empty_outbound": 3})
+        svc = _svc(mcp_writer=writer)
+        svc._purge_old()
+        assert writer.purges == [{"retention_days": None, "remove_empty_outbound": None}], (
+            "правило чистки осталось в двух местах: платформа его объявила, "
+            "агент переопределил"
+        )
+
+    def test_periodic_purge_counts_every_counter(self):
+        writer = RecordingWriter(
+            purge_counters={"empty_outbound": 3, "events": 4, "question_runs": 2}
+        )
+        svc = _svc(mcp_writer=writer)
+        svc._purge_old()
+        stats = svc.get_stats()
+        assert stats["last_purged_events"] == 4, stats
+        assert stats["last_purged_runs"] == 2, stats
+        assert stats["last_purge_at"], stats
+
     def test_purge_old_disabled_when_zero_calls_nothing(self):
         writer = RecordingWriter()
-        svc = _svc(retention_days=0, mcp_writer=writer)
+        svc = _svc(mcp_writer=writer)
         assert svc.purge_old(0) == (0, 0)
         assert writer.purges == [], (
             "выключенный retention не должен ходить в платформу на каждом тике"

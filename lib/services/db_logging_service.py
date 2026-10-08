@@ -628,7 +628,6 @@ class DbLoggingService:
         connect_backoff_sec: float = 1.0,
         connect_backoff_max_sec: float = 60.0,
         summary_max_chars: int = 200,
-        retention_days: int = 0,
         purge_interval_sec: float = 3600.0,
         mcp_writer: Any | None = None,
         fallback_sink: Any | None = None,
@@ -656,7 +655,10 @@ class DbLoggingService:
         self._connect_backoff_sec = float(connect_backoff_sec)
         self._connect_backoff_max_sec = float(connect_backoff_max_sec)
         self._summary_max_chars = int(summary_max_chars)
-        self._retention_days = int(retention_days)
+        # Срока хранения у сервиса нет: правило чистки объявлено платформой
+        # (`data.log_retention_days`), и агент больше не переопределяет его
+        # дефолтом из своего модуля. Здесь остаётся только расписание —
+        # когда дёрнуть платформу.
         self._purge_interval_sec = float(purge_interval_sec)
         self._last_purge = 0.0
 
@@ -2134,14 +2136,20 @@ class DbLoggingService:
     # ------------------------------------------------------------------
 
     def _purge_via_platform(
-        self, *, retention_days: int, remove_empty_outbound: bool
+        self, *, retention_days: int | None = None, remove_empty_outbound: bool | None = None
     ) -> dict[str, int] | None:
         """Чистка журнала операцией ``purge_logs``. ``None`` — вызова не было.
 
-        Отдельный метод, потому что у чистки теперь ровно один писатель, и обе
+        Отдельный метод, потому что у чистки теперь ровно один писатель, и все
         точки вызова обязаны это разделять. Иначе «нужна платформа» и «платформа
         есть» снова разойдутся, и одна из двух чисток получит свой обход —
         то есть вернёт ровно тот второй путь, который здесь снимается.
+
+        Аргументы — переопределение, а не обязательная часть. Без них
+        платформа применяет своё объявленное правило, и именно так её должен
+        звать обычный периодический путь: иначе правило чистки живёт в двух
+        местах сразу, и агентская половина — дефолт, которого нет ни в одном
+        конфиге.
 
         Отсутствие писателя — потеря, а не повод удалять строки самому.
         """
@@ -2186,20 +2194,22 @@ class DbLoggingService:
             self._stats["last_purge_at"] = time.time()
         return removed
 
-    def purge_old(self, retention_days: int | None = None) -> tuple[int, int]:
+    def purge_old(self, retention_days: int) -> tuple[int, int]:
         """Убрать записи старше ``retention_days`` операцией ``purge_logs``.
+
+        Разовый вызов с явным сроком: тестам и ручной чистке. Периодический
+        путь сюда не ходит — он зовёт платформу без аргументов и получает её
+        правило.
 
         Возвращает ``(удалено_событий, удалено_question_runs)``. Retention
         выключен (``days <= 0``) — не делает ничего. Это проверяется ДО
         вызова, а не после: платформа на ``0`` тоже ничего не трогает, но
-        повторять её решение значило бы делать вызов впустую на каждом тике
-        очистки, то есть каждые ``purge_interval_sec``.
+        повторять её решение значило бы делать вызов впустую.
 
-        ``retention_days=None`` берётся из настройки сервиса. Сам интервал
-        считает платформа — ``NOW() - (days || ' days')::interval``, совместимо
-        с Greenplum 6.5, где нет ``make_interval``.
+        Сам интервал считает платформа — ``NOW() - (days || ' days')::interval``,
+        совместимо с Greenplum 6.5, где нет ``make_interval``.
         """
-        days = int(retention_days if retention_days is not None else self._retention_days)
+        days = int(retention_days)
         if days <= 0:
             return (0, 0)
         counters = self._purge_via_platform(
@@ -2218,12 +2228,29 @@ class DbLoggingService:
     def _purge_old(self) -> None:
         """Один шаг периодической очистки из worker-цикла.
 
-        Пустой outbound-мусор чистим всегда (независимо от retention);
-        старые данные — только если задан ``retention_days > 0``.
+        Правило — платформенное, поэтому аргументы не задаются: без них сервер
+        применяет ``data.log_retention_days`` и ``data.log_purge_empty_outbound``
+        сам. Раньше здесь стояли два вызова с агентскими значениями, и это была
+        вторая половина правила чистки: значение бралось из настройки сервиса,
+        которой нет ни в ``config.json``, ни в ``platform.json``, — то есть
+        правило живого журнала задавалось дефолтом в чужом модуле. Платформа
+        удаляла запись раньше, чем агент успевал её учесть.
+
+        Расписание (``purge_interval_sec``) остаётся за агентом: когда дёрнуть
+        платформу — его дело, что именно удалить — её.
         """
-        self.purge_empty_outbound()
-        if self._retention_days > 0:
-            self.purge_old(self._retention_days)
+        counters = self._purge_via_platform()
+        if counters is None:
+            return
+        removed_empty = int(counters.get("empty_outbound", 0))
+        removed_events = int(counters.get("events", 0))
+        removed_runs = int(counters.get("question_runs", 0))
+        if not (removed_empty or removed_events or removed_runs):
+            return
+        with self._state_lock:
+            self._stats["last_purged_events"] += removed_events
+            self._stats["last_purged_runs"] += removed_runs
+            self._stats["last_purge_at"] = time.time()
 
 
 def _count_by_type(batch: list[LogEvent]) -> dict[str, int]:

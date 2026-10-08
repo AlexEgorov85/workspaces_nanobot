@@ -37,7 +37,7 @@
 «сегодня очередь обслуживает пул агента» коду не соответствует: в
 `lib/channels/` нет ни одного обращения к `lib.utils.db`. Пул в агенте при этом
 жив (`lib/utils/db.py:35`) и поднимается в composition root
-(`lib/core/application_context.py:2021`), но очередью он не владеет; его
+(`lib/core/application_context.py:2020`), но очередью он не владеет; его
 потребители — другие подсистемы, и снять пул нельзя до задач 2.1–2.3 change'а
 `openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`. Не доведён
 батч в цикле опроса: канал по-прежнему берёт одну задачу за тик
@@ -494,7 +494,7 @@ MUST NOT выглядеть как пустая очередь. Иначе ка�
 платформы было видно, а не молчало
 (`lib/channels/postgres_channel.py:144-157`).
 Пул `lib/utils/db` жив (`lib/utils/db.py:35`, старт —
-`lib/core/application_context.py:2021`), и очередью он не владеет: его снос
+`lib/core/application_context.py:2020`), и очередью он не владеет: его снос
 заблокирован задачами 2.1–2.3 change'а
 `openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`. Переключатель
 пути не объявлен **решением владельца**: второго пути в дереве нет, а объявлять

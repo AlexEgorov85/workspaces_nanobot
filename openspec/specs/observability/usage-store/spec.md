@@ -427,7 +427,7 @@ SQLite-база в режиме WAL, одноимённый файл по пут
 
 - `nanobot.llm_usage.get_llm_usage_store` — фабрика-синглтон; импортируется
   **лениво**, внутри `_make_usage_store`
-  (`lib/core/application_context.py:1974`);
+  (`lib/core/application_context.py:1973`);
 - `nanobot.llm_usage.store.LLMUsageStore` — сам объект;
 - `nanobot.llm_usage.LLMCallRecord` — тип входа `record()`;
 - `nanobot.providers.fallback_provider.FallbackProvider` — ленивый импорт
@@ -608,7 +608,7 @@ None`. То есть битый раздел конфигурации приво
    предупреждением; иначе пропавший учёт выглядел бы как «учёта нет».
 9. **Импортировать `nanobot.llm_usage` на уровне модуля** вместо
    ленивого импорта внутри фабрики
-   (`lib/core/application_context.py:1974`): ленивость здесь позволяет
+   (`lib/core/application_context.py:1973`): ленивость здесь позволяет
    работать без storage-стека вообще.
 
 ## Consumers

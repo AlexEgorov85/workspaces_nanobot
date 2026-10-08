@@ -1263,22 +1263,27 @@
       вызову fallback на ветке недоступности, по образцу уже сделанного
       `on_unidentified`, плюс тест «сервер недоступен → файл непуст и
       `fallback_written` растёт».
-- [ ] 7.4 `logging.db.retention_days` и purge пустых outbound → в конфиг
-      `enterprise-mcp`
-      **Не сделано, перепроверено 2026-10-04.** Платформенная половина
-      готова: операция `purge_logs`
-      (`mcp-platform/servers/enterprise/capabilities/data/service/main.py:3153`)
-      и настройки `platform.json → data.log_retention_days` /
-      `data.log_purge_empty_outbound` (`platform.json:100`). Агентская
-      половина на месте и работает: `DbLoggingService._purge_old` вызывается
-      из worker-цикла по расписанию `config.json → logging.db.purge_interval_sec`
-      (метод и вызов — в `lib/services/db_logging_service.py`; номера строк не
-      привожу: файл правит соседняя сессия, и они устаревают каждый час). Итог —
-      **две очистки одного журнала по двум разным настройкам**: платформенная
-      удалит запись раньше, чем агентская успеет её учесть, и
-      `mcp-platform/docs/TARGET-ARCHITECTURE.md:698-702` («агент свою копию
-      журнала больше не ведёт») говорит неправду. Пункт требует снять
-      агентский purge — это код и конфиг, не документация.
+- [x] 7.4 `logging.db.retention_days` и purge пустых outbound → в конфиг
+      `enterprise_mcp`
+      **Сделано 2026-10-08.** Правило чистки было в двух местах: платформа
+      объявила его (`platform.json → data.log_retention_days`,
+      `data.log_purge_empty_outbound`, применяется операцией `purge_logs` без
+      аргументов), а агент на каждом тике переопределял его своим
+      `retention_days`, которого нет ни в `config.json`, ни в `platform.json` —
+      значение приходило дефолтом `90` из `application_context.py`. Платформа
+      удаляла запись раньше, чем агент её учитывал.
+      Снят второй владелец: периодический шаг зовёт `purge_logs` **без
+      аргументов** и получает серверное решение; `retention_days` убран из
+      `DbLoggingService` и из чтения `logging.db`. Расписание
+      (`purge_interval_sec`) осталось за агентом — когда дёрнуть платформу
+      его дело, что именно удалить — её. Разовые `purge_old` / `purge_empty_outbound`
+      оставлены как переопределение: ими пользуются тесты и ручная чистка, и
+      платформа так и объявляет их назначение.
+      Строй: `tests/test_db_logging_service.py::TestPurge::test_periodic_purge_sends_no_overrides`
+      — периодический вызов обязан уйти без переопределений.
+      Утверждение `mcp-platform/docs/TARGET-ARCHITECTURE.md:731-735` («политика
+      хранения одна… решает сервер») до правки было неправдой, после — соответствует
+      коду.
 - [x] 7.5 `db_logging_bus.py` остаётся в агенте — файл на месте
       (`lib/services/db_logging_bus.py`)
 - [x] 7.6 Интеграционный тест: недоступность `enterprise-mcp` не блокирует ход

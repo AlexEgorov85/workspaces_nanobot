@@ -352,7 +352,7 @@ class McpLogWriter:
     def purge_logs(
         self,
         *,
-        retention_days: int,
+        retention_days: int | None = None,
         remove_empty_outbound: bool | None = None,
     ) -> dict[str, int] | None:
         """Чистка журнала операцией ``purge_logs``. Вернуть счётчики ответа.
@@ -362,6 +362,14 @@ class McpLogWriter:
         операция ``purge_logs`` с тем же разбором режимов, и второй ``DELETE``
         из агента означал бы ровно то, чего change и добивается: второй
         писатель в базу журнала.
+
+        ``retention_days`` и ``remove_empty_outbound`` — переопределения, и
+        обычный вызов их **не задаёт**: без них платформа применяет своё
+        объявленное правило (``platform.json → data.log_retention_days`` и
+        ``data.log_purge_empty_outbound``). Задавать их из агента — значит
+        завести второго владельца правила, причём невидимого: агентская сторона
+        нигде не объявлена и приходит дефолтом. Значения нужны тестам и разовым
+        чисткам.
 
         Разбор режимов — платформенный, и это важно именно потому, что
         значения у сторон не совпадают. Платформа отвергает отрицательный
@@ -387,7 +395,9 @@ class McpLogWriter:
         Но решением должно было быть «передать своё», а не «не передавать
         ничего»: личность у писателя есть, это он сам.
         """
-        payload: dict[str, Any] = {"retention_days": int(retention_days)}
+        payload: dict[str, Any] = {}
+        if retention_days is not None:
+            payload["retention_days"] = int(retention_days)
         if remove_empty_outbound is not None:
             payload["remove_empty_outbound"] = bool(remove_empty_outbound)
         try:

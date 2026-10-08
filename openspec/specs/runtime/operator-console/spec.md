@@ -79,7 +79,7 @@
 Факты делятся на два класса, и смешивать их запрещено:
 
 - **Класс А — пишется в журнал.** Это `agent.received`
-  (`db_logging_service.py:1024`), `agent.delivered` (`:1073`),
+  (`db_logging_service.py:1026`), `agent.delivered` (`:1073`),
   `agent.responded` (`lib/hooks/database_logging_hook.py:822`),
   `agent.completed` (`lib/services/runtime_events_subscriber.py:393`), а также
   `llm.*` и `tool.*`. Имя печатается как есть.
@@ -136,7 +136,7 @@
 Ключ `channel` MUST сохранять своё значение **транспорта** в обоих местах, где
 он занят: в loguru (`nanobot/channels/base.py:44`,
 `logger.bind(channel=self.name)`) и в журнале (`LogEvent.channel`,
-`db_logging_service.py:1024`, `:1073`, `runtime_events_subscriber.py:398`).
+`db_logging_service.py:1026`, `:1073`, `runtime_events_subscriber.py:398`).
 Под «кто» он MUST NOT переиспользоваться.
 
 `TerminalToolPrintHook` MUST NOT биндить `channel="tools"`
