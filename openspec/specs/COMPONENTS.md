@@ -63,7 +63,6 @@
 | CallTimeoutBudget | `config.json::tools.mcpServers.enterprise.tool_timeout`, `mcp-platform/platform.json::execution` | [`runtime/call-timeout`](runtime/call-timeout/spec.md) | partial |
 | QueueChannelSwitch | `lib/channels/queue_ops.py:QueueOps`, `lib/channels/postgres_channel.py` | [`runtime/queue-channel-switch`](runtime/queue-channel-switch/spec.md) | partial |
 | PatchToHook | `lib/services/runtime_patcher.py:_PATCH_SPECS` | [`runtime/patch-to-hook`](runtime/patch-to-hook/spec.md) | partial |
-| CliChannelClient | `cli_agent.py`, `lib/cli/console_loop.py` — клиентский модуль вводится change `unify-runtime-channels` и в дереве отсутствует | [`runtime/cli-client`](runtime/cli-client/spec.md) | draft |
 
 ### Configuration
 
