@@ -44,6 +44,8 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -182,6 +184,13 @@ class ApplicationContext:
     # догружаются уже после старта каналов.
     cache_ready_signal: Any = None
     background_vector_preload: bool = False
+
+    # Решение caller'а: не запускать PgDuckDbSyncService вовсе, потому что
+    # снапшот ``cache.duckdb`` моложе ``gateway.cache.reuse_ttl_hours`` и
+    # данные уже лежат на диске. Выставляется gateway.py ДО ``start()``.
+    # Не молчаливый флаг: caller, поставивший его, обязан сам удовлетворить
+    # ``cache_ready_signal``, иначе StartupGate будет ждать сигнал вечно.
+    skip_data_load: bool = False
 
     # Per-turn hook factories (для DatabaseLoggingHook и т.п.), которые
     # ``AgentFactory`` собрала из конфигурации и передала в
@@ -530,6 +539,37 @@ class ApplicationContext:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _start_sync_or_skip(self) -> None:
+        """Старт синхронизатора — либо явный отказ от загрузки данных.
+
+        ``skip_data_load`` — решение caller'а (gateway) по свежести
+        снапшота ``cache.duckdb`` (``gateway.cache.reuse_ttl_hours``).
+        Выставленный флаг означает: данные уже лежат на диске и перечитывать
+        их из PG незачем.
+
+        Почему синхронизатор не стартует ВОВСЕ, а не «стартует без
+        ``initial_load````: poll-цикл с пустым ``_last_sync`` на первом же
+        такте делает полный ``_fetch_all`` — «пропуск» не был бы пропуском,
+        а лишь переставил бы ту же полную вычитку. Плюс воркеры синка
+        занимали бы пул БД, конкурируя с каналом вопросов.
+
+        Явный метод (а не ``if`` внутри ``start()``) — чтобы контракт можно
+        было проверить тестом, не поднимая пул БД и schema validation.
+        """
+        if self.sync_service is None:
+            return
+        if self.skip_data_load:
+            logger.info(
+                "PgDuckDbSyncService NOT started: data load skipped "
+                "(fresh cache snapshot) — данные берутся из cache.duckdb"
+            )
+            return
+        try:
+            self.sync_service.start(initial_load=True)
+            self._shutdown.register("sync_service", self.sync_service)
+        except Exception as exc:
+            logger.warning("PgDuckDbSyncService not started: %s", exc)
+
     def start(self) -> None:
         """Запустить фоновые сервисы (БД-логирование, аудит)."""
         if self._started:
@@ -595,12 +635,7 @@ class ApplicationContext:
             self.db_logging_service.start()
             self._shutdown.register("db_logging_service", self.db_logging_service)
 
-        if self.sync_service is not None:
-            try:
-                self.sync_service.start(initial_load=True)
-                self._shutdown.register("sync_service", self.sync_service)
-            except Exception as exc:
-                logger.warning("PgDuckDbSyncService not started: %s", exc)
+        self._start_sync_or_skip()
 
         if self.session_cold_sync_service is not None:
             try:
@@ -1343,6 +1378,84 @@ def resolve_publish_path(workspace_path, cache_cfg: dict | None = None) -> str:
     default = _default_local_cache_dir()
     default.mkdir(parents=True, exist_ok=True)
     return str(default / "cache.duckdb")
+
+
+@dataclass(frozen=True)
+class CacheSnapshotDecision:
+    """Решение по снапшоту кэша на старте: переиспользовать или пересоздать.
+
+    ``age_sec is None`` — снапшота нет (или он нечитаем), поэтому age
+    неизвестен и переиспользовать нечего.
+    """
+
+    reuse: bool
+    age_sec: float | None
+    ttl_sec: float
+    reason: str
+
+
+def evaluate_cache_snapshot(
+    snapshot_path: str,
+    ttl_hours: float,
+    *,
+    now: float | None = None,
+) -> CacheSnapshotDecision:
+    """Свежий ли снапшот ``cache.duckdb`` — можно ли не грузить данные заново.
+
+    **Время жизни берётся по ``mtime``, а не по дате создания.** ``mtime`` —
+    это момент последней публикации (``publish()`` делает ``os.replace``
+    свежего файла поверх старого), то есть «данным в этом файле» ровно
+    столько, сколько прошло с последней успешной публикации. Дата создания
+    на POSIX — это ``st_ctime``, который меняется при любой правке
+    метаданных, а в Windows вообще другая семантика; для «свежести данных»
+    она непригодна.
+
+    TTL приходит из ``gateway.cache.reuse_ttl_hours``. ``0`` означает
+    «никогда не переиспользовать» — безопасный режим, полностью
+    воспроизводящий прежнее поведение (снапшот всегда пересоздаётся).
+
+    Функция чистая и не делает I/O кроме одного ``stat``: решение обязано
+    быть проверяемым тестом без поднятия БД и DuckDB.
+    """
+    from pathlib import Path
+
+    ttl_sec = max(0.0, float(ttl_hours)) * 3600.0
+    current = time.time() if now is None else float(now)
+
+    try:
+        st = Path(snapshot_path).stat()
+    except OSError:
+        return CacheSnapshotDecision(
+            reuse=False, age_sec=None, ttl_sec=ttl_sec, reason="snapshot_missing"
+        )
+
+    age_sec = max(0.0, current - st.st_mtime)
+
+    if ttl_sec <= 0.0:
+        return CacheSnapshotDecision(
+            reuse=False, age_sec=age_sec, ttl_sec=ttl_sec, reason="ttl_disabled"
+        )
+    if age_sec <= ttl_sec:
+        return CacheSnapshotDecision(
+            reuse=True, age_sec=age_sec, ttl_sec=ttl_sec, reason="fresh"
+        )
+    return CacheSnapshotDecision(
+        reuse=False, age_sec=age_sec, ttl_sec=ttl_sec, reason="stale"
+    )
+
+
+def format_cache_age(age_sec: float | None) -> str:
+    """Человекочитаемый возраст снапшота для лога (``2ч 13м`` / ``47с``)."""
+    if age_sec is None:
+        return "n/a"
+    seconds = int(age_sec)
+    if seconds < 60:
+        return f"{seconds}с"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}м {sec}с"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}ч {minutes}м"
 
 
 def _warn_if_publish_path_on_nfs(publish_path: str) -> None:

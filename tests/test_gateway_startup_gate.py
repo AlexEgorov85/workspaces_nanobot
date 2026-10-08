@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import os
 import threading
 import time
 from contextlib import redirect_stderr
@@ -58,18 +59,30 @@ class _Order:
 
 
 class _FakeCacheStore:
-    def __init__(self, order: _Order) -> None:
+    def __init__(
+        self,
+        order: _Order,
+        *,
+        publish_path: str | None = None,
+        ready: bool = True,
+    ) -> None:
         self._order = order
+        self._publish_path = publish_path
+        self._ready = ready
 
     def connect(self) -> None:
         self._order.add("cache.connect")
+
+    def is_ready(self) -> bool:
+        """Готовность store — «снапшот реально открылся»."""
+        return self._ready
 
     def upsert_records(self, *args: Any, **kwargs: Any) -> None:
         """Sink синхронизации (gateway вешает его как on_new_records)."""
         self._order.add("cache.upsert")
 
     def get_stats(self) -> dict[str, Any]:
-        return {"publish_path": None}
+        return {"publish_path": self._publish_path}
 
     def publish(self, force: bool = False) -> None:
         self._order.add("cache.publish")
@@ -132,12 +145,22 @@ def _ctx(
     policy: str = "warn",
     await_ready: bool = True,
     enabled: bool = True,
+    publish_path: str | None = None,
+    cache_ready: bool = True,
+    reuse_ttl_hours: float = 23.0,
 ) -> Any:
     ctx = MagicMock()
-    ctx.cache_store = _FakeCacheStore(order)
+    ctx.cache_store = _FakeCacheStore(
+        order, publish_path=publish_path, ready=cache_ready
+    )
     ctx.sync_service = _FakeSyncService(order)
     ctx.db_logging_service = None
     ctx.background_vector_preload = False
+    # Реальный dict, а не MagicMock: gateway читает отсюда
+    # gateway.cache.reuse_ttl_hours. MagicMock молча отдаёт 1.0 через
+    # __float__ — и тест проверял бы не тот TTL, который задуман.
+    ctx.settings = {"gateway": {"cache": {"reuse_ttl_hours": reuse_ttl_hours}}}
+    ctx.skip_data_load = False
     ctx.startup_gate = StartupGate(
         VectorPreloadConfig(
             enabled=enabled,
@@ -438,6 +461,134 @@ class TestUnavailablePolicy:
 
         asyncio.run(_drive())
         assert "channels" not in order.events
+
+
+def _gate_satisfied_without_sync(ctx: Any) -> None:
+    """Подмена ``ctx.start``: гейту сразу дают данные, синк не трогаем.
+
+    Нужна сценариям про reuse. Gateway присваивает ``cache_ready_signal``
+    ДО ``ctx.start()``, поэтому подмена читает уже выставленный сигнал и
+    снимает его сразу. Зачем: если gateway по ошибке НЕ переиспользовал
+    снапшот, он всё равно не должен оставлять гейт висеть — тест обязан
+    падать на ``assert skip_data_load is True``, а не висеть до таймаута
+    (проверено подсадкой дефекта: без этого тест висел 30 с вместо падения).
+    """
+
+    def _start(*args: Any, **kwargs: Any) -> None:
+        signal = getattr(ctx, "cache_ready_signal", None)
+        if signal is not None:
+            signal.set()
+
+    ctx.start = MagicMock(side_effect=_start)
+
+
+class TestCacheSnapshotReuse:
+    """``gateway.cache.reuse_ttl_hours``: свежий снапшот vs пересоздание."""
+
+    def _snapshot(self, tmp_path: Path, age_hours: float) -> Path:
+        p = tmp_path / "cache.duckdb"
+        p.write_bytes(b"duck")
+        when = time.time() - age_hours * 3600.0
+        os.utime(p, (when, when))
+        return p
+
+    def test_fresh_snapshot_skips_data_load(self, tmp_path: Path) -> None:
+        """Свежий снапшот → данные не грузим, файл НЕ удаляем."""
+        snap = self._snapshot(tmp_path, age_hours=1.0)
+        order = _Order()
+        ctx = _ctx(order, publish_path=str(snap), cache_ready=True)
+        _gate_satisfied_without_sync(ctx)
+
+        _run_entrypoint(ctx, order)
+
+        assert ctx.skip_data_load is True, "фаза загрузки должна быть пропущена"
+        assert snap.exists(), "свежий снапшот нельзя удалять на старте"
+        # Синхронизатор не стартовал — значит данные не перечитывались.
+        assert "sync.start" not in order.events
+        # Но каналы всё равно поднялись: процесс обслуживает вопросы.
+        assert _serving_events(order)[-1] == "channels"
+
+    def test_stale_snapshot_reloads_data(self, tmp_path: Path) -> None:
+        """Протухший снапшот → пересоздать и загрузить данные заново."""
+        snap = self._snapshot(tmp_path, age_hours=48.0)
+        order = _Order()
+        ctx = _ctx(order, publish_path=str(snap), cache_ready=True)
+        _signal_ready(ctx)
+
+        _run_entrypoint(ctx, order)
+
+        assert ctx.skip_data_load is False
+        assert not snap.exists(), "протухший снапшот обязан быть удалён"
+        assert "sync.start" in order.events
+
+    def test_ttl_zero_always_reloads(self, tmp_path: Path) -> None:
+        """``reuse_ttl_hours=0`` — escape-hatch: всегда пересоздавать."""
+        snap = self._snapshot(tmp_path, age_hours=0.001)
+        order = _Order()
+        ctx = _ctx(order, publish_path=str(snap), reuse_ttl_hours=0.0)
+        _signal_ready(ctx)
+
+        _run_entrypoint(ctx, order)
+
+        assert ctx.skip_data_load is False
+        assert not snap.exists()
+
+    def test_unopened_snapshot_forces_reload(self, tmp_path: Path) -> None:
+        """Файл свежий, но store его не открыл → пересоздать.
+
+        Иначе «используем как есть» = молчаливая работа на пустом кэше:
+        процесс жив, отвечает, но данных нет. Именно такой отказ hardest
+        заметить по косвенным признакам.
+        """
+        snap = self._snapshot(tmp_path, age_hours=0.0)
+        order = _Order()
+        ctx = _ctx(order, publish_path=str(snap), cache_ready=False)
+        _signal_ready(ctx)
+
+        _run_entrypoint(ctx, order)
+
+        assert ctx.skip_data_load is False, (
+            "неоткрытый снапшот нельзя переиспользовать"
+        )
+        assert not snap.exists()
+        assert "sync.start" in order.events
+
+    def test_reuse_signals_gate_without_sync(self, tmp_path: Path) -> None:
+        """Гейт не должен висеть вечно, когда синка нет.
+
+        StartupGate ждёт сигнал БЕЗ таймаутов. Если синхронизатор не
+        запущен, он этот сигнал никогда не поставит — обязан поставить
+        его сам gateway.
+        """
+        snap = self._snapshot(tmp_path, age_hours=1.0)
+        order = _Order()
+        ctx = _ctx(order, publish_path=str(snap), cache_ready=True)
+
+        finished = threading.Event()
+
+        def _run() -> None:
+            try:
+                _run_entrypoint(ctx, order)
+            finally:
+                finished.set()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        # Если сигнал не поставлен, _run_entrypoint зависнет на гейте.
+        assert finished.wait(timeout=30.0) is True, (
+            "entrypoint завис на StartupGate при пропуске синка"
+        )
+
+    def test_missing_snapshot_reloads(self, tmp_path: Path) -> None:
+        """Нет файла → пересоздать (нечего переиспользовать)."""
+        order = _Order()
+        ctx = _ctx(order, publish_path=str(tmp_path / "absent.duckdb"))
+        _signal_ready(ctx)
+
+        _run_entrypoint(ctx, order)
+
+        assert ctx.skip_data_load is False
+        assert "sync.start" in order.events
 
 
 class TestMainBoundary:

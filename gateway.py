@@ -117,7 +117,11 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     #    если кто-то вызовет lifecycle-gate напрямую минуя CLI).
     _cfg._initialize_settings(profile=args.profile)
 
-    from lib.core.application_context import ApplicationContext
+    from lib.core.application_context import (  # noqa: E402
+        ApplicationContext,
+        evaluate_cache_snapshot,
+        format_cache_age,
+    )
     from lib.lifecycle.gateway_runner import GatewayRunner
 
     ctx = ApplicationContext.create(role='gateway', 
@@ -163,20 +167,57 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     first_sync_event: "ThreadSafeSignal | None" = None
     if ctx.sync_service is not None and ctx.cache_store is not None:
         ctx.cache_store.connect()
-        # Пересоздаём снапшот при каждом старте: удаляем устаревший файл,
-        # чтобы CLI/skill не читали данные с прошлого запуска, пока
-        # initial_load не заполнит свежий снимок заново.
-        _old_snapshot = ctx.cache_store.get_stats().get("publish_path")
-        if _old_snapshot:
-            # Чистим и финальный снапшот, и осиротевший .tmp (publish мог быть
-            # убит между ATTACH и os.replace — тогда .tmp лежит залоченный
-            # через NFS lockd, и новый publish отстрелит "PID 0" на ATTACH).
-            for _candidate in (Path(_old_snapshot),
-                               Path(_old_snapshot + ".tmp")):
-                try:
-                    _candidate.unlink(missing_ok=True)
-                except OSError:
-                    pass
+
+        # Свежесть снапшота решает, грузим ли мы данные заново.
+        # TTL — ``gateway.cache.reuse_ttl_hours`` (дефолт 23 ч), считается по
+        # mtime файла = момент последней публикации. См. evaluate_cache_snapshot.
+        _ttl_hours = 23.0
+        try:
+            _cache_cfg = ctx.settings.get("gateway", {}).get("cache", {}) or {}
+            _ttl_hours = float(_cache_cfg.get("reuse_ttl_hours", _ttl_hours))
+        except (AttributeError, TypeError, ValueError):
+            # Настройка битая — безопасный путь: старое поведение (пересоздать).
+            _ttl_hours = 0.0
+            logger.warning(
+                "gateway.cache.reuse_ttl_hours нечитаем — снапшот будет "
+                "пересоздан (reuse_ttl_hours=0)"
+            )
+        _snapshot_path = ctx.cache_store.get_stats().get("publish_path") or ""
+        _decision = evaluate_cache_snapshot(_snapshot_path, _ttl_hours)
+        # Переиспользовать можно только ТОЛЬКО если store реально открыл файл.
+        # Иначе «используем как есть» превратится в молчаливую работу на пустом
+        # кэше: is_ready() False — значит данных нет, нужен полный пересоздан.
+        _reuse = _decision.reuse and ctx.cache_store.is_ready()
+        if _decision.reuse and not _reuse:
+            logger.warning(
+                "cache snapshot {} считается свежим (age={}), но store его не "
+                "открыл — принудительный пересоздан",
+                _snapshot_path, format_cache_age(_decision.age_sec),
+            )
+        logger.info(
+            "cache snapshot: path={} age={} ttl={} decision={} reuse={}",
+            _snapshot_path,
+            format_cache_age(_decision.age_sec),
+            format_cache_age(_decision.ttl_sec),
+            _decision.reason,
+            _reuse,
+        )
+
+        if not _reuse:
+            # Пересоздаём снапшот: удаляем устаревший файл, чтобы CLI/skill не
+            # читали данные с прошлого запуска, пока initial_load не заполнит
+            # свежий снимок заново.
+            if _snapshot_path:
+                # Чистим и финальный снапшот, и осиротевший .tmp (publish мог быть
+                # убит между ATTACH и os.replace — тогда .tmp лежит залоченный
+                # через NFS lockd, и новый publish отстрелит "PID 0" на ATTACH).
+                for _candidate in (Path(_snapshot_path),
+                                   Path(_snapshot_path + ".tmp")):
+                    try:
+                        _candidate.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
         # Колбэк upsert НЕ переустанавливаем: его уже выставил
         # ``_make_sync_services`` как PK-aware обёртку
         # (``_upsert_with_pk``), которая резолвит PK источника и передаёт
@@ -187,6 +228,7 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
         # ветку пересоздания, которая для дельты от ``_fetch_incremental``
         # удаляет несвязанные строки. Назначение колбэков — контракт
         # composition root'а, а не callers'а.
+        #
         # Сохраняем оригинальный callback и подменяем на обёртку,
         # которая публикует снимок DuckDB в publish_path после каждого
         # цикла синхронизации и выставляет сигнал готовности данных.
@@ -224,6 +266,22 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
                     pass
 
         ctx.sync_service.set_on_sync_callback(_wrapped)
+
+        if _reuse:
+            # Синхронизатор не запустится (см. ApplicationContext.start и
+            # skip_data_load) — значит он НИКОГДА не вызовет ``_wrapped`` и
+            # сигнал готовности не будет поставлен. StartupGate ждёт этот
+            # сигнал без таймаутов, поэтому удовлетворяем его здесь, явно:
+            # данные уже в DuckDB (store открыт и is_ready), снапшот лежит
+            # на диске. Молча ждать тут нельзя — гейт висел бы вечно.
+            ctx.skip_data_load = True  # type: ignore[attr-defined]
+            console.print(
+                f"[cache] свежий снапшот использован как есть "
+                f"(age={format_cache_age(_decision.age_sec)}, "
+                f"ttl={format_cache_age(_decision.ttl_sec)}): "
+                f"{_snapshot_path} — фаза загрузки данных пропущена"
+            )
+            first_sync_event.set()
 
     # Сигнал готовности данных публикуем на ctx: фоновый режим
     # (``await_ready=false``) ждёт его уже в рабочем цикле.

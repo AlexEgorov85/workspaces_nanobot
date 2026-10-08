@@ -333,6 +333,12 @@ class CacheSettings(_StrictOptional):
         путь к каталогу на **локальной** ФС, где будет лежать
         ``cache.duckdb``. Полезно, когда у ``~/.cache`` нет места или
         нужна отдельная ФС.
+      * ``reuse_ttl_hours`` (float, дефолт ``23.0``) — время жизни
+        снапшота ``cache.duckdb``. Пока снимок моложе TTL, gateway
+        **не удаляет его и не грузит данные заново**: берёт готовый
+        снапшот и пропускает фазу загрузки. Считается по ``mtime``, то
+        есть «сколько прошло с последней публикации». ``0`` — всегда
+        пересоздавать (прежнее поведение, безопасный режим).
 
     Пример для jupyter-инсталляции, где ``~/.cache`` не подходит:
 
@@ -346,6 +352,7 @@ class CacheSettings(_StrictOptional):
     """
 
     local_path: str | None = None
+    reuse_ttl_hours: float = Field(default=23.0, ge=0.0)
 
 
 class CliSettings(_StrictOptional):

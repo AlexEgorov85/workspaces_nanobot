@@ -398,6 +398,29 @@
       "notify_in_history": true,       // Писать заметку о сжатии в agent_conversation_messages (видно в Streamlit)
       "print_to_terminal": false       // Дублировать заметку в терминал gateway (по образцу print_worker_activity)
     },
+    //  cache.* — runtime-кеш DuckDB (снапшот cache.duckdb).
+    //  local_path — каталог на ЛОКАЛЬНОЙ ФС для cache.duckdb. На NFS нельзя:
+    //  DuckDB ATTACH падает с "Conflicting lock is held in PID 0".
+    //  Пусто → дефолт ~/.cache/nanobot/duckdb (lib.core.application_context.
+    //  resolve_publish_path — ЕДИНСТВЕННЫЙ расчёт пути).
+    //
+    //  reuse_ttl_hours (float, дефолт 23.0) — время жизни снапшота.
+    //  Считается по mtime файла = момент последней публикации данных.
+    //  Пока снимок моложе TTL, gateway НЕ удаляет его и НЕ запускает
+    //  синхронизацию: берёт готовый снапшот и пропускает фазу загрузки
+    //  данных (StartupGate получает сигнал сразу).
+    //  0 → всегда пересоздавать (прежнее поведение).
+    //
+    //  ЦЕНА РЕШЕНИЯ, читать перед изменением TTL:
+    //   * пока кэш свежий, изменения в PG не видны (новые строки, новые
+    //     predefined-скрипты, УДАЛЁНные строки) — до истечения TTL;
+    //   * full_resync_every не работает в этот период — сверки удалений нет;
+    //   * экономия — доли секунды: замер вычитки всех 6 таблиц из PG дал
+    //     63 мс на холодном соединении и 35 мс на прогретом.
+    //     То есть выигрыш по времени близок к нулю, а платим мы свежестью.
+    "cache": {
+      "reuse_ttl_hours": 23.0
+    },
     //  sync.* — параметры фоновой синхронизации PG → DuckDB (PgDuckDbSyncService).
     //  Глобальные runtime-параметры, общие для всех skills. Минимум 4 часа
     //  (см. lib/services/pg_duckdb_sync_service.py). Все ключи опциональны;
