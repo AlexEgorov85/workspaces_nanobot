@@ -1,3 +1,18 @@
+> **Состояние на 2026-10-08 (сверено с деревом).**
+>
+> Change создан 2026-09-27 и **не начат**. Проверено: нет файла
+> `lib/hooks/repeat_guard_hook.py`, нет настройки `repeat_guard` в
+> `lib/core/project_settings.py`, нет записи в
+> `canonical_framework_hooks()`, нет упоминаний `repeat_guard` /
+> `RepeatGuard` / `anti-loop` в `project.json`, `AGENTS.md`, `docs/`,
+> `CHANGELOG.md` и в каноне `openspec/specs/`. Все 23 задачи ниже
+> не выполнены — в отличие от `cache-architecture-alignment`, здесь
+> чекбоксы не протухли, а честно отражают состояние.
+>
+> План сохранён как есть; исправлены только устаревшие ссылки на строки
+> и имя команды (в репозитории нет `openspec.cmd`, CLI глобальный через
+> npm и вызывается как `openspec`).
+
 ## 1. Конфигурация и скелет модуля
 
 - [ ] 1.1 Добавить `GatewayRepeatGuardSettings` (pydantic) с полями
@@ -11,7 +26,8 @@
   печатает дефолты без `ValidationError`.
 
 - [ ] 1.2 Подключить `repeat_guard: GatewayRepeatGuardSettings | None = None`
-  в `GatewaySettings` (`lib/core/project_settings.py:218-264`).
+  в `GatewaySettings` (`lib/core/project_settings.py`; класс начинается
+  со строки 253 — прежняя ссылка «218-264» устарела).
   **Verify:** `python -c "from lib.core.project_settings import
   GatewaySettings; print(GatewaySettings().repeat_guard)"` печатает
   `None` (новые ключи опциональны).
@@ -161,7 +177,7 @@
 
 ## 5. Финализация
 
-- [ ] 5.1 `openspec.cmd validate repeat-guard-hook` — exit 0,
+- [ ] 5.1 `openspec validate repeat-guard-hook` — exit 0,
   в выводе нет `FAIL`/`ERROR`. **Verify:** команда возвращает 0.
 
 - [ ] 5.2 `pytest tests/test_repeat_guard_hook.py
@@ -173,3 +189,5 @@
   `python -m pytest tests/ -q --collect-only | grep -c "::"` —
   число собранных тестов ≥ 3603, нет import-циклов.
   **Verify:** число ≥ 3603, exit 0.
+  **Ориентир на 2026-10-08:** собирается 3812 тестов, import-ошибок нет,
+  то есть порог ещё держится; при изменении кода пересчитать.
