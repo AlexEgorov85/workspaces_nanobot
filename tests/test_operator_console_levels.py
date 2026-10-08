@@ -272,7 +272,18 @@ def test_single_level_replaces_the_boolean_flags():
 
     # Таблица перехода — в консоли, и она ИМЕННО про переход, а не про чтение.
     assert set(oc.LEGACY_FLAG_LEVELS) == set(LEGACY_FLAGS)
-    assert "settings_section" not in _code_without_docstrings(Path(oc.__file__))
+
+    # Чтение объявления живёт в ВЛАДЕЛЬЦЕ. Прежний страж требовал обратного —
+    # «operator_console не читает конфиг», — и это было верно только пока
+    # читателем был ``lib/utils/logging_utils.py``: тогда значение читалось в
+    # двух модулях и расхождение решал тот, кто прочитал позже. Решение
+    # владельца (change ``close-console-level-canon-gap``) сделало владельцем
+    # сам ``operator_console``, поэтому чтение ``settings_section`` в нём —
+    # требуемое свойство, а не нарушение.
+    assert "settings_section" in _code_without_docstrings(Path(oc.__file__)), (
+        "владелец обязан сам читать объявление gateway.console_level; "
+        "читать его должен ровно один модуль, и это он"
+    )
 
 
 def test_level_maps_worker_activity_to_turn():

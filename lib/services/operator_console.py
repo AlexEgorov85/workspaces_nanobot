@@ -179,7 +179,10 @@ def normalize_console_level(value: Any) -> str:
         f"gateway.{CONSOLE_LEVEL_KEY}={value!r} — недопустимая глубина вывода. "
         f"Допустимо: {' | '.join(CONSOLE_LEVELS)}. "
         f"Глубина объявляется ОДНИМ ключом: четыре булева флага "
-        f"({', '.join(sorted(LEGACY_FLAG_LEVELS))}) больше не выбирают вывод."
+        f"({', '.join(sorted(LEGACY_FLAG_LEVELS))}) больше не выбирают вывод. "
+        f"Значение {DEFAULT_CONSOLE_LEVEL!r} подставлено не будет: оно "
+        f"объявлено как ОТСУТСТВИЕ объявления, а не как замена объявленного — "
+        f"иначе оператор считал бы с экрана не то, что задал."
     )
 
 
@@ -228,6 +231,49 @@ def legacy_flag_warnings(gateway_settings: dict[str, Any] | None) -> list[str]:
             f"начнёт описывать уже не тот вывод."
         )
     return warnings
+
+
+def resolve_console_level(
+    gateway_settings: dict[str, Any] | None = None,
+) -> tuple[str, list[str]]:
+    """ЕДИНСТВЕННЫЙ владелец объявленной глубины вывода.
+
+    ``gateway.console_level`` читается здесь и больше нигде.
+    :mod:`lib.utils.logging_utils` — **потребитель** этого значения, а не
+    второй читатель конфига. Читателей было два, и расхождение между ними
+    разрешалось тем, кто прочитал позже: молча и без объявления. Ровно тот
+    класс дефекта, из-за которого окружение однажды затерло объявление.
+
+    Args:
+        gateway_settings: Готовая секция ``gateway`` (``None`` — прочитать
+            самому; это путь боевого старта).
+
+    Returns:
+        ``(глубина, предупреждения о старых булевых ключах)``.
+
+    Raises:
+        ConfigurationError: объявленное значение недопустимо либо конфиг
+            недоступен. И то и другое — отказ, а не молчаливая подмена
+            дефолтом: оператор, объявивший глубину и получивший ``turn``,
+            узнал бы об этом только из молчания консоли.
+    """
+    if gateway_settings is None:
+        try:
+            from lib.services.config_service import ConfigService
+
+            gateway_settings = ConfigService().settings_section("gateway") or {}
+        except Exception as exc:
+            raise ConfigurationError(
+                f"Не удалось прочитать объявление "
+                f"gateway.{CONSOLE_LEVEL_KEY}: {type(exc).__name__}: {exc}. "
+                f"Процесс не станет молча печатать на "
+                f"{DEFAULT_CONSOLE_LEVEL!r} — это объявило бы глубину, "
+                f"которой не объявлял никто."
+            ) from exc
+    return (
+        console_level_of(gateway_settings),
+        legacy_flag_warnings(gateway_settings),
+    )
 
 
 def set_console_level(level: Any) -> str:

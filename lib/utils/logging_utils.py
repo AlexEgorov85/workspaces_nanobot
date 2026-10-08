@@ -230,7 +230,9 @@ def configure_loguru(
         env_var: Имя переменной окружения, куда продублировать уровень
             (``os.environ.setdefault`` — не перезатирает уже заданное).
         console_level: Объявленная глубина вывода консоли
-            (``gateway.console_level``). ``None`` — прочитать из конфига.
+            (``gateway.console_level``). ``None`` — спросить владельца
+            значения (:func:`lib.services.operator_console.resolve_console_level`),
+            который читает объявление; этот модуль конфиг не читает.
             НЕ выводится повышением ``level``: глубина и уровень логгера —
             разные ручки, иначе факт простоя (сегодня DEBUG) пришлось бы
             поднимать до DEBUG целиком.
@@ -248,25 +250,35 @@ def configure_loguru(
         import os
 
         os.environ.setdefault(env_var, str(level))
-    try:
-        if console_level is None:
-            from lib.services.config_service import ConfigService
+    if console_level is None:
+        # Потребитель, а не второй читатель конфига: значение приносит
+        # владелец — operator_console.resolve_console_level. Раньше этот
+        # модуль сам поднимал ConfigService и читал gateway.console_level,
+        # а отказ владельца глотал ``except Exception``, подставляя дефолт.
+        from lib.services.operator_console import resolve_console_level
+
+        try:
+            console_level, warnings = resolve_console_level()
+        except Exception as exc:
+            # Отказ объявляется, а не проглатывается, и называет оба
+            # источника: объявленный ключ и дефолт, на котором процесс
+            # вынужден печатать, чтобы сообщение об отказе было видно.
             from lib.services.operator_console import (
-                console_level_of,
-                legacy_flag_warnings,
+                DEFAULT_CONSOLE_LEVEL,
+                CONSOLE_LEVEL_KEY,
             )
 
-            gateway_settings = ConfigService().settings_section("gateway") or {}
-            console_level = console_level_of(gateway_settings)
-            warnings = legacy_flag_warnings(gateway_settings)
-    except Exception:
-        from lib.services.operator_console import (
-            DEFAULT_CONSOLE_LEVEL,
-            set_console_level,
-        )
-
-        console_level = DEFAULT_CONSOLE_LEVEL
-        warnings = []
+            refusal = (
+                f"✗ gateway.{CONSOLE_LEVEL_KEY}: {exc} "
+                f"Печать продолжается на {DEFAULT_CONSOLE_LEVEL!r} — это НЕ "
+                f"объявленная глубина."
+            )
+            print(refusal, file=sys.stderr, flush=True)
+            warnings = [
+                f"Глубина вывода НЕ объявлена: {exc} Печать на "
+                f"{DEFAULT_CONSOLE_LEVEL!r} — подстановка, а не объявление."
+            ]
+            console_level = DEFAULT_CONSOLE_LEVEL
     try:
         from loguru import logger
 
