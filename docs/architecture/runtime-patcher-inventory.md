@@ -66,7 +66,8 @@ runtime patch'ом — это отдельный loader
 и e2e-класс `TestGrepBlindToLargeFilesE2E`.
 
 Колонка и каталог внесены в рамках openspec change
-[`enterprise-mcp-platform`](../../openspec/changes/enterprise-mcp-platform/).
+[`enterprise-mcp-platform`](../../openspec/changes/archive/2026-10-08-enterprise-mcp-platform/) —
+архив даёт каталогу дату, поэтому имя больше не совпадает с исходным.
 **Доказательная база по каждому пункту — в
 [`nanobot-reuse-catalog.md`](nanobot-reuse-catalog.md).** Перед добавлением
 нового патча каталог просматривается обязательно: он отвечает на вопрос
