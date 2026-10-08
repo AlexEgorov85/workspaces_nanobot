@@ -39,12 +39,14 @@
 жив (`lib/utils/db.py:35`) и поднимается в composition root
 (`lib/core/application_context.py:2021`), но очередью он не владеет; его
 потребители — другие подсистемы, и снять пул нельзя до задач 2.1–2.3 change'а
-`openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`. Не доведены
-также: батч в цикле опроса — канал по-прежнему берёт одну задачу за тик
-(`lib/channels/postgres_channel.py:1094`), и объявление имени таблицы в
-`config.json` (`config.json:232`), которое больше ничего не выбирает
-(`openspec/changes/2026-10-04-task-queue-channel-switch/tasks.md:98`).
-Ниже описано целевое состояние, а не достигнутое.
+`openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`. Не доведён
+батч в цикле опроса: канал по-прежнему берёт одну задачу за тик
+(`lib/channels/postgres_channel.py:1094`) — это отдельная работа про
+конкурентность и лимиты слота, а не путь вызова. Объявление имени таблицы в
+`config.json` (`config.json:232`) остаётся намеренно: канал читает его как
+диагностическую подпись, чтобы оператор видел расхождение своего объявления с
+профилем платформы (`lib/channels/postgres_channel.py:144-157`), и ничего не
+выбирает (`openspec/changes/archive/2026-10-04-task-queue-channel-switch/tasks.md`).
 
 ## Requirements
 
@@ -485,17 +487,20 @@ MUST NOT выглядеть как пустая очередь. Иначе ка�
 **Что из этого ещё не доведено.** Батч доступен, но в цикл опроса не введён:
 канал берёт одну задачу за тик (`lib/channels/postgres_channel.py:1094`), и это
 отдельная работа про конкурентность и лимиты слота
-(`openspec/changes/2026-10-04-task-queue-channel-switch/tasks.md:94`).
-`config.json::channels.postgres.table_name` остался объявленным и ничего не
-выбирает (`config.json:232`) — снимать его логично вместе со сносом пула агента.
+(`openspec/changes/archive/2026-10-04-task-queue-channel-switch/tasks.md`).
+`config.json::channels.postgres.table_name` объявлен и ничего не выбирает
+(`config.json:232`) — **оставлен намеренно**: канал читает его как
+диагностическую подпись, чтобы расхождение объявления оператора с профилем
+платформы было видно, а не молчало
+(`lib/channels/postgres_channel.py:144-157`).
 Пул `lib/utils/db` жив (`lib/utils/db.py:35`, старт —
 `lib/core/application_context.py:2021`), и очередью он не владеет: его снос
 заблокирован задачами 2.1–2.3 change'а
 `openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`. Переключатель
-пути не объявлен намеренно: второго пути в дереве нет, а объявлять ключ, которому
-не соответствует ни одна строка кода, — обещание без исполнения; вопрос об
-откатной страховке вынесен владельцу и не решён молча
-(`openspec/changes/2026-10-04-task-queue-channel-switch/tasks.md:84`).
+пути не объявлен **решением владельца**: второго пути в дереве нет, а объявлять
+ключ, которому не соответствует ни одна строка кода, — обещание без исполнения;
+откатная страховка, если понадобится, оформляется отдельным change'ем
+(`openspec/changes/archive/2026-10-04-task-queue-channel-switch/tasks.md`).
 
 ## Verification
 

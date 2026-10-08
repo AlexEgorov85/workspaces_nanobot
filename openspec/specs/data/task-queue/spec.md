@@ -31,14 +31,18 @@
 `fetchone`, `transaction` (`lib/utils/db.py:35`), поднимается и останавливается
 в composition root (`lib/core/application_context.py:2021`,
 `lib/core/application_context.py:2031`), а настраивается при старте хранилища
-сессий (`lib/services/session_storage.py:188`). Его потребители не переведены
-на операции платформы: это шаг 3, объявленный, но не выполненный
-(`openspec/changes/2026-10-04-task-queue-platform-ops/tasks.md:99`). Пул нельзя
-удалить до закрытия задач 2.1–2.3 change'а
+сессий (`lib/services/session_storage.py:188`). Пул нельзя удалить до закрытия
+задач 2.1–2.3 change'а
 `openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`: пула-переёмчика
-в агенте нет, а `start()` выполняется до входа в живой loop. Шаг 4 — удаление
-tombstone'ов `_claim_task.py` / `_update_task_status.py` — тоже не выполнен
-(`openspec/changes/2026-10-04-task-queue-platform-ops/tasks.md:100`).
+в агенте нет, а `start()` выполняется до входа в живой loop.
+
+Шаги 3 и 4 раскладки queue-перехода **выполнены** — сверено с деревом, а не с
+чекбоксами change'а: `workspace/utils/db.py` удалён, tombstone'ов
+`_claim_task.py` / `_update_task_status.py` в дереве нет
+(`openspec/changes/archive/2026-10-04-task-queue-platform-ops/tasks.md`).
+Перенос потребителей **агентского** пула на операции платформы — не тот же
+предмет и не сделан: пул обслуживает собственные таблицы агента, и его судьба
+ведётся в `2026-10-04-utils-db-pool-removal`.
 
 ## Requirements
 
@@ -465,12 +469,13 @@ Capability `data` отвечает за шесть операций самой �
   (`settings.py:1350`).
 
 **Что из этого ещё не доведено.** Операции реализованы, и очередь ими
-обслуживается. Не реализованы шаги 3 и 4 общей раскладки: перенос потребителей
-агентского пула на операции платформы и удаление tombstone'ов
-`_claim_task.py` / `_update_task_status.py`
-(`openspec/changes/2026-10-04-task-queue-platform-ops/tasks.md:99`). Снять
-агентский пул нельзя раньше задач 2.1–2.3 change'а
-`openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43` — там же
+обслуживается. Шаги 3 и 4 общей раскладки выполнены: `workspace/utils/db.py`
+удалён, tombstone'ов `_claim_task.py` / `_update_task_status.py` в дереве нет
+(`openspec/changes/archive/2026-10-04-task-queue-platform-ops/tasks.md`).
+Не сделан снос агентского пула — он обслуживает собственные таблицы агента, а не
+очередь, и его судьба ведётся в `2026-10-04-utils-db-pool-removal`: снять его
+нельзя раньше задач 2.1–2.3
+(`openspec/changes/2026-10-04-utils-db-pool-removal/tasks.md:43`) — там же
 записано, почему: пула-переёмчика в агенте нет, а `start()` вызывается до
 `asyncio.run`. Пока это не сделано, «единственный владелец записи в таблицу
 задач» верно для таблицы задач и неверно для процесса в целом.
