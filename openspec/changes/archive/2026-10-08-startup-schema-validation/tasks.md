@@ -1,3 +1,20 @@
+> **Состояние на момент архивации (2026-10-08).** Чекбоксы ниже не
+> проставлены: работа выполнена и заведена в канон напрямую —
+> `lib/services/schema_validation.py`, `StartupSchemaValidationSettings`
+> в `lib/core/project_settings.py`, `AGENTS.md`, `COMPONENTS.md`,
+> CHANGELOG и 37 тестов в трёх файлах (`test_schema_validation.py`,
+> `test_application_context_schema_validation.py`,
+> `test_gateway_entrypoint_schema_validation.py`, все зелёные).
+> Протух только `tasks.md`.
+>
+> Change закрыт с `--skip-specs`: канон
+> `openspec/specs/runtime/startup-schema-validation/spec.md` оказался
+> **новее дельты** — в нём `utils.db` вместо `workspace.utils.db`,
+> `OperationalError` вместо `DatabaseUnavailableError` и фильтр
+> `table_type = 'BASE TABLE'`, которых в дельте нет. Перенос дельты
+> откатил бы более точный канон, поэтому спеки не применялись; сама
+> спека в каноне уже присутствует.
+
 ## 1. Сервис и типы
 
 - [ ] 1.1 Создать `lib/services/schema_validation.py` с типами
