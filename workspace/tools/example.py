@@ -25,8 +25,8 @@
 
   Чтение кастомных настроек идёт через ``ctx._settings_ref`` (полный
   pydantic-объект ``Settings``, который кладёт туда
-  ``RuntimePatcher.patch_project_tools``). Это общий путь для
-  ``compact_context`` (``gateway.compact.*``).
+  ``lib/services/project_tool_loader.py::register_project_tools``). Это общий
+  путь для ``compact_context`` (``gateway.compact.*``).
   Секции под наши tool'ы естественно класть под ``tools.<config_key>``
   (там, где их уже ищет пользователь в ``config.json``).
 """

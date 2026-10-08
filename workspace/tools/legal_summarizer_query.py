@@ -1,7 +1,7 @@
 """``legal_summarizer_query`` — follow-up tool по сохранённой operation_id.
 
-Регистрируется автоматически через ``RuntimePatcher.patch_project_tools``
-(см. ``lib/services/runtime_patcher.py``).
+Регистрируется автоматически через
+``lib/services/project_tool_loader.py::register_project_tools``.
 
 Зачем: без этого tool'а агент на follow-up вопрос ("сколько статей?",
 "какие разделы?", "что в чанке 12?") вынужден перепарсить PDF через

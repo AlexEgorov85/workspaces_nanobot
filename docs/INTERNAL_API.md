@@ -151,13 +151,13 @@ Reference: `nanobot/agent/tools/image_generation.py`
 
 | Источник | Как подхватывается |
 |---|---|
-| **`workspace/tools/*.py`** | `RuntimePatcher.patch_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (модуль грузится под именем `workspace.tools.<name>`, без зависимости от наличия `__init__.py`). |
+| **`workspace/tools/*.py`** | `lib/services/project_tool_loader.py::register_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (модуль грузится под именем `workspace.tools.<name>`, без зависимости от наличия `__init__.py`). Вызывается из `ApplicationContext.create()` сразу после `RuntimePatcher.apply_all()`; самостоятельного метода `RuntimePatcher.patch_project_tools` в проекте нет. |
 | **Внешние pip-плагины** | `entry_points(group="nanobot.tools")` в `pyproject.toml` пакета. Встроенный `ToolLoader._discover_plugins` (`nanobot/agent/tools/loader.py:62`) подхватывает их автоматически. |
 | **Тесты/явная регистрация** | `agent.tools.register(MyTool(...))` напрямую (для unit-тестов или особых сценариев DI). |
 
 ### `ToolContext` и DI
 
-`RuntimePatcher.patch_project_tools` собирает `ToolContext` из полей
+`lib/services/project_tool_loader.py::register_project_tools` собирает `ToolContext` из полей
 `AgentLoop` тем же способом, что `AgentLoop._register_default_tools`
 (`loop.py:597-630`):
 
@@ -200,7 +200,7 @@ setattr(ctx, "_agent_ref", agent)   # для tool'ов, которым нуже�
 
 ### Конфликты имён
 
-`patch_project_tools` пропускает tool, если `agent.tools.get(name)`
+`register_project_tools` пропускает tool, если `agent.tools.get(name)`
 уже возвращает не-`None` (т.е. встроенный loader его зарегистрировал
 первым через `_register_default_tools`). Это страхует от случайного
 затирания встроенных tool'ов.
@@ -264,9 +264,10 @@ class MyTool(Tool):
 
 ### Отладка
 
-`RuntimePatcher.apply_all` пишет результат `patch_project_tools` в
-`PatchReport` (логируется через loguru): `"3 project tools
-registered: foo, bar, baz; skipped: qux (disabled by config)"`.
+`register_project_tools` возвращает `ProjectToolsLoadResult` и логирует его `detail`
+через loguru (`"Custom (project) tools: 3 project tools registered: foo, bar, baz;
+1 disabled by config: qux"`). В `PatchReport` от `RuntimePatcher.apply_all()`
+эти сведения не попадают — loader отделён от monkey-patch'ей намеренно.
 
 Если tool не регистрируется — проверьте:
 1. `cls.__module__` начинается с `workspace.tools.` (имена в

@@ -327,7 +327,7 @@ Concrete adapter (например, `DuckDbCacheStore`) сам реализуе�
 - `lib/services/cache_provider_impl.py` — DuckDB + FAISS реализация
 - `lib/services/duckdb_cache_store.py:DuckDbCacheStore` — низкоуровневый слой DuckDB
 - `lib/services/pg_duckdb_sync_service.py:PgDuckDbSyncService` — инкрементальный sync PG → DuckDB
-- `lib/services/vector_index_service.py:VectorIndexService` — сборка FAISS-индексов
+- `lib/services/vector_index_service.py:VectorIndexBuildService` — сборка FAISS-индексов
 - `lib/services/table_registry.py:TableRegistry` — реестр таблиц для синхронизации
 - `tools/build_vectors.py` — CLI для сборки FAISS-индексов
 
@@ -375,7 +375,7 @@ CacheProvider хранит:
 ## Consumers
 
 - Skills (через `CacheProvider`) — SQL-запросы и vector search.
-- `VectorIndexService` (через `search_vector`).
+- `VectorIndexBuildService` (через `search_vector`).
 - Инфраструктурные сервисы (`ApplicationContext` для refresh/preload).
 - `tools/build_vectors.py` — сборка FAISS-индексов.
 - Тесты (`tests/test_duckdb_cache_store.py`, `tests/test_pg_duckdb_sync_service.py`).
@@ -388,7 +388,7 @@ CacheProvider хранит:
 - `lib/services/cache_provider_impl.py` — DuckDB + FAISS реализация интерфейса
 - `lib/services/duckdb_cache_store.py:DuckDbCacheStore`
 - `lib/services/pg_duckdb_sync_service.py:PgDuckDbSyncService`
-- `lib/services/vector_index_service.py:VectorIndexService`
+- `lib/services/vector_index_service.py:VectorIndexBuildService`
 
 Связанные компоненты:
 

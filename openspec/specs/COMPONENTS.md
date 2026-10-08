@@ -53,7 +53,7 @@
 | Компонент | Реализация | Спецификация | Статус |
 |-----------|------------|--------------|--------|
 | CacheProvider | `lib/services/cache_provider.py:CacheProvider` | [`data/cache-provider`](data/cache-provider/spec.md) | partial |
-| VectorIndexService | `lib/services/vector_index_service.py:VectorIndexService` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
+| VectorIndexBuildService | `lib/services/vector_index_service.py:VectorIndexBuildService` | [`data/vector-indexes`](data/vector-indexes/spec.md) | partial |
 
 ### Documentation
 

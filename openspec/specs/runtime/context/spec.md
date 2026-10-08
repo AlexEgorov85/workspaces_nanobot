@@ -37,7 +37,7 @@ Runtime Context отвечает за:
 
 ApplicationContext предоставляет:
 - единый корень сборки runtime-сервисов
-- доступ к ConfigService, CacheProvider, VectorIndexService
+- доступ к ConfigService, CacheProvider, VectorIndexBuildService
 - детерминированный lifecycle (start/stop)
 - изоляцию от session state
 
@@ -235,7 +235,7 @@ patches: `start()` их не применяет, ни прямо, ни косв�
 ApplicationContext хранит ссылки на:
 - ConfigService
 - CacheProvider
-- VectorIndexService
+- VectorIndexBuildService
 - другие infrastructure сервисы
 
 НЕ хранит:
@@ -269,7 +269,7 @@ ApplicationContext хранит ссылки на:
 Связанные компоненты:
 - `lib/services/config_service.py:ConfigService`
 - `lib/services/cache_provider.py:CacheProvider`
-- `lib/data/vector_index_service.py:VectorIndexService`
+- `lib/services/vector_index_service.py:VectorIndexBuildService`
 
 ## Verification
 

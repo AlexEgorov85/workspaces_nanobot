@@ -40,7 +40,7 @@ MessageBus                  → компонент
 PostgresChannel             → компонент
 RedisChannel                → компонент
 CacheProvider               → компонент
-VectorIndexService          → компонент
+VectorIndexBuildService     → компонент
 DbLoggingService            → компонент
 RuntimePatcher              → компонент
 AgentFactory                → компонент

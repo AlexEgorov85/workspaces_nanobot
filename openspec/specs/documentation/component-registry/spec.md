@@ -68,7 +68,7 @@
 - `configuration` — конфигурация (`ConfigService`, profiles)
 - `channels` — каналы коммуникации (`PostgresChannel`, `RedisChannel`)
 - `sessions` — управление сессиями (`PostgresSessionManager`)
-- `data` — данные, кеш, векторы (`CacheProvider`, `VectorIndexService`)
+- `data` — данные, кеш, векторы (`CacheProvider`, `VectorIndexBuildService`)
 - `observability` — логирование, мониторинг (`DatabaseLogging`, `EventLogging`)
 - `infrastructure` — инфраструктура (`RuntimePatcher`, Hooks, SubprocessManagement)
 - `interfaces` — интерфейсы (CLI, Gateway, Streamlit)

@@ -1,7 +1,10 @@
 """Кастомные tool'ы проекта (auto-discover).
 
-Модули в этой директории сканируются ``RuntimePatcher.patch_project_tools``
-после старта ``AgentLoop``. Каждый модуль может экспортировать tool-классы
+Модули в этой директории сканируются
+``lib/services/project_tool_loader.py::register_project_tools``
+после старта ``AgentLoop`` (вызов из ``ApplicationContext.create()``;
+отдельного ``RuntimePatcher.patch_project_tools`` в проекте нет).
+Каждый модуль может экспортировать tool-классы
 — наследники ``nanobot.agent.tools.base.Tool``.
 
 Конвенции (см. ``workspace/tools/example.py`` как reference и

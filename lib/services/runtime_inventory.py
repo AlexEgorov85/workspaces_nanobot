@@ -247,7 +247,7 @@ def diff_project_tools(
 
     Args:
         registered: tool'ы, успешно зарегистрированные (``detail`` из
-            ``patch_project_tools`` — секция до ``; ``).
+            ``register_project_tools`` — секция до ``; ``).
         skipped_disabled: tool'ы, отключённые конфигом (``detail`` —
             секция ``disabled by config``). Required tool, попавший сюда,
             попадает в ``disabled_required`` (конфиг выключил обязательный

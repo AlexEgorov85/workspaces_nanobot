@@ -3,9 +3,10 @@
 Три входа — один путь записи (заметка в ``agent_conversation_messages``,
 loguru INFO, опциональный Rich-вывод в терминал gateway):
 
-  1. **Ручной запуск**: slash-команда ``/compact``
-     (``lib/commands/compact_command.py`` + регистрация
-     ``RuntimePatcher.patch_compact_command``), CLI-команда ``/compact``
+  1. **Ручной запуск**: upstream slash-команда ``/compact``
+     (``nanobot/command/builtin.py::cmd_compact``, handler не оборачивается —
+     monkey-patch'а ``RuntimePatcher.patch_compact_command`` в проекте нет),
+     CLI-команда ``/compact``
      (``lib/cli/console_loop.py::_run_cli_compact``) или tool агента
      ``compact_context`` (``workspace/tools/compact_context.py``).
      Метод :py:meth:`compact` сам зовёт штатный ``Consolidator`` из

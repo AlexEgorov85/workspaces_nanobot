@@ -189,8 +189,8 @@ cross-user выдачи; без identity-store возвращается `missing
 
 **Changed.** Единый logging pipeline: `workspace/utils/event_log.py` удалён,
 `DbLoggingService` — единственный writer в `agent_gateway_logs` /
-`agent_question_runs`; `/compact` переведён на upstream-обработчик
-(`ContextCompactionService` + `RuntimePatcher.patch_compact_command`).
+`agent_question_runs`; `/compact` использует upstream-обработчик без обёртки
+(`ContextCompactionService`, наблюдение — через `CompactionEventSubscriber`).
 
 Полный changelog — в [CHANGELOG.md → Unreleased](CHANGELOG.md#unreleased).
 

@@ -37,7 +37,7 @@ Vector Indexes отвечают за:
 
 ## Public Contract
 
-VectorIndexService предоставляет:
+VectorIndexBuildService предоставляет:
 - загрузку конфигурации индексов из project.json
 - сборку FAISS индексов через build_vectors.py
 - поиск по векторному сходству через CacheProvider.search_vector
@@ -189,7 +189,7 @@ VectorIndexService предоставляет:
 ## Dependencies
 
 - `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные принципы
-- `lib/services/vector_index_service.py:VectorIndexService` — реализация
+- `lib/services/vector_index_service.py:VectorIndexBuildService` — реализация
 - `tools/build_vectors.py` — сборка индексов
 - FAISS library — vector index engine
 - `lib/services/cache_provider.py:CacheProvider` — доступ к поиску
@@ -229,7 +229,7 @@ VectorIndexService предоставляет:
 
 ## State
 
-VectorIndexService хранит:
+VectorIndexBuildService хранит:
 - конфигурацию индексов
 - пути к FAISS файлам
 - статус последней сборки
@@ -256,7 +256,7 @@ VectorIndexService хранит:
 ## Implementation
 
 Основная реализация:
-- `lib/services/vector_index_service.py:VectorIndexService`
+- `lib/services/vector_index_service.py:VectorIndexBuildService`
 
 Связанные компоненты:
 - `tools/build_vectors.py` — сборка индексов

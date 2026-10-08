@@ -111,17 +111,48 @@ shutdown, который показывает код, не происходит.
 
 ### 3.5 Ссылки на несуществующие классы в каноне и реестре
 
-- `openspec/specs/data/vector-indexes/spec.md:272` — путь `lib/data/vector_index_service.py` (нет такого).
-- `openspec/specs/COMPONENTS.md:56` — `lib/services/vector_index_service.py:VectorIndexService`;
-  фактический класс — `VectorIndexBuildService` (`lib/services/vector_index_service.py:41`).
+Класс в коде называется `VectorIndexBuildService` (`lib/services/vector_index_service.py:41`),
+а имя `VectorIndexService` осталось в **12 местах** нормативных документов:
 
-### 3.6 `AGENTS.md` ссылается на методы, которых нет
+- `openspec/specs/COMPONENTS.md:56` — и как имя компонента, и как указатель реализации;
+- `openspec/specs/data/vector-indexes/spec.md:40,192,232,259`;
+- `openspec/specs/data/cache-provider/spec.md:330,378,391`;
+- `openspec/specs/runtime/context/spec.md:40,238,272`;
+- `openspec/specs/documentation/component-registry/spec.md:71`;
+- `openspec/specs/architecture/component-model/spec.md:43` (список имён компонентов).
 
-`AGENTS.md:42` — «регистрируется через `RuntimePatcher.patch_project_tools`»,
-`AGENTS.md:43` — «Расширение — `RuntimePatcher.patch_compact_command`».
+Отдельно: `runtime/context/spec.md:272` указывал путь `lib/data/vector_index_service.py`,
+которого нет (правильный — `lib/services/vector_index_service.py`).
+
+> Поправка к первой редакции отчёта: путь `lib/data/…` приписывался специ
+> `data/vector-indexes` — там путь был корректным, и ошибалось только имя класса.
+
+### 3.6 Документация называет механизм, которого нет
+
 Определений `def patch_project_tools` / `def patch_compact_command` в `lib/` — **0**.
-Регистрацию tool'ов делает `lib/services/project_tool_loader.py`, и в той же строке 23
-AGENTS.md это уже утверждает — файл внутренне противоречив.
+Реально существуют `lib/services/project_tool_loader.py::register_project_tools`
+и `lib/services/compaction_event_subscriber.py::CompactionEventSubscriber`,
+который кормит канал на upstream-событии `ContextCompactionEvent`.
+
+Устаревшее имя было не в двух строках `AGENTS.md`, а **в 15 местах** живых документов
+и исходников, включая шаблон для новых tool'ов:
+
+- `AGENTS.md:42,43`;
+- `README.md:193`;
+- `docs/INTERNAL_API.md:154,160,203,267`;
+- `docs/ARCHITECTURE.md:258,265,469-472,492,676,1372,1590`;
+- `lib/services/context_compaction.py:7-8` (docstring модуля);
+- `lib/services/runtime_inventory.py:250`;
+- `workspace/tools/__init__.py:3`, `workspace/tools/example.py:28`,
+  `workspace/tools/legal_summarizer_query.py:3`.
+
+`workspace/tools/example.py` — самый дорогой случай: это reference для автора нового
+tool'а, и он отправлял его искать несуществующий метод.
+
+Упоминания в `lib/services/project_tool_loader.py:3,148`,
+`lib/services/runtime_patcher.py:14-16` и в `tests/*` — **корректный** audit-trail
+(«было раньше, вынесено в …»), их трогать нельзя: гвард
+`tests/test_runtime_patcher_no_project_tools_boundary.py` явно допускает docstring-упоминания.
 
 ---
 
@@ -183,12 +214,18 @@ AGENTS.md это уже утверждает — файл внутренне п�
 Файл (`sql/README.md`, 209 строк) перечисляет все 6 DDL в дереве каталога (строки 28-49), но
 сам раздел и команда `python tools/apply_test_profile_tables.py` не упомянуты ни разу.
 
-### 4.7 Битые ссылки в `AGENTS.md`
+### 4.7 Ссылка в `AGENTS.md` на несуществующую спеку
 
-- `AGENTS.md:138` — `profiles/test.json`; фактический файл — `profiles/test.jsonc`
-  (что подтверждает и docstring `tools/apply_test_profile_tables.py:3`).
-- `AGENTS.md` ссылается на спеку `openspec/specs/runtime/startup-vector-preload-gate`, которой нет:
-  change `startup-vector-preload-gate` не архивирован (24 задачи из 26 выполнены).
+`AGENTS.md` ссылался на спеку `openspec/specs/runtime/startup-vector-preload-gate`, которой нет:
+change `startup-vector-preload-gate` не архивирован (24 задачи из 26 выполнены), норма живёт
+в его дельте. Агент, читающий инструкции, получал ссылку в пустоту.
+
+> Поправка к первой редакции отчёта: там же было заявлено, что `AGENTS.md:138` указывает
+> `profiles/test.json` вместо `profiles/test.jsonc`. Это была ошибка моего же скрипта:
+> регулярка `[A-Za-z0-9_./\-]+(?:\.py|\.md|\.json|…)` съела `profiles/test.jsonc` префиксом
+> `profiles/test.json`. В файле указано верно `.jsonc`. Класс дефекта полезно запомнить:
+> **искомая ссылка может быть подстрокой существующей** — «файл не найден» по такой проверке
+> не означает «файла нет».
 
 ### 4.8 `docs/README.md` описывает спеки неверно
 
