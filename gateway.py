@@ -177,9 +177,16 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
                     _candidate.unlink(missing_ok=True)
                 except OSError:
                     pass
-        ctx.sync_service.set_on_new_records_callback(
-            ctx.cache_store.upsert_records
-        )
+        # Колбэк upsert НЕ переустанавливаем: его уже выставил
+        # ``_make_sync_services`` как PK-aware обёртку
+        # (``_upsert_with_pk``), которая резолвит PK источника и передаёт
+        # ``key_column=sync.key_column_for(table)``. Простая замена на
+        # ``cache_store.upsert_records`` откатывала бы её к дефолту
+        # ``key_column=None`` — и таблицы с PK не ``id``
+        # (``public.agent_predefined_scripts`` с PK ``name``) уходили бы в
+        # ветку пересоздания, которая для дельты от ``_fetch_incremental``
+        # удаляет несвязанные строки. Назначение колбэков — контракт
+        # composition root'а, а не callers'а.
         # Сохраняем оригинальный callback и подменяем на обёртку,
         # которая публикует снимок DuckDB в publish_path после каждого
         # цикла синхронизации и выставляет сигнал готовности данных.
