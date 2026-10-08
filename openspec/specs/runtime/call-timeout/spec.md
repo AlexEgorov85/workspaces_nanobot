@@ -21,8 +21,8 @@
   разными сообщениями — на равенстве разницы в числе не существует, и
   называть её было бы выдумкой.
 
-Объявленные значения сегодня: модельная нога — `180` (`config.json:868`),
-фоновая — `180.0` (`config.json:762`), платформенный бюджет — `120.0`
+Объявленные значения сегодня: модельная нога — `720` (`config.json:868`),
+фоновая — `720.0` (`config.json:762`), платформенный бюджет — `660.0`
 (`mcp-platform/platform.json:42`). Запас в 60 с на каждой ноге объявлен в
 `config.json` явно, и величина его не выводится из измерений: замеров
 длительности операций в репозитории нет.
@@ -267,9 +267,12 @@ Capability отвечает за единственный инвариант, к
 
 | Ключ | Смысл | Кто применяет |
 |---|---|---|
-| `config.json → tools.mcpServers.enterprise.tool_timeout` | потолок модельной ноги, `180` | `nanobot/agent/tools/mcp.py:632-642` |
-| `config.json → gateway.agent.enterprise_mcp.tool_timeout_sec` | потолок фоновой ноги, `180.0` | `lib/services/enterprise_mcp_client.py:1500-1501` |
-| `mcp-platform/platform.json → execution.execution_timeout_sec` | бюджет платформы, `120.0` | конвейер платформы |
+| `config.json → tools.mcpServers.enterprise.tool_timeout` | потолок модельной ноги, `720` | `nanobot/agent/tools/mcp.py:632-642` |
+| `config.json → gateway.agent.enterprise_mcp.tool_timeout_sec` | потолок фоновой ноги, `720.0` | `lib/services/enterprise_mcp_client.py:1500-1501` |
+| `mcp-platform/platform.json → execution.execution_timeout_sec` | бюджет платформы, `660.0` | конвейер платформы |
+| `mcp-platform/platform.json → job_classes.model.statement_timeout_ms` | потолок одной пользовательской работы в пуле, `600000` | `servers/enterprise/capabilities/data/service/main.py:804-819` |
+
+Величины подняты под пользовательскую работу, которая идёт в PostgreSQL и длится до 10 минут. Порядок задан цепочкой сверху вниз, и запас в 60 с сохранился: 720 − 660 = 60. Нижняя величина — потолок самой работы, а не вызова; `job_classes.runtime` остался на 5000 мс, потому что долгих системных работ нет.
 
 Оговорка о коде-владельце величины. У фоновой ноги есть дефолт в коде —
 `DEFAULT_TOOL_TIMEOUT_SEC = 30.0` (`lib/services/enterprise_mcp_client.py:99`),
