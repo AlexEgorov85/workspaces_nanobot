@@ -17,6 +17,21 @@
    change'ом или требование уже лежит в каноне, но ``tasks.md`` об этом не
    знает и продолжает числить задачу открытой.
 
+Что из этого препятствие, а что нет. Прежняя версия складывала в один список
+и препятствия, и признаки состояния, из-за чего отчёт показывал «требуют
+решения 10 из 14» там, где непроходимы были меньше. Разделение:
+
+* **Препятствие** — архив в таком состоянии сделает не то, что ожидают:
+  дельта заводит несуществующую спеку; дельта с операцией ``ADDED`` содержит
+  требование, уже лежащее в каноне (архив добавит второй такой же заголовок);
+  состояние недоказуемо (нет ``tasks.md``).
+* **Признак состояния** — архив ничего не испортит: требования уже применены
+  архивом; требования уже лежат в каноне под операцией ``MODIFIED`` (архив их
+  обновит, дублирования не будет); дельт нет вовсе.
+
+Операция дельты — не украшение: именно она решает, обновит архив канон или
+продублирует его. Поэтому она и разбирается, а не только имя требования.
+
 Инструмент ничего не меняет: он только сообщает. Решение принимает владелец.
 
 Использование::
@@ -88,17 +103,29 @@ def archived_specs() -> dict[str, set[str]]:
     return out
 
 
-def delta_targets(change: Path) -> dict[str, set[str]]:
-    """{'<категория>/<компонент>': {имена требований дельты}}."""
+def delta_targets(change: Path) -> dict[str, dict[str, str]]:
+    """{'<категория>/<компонент>': {имя требования: операция}}.
+
+    Операция возвращается не для красоты: ``MODIFIED`` при уже существующем
+    требовании архив обновляет, а ``ADDED`` — добавит второй заголовок с тем
+    же именем. Без неё эти два случая неразличимы, и оба выглядят в отчёте
+    одинаково.
+    """
     sd = change / "specs"
-    out: dict[str, set[str]] = {}
+    out: dict[str, dict[str, str]] = {}
     if not sd.is_dir():
         return out
     for delta in sorted(sd.rglob("*.md")):
         key = delta.parent.relative_to(sd).as_posix()
-        out.setdefault(key, set()).update(
-            m.group(1).strip() for m in (REQ_RE.match(ln) for ln in _read(delta)) if m
-        )
+        op = "?"
+        for ln in _read(delta):
+            m = OPS_RE.match(ln)
+            if m:
+                op = m.group(1)
+                continue
+            m = REQ_RE.match(ln)
+            if m:
+                out.setdefault(key, {})[m.group(1).strip()] = op
     return out
 
 
@@ -135,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     archived = archived_specs()
     in_components, in_ownership = registered_paths()
 
-    rows: list[tuple[str, str, list[str]]] = []
+    rows: list[tuple[str, str, list[str], list[str]]] = []
     creators: dict[str, list[str]] = {}
 
     for change in sorted(p for p in CHANGES_DIR.iterdir() if p.is_dir()):
@@ -144,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         done, todo, has_tasks = task_counts(change)
         targets = delta_targets(change)
         blockers: list[str] = []
+        notes: list[str] = []
 
         new_paths = sorted(k for k in targets if k not in canon)
         for key in new_paths:
@@ -161,6 +189,16 @@ def main(argv: list[str] | None = None) -> int:
             for name in sorted(names)
             if key in canon and name in canon[key]
         ]
+        # Единственное состояние, где «уже лежит в каноне» — настоящее
+        # препятствие: операция ADDED добавит второй заголовок с тем же
+        # именем, и канон станет противоречивым сам себе. MODIFIED в том же
+        # месте обновляет требование, поэтому дублирования не будет.
+        duplicate = [
+            f"{key.split('/')[-1]}/{name}"
+            for key, names in targets.items()
+            for name, op in sorted(names.items())
+            if op == "ADDED" and key in canon and name in canon[key]
+        ]
 
         if not has_tasks:
             blockers.append("нет tasks.md — состояние недоказуемо")
@@ -176,15 +214,25 @@ def main(argv: list[str] | None = None) -> int:
                 "заготовку без обязательных разделов и без записи в реестрах: "
                 + ", ".join(new_paths)
             )
+        if duplicate:
+            blockers.append(
+                f"архив продублирует требований: {len(duplicate)} — операция "
+                "ADDED, а требование уже есть в каноне (MODIFIED обновляет "
+                "без дубля): " + ", ".join(duplicate[:4])
+            )
         if not targets and not has_tasks:
             blockers.append("нет ни дельт, ни tasks.md — нечего архивировать и нечего проверять")
-        if already:
-            blockers.append(f"требований уже применено архивом: {len(already)}")
-        if in_canon:
-            blockers.append(f"требований уже лежит в каноне: {len(in_canon)}")
         for key in new_paths:
             if key in in_ownership and key not in canon:
                 blockers.append(f"путь {key} упомянут в OWNERSHIP.md, но спеки нет")
+
+        if already:
+            notes.append(f"требований уже применено архивом: {len(already)}")
+        if in_canon:
+            notes.append(f"требований уже лежит в каноне: {len(in_canon)}")
+        if not targets and has_tasks:
+            notes.append("дельт нет — архив перенесёт только proposal.md и tasks.md, "
+                         "канон не изменится")
 
         if not has_tasks:
             state = "БЕЗ tasks.md"
@@ -192,19 +240,21 @@ def main(argv: list[str] | None = None) -> int:
             state = "задачи закрыты"
         else:
             state = f"в работе {done}/{done + todo}"
-        rows.append((change.name, state, blockers))
+        rows.append((change.name, state, blockers, notes))
 
     multi = {k: v for k, v in creators.items() if len(v) > 1}
 
     print("=" * 96)
     print(f"Активных change'ов: {len(rows)}   спеек в каноне: {len(canon)}")
     print("=" * 96)
-    for name, state, blockers in rows:
+    for name, state, blockers, notes in rows:
         if args.blocked and not blockers:
             continue
         print(f"{name:<50} {state}")
         for b in blockers:
-            print(f"    - {b}")
+            print(f"    ! {b}")
+        for n in notes:
+            print(f"    ~ {n}")
 
     if multi:
         print()
@@ -218,8 +268,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    - {o}")
 
     blocked = [r for r in rows if r[2]]
+    ready = [r for r in rows if not r[2] and r[1] == "задачи закрыты"]
     print()
-    print(f"Требуют решения: {len(blocked)} из {len(rows)}; конфликтов за путь спеки: {len(multi)}")
+    print(f"Требуют решения: {len(blocked)} из {len(rows)}; "
+          f"готовы к архивированию: {len(ready)}; "
+          f"конфликтов за путь спеки: {len(multi)}")
     return 1 if blocked else 0
 
 
