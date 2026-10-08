@@ -68,6 +68,19 @@ vectors.indexes`.
 возвращать его публикацию — отдельное решение, у которого должны быть владелец и
 адресат.
 
+Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены к
+тексту канона: тело `MODIFIED`-требования `Hydrated payload берётся из
+DuckDB-снапшота` заменено текстом из `openspec/specs/data/vector-indexes/spec.md` —
+архив при таком состоянии не может ни добавить второй заголовок с тем же
+именем, ни переписать живое требование. Пять требований, объявленных `REMOVED`,
+из дельты сняты целиком: `FAISS-backed`, `FAISS собирается в памяти из
+DuckDB-снапшота`, `Preload health-summary виден оператору и логируется`,
+`Единый источник конфигурации`, `Единый путь доступа` — они живут в каноне, а
+работа change'а не сделана, и архив удалил бы их. Требования, которых в каноне
+нет, дельта не трогает: это работа change'а. Причина — расхождение дельты с
+каноном; незавершённое остаётся в `tasks.md`.
+
+
 ## REMOVED Requirements
 
 ### Requirement: Storage table зарегистрирован через infra API
@@ -78,140 +91,15 @@ vectors.indexes`.
 (`platform.json → vectors.indexes`), и отдельного «storage table», который кто-то
 регистрирует, больше нет.
 
-### Requirement: FAISS-backed
-
-**Reason**: Требование указывало на `tools/build_vectors.py` и
-`lib/services/vector_index_service.py`. Обоих файлов нет. Сборка индекса
-выполняется в платформе, на старте сервера до event loop
-(`servers/enterprise/server.py::_prepare_capabilities` → `ensure_index`),
-владельцем индексов (`mcp-platform/libs/vectors/`), а не отдельной командой
-агента.
-
-### Requirement: FAISS собирается в памяти из DuckDB-снапшота
-
-**Reason**: Требование указывало на `tools/build_vectors.py`,
-`lib/services/vector_index_service.py`, `gateway.vector.index.signature_table`,
-`gateway.vector.index.storage_table` и `gateway.vector.index.default_root`, а также
-допускало оффлайн-источник в локальном кэше `audit_cache.duckdb` — путь на NFS,
-известный как неработоспособный. Ключи конфигурации не читаются, файлов нет,
-локального кэша в дереве агента нет.
-
-Требование содержало **два** намерения, и оба переезжают, а не теряются вместе
-с ним:
-
-- ленивая постройка из источника → `MODIFIED Requirement: Единый источник
-  конфигурации` и `ADDED Requirement: Агент не объявляет состав индексов`;
-- бюджет первичной постройки ≤ 5 секунд (сценарий «Стоимость холодного старта»,
-  `openspec/specs/data/vector-indexes/spec.md:106-109`) → отдельный сценарий
-  «Стоимость первичной постройки» в `ADDED Requirement: Агент не объявляет
-  состав индексов`. Бюджет сохранён, момент уплаты — тоже: платит старт
-  платформы, а не первый пользовательский запрос.
-
-Единственное намерение, которое снимается целиком, — привязка источника к
-`gateway.vector.index.storage_table`: объявление состава теперь принадлежит
-capability `vectors`, а не блоку агента.
-
-Требование «Прогрев индексов при старте» **не снимается этим change'ом**. Оно
-направлено верно — сборка до приёма пользовательских запросов, а не по первому
-поиску, — но адреса в нём устарели: `provider.preload_indexes(db_table)`,
-`gateway.vector.index.indexes.*` и сигнал `READY` от `runtime-health` принадлежат
-миру агента. Правку тела на реализацию платформы делает
-`../2026-10-05-vector-preload-canon/`.
-
-Прежняя формулировка этого пункта утверждала, что постройка ленивая по первому
-поиску, и обосновывала снятие докстрингами `owner.py:8-11` («сборка на старте
-процесса запрещена») и `:305-311` («На старте процесса **не вызывается**»). Эти
-докстринги были неверны: сборку на старте зовёт
-`servers/enterprise/server.py::_prepare_capabilities` до старта event loop, что
-закреплено тестом `test_server_bootstrap.py::TestStartupPreparation` и объявлено
-нормой в `CHANGELOG.md`. Докстринги исправлены (коммит `e81228e`), и обоснование
-снятия вместе с ними.
-
-### Requirement: Preload health-summary виден оператору и логируется
-
-**Reason**: Расчёт есть
-(`mcp-platform/libs/vectors/preload.py:22,57`, экспорт обеих функций —
-`libs/vectors/__init__.py:47`, в `__all__` — `compute_index_health` на `:66`
-и `format_index_health_lines` на `:68`),
-но **производственного вызова нет ни одного** — только
-`mcp-platform/tests/test_vectors_index_health.py`. Публикация в `stderr` и событие
-`vector_index_preload_health` в `agent_gateway_logs` не происходят ни разу.
-Требование описывало `PreloadService`
-(`lib/services/preload_service.py:229`) — файла нет.
-
-**Второй канон, требующий это же событие.** Требование снимается не потому, что
-событие не нужно, а потому что его требует ещё один нормативный документ:
-`openspec/specs/observability/logging-db/spec.md:689-704` (сценарий «preload health-summary через
-DbLoggingService») предписывает записать ровно один `LogEvent` с
-`event_type="vector_index_preload_health"` и payload `declared` / `loaded` /
-`missing` / `orphan` / `stale` — со ссылкой на «snapshot текущей реализации
-`PreloadService.compute_index_health`». `PreloadService` удалён, файла нет, писать
-событие некому. Если снять требование здесь и не тронуть `logging-db`, после
-архивации два канона будут требовать то, что не реализовано, и ни один не
-указывать, что это неактуально. Именно поэтому ниже, в `tasks.md`, это заведено
-как открытое решение с владельцем: возврат публикации — отдельный change, который
-обязан переписать оба канона разом.
-
-
-### Requirement: Единый источник конфигурации
-
-**Reason**: Требование снимается и заменяется: прежняя редакция требовала читать
-`gateway.vector.index.indexes.*` из `config.json` — секцию, которая объявлена и
-провалидируется, но нигде не читается (grep по `lib/` даёт только объявления моделей
-и docstring-комментарии). Сценарий «Конфигурация индекса», который канон к этому
-требованию прилагает, лежит внутри frozen-блока
-(`openspec/specs/data/vector-indexes/spec.md:14-37`), объявляющего себя не текущей
-нормой, и описывает именно снятую подсистему. Удержать его в новой редакции было бы
-невозможно.
-
-`MODIFIED` здесь структурно неприменим: правило «MODIFIED не выбрасывает
-сценарий» не различает «сценарий забыли скопировать» и «сценарий отменён новым
-требованием», а здесь сценарий отменён. Поэтому старая редакция объявлена снятой,
-а не переписана.
-
-### Requirement: Единый путь доступа
-
-**Reason**: Требование снимается и заменяется: прежняя редакция требовала
-`CacheProvider.search_vector` и запрещала Skill-коду обращаться к FAISS напрямую.
-`CacheProvider` удалён вместе с локальным кэшем, а Skill, которому был нужен vector
-search, уехал в платформу. Сценарий «Skill выполняет vector search» лежит внутри
-frozen-блока (`openspec/specs/data/vector-indexes/spec.md:14-37`) и описывает
-удалённый путь через `CacheProvider`; удержать его в новой редакции было бы
-невозможно — он утверждал бы вызов снятого класса.
-
-`MODIFIED` здесь структурно неприменим: правило «MODIFIED не выбрасывает
-сценарий» не различает «сценарий забыли скопировать» и «сценарий отменён новым
-требованием», а здесь сценарий отменён. Поэтому старая редакция объявлена снятой,
-а не переписана.
 ## MODIFIED Requirements
 
 ### Requirement: Hydrated payload берётся из DuckDB-снапшота
-
-Система SHALL подтягивать `content` / `search_text` / `row_data` для каждого
-FAISS-hit'а из таблицы-источника по ключу `(source, pk_value, chunk_index)`; она
-SHALL NOT читать эти поля из метаданных, сериализованных в индекс.
-
-Прежняя редакция привязывала источник к `gateway.vector.index.storage_table`.
-Ключ удалён; источник теперь определяется объявлением
-`platform.json → vectors.indexes`.
-
-> Заголовок требования оставлен дословно как в каноне
-> (`openspec/specs/data/vector-indexes/spec.md:116`): OpenSpec сопоставляет
-> требования по имени, и переименование заголовка превратило бы `MODIFIED` в
-> новое требование — канонное осталось бы жить и требовало бы читать
-> `gateway.vector.index.storage_table`. Меняется тело, не имя.
+Система SHALL подтягивать `content` / `search_text` / `row_data` для каждого FAISS-hit'а через SELECT строки из DuckDB-снапшота таблицы-источника, заданной `gateway.vector.index.storage_table`, по ключу `(source, pk_value, chunk_index)`; она SHALL NOT читать эти поля из in-memory metadata, сериализованной в индекс.
 
 #### Scenario: Подтягивание payload
 
-- **WHEN** поиск по индексу выдаёт результат с `pk_value=P` и `chunk_index=K`
-- **THEN** система SHALL получить `(content, search_text, row_data)` из
-  таблицы-источника по `source = <index_name> AND pk_value = P AND chunk_index = K`
-- **AND** SHALL NOT читать их из сериализованного в индексе
-
-#### Scenario: Индекс без payload
-
-- **WHEN** FAISS-hit найден, а строка источника отсутствует
-- **THEN** отказ SHALL быть явным, без silent fallback на данные из индекса
+- **WHEN** `group_vector_hits` выдаёт результат с `pk_value=P` и `chunk_index=K`
+- **THEN** система SHALL сделать SELECT `(content, search_text, row_data)` из снапшотной таблицы-источника `WHERE source = <index_name> AND pk_value = P AND chunk_index = K`, чтобы заполнить `SearchResult.content` и `SearchResult.row`.
 
 ## ADDED Requirements
 

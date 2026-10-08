@@ -1,3 +1,16 @@
+## Scope
+
+Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены
+к тексту канона: пять требований под `MODIFIED` взяты из
+`openspec/specs/runtime/entrypoints/spec.md` целиком, вместе со сценариями.
+Пять требований, объявленных `REMOVED`, из дельты сняты: они живут в
+каноне, а работа change'а не сделана — архив удалил бы живое требование, в
+том числе описывающее `role`, который код реализует
+(`lib/core/application_context.py:186`, `:427`). Пять требований под
+`ADDED` в каноне отсутствуют, поэтому оставлены как работа change'а — их
+имена перечислены ниже, в самой дельте. Причина — работа change'а не
+сделана; незавершённое остаётся в `tasks.md`.
+
 ## ADDED Requirements
 
 ### Requirement: ApplicationContext.create без параметра role
@@ -193,103 +206,43 @@ CLI MUST NOT выполнять её: проверка занятости пор
 
 ### Requirement: AgentLoop MUST быть transport-agnostic
 
-`AgentLoop` MUST взаимодействовать с внешним миром **только** через
-in-memory `MessageBus`: `bus.publish_inbound(InboundMessage(...))` для
-входящих сообщений и `bus.publish_outbound(OutboundMessage(...))` для
-исходящих. Никаких прямых обращений к каналам, транспортам, файловым
-дескрипторам или CLI-объектам.
-
-Формулировка MUST оставаться проверяемой. В upstream `nanobot` присутствуют
-ветвления по литеральным именам каналов внутри `AgentLoop`
-(`nanobot/agent/loop.py:928,1297,1331,1342,1814,1822,2340` — строки, `"cli"`,
-`"system"`, `"websocket"`). Это перечень известных исключений, а не
-разрешённая зависимость:
-
-- проект MUST NOT добавлять новых ветвлений по именам каналов;
-- проект MUST NOT добавлять транспортные зависимости в `AgentLoop`;
-- проект MUST NOT патчить `AgentLoop` для добавления транспортной логики —
-  транспортные решения принимаются в channel- и client-слоях.
-
-Смысл требования — инвариант «runtime-ядро не знает, откуда пришло сообщение
-и куда уйдёт ответ», а не запрет на существующий upstream-код.
+`AgentLoop` MUST NOT знать о CLI, PostgreSQL, HTTP, WebSocket, Telegram, terminal. `AgentLoop` взаимодействует только с in-memory `MessageBus` через `bus.publish_inbound(InboundMessage(...))` и `bus.publish_outbound(OutboundMessage(...))`.
 
 #### Scenario: AgentLoop получает одно и то же сообщение независимо от источника
 
 - **WHEN** пользователь вводит сообщение в CLI REPL
-- **THEN** CLI отправляет его в Gateway по wire-протоколу, а Gateway вызывает `bus.publish_inbound(InboundMessage(channel="websocket", chat_id=..., content=...))` — AgentLoop обрабатывает через bus
-- **WHEN** сообщение приходит в Gateway через канал, который читает очередь задач
-- **THEN** этот канал вызывает `bus.publish_inbound(InboundMessage(channel="postgres", chat_id=..., content=...))` — тот же AgentLoop обрабатывает через bus
+- **THEN** CLI вызывает `bus.publish_inbound(InboundMessage(channel="cli", chat_id=<chat_id>, content=...))`, где `chat_id` — имя сессии из `--session` либо `"direct"`, а ключ сессии получается как `f"{channel}:{chat_id}"` (`lib/cli/console_loop.py:241-243,395-403`) — AgentLoop обрабатывает через bus
+- **WHEN** HTTP-запрос приходит в gateway через `PostgresChannel`
+- **THEN** `PostgresChannel` вызывает `bus.publish_inbound(InboundMessage(channel="postgres", chat_id=..., content=...))` — тот же AgentLoop обрабатывает через bus
 - **AND** AgentLoop MUST вести себя идентично в обоих случаях
-
-> Маркер «после `2026-10-02-task-queue-into-mcp`». Пример назван не
-> `PostgresChannel` с собственным пулом PostgreSQL и 33 SQL-глаголами: change
-> `2026-10-02-task-queue-into-mcp` переводит работу с задачами в операции
-> capability `data`, и канал становится потребителем этих операций, а не
-> владельцем собственного пула. **Инвариант сценария переживает эту правку
-> целиком:** важен не конкретный канал, а то, что любой источник приходит в
-> `AgentLoop` через `bus.publish_inbound` и что `AgentLoop` не различает их.
-> Ждать завершения `2026-10-02-task-queue-into-mcp` не нужно — тот же приём
-> «после X», что уже применён в D13.
-
-#### Scenario: проект не расширяет список исключений
-
-- **WHEN** выполняется поиск литералов имён каналов (`"cli"`, `"system"`, `"websocket"`, `"postgres"`, ...) в патчах проекта
-- **THEN** совпадений в `RuntimePatcher` MUST NOT быть
-- **AND** новая транспортная логика MUST добавляться в channel/client-слой
 
 ### Requirement: Cron = gateway-only
 
-`CronService` MUST создаваться ТОЛЬКО процессом Gateway, по конфигурации
-Gateway, и MUST подниматься вместе с ним. CLI MUST NOT создавать
-`CronService`.
-
-Cron MUST NOT быть переключателем composition. Флаг способа запуска
-(`enable_cron` в роли entrypoint-аргумента) MUST быть удалён: он не должен
-определять наличие `CronService` и MUST NOT определять `return_file_manager`
-(`SessionStorageService.create` — сессионное решение, а не cron-решение).
-
-Если одновременно работают CLI и Gateway, cron fires ТОЛЬКО из Gateway — нет
-дублирования `jobs.json`. Это BREAKING для пользователей, у которых сейчас
-cron работал в CLI.
+`CronService` MUST создаваться ТОЛЬКО при `role="gateway"` (если `gateway.enable_cron=True`). CLI MUST NOT создавать `CronService`. Если одновременно работают CLI и gateway, cron fires ТОЛЬКО из gateway — нет дублирования `jobs.json`. Это BREAKING для пользователей, у которых сейчас cron работал в CLI.
 
 #### Scenario: Cron в gateway
 
-- **WHEN** запускается `gateway.py` с `gateway.enable_cron=True`
-- **THEN** `CronService` MUST быть создан и подключён к `AgentLoop`
+- **WHEN** `gateway.py` запущен с `gateway.enable_cron=True`
+- **THEN** `CronService` MUST быть подключен к `AgentLoop`
 - **AND** scheduled jobs MUST выполняться при наступлении cron-тайминга
 
 #### Scenario: Cron НЕ в CLI
 
-- **WHEN** запускается `cli_agent.py`
+- **WHEN** `cli_agent.py` запущен
 - **THEN** `CronService` MUST NOT создаваться
 - **AND** scheduled jobs MUST NOT выполняться из CLI-процесса
 
-#### Scenario: cron-флаг не управляет storage
-
-- **WHEN** создаётся `SessionStorageService`
-- **THEN** выбор file-storage MUST определяться режимом хранилища
-- **AND** значение `enable_cron` MUST NOT участвовать в этом выборе
-
 ### Requirement: CLI имеет фиксированный профиль test
 
-`cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать
-профиль из env. CLI MUST использовать фиксированный профиль `test` при вызове
-`config._initialize_settings(profile="test")`. Отклоняются `--profile`,
-`-profile` и `-p`, каждая передача — `ConfigurationError`. Gateway MUST
-принимать `--profile` из whitelist'а `("prod", "test")`
-(`gateway.py::_SUPPORTED_PROFILES`) и MUST отклонять иной профиль.
+`cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать профиль из env. CLI MUST использовать фиксированный профиль `test` при вызове `config._initialize_settings(profile="test")` (`cli_agent.py:117-119`, `CLI_FIXED_PROFILE = "test"`). Отклоняются `--profile`, `-profile` и `-p` (`CLI_REJECTED_FLAGS`, `cli_agent.py`), каждая передача — `ConfigurationError`. Gateway MUST принимать `--profile` из whitelist'а `("prod", "test")` (`gateway.py:_SUPPORTED_PROFILES`) и MUST отклонять иной профиль.
 
-Профиль `test` у CLI определяет **только локальное разрешение конфигурации
-клиента** (адрес Gateway, флаги подключения, отображение настроек). Он НЕ
-означает, что CLI имеет собственный Agent Runtime: Agent Runtime, skills,
-tools, vector search, memory, logging, prompts и runtime patches принадлежат
-Gateway и доступны CLI через wire-протокол.
+"test" в контексте CLI НЕ означает урезанный runtime: CLI MUST иметь тот же AgentLoop, Skills, Tools, Memory, Logging, Prompts, Runtime patches, что и gateway. Различие только в profile (CLI == "test" fixed) и transport (CLI == in-memory bus).
 
 #### Scenario: CLI не принимает --profile
 
 - **WHEN** пользователь запускает `python cli_agent.py --profile=test`
-- **THEN** CLI MUST отклонить флаг с `ConfigurationError` и завершиться с кодом 2
-- **AND** процесс MUST NOT подключаться к Gateway
+- **THEN** CLI MUST отклонить флаг с `ConfigurationError` и завершиться с кодом 2 (`cli_agent.py:458-462`)
+- **AND** процесс MUST NOT запускать `ApplicationContext`
 
 #### Scenario: CLI hardcodes profile="test"
 
@@ -319,22 +272,13 @@ Gateway и доступны CLI через wire-протокол.
 - **WHEN** пользователь запускает `python gateway.py --profile=staging`
 - **THEN** gateway MUST поднять `ConfigurationError` и завершиться с кодом 2 (`gateway.py::_parse_args`)
 
-#### Scenario: профиль CLI не создаёт локальный runtime
-
-- **WHEN** CLI разрешил конфигурацию с профилем `test`
-- **THEN** он MUST NOT создавать `AgentLoop` или `ApplicationContext`
-- **AND** профиль MUST влиять только на локальное разрешение конфигурации клиента
-
 ### Requirement: Production entrypoints MUST NOT передавать profile в composition root
 
 Production application entrypoints MUST NOT передавать `profile` в
 `ApplicationContext.create()`. Профиль определяется entrypoint'ом и
-публикуется через `_initialize_settings(profile=...)` до вызова `create()`;
-после этого профиль доступен исключительно через `SETTINGS["profile"]`.
-
-CLI после перехода в клиентскую модель вообще не вызывает `create()`: его
-`_initialize_settings(profile="test")` разрешает конфигурацию клиента, а не
-состав runtime.
+публикуется через `_initialize_settings(profile=...)` до вызова
+`create()`; после этого профиль доступен исключительно через
+`SETTINGS["profile"]`.
 
 #### Scenario: Entrypoints не передают profile
 
@@ -346,58 +290,41 @@ CLI после перехода в клиентскую модель вообщ�
 
 - **WHEN** `cli_agent.py` стартует
 - **THEN** он MUST вызвать `_initialize_settings` с фиксированным
-  профилем `test` ДО любого обращения к `SETTINGS`
-- **AND** вызовов `ApplicationContext.create()` в `cli_agent.py` SHALL NOT быть
+  профилем `test` ДО вызова `ApplicationContext.create()` (`cli_agent.py:119`)
+- **AND** вызов `ApplicationContext.create()` SHALL NOT содержать `profile`
 
 ### Requirement: Deprecated kwargs с явной compatibility boundary
 
-Deprecated kwargs являются временной compatibility boundary. Change
-`remove-deprecated-enable-kwargs`, который их снимал, **не существует** ни в
-`changes/`, ни в `archive/`, и замена кандидата **не выполнена** на 2026-04.
-Исполнитель не назначен, и этот change его за собой не заменяет: снятие
-deprecated kwargs — отдельный предмет. До того как отдельный change будет
-создан и выполнен, kwargs MUST приниматься через `**kwargs`, а production
-code MUST NOT их использовать. После такого change:
+Deprecated kwargs являются временной compatibility boundary. Они MUST приниматься только через `**kwargs` до выполнения отдельного change `remove-deprecated-enable-kwargs`. До этого change production code MUST NOT использовать эти kwargs. После применения `remove-deprecated-enable-kwargs`:
 
 - `enable_db_logging`
 - `enable_audit`
+- `enable_cron`
 - `print_llm_calls`
 
-MUST NOT приниматься `ApplicationContext.create()`; их передача MUST
-приводить к `TypeError`.
+MUST NOT приниматься `ApplicationContext.create()`; их передача MUST приводить к `TypeError`.
 
-`DEPRECATED_ENABLE_KWARGS`
-(`lib/core/application_context.py::DEPRECATED_ENABLE_KWARGS`) MUST оставаться
-allowlist'ом, а не «мягкой» обработкой: любой ключ вне перечня MUST
-отвергаться `TypeError`, называющим принятые имена
-(`lib/core/application_context.py::_resolve_enable_kwargs`). Это делает
-опечатку (`enable_aduit=`) явной ошибкой, а не молчаливым игнорированием.
+Перечень deprecated kwargs SHALL состоять ровно из этих четырёх
+параметров. `profile` MUST NOT входить в этот перечень: у него нет
+migration path в `config.json`, и он не является deprecated API.
 
-`enable_cron` УДАЛЁН из перечня: cron перестаёт быть параметром composition
-(см. требование «Cron = gateway-only»), поэтому принимать его через `**kwargs`
-значило бы принимать молчаливо игнорируемый аргумент. Передача
-`enable_cron` MUST приводить к `TypeError` сразу после этого change.
-
-`profile` MUST NOT входить в перечень: у него нет migration path в
-`project.json`, и он не является deprecated API.
+`DEPRECATED_ENABLE_KWARGS` (`lib/core/application_context.py::DEPRECATED_ENABLE_KWARGS`) MUST оставаться
+allowlist'ом, а не «мягкой» обработкой: любой ключ вне перечня MUST отвергаться
+`TypeError`. Это делает опечатку (`enable_aduit=`) явной ошибкой, а не молчаливым
+игнорированием.
 
 #### Scenario: Deprecated kwargs через **kwargs продолжают работать
 
 - **WHEN** существующий тест вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
 - **THEN** система MUST использовать переданное значение `enable_audit=False`, игнорируя конфиг `gateway.enable_audit`
 - **AND** система MUST логировать `DeprecationWarning` с указанием на новый путь конфигурации
+  (`lib/core/application_context.py::_resolve_enable_kwargs`)
 
 #### Scenario: После remove-deprecated-enable-kwargs — TypeError на deprecated kwargs
 
-- **WHEN** отдельный change, снимающий deprecated kwargs, реализован
+- **WHEN** change `remove-deprecated-enable-kwargs` реализован
 - **AND** код вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
 - **THEN** MUST быть поднят `TypeError`
-
-> Заголовок сценария сохранён как канонический, но сам change
-> `remove-deprecated-enable-kwargs` в репозитории **отсутствует** (нет ни в
-> `changes/`, ни в `archive/`), замена кандидата не выполнена, исполнитель не
-> назначен. Сценарий описывает цель отдельного будущего change, а не
-> достигнутое состояние.
 
 #### Scenario: Ключ вне allowlist'а — TypeError, а не молчание
 
@@ -411,115 +338,3 @@ allowlist'ом, а не «мягкой» обработкой: любой клю
 - **THEN** `profile` MUST NOT входить в него
 - **AND** профиль MUST NOT обрабатываться через `**kwargs` с
   `DeprecationWarning`
-
-#### Scenario: enable_cron не принимается composition-ом
-
-- **WHEN** код вызывает `ApplicationContext.create(..., enable_cron=True)`
-- **THEN** MUST быть поднят `TypeError`
-- **AND** значение MUST NOT интерпретироваться как «создать `CronService`»
-
-## REMOVED Requirements
-
-### Requirement: Единая typed signature ApplicationContext.create с role
-
-**Reason**: Требование нормализовало `role` как обязательный элемент
-composition API («CLI и gateway вызывают `create()` с одной и той же
-сигнатурой; различие только в `role`»). После того как CLI перестаёт быть
-владельцем Agent Runtime, у параметра остаётся одно допустимое значение и
-ноль вызывающих из CLI. Требование закрепляло ровно ту модель, которую
-change устраняет, и служило источником побочных эффектов
-(`return_file_manager=not ctx.enable_cron`), при которых флаг cron
-определял наличие session storage.
-
-**Migration**: Контракт переносится в требование «`ApplicationContext.create`
-без параметра `role`». Параметр `role` удаляется из сигнатуры и из полей
-`ApplicationContext`; его чтение в cron-гейте
-(`lib/core/application_context.py:385`) удаляется. Проверка «profile
-разрешён ДО create()» и границы deprecated kwargs сохраняются без изменений.
-
-### Requirement: role определяет composition инфраструктуры, не AgentLoop
-
-**Reason**: Таблица «сервис × `role`» кодировала композицию как функцию от
-параметра способа запуска и была частично неверна: канал, читающий очередь
-задач, создаётся `ChannelFactory._add_postgres`
-(`lib/services/channel_factory.py:129-191`) из `gateway.py:249-258`, то есть
-вне `ApplicationContext`. Кроме того, таблица утверждала, что cron — сервис,
-определяемый `role` и `enable_cron`, что и породило связь cron → storage.
-
-> Маркер «после `2026-10-02-task-queue-into-mcp`». Канал назван не
-> «`PostgresChannel` со своим пулом PostgreSQL и 33 SQL-глаголами»: change
-> `2026-10-02-task-queue-into-mcp` переводит работу с задачами в операции
-> capability `data`. Причина снятия требования от этого не меняется — она в
-> том, что канал создаёт `ChannelFactory`, а не `ApplicationContext`, и
-> таблица кодировала композицию как функцию от `role`. Ждать завершения
-> `2026-10-02-task-queue-into-mcp` не нужно.
-
-**Migration**: Контракт переносится в требование «composition принадлежит
-Gateway»: перечень создаваемых компонентов фиксирован и разделён по
-исполнителю (`ApplicationContext` — runtime-сервисы, `ChannelFactory` /
-`gateway.py` — каналы и pre-startup проверки). Cron определяется
-конфигурацией Gateway и не является параметром composition.
-
-### Requirement: WebSocket port check остаётся server-only
-
-**Reason**: Требование утверждало, что порт WebSocket интересует только
-сервер. После перехода CLI в клиентскую модель тот же порт становится
-адресом подключения клиента, и требование в этой формулировке запрещало бы
-указать клиенту на порт, который Gateway проверяет как свой.
-
-**Снимает три D13-обязательства.** Это требование доставляется
-`2026-10-04-enterprise-mcp-http-transport` в усиленном виде, и на трёх местах
-оно держится на предпосылке «CLI поднимает собственный процесс платформы»
-(`2026-10-04-enterprise-mcp-http-transport/design.md:354-361`). Снятие
-предпосылки снимает и все три, точно:
-
-1. **сужение «server-only» до порта канала** — уточнение границы объекта:
-   «server-only» относится к порту канала WebSocket, а проверка занятости
-   порта **платформы** — другой объект и другое требование, потому что её CLI
-   выполняет;
-2. **проверка закреплённого порта платформы в обоих входах** — требование
-   «Закреплённый порт проверяется до запуска, занятый — отказ запуска»:
-   проверка MUST выполняться в gateway и в CLI, «платформу поднимает и CLI»;
-3. **сценарий «Проверки портов не смешиваются»** — CLI проверяет порт
-   платформы и MUST NOT выполнять `_check_websocket_port_available()`.
-
-Все три помечены в `http-transport` как «до `unify-runtime-channels`», и все
-три MUST быть сняты именно здесь, а не остаться требованиями к коду, которого
-после этого change не существует. Ничего из перечисленного не переносится в
-`ADDED`: после перехода CLI не поднимает платформу, поэтому проверять её порт
-некому.
-
-**Migration**: Контракт переносится в требование «WebSocket port check
-принадлежит Gateway, а тот же порт — адрес клиента»: проверка остаётся
-server-side в `gateway.py`, а источник адреса клиента и источник проверки —
-один и тот же (`channels.websocket.host`/`port`). Второй порт для клиента не
-вводится. Снятие трёх D13-обязательств выше — не следствие этого переноса, а
-отдельное обязательство фазы 5 (`tasks.md` п. 5.9).
-
-### Requirement: CLI-специфичные runtime-параметры
-
-**Reason**: Требование закрепляло `--storage` (выбор локального
-`storage_mode`) и `--session` как «runtime-флаги CLI». После перехода CLI не
-владеет локальным хранилищем, поэтому `--storage` адресата не имеет:
-`storage_override` передавался в `ApplicationContext.create()`, который CLI
-больше не вызывает.
-
-**Migration**: Контракт переносится в требование «CLI-клиент принимает
-параметры подключения»: `--session` сохраняется как идентификатор сессии на
-Gateway, `--storage` и `--patched` удаляются с `ConfigurationError` + exit 2,
-добавляется `--gateway`.
-
-### Requirement: Slash-команда /compact в CLI остаётся локальной
-
-**Reason**: Требование предписывало локальный вызов
-`ContextCompactionService.compact(...)` из CLI-процесса. После перехода CLI
-не имеет ни `ApplicationContext`, ни сервиса сжатия, ни подключения к
-`agent_conversation_messages`; локальное исполнение означало бы запись в
-сессию вторым процессом.
-
-**Migration**: Контракт переносится в требование «Slash-команда `/compact` в
-CLI делегируется Gateway». Команда отправляется как `content="/compact"`,
-разбирается command router'ом Gateway (включая
-`RuntimePatcher.patch_compact_command`), событие `context_compacted` пишется
-Gateway в `agent_gateway_logs`. Локальный вызов из `console_loop.py` и
-миграция cron-хранилища из `cli_agent.py` удаляются.

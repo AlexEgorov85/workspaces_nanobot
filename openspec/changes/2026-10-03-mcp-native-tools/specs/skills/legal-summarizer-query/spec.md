@@ -29,6 +29,13 @@ subprocess-границы больше нет, домен вызывается �
 `mcp_enterprise_query_operation` (объявлена в
 `config.json → tools.mcpServers.enterprise.enabled_tools`).
 
+Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены к
+тексту канона: 3 требования под `MODIFIED` взяты телом из
+`openspec/specs/skills/legal-summarizer-query/spec.md` — архив при таком
+состоянии не может ни добавить второй заголовок с тем же именем, ни переписать
+живое требование. Дублирующих `ADDED` на живые требования в этом файле нет.
+Причина — расхождение дельты с каноном; незавершённое остаётся в `tasks.md`.
+
 ## REMOVED Requirements
 
 ### Requirement: Subprocess IPC contract between tool wrapper and CLI query
@@ -85,27 +92,25 @@ success exit`, `Non-JSON on success exit` — описывали комбина�
 
 ### Requirement: Manifest diagnostic taxonomy
 
-Требование существует и в прежней редакции. Три причины недоступности manifest
-те же, но доставляются они иначе: не конвертом внутри JSON-строки результата, а
-исключением домена, которое capability переводит в код конверта.
+Capability SHALL различать ровно три причины недоступности manifest: файл
+отсутствует, файл повреждён, версия файла не поддерживается.
 
-Capability SHALL различать ровно три причины: manifest отсутствует, manifest
-повреждён, версия manifest не поддерживается. Домен SHALL сообщать их именами
-`manifest_not_found` / `manifest_corrupted` /
-`manifest_unsupported_version`, а capability SHALL переводить их в коды
-конверта `not_found` / `internal` / `upstream_unavailable` по таблице
-`_ERROR_CODES` в `.../legal_summarizer/service/main.py`.
+Домен SHALL сообщать их именами `manifest_not_found` /
+`manifest_corrupted` / `manifest_unsupported_version`, а capability SHALL
+переводить их в коды конверта `not_found` / `internal` /
+`upstream_unavailable` по таблице `_ERROR_CODES` в
+`mcp-platform/servers/enterprise/capabilities/legal_summarizer/service/main.py`.
 
 Ключи таблицы SHALL совпадать со значениями `cli_query._MANIFEST_ERROR_TYPES`
 буквально: перевод идёт по строке `error_type`, и имя «почти то же самое» молча
-уходит в `internal` — это уже случалось, и код отказа модели врал.
+уходит в `internal`.
 
 `internal` для повреждённого manifest SHALL оставаться осознанным: файл чинит
 владелец состояния, ни «проверь имя», ни «повтори» модели не помогают.
 
-Диагностика SHALL продолжать отличать эти три причины на уровне чтения файла, а
-не схлопывать их в один «не найден» (функция `diagnose_manifest`, значения
-`reason`: `not_found` / `corrupted` / `unsupported_version`).
+Диагностика SHALL отличать три причины на уровне чтения файла, а не схлопывать
+их в один «не найден» (функция `diagnose_manifest`, значения `reason`:
+`not_found` / `corrupted` / `unsupported_version`).
 
 #### Scenario: Manifest отсутствует
 
@@ -144,17 +149,14 @@ Capability SHALL различать ровно три причины: manifest �
 
 ### Requirement: Backward compatibility of resume-path manifest loading
 
-Требование существует и в прежней редакции. Поведение `load_manifest()` не
-меняется, меняется его место:
-`mcp-platform/libs/legal_summarizer/cache/manifest.py`.
+`load_manifest()` в `mcp-platform/libs/legal_summarizer/cache/manifest.py` SHALL
+продолжать возвращать `None` по любой из трёх причин недоступности и SHALL NOT
+протаскивать диагностику через возвращаемое значение.
 
-`load_manifest()` SHALL продолжать возвращать `None` по любой из трёх причин
-недоступности и SHALL NOT протаскивать диагностику через возвращаемое
-значение. Диагностика SHALL оставаться отдельной функцией
-(`diagnose_manifest`), SHALL возвращать не больше полей, нужных для
-построения конверта (`reason`, `path`, `version_observed`), и SHALL NOT
-возвращать разобранное содержимое manifest: для повреждённого файла его и не
-получить, а для конверта оно не нужно.
+Диагностика SHALL оставаться отдельной функцией (`diagnose_manifest`), SHALL
+возвращать не больше полей, нужных для построения конверта (`reason`, `path`,
+`version_observed`), и SHALL NOT возвращать разобранное содержимое manifest:
+для повреждённого файла его и не получить, а для конверта оно не нужно.
 
 #### Scenario: Resume-загрузчик не изменился
 
@@ -174,17 +176,15 @@ Capability SHALL различать ровно три причины: manifest �
 
 ### Requirement: Documented semantics for chunks_total vs field=chunks
 
-Требование существует и в прежней редакции. Само расхождение остаётся, меняется
-место, где оно объявлено: `workspace/skills/legal_summarizer/SKILL.md` снят
-вместе с навыком, и документом объявления стал
-`mcp-platform/libs/legal_summarizer/skill/SKILL.md`.
-
 `chunks_total` из manifest и список из `field=chunks` SHALL оставаться
 независимыми источниками: первый — логический/плановый счётчик, посчитанный при
 планировании прогона; второй — список физических файлов
-`<operation>/chunks/*.json`, обрезанных по `max_chunk_summary_chars`. Операция
-SHALL возвращать оба источника независимо и SHALL NOT пытаться их
-согласовать.
+`<operation>/chunks/*.json`, обрезанных по `max_chunk_summary_chars`.
+
+Операция SHALL возвращать оба источника независимо и SHALL NOT пытаться их
+согласовать. Расхождение объявлено в
+`mcp-platform/libs/legal_summarizer/skill/SKILL.md` — документ переехал вместе с
+навыком, отдельного `SKILL.md` в агенте для этого больше нет.
 
 #### Scenario: Расхождение chunks_total и списка chunks — не баг
 

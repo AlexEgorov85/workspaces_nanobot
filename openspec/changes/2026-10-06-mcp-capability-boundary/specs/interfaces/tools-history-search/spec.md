@@ -31,11 +31,22 @@
 запись в `config.json → tools.mcpServers.enterprise.enabled_tools` меняется на
 `history.search`.
 
+Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены к
+тексту канона: тело единственного расходящегося `MODIFIED`-требования
+(`operation identity and scope`) заменено текстом из
+`openspec/specs/interfaces/tools-history-search/spec.md` — архив при таком
+состоянии не может ни добавить второй заголовок с тем же именем, ни переписать
+живое требование. Два остальных `MODIFIED`-требования дельты (`missing identity is
+a hard error`, `Параметры запроса`) текстом с каноном уже совпадают и оставлены
+побайтово; оба `ADDED`-требования в каноне отсутствуют и остаются дельтой: это
+работа change'а. Причина — расхождение дельты с каноном; незавершённое остаётся в
+`tasks.md`.
+
+
 ## MODIFIED Requirements
 
 ### Requirement: operation identity and scope
-
-Операция `history.search` SHALL читать таблицу журнала, имя и схема которой
+Операция `data.history_search` SHALL читать таблицу журнала, имя и схема которой
 задаются `platform.json`. Операция MUST NOT выполнять произвольный SQL,
 обращаться к другим таблицам или делать `INSERT`/`UPDATE`/`DELETE`. Все
 параметры запроса, включая текстовые, MUST передаваться позиционными
@@ -51,7 +62,7 @@
 
 #### Scenario: Агент SQL не строит
 
-- **WHEN** модель вызывает `mcp_enterprise_history_search`
+- **WHEN** модель вызывает `mcp_enterprise_data_history_search`
 - **THEN** агент SHALL NOT строить SQL
 - **AND** агент SHALL NOT обращаться к таблице журнала напрямую
 
@@ -62,15 +73,7 @@
 - **AND** SHALL NOT содержать `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`
   или DDL
 
-Заголовок сценария оставлен прежним, хотя операция переименована: в
-`## MODIFIED Requirements` сценарий опознаётся **заголовком**, и переименование
-заголовка archive считает выбрасыванием сценария (`openspec validate` отказывает
-с ошибкой «omits scenario(s) the current spec still has»). Заголовок — имя
-сценария в каноне, а не утверждение о текущем имени операции; текст ниже
-называет `history.search`.
-
 ### Requirement: missing identity is a hard error
-
 Проверки личности стоят на двух уровнях, и разделение существенно: доменная
 проверка и проверка на границе конвейера отвечают на разные вопросы.
 
@@ -93,18 +96,17 @@
 
 #### Scenario: Поиск без области отвергнут сервисом
 
-- **WHEN** `history.search` вызван без `user_id` и без `session_id`
+- **WHEN** `data.history_search` вызван без `user_id` и без `session_id`
 - **THEN** сервис SHALL отказать `InvalidRequestError`
 - **AND** SQL к журналу SHALL NOT быть выполнен
 
 #### Scenario: Одной из двух частей области достаточно
 
-- **WHEN** `history.search` вызван с заданным `session_id` и пустым `user_id`
+- **WHEN** `data.history_search` вызван с заданным `session_id` и пустым `user_id`
 - **THEN** сервис SHALL построить предикат только по `session_id`
 - **AND** SHALL NOT построить unscoped условие
 
 ### Requirement: Параметры запроса
-
 Операция SHALL принимать следующие параметры; все, кроме `query`, опциональны.
 Значения — доменные, идентичности среди них нет.
 
@@ -127,9 +129,9 @@
 
 #### Scenario: Фильтр по event_type + tool_name
 
-- **WHEN** вызвано `history.search(event_type="tool.started", tool_name="history.search", limit=3)`
+- **WHEN** вызвано `data.history_search(event_type="tool.started", tool_name="data.history_search", limit=3)`
 - **THEN** SHALL быть возвращено не более 3 событий, у которых
-  `event_type='tool.started'` И `name='history.search'`
+  `event_type='tool.started'` И `name='data.history_search'`
 - **AND** они SHALL быть отсортированы по `(timestamp DESC, id DESC)`
 
 #### Scenario: Неизвестный event_type даёт пустую выборку

@@ -27,6 +27,15 @@ Tool снят (change `2026-10-03-mcp-native-tools`, п. D6). Модель по�
 `mcp-platform/servers/enterprise/capabilities/data/service/main.py`.
 Вызов: `mcp_enterprise_history_search`.
 
+Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены к
+тексту канона: 6 требований под `MODIFIED` взяты телом из
+`openspec/specs/interfaces/tools-history-search/spec.md` — архив при таком
+состоянии не может ни добавить второй заголовок с тем же именем, ни переписать
+живое требование. Требование `RequestContext exposes user identity`,
+объявленное `REMOVED`, из дельты снято: оно живёт в каноне, а работа
+change'а не сделана. Причина — расхождение дельты с каноном; незавершённое
+остаётся в `tasks.md`.
+
 ## REMOVED Requirements
 
 ### Requirement: session_scope = current filters by session_id
@@ -62,45 +71,9 @@ Tool снят (change `2026-10-03-mcp-native-tools`, п. D6). Модель по�
 - **THEN** SHALL NOT существовать способа отключить предикат по `session_id`
 - **AND** SHALL NOT существовать способа отключить предикат по `user_id`
 
-### Requirement: RequestContext exposes user identity
-
-Требование снимается в части, которая относилась к tool'у: функции
-`_current_user_id()` в `history_search_tool.py` не существует, и обращение к
-`RequestContext.sender_id` из места, которое её вызывало, тоже.
-
-Роль identity-store **переносится** в требование «Scope is the caller session
-intersected with the caller user»: источник тот же самый —
-`nanobot.agent.tools.context.RequestContext.sender_id`, — но читает его теперь
-`McpIdentityHook._sender_id()`, единственное обращение к этому полю в агенте.
-Зависимость от версии nanobot по-прежнему изолирована в одной функции.
-
-Контракт-тест `tests/contract/test_history_search_identity_contract.py`
-остаётся и по-прежнему проверяет, что поле `sender_id` у `RequestContext`
-существует и совместимо с `str | None`; требование к нему переносится целиком.
-
-#### Scenario: Единственное обращение к identity-store — в хуке
-
-- **WHEN** личность оборота вычисляется для вызова операции
-- **THEN** обращение к `RequestContext.sender_id` SHALL происходить в
-  `McpIdentityHook._sender_id()`
-- **AND** в других местах агента прямой доступ к `sender_id` SHALL NOT
-  использоваться для построения вызова операции
-
-#### Scenario: Контракт-тест nanobot-API на месте
-
-- **GIVEN** nanobot установлен согласно `requirements.txt`
-- **WHEN** выполняется `tests/contract/test_history_search_identity_contract.py`
-- **THEN** импорт `nanobot.agent.tools.context.RequestContext` SHALL быть успешным
-- **AND** итерация `dataclasses.fields(RequestContext)` SHALL содержать `sender_id`
-- **AND** аннотация `sender_id` SHALL быть совместима с `str | None`
-- **AND** тест SHALL падать при отсутствии поля или несовместимой аннотации
-
 ## MODIFIED Requirements
 
 ### Requirement: no unscoped fallback and no identity derivation
-
-Требование существует и в прежней редакции и остаётся в силе без изменений по
-существу; меняется только то, что запрет относится к платформенной операции.
 
 Операция MUST NOT реализовывать unscoped fallback вида
 `WHERE (%s IS NULL OR user_id = %s)`. Операция MUST NOT извлекать `user_id` из
@@ -123,9 +96,6 @@ intersected with the caller user»: источник тот же самый —
 - **AND** смешивания источников SHALL NOT происходить
 
 ### Requirement: pagination and ordering
-
-Требование существует и в прежней редакции и остаётся в силе: сортировка и
-механика детекции следующей страницы не менялись, переехали на платформу.
 
 Операция SHALL поддерживать параметр `offset` (целое ≥ 0, дефолт 0).
 Результирующий SQL SHALL использовать
@@ -171,9 +141,6 @@ intersected with the caller user»: источник тот же самый —
 
 ### Requirement: response shape and no user_id leak
 
-Требование существует и в прежней редакции. Форма ответа меняется целиком;
-запрет на утечку `user_id` не меняется и становится строже.
-
 Операция SHALL возвращать JSON-объект с полями `hits`, `next_offset`,
 `truncated`. Каждый элемент `hits` SHALL содержать `id`, `timestamp`,
 `event_type`, `name`, `level`, `summary`, `payload`. Поле `payload` SHALL быть
@@ -182,10 +149,6 @@ intersected with the caller user»: источник тот же самый —
 Операция SHALL NOT возвращать `user_id` ни в корне ответа, ни в элементах
 `hits`. В текущей форме ответа `user_id` не появляется **вовсе**: он служит
 только предикатом поиска и в выборку не попадает.
-
-Поля прежней формы — `status`, `count`, `session_scope`, `has_more`,
-`results_truncated`, `events`, `event_id`, `payload_truncated` — SHALL считаться
-снятыми вместе с tool'ом.
 
 #### Scenario: форма ответа соответствует операции
 
@@ -210,13 +173,8 @@ intersected with the caller user»: источник тот же самый —
 - **AND** отказа SHALL NOT быть
 
 ### Requirement: Параметры запроса
-
-Требование существует и в прежней редакции. Состав параметров меняется: из
-списка уходят `session_scope` и упоминание `tools.history_search.max_rows`,
-потому что потолок задаёт платформа.
-
-Операция SHALL принимать следующие параметры (все, кроме `query`, опциональны;
-все значения — доменные, идентичности среди них нет):
+Операция SHALL принимать следующие параметры; все, кроме `query`, опциональны.
+Значения — доменные, идентичности среди них нет.
 
 - `query` — подстрока для регистронезависимого поиска (`ILIKE`) по `summary`
   и `payload::text` журнала; пустая строка фильтр не добавляет.
@@ -237,9 +195,9 @@ intersected with the caller user»: источник тот же самый —
 
 #### Scenario: Фильтр по event_type + tool_name
 
-- **WHEN** вызвано `history_search(event_type="tool.started", tool_name="history_search", limit=3)`
+- **WHEN** вызвано `data.history_search(event_type="tool.started", tool_name="data.history_search", limit=3)`
 - **THEN** SHALL быть возвращено не более 3 событий, у которых
-  `event_type='tool.started'` И `name='history_search'`
+  `event_type='tool.started'` И `name='data.history_search'`
 - **AND** они SHALL быть отсортированы по `(timestamp DESC, id DESC)`
 
 #### Scenario: Неизвестный event_type даёт пустую выборку
@@ -262,21 +220,18 @@ intersected with the caller user»: источник тот же самый —
 
 ### Requirement: Схема payload по event_type
 
-Требование существует и в прежней редакции. Имена типов событий в схеме
-**устарели полностью**: перечень переехал в платформу и стал
-пространством имён с префиксами.
-
 Система SHALL задокументировать в `workspace/TOOLS.md` JSON-схему `payload` для
 действующих типов событий. Перечень SHALL соответствовать словарю типов
-платформы (`libs/enterprise_common/eventing/types.py`), а не прежнему списку
-`context_compacted` / `tool_call` / `tool_result` / `llm_call` /
-`run_finished` / `subagent_run_finished` / `inbound`. Изменение формы данных
-требует отдельного change.
+платформы (`mcp-platform/libs/enterprise_common/eventing/types.py`).
 
 Префиксы `agent.`, `llm.`, `tool.`, `artifact.`, `quality.` SHALL использоваться
-вместе с конкретным именем (`tool.started`, `agent.compacted`, `llm.exchanged`),
-а опечатка в последнем компоненте SHALL отвергаться проверкой словаря, а не
-плодить новый тип.
+вместе с конкретным именем (`tool.started`, `agent.compacted`,
+`llm.exchanged`), а опечатка в последнем компоненте SHALL отвергаться проверкой
+словаря, а не плодить новый тип.
+
+Имена прежней редакции — `context_compacted`, `tool_call`, `tool_result`,
+`llm_call`, `run_finished`, `subagent_run_finished`, `inbound` — устарели и
+SHALL NOT использоваться как действующие.
 
 #### Scenario: Документация использует действующие имена
 
@@ -292,23 +247,23 @@ intersected with the caller user»: источник тот же самый —
 
 ### Requirement: Scope is the caller session intersected with the caller user
 
-Область поиска SHALL определяться вызывающей стороной и SHALL быть
-обязательной. Это заменяет прежний выбор `current` / `all` и делает его
-невозможным по построению.
+Область поиска SHALL определяться вызывающей стороной и SHALL быть обязательной.
+Это заменяет прежний выбор `current` / `all` и делает его невозможным по
+построению.
 
-Личность вызова SHALL формироваться на стороне агента хуком
-`McpIdentityHook` — безусловной подстановкой `session_id`, `user_id` и
-`request_id` в аргументы вызова — и SHALL читаться платформой в контекст
-вызова. Операция SHALL применять предикат по `session_id` **и** по `user_id`,
-каждый из которых берётся из контекста вызова, а не из аргументов.
+Личность вызова SHALL формироваться на стороне агента хуком `McpIdentityHook` —
+безусловной подстановкой `session_id`, `user_id` и `request_id` в аргументы
+вызова — и SHALL читаться платформой в контекст вызова. Операция SHALL применять
+предикат по `session_id` **и** по `user_id`, каждый из которых берётся из
+контекста вызова, а не из аргументов.
 
 Возможность выбрать область SHALL NOT существовать ни в опубликованной схеме,
 ни среди неявных умолчаний.
 
 Значения SHALL совпадать с тем, что пишет журнал: `session_id` — ключ сессии
 оборота, `user_id` — отправитель оборота (`RequestContext.sender_id`).
-Несогласованные значения (например, `user_id`, не совпадающий с владельцем
-сессии) не должны возникать, потому что оба берутся из одного оборота.
+Несогласованные значения не должны возникать, потому что оба берутся из одного
+оборота.
 
 #### Scenario: Пересечение, а не выбор
 

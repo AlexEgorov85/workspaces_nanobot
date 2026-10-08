@@ -1,4 +1,16 @@
-## ADDED Requirements
+## Scope
+
+Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены к
+тексту канона: `ADDED` заменён на `MODIFIED` (требований в каноне — 6),
+тела взяты из `openspec/specs/runtime/event-model/spec.md` (переписано 5, совпало с каноном
+без правок 1).
+Архив при таком состоянии не может ни добавить второй заголовок с тем же именем,
+ни переписать живое требование. Причина — работа change'а не сделана, а дельта
+описывала состояние, которое уже не является каноном. Незавершённая работа остаётся
+в `tasks.md`; каноно-специфичные `ADDED` оставлены как есть (требований в каноне не
+имеющих — 0).
+
+## MODIFIED Requirements
 
 ### Requirement: События агента и события MCP — одна модель
 
@@ -15,7 +27,7 @@ SHALL порождать события одного формата, разли�
 | `event_type` | Тип из закрытого словаря § «Словарь типов» |
 | `level` | `DEBUG` / `INFO` / `WARN` / `ERROR` |
 | `session_id` | Идентификатор сессии |
-| `user_id` | Идентификатор пользователя |
+| `user_id` | Идентификатор пользоватора |
 | `request_id` | Ключ оборота, `agent_question_runs.request_id` |
 | `channel` | Канал (`telegram` / `cli` / ...) |
 | `actor` | Кто инициировал: `user` / `agent` / `system` |
@@ -23,6 +35,17 @@ SHALL порождать события одного формата, разли�
 | `summary` | Краткое текстовое описание |
 | `payload` | JSONB с деталями |
 | `metadata` | JSONB с дополнительными метаданными |
+
+Таблица описывает поля события (`AgentEvent`,
+`mcp-platform/libs/enterprise_common/eventing/models.py:155`). Таблица журнала
+`agent_gateway_logs` шире: у колонки `"timestamp"` там **момент записи строки**,
+её ставит база при сбросе батча
+(`sql/logs/create_public_agent_gateway_logs.sql:128`), а момент события лежит в
+`occurred_at` (`:141`), и рядом стоит ключ порядка `seq` (`:140`). Поэтому
+момент события едет событием (`AgentEvent.timestamp`,
+`mcp-platform/libs/enterprise_common/eventing/models.py:170`), а в базу попадает
+разобранным из `metadata` единственным табличным писателем
+(`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1047`).
 
 `source` (`nanobot`, `enterprise_mcp`) и `component` (`agent`, `tool_execution`,
 `data`, `audit`, `vectors`, `llm`, `legal`) SHALL передаваться в `metadata` до
@@ -65,14 +88,19 @@ SHALL порождать события одного формата, разли�
 ### Requirement: Типы событий берутся из закрытого словаря
 
 Тип события SHALL принадлежать закрытому словарю с префиксом по источнику
-ответственности:
+ответственности. Словарь объявлен один раз — константой `EVENT_TYPES`
+(`mcp-platform/libs/enterprise_common/eventing/types.py:86`), и по префиксам его
+можно перечислить целиком без чтения кода операций:
 
 ```text
-agent.*     started · completed · failed
-llm.*       requested · completed · failed
-tool.*      started · completed · failed · timeout
+agent.*     started · completed · failed · received · responded · delivered ·
+                compacted · degraded
+llm.*       requested · completed · failed · exchanged
+tool.*      started · completed · failed · timeout · suppressed
 artifact.*  created · read
 quality.*   check
+legal_      analysis_step · analysis_confirmation · analysis_completed ·
+              analysis_partial · analysis_refused
 ```
 
 Произвольные строки вроде `mcp_magic_operation_finished` SHALL NOT
@@ -111,7 +139,7 @@ quality.*   check
 `ToolLogRepository` или `AgentLogRepository` SHALL NOT заводиться.
 
 Конкретная реализация решает, куда пишет событие: журнал в базе, файл сессии или
-локальный лог процесса. Выбор хранилища SHALL NOT быть виден вызывающему кода.
+локальный лог процесса. Выбор хранилища SHALL NOT быть виден вызывающему коду.
 
 Обязательный инвариант, который уже есть в проекте и SHALL сохраниться: у
 `agent_gateway_logs` **один писатель** (миграция `V004`). Перенос писателя в
@@ -169,7 +197,10 @@ quality.*   check
 
 - **WHEN** запрошены события по одному `request_id`
 - **THEN** SHALL быть видны события агента и события `enterprise-mcp` этого оборота
-- **AND** упорядочение SHALL быть по `timestamp`
+- **AND** упорядочение SHALL быть по ключу порядка `seq`, а при равенстве моментов
+  — по `id`, а не по `"timestamp"`: та колонка — момент записи строки, и по ней
+  хронология оборота не восстанавливается
+  (`sql/logs/create_public_agent_gateway_logs.sql:143`)
 
 #### Scenario: Второй идентификатор не появился
 
@@ -231,17 +262,24 @@ Nanobot SHALL NOT заводиться.
 Платформенный писатель SHALL записывать полный конверт события, включая
 `request_id` и `metadata`.
 
-Сегодня писатель `enterprise-mcp` пишет подмножество колонок —
-`(id, timestamp, event_type, name, level, summary, payload, session_id, user_id)` —
-и молча теряет `request_id`, `metadata`, `channel` и `actor`. Агентский писатель
-пишет весь конверт. Расхождение означает, что корреляция оборота теряется ровно
-на границе процессов, ради которой перенос и делался: событие MCP нельзя связать
-с вопросом пользователя.
+Писатель агента и платформенный пишут **один и тот же** набор полей: двенадцать
+имён `JOURNAL_FIELDS` (`mcp-platform/libs/enterprise_common/eventing/models.py:138`),
+и `AgentEvent.to_row` отдаёт строку ровно по ним
+(`mcp-platform/libs/enterprise_common/eventing/models.py:208`). Расхождение
+означало бы, что корреляция оборота теряется ровно на границе процессов, ради
+которой перенос и делался: событие MCP нельзя связать с вопросом пользователя.
 
-Требование SHALL распространяться и на операцию `log_event`: её сигнатура SHALL
-принимать `request_id` и `metadata`, как их уже описывает контракт
-(`docs/MCP-CONTRACTS.md` §3.1), — иначе документация и код расходятся, а
-корреляция теряется на входе.
+Табличный писатель платформы кладёт в строку пятнадцать колонок — двенадцать
+конверта плюс `seq` и `occurred_at`, момент события и ключ порядка
+(`mcp-platform/servers/enterprise/capabilities/data/service/main.py:1047`). Лишней
+колонки там быть не должно: это опечатка либо забытая миграция.
+
+Требование SHALL распространяться и на операцию `log_event`: личность вызова
+(`request_id`, `session_id`, `user_id`) и `metadata` SHALL доходить до строки
+журнала, как их уже описывает контракт (`docs/MCP-CONTRACTS.md` §3.1). Операция
+принимает контекст вызова и берёт идентичность из него, а не заводит
+собственный параметр: личность, которой нет у вызова, SHALL NOT достраиваться —
+выдуманный `session_id` указал бы в журнале на чужую сессию.
 
 Потеря колонки SHALL считаться дефектом писателя, а не допустимой оптимизацией:
 `request_id` — ключ группировки журнала по оборотам.
