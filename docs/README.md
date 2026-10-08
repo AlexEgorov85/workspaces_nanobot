@@ -71,6 +71,7 @@ reference** по своей подсистеме; README в корне — эт�
 | [VECTOR_INDEXES.md](VECTOR_INDEXES.md) | Векторная подсистема: `project.json` → `storage_table` → DuckDB-снапшот → in-memory FAISS, `tools/build_vectors.py`, edge-cases |
 | [INTERNAL_API.md](INTERNAL_API.md) | `tools.exec`, кастомные `workspace/tools/*.py`, CLI-режимы, `tools/`, добавление настроек |
 | [TESTING.md](TESTING.md) | Запуск тестов, контрактные тесты nanobot API, live e2e |
+| [spec-code-drift-audit.md](spec-code-drift-audit.md) | Срез соответствия «спека ↔ код ↔ документация» (2026-10-08): P0/P1/P2 расхождения, состояние валидаторов и реестра |
 
 ### Архив
 
