@@ -316,7 +316,7 @@
     "show_context_window": true,  // Печатать занятость контекстного окна (M1 UI в console_loop.py)
     "typewriter_speed": 0.01,     // Скорость "печатания" ответа, сек/символ
     "llm_timeout": 300,           // Таймаут LLM-запроса, сек
-    "exec_timeout": 60,           // Таймаут exec-инструмента, сек
+    "exec_timeout": 60,           // МЁРТВЫЙ КЛЮЧ: не читается ни кодом проекта, ни nanobot. Фактический бюджет exec — gateway.exec_timeout ниже (0 = без лимита).
     "max_iterations": 200,        // Макс. итераций агента
     "log_level": "WARNING",       // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
     "repl_idle_timeout_sec": 1.0  // Таймаут REPL-цикла ожидания outbound (console_loop.py)

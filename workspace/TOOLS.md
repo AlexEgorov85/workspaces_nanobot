@@ -299,31 +299,65 @@ JSON-string. Изменение формы данных требует отде�
   есть `legal_summarizer_query`. Это и быстрее, и кириллица не сломается.
 - Не передавай в `field` значения вне списка — будет отказ с понятной ошибкой.
 
-## audit_analyzer — доступ через CLI
+## audit_analyzer — доступ через tool'ы (не через CLI)
 
-Для работы с `audit_analyzer` Agent вызывает CLI навыка через `exec`
-(прямые tools `duckdb_query` / `vector_search` удалены):
+Данные capability агент берёт **двумя tool'ами**, которые исполняются
+внутри gateway на его уже открытом `CacheProvider`:
 
-```bash
-# Predefined script (единственный Agent-контракт)
-python workspace/skills/audit_analyzer/scripts/cli.py --mode predefined \
-    --script violations_by_type --params '{"date_from": "2024-01-01"}'
-
-# Каталог predefined-скриптов (имя, описание, параметры)
-python workspace/skills/audit_analyzer/scripts/cli.py --list-scripts
-
-# Каталог FAISS-индексов
-python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
-```
-
-| Способ | Назначение | Когда |
+| Tool | Назначение | Когда |
 |---|---|---|
-| `--mode predefined` | Точный SELECT по 6 predefined-скриптам | Числовые/структурные запросы; predefined-скрипты |
-| `--list-scripts` | Актуальный каталог скриптов из БД | Выбор скрипта |
-| `--list-indexes` | Актуальный каталог FAISS-индексов | Discovery индексов |
+| `duckdb_query(sql, params, max_rows)` | read-only SQL к кэшу | Числовые/структурные запросы, агрегации, predefined-скрипты |
+| `vector_search(query, index_name, top_k, threshold)` | Семантический поиск по FAISS-индексу | Поиск по смыслу, когда неизвестна точная формулировка |
 
-Агент сам читает `SKILL.md` и делает выбор. Ни один режим не делает
-auto-routing или классификацию запроса. Режимы `--mode vector` и
-`--mode generated_sql` доступны в CLI, но не являются частью контракта
-агента.
+**Не делать:** не вызывай `workspace/skills/audit_analyzer/scripts/cli.py`
+через `exec`. CLI открывает `cache.duckdb` в отдельном процессе, а
+gateway держит этот файл открытым весь свой жизненный цикл — DuckDB
+отдаёт `File is already open in ... PID ...` даже в `read_only`-режиме,
+и CLI падает с «DuckDB-кеш не найден» при существующем файле.
+
+Каталог таблиц и индексов — через сам tool: доступные имена таблиц
+перечисляются в ответе при отказе по неизвестной таблице, имена
+индексов — в `vector_search` (см. описание tool'а). Агент сам читает
+`SKILL.md` и делает выбор. Ни один tool не делает auto-routing или
+классификацию запроса.
+
+## Долгие операции: ждать честно
+
+`legal_summarizer` на большом документе считает **минуты** (skill сам
+печатает `estimated_total_sec`, типично 400–600 с). Это нормальная
+блокирующая работа, а не сбой.
+
+Бюджет времени уже настроен и **не является узким местом**:
+
+| Параметр | Значение | Смысл |
+|---|---|---|
+| `project.json::gateway.exec_timeout` | `0` | Без лимита: процесс живёт, пока не завершится. `ApplicationContext.create` → `apply_timeouts` переносит это в `config.tools.exec.timeout`. |
+| `project.json::gateway.exec_timeout_cap_sec` | `3600` | Потолок явного per-call `timeout=` — поднимает `RuntimePatcher.patch_exec_timeout_cap` (хардкод nanobot 600 с убивал много-минутные прогоны). |
+
+`config.json::tools.exec.timeout` — значение **перезаписывается** при старте
+из `gateway.exec_timeout`, поэтому править его бесполезно.
+
+Как ждать:
+
+1. Запусти навык и прочитай `estimated_total_sec` из JSON `status: "running"`.
+2. Жди sentinel `__LEGAL_SUMMARIZER_DONE__` вызовами `write_stdin`
+   (`wait_timeout_ms ≤ 120000` — потолок **одного** вызова, не всего
+   ожидания), пока суммарно не выбрано `estimated_total_sec` + 30% запаса.
+3. Не опрашивай по таймеру и не делай пустых LLM-вызовов.
+4. Если sentinel не пришёл, а время исчерпано — сообщи пользователю
+   `operation_id` и **остановись**.
+
+**Никогда не перезапускай навык без `--operation-id`** после неудачи:
+это создаёт вторую операцию и дублирует минуты работы, а оборот при этом
+не продвигается. Для resume есть `--operation-id` — уже записанные
+чанки не переобрабатываются.
+
+Именно эта ошибка стоила прогона в 2026-09-10: правило «не более двух
+`write_stdin` по 120 с» (≈4 минуты) короче собственной оценки навыка
+(≈7 минут), поэтому агент бросал живые процессы и начинал заново, пока
+контекст оборота не переполнялся.
+
+Если agent упал с `ContextWindowExceededError` во время такого прогона —
+это не «навык сломался», а раздутый контекст от повторных попыток;
+см. `agents.defaults.contextWindowTokens`.
 

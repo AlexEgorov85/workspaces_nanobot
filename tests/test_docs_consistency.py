@@ -102,6 +102,54 @@ def test_project_json_no_duplicate_keys() -> None:
     )
 
 
+def test_legal_summarizer_wait_contract_is_estimate_driven() -> None:
+    """Ожидание долгого прогона задаётся оценкой навыка, а не числом попыток.
+
+    Правило «не более двух ``write_stdin`` по 120 с» (≈4 минуты) короче
+    собственной оценки навыка (≈7 минут для документа ГК РФ). Агент бросал
+    живые фоновые процессы и начинал заново, пока контекст оборота не
+    переполнялся (``ContextWindowExceededError``). Такое правило вернулось
+    бы незаметно — оно читается как разумная осторожность.
+    """
+    skill = _PROJECT_ROOT / "workspace" / "skills" / "legal_summarizer" / "SKILL.md"
+    if not skill.is_file():
+        return
+    text = skill.read_text(encoding="utf-8")
+
+    assert "не более 2 попыток" not in text, (
+        "Правило ожидания снова ограничено числом попыток — документ на 10 "
+        "минут будет брошен живым, а агент начнёт повторную операцию."
+    )
+    assert "estimated_total_sec" in text, (
+        "SKILL.md должен называть estimated_total_sec: ожидание строится "
+        "по оценке навыка, а не по фиксированному числу попыток."
+    )
+
+
+def test_gateway_exec_budget_covers_long_skills() -> None:
+    """``gateway.exec_timeout`` не должен убивать много-минутный навык.
+
+    Фактический бюджет shell-вызовов агента задаётся здесь: он
+    переносится в ``config.tools.exec.timeout`` при старте. Малое
+    положительное значение означает тихий обрыв долгого прогона.
+    """
+    path = _PROJECT_ROOT / "project.json"
+    if not path.is_file():
+        return
+    text = _strip_jsonc_comments(path.read_text(encoding="utf-8"))
+    try:
+        gateway = json.loads(text).get("gateway") or {}
+    except json.JSONDecodeError:
+        return
+    if "exec_timeout" not in gateway:
+        return
+    value = gateway["exec_timeout"]
+    assert value == 0 or value >= 900, (
+        f"gateway.exec_timeout={value} — прогоны навыков дольше "
+        f"{value}с будут убиты (для legal_summarizer нужно 0 или ≥900)"
+    )
+
+
 @pytest.mark.skip(
     reason="Out of scope for 0.3.5 upgrade — broken links in docs/README.md "
     "and openspec/specs/COMPONENTS.md (legacy spec paths)",
