@@ -3,8 +3,10 @@ CacheOwnershipCoordinator — координация ownership для логич
 resource (``resource_key='local_cache'``).
 
 Ответственность (DOES):
-  * Atomic claim через PG ``INSERT ... ON CONFLICT (resource_key) DO UPDATE``
-    с инкрементом ``generation`` при takeover;
+  * Atomic claim через PG: SELECT + INSERT/UPDATE под
+    ``pg_advisory_xact_lock(hashtext(resource_key))`` с инкрементом
+    ``generation`` при takeover. Без ``INSERT ... ON CONFLICT`` —
+    Greenplum 6.5 его не поддерживает;
   * Heartbeat (``UPDATE ... WHERE owner_id=%s AND generation=%s``);
   * Release (``DELETE ... WHERE owner_id=%s AND generation=%s``);
   * Fencing context manager: ``pg_advisory_xact_lock(hashtext(resource_key))``
@@ -19,7 +21,7 @@ resource (``resource_key='local_cache'``).
 Generation semantics:
   * Стартует с 1 при первой вставке;
   * Инкрементируется на 1 при каждом takeover (при истечении
-    ``expires_at`` и успешном ``DO UPDATE``);
+    ``expires_at`` и успешном takeover-UPDATE);
   * Strictly monotonic.
 
 Fencing semantics (Variant A — design D4):
@@ -162,7 +164,7 @@ class CacheOwnershipCoordinator:
                     INSERT INTO public.agent_cache_ownership
                         (resource_key, owner_id, generation, expires_at)
                     VALUES
-                        (%s, %s, 1, NOW() + make_interval(secs => %s))
+                        (%s, %s, 1, NOW() + (%s || ' seconds')::interval)
                     RETURNING generation
                     """,
                     (self._resource_key, self._worker_id, self._ttl_seconds),
@@ -201,7 +203,7 @@ class CacheOwnershipCoordinator:
                         generation = generation + 1,
                         acquired_at = NOW(),
                         last_heartbeat_at = NOW(),
-                        expires_at = NOW() + make_interval(secs => %s)
+                        expires_at = NOW() + (%s || ' seconds')::interval
                     WHERE resource_key = %s
                     RETURNING generation
                     """,
@@ -265,7 +267,7 @@ class CacheOwnershipCoordinator:
                 """
                 UPDATE public.agent_cache_ownership
                 SET last_heartbeat_at = NOW(),
-                    expires_at = NOW() + make_interval(secs => %s)
+                    expires_at = NOW() + (%s || ' seconds')::interval
                 WHERE resource_key = %s
                   AND owner_id = %s
                   AND generation = %s

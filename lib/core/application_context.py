@@ -1679,8 +1679,10 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     # 1. CacheOwnershipCoordinator — координатор ownership для логического
     #    cache resource ``local_cache`` через таблицу ``agent_cache_ownership``
     #    (см. sql/migrations/V005__create_agent_cache_ownership.sql).
-    # 2. ``coord.try_claim()`` — atomic PG INSERT ... ON CONFLICT. Один процесс
-    #    получает acquired=True (OWNER), остальные — False (READER).
+    # 2. ``coord.try_claim()`` — atomic PG claim под advisory xact lock
+    #    (SELECT + INSERT/UPDATE, без ON CONFLICT — Greenplum 6.5 не
+    #    поддерживает). Один процесс получает acquired=True (OWNER),
+    #    остальные — False (READER).
     # 3. ``DuckDbCacheStore.open(path, mode)`` — concrete factory. mode
     #    зависит от результата claim:
     #      - acquired=True → READ_WRITE (OWNER может писать в cache);
