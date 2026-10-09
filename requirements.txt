@@ -18,7 +18,9 @@ pypdf==5.9.0
 pdfplumber==0.11.10
 python-pptx==1.0.2
 Pillow==12.3.0
-chardet==7.6.0
+# chardet<6 — ограничение nanobot-ai (requirements nanobot-ai 0.3.5).
+# API chardet.detect() в 5.x и 7.x одинаков, 7.x несовместим по версии.
+chardet==5.2.0
  
 # SQL AST security guard (lib/utils/sql_safety.py)
 sqlglot==30.17.0
