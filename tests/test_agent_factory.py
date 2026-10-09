@@ -34,6 +34,25 @@ def fake_modules(tmp_path):
         sys.modules["nanobot.agent"] = sol.agent
         sys.modules["nanobot.agent.loop"] = loop
 
+        # nanobot.agent.tools.registry: AgentFactory.create() импортирует
+        # ``ToolRegistry`` и кладёт экземпляр в kwargs
+        # (lib/core/agent_factory.py:117,184). Подмена ``nanobot.agent`` на
+        # ModuleType без ``__path__`` делает ``nanobot.agent`` НЕ пакетом,
+        # поэтому любой ``from nanobot.agent.tools.registry import ...``
+        # падает с ModuleNotFoundError. Заглушка обязана покрывать всё,
+        # что фабрика импортирует, — иначе тесты падают не по существу.
+        class _ToolRegistry:
+            def __init__(self, *args, **kwargs):
+                self.tools: dict = {}
+
+        tools_pkg = types.ModuleType("nanobot.agent.tools")
+        registry_mod = types.ModuleType("nanobot.agent.tools.registry")
+        registry_mod.ToolRegistry = _ToolRegistry
+        tools_pkg.registry = registry_mod
+        sol.agent.tools = tools_pkg
+        sys.modules["nanobot.agent.tools"] = tools_pkg
+        sys.modules["nanobot.agent.tools.registry"] = registry_mod
+
         # hooks.tool_audit_hook больше не существует: фреймворковые хуки
         # (ToolAuditHook, DatabaseLoggingHook) переехали в lib/hooks/ и
         # импортируются через ``from lib.hooks.*`` (реальные модули — при
