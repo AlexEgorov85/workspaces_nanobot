@@ -72,7 +72,7 @@ BODY = """**PATCH-релиз v2.5.4.** Первое — из изменений 
 
 ---
 
-Полный changelog по подсистемам — в [CHANGELOG.md → 2.5.4](CHANGELOG.md#254--2026-10-09)."""
+Полный changelog по подсистемам — в [CHANGELOG.md → 2.5.4](https://github.com/AlexEgorov85/workspaces_nanobot/blob/v2.5.4/CHANGELOG.md#254--2026-10-09), инструкция обновления — в [docs/MIGRATION.md](https://github.com/AlexEgorov85/workspaces_nanobot/blob/v2.5.4/docs/MIGRATION.md)."""
 
 
 def _payload() -> dict:
