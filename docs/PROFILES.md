@@ -28,7 +28,7 @@ runtime-таблиц остальная логика агента **не зна�
 
 ## Структура файлов
 
-```
+```text
 project.json              ← prod (база; специальный файл не нужен)
 profiles/
     test.jsonc            ← test (только дельты от project.json)
@@ -190,7 +190,7 @@ SETTINGS через тот же lifecycle-gate.
 
 ## Порядок merge (ConfigurationResolver)
 
-```
+```text
 1. project.json                     ← база
 2. session_manager.json (если есть) ← per-deploy override
 3. config.json                      ← nanobot-настройки

@@ -32,7 +32,7 @@
 
 Решение D4 фиксируется в трёх ветвях `_enqueue`:
 
-```
+```text
 session_key (RequestContext.session_key)
         │
         ▼
@@ -104,7 +104,7 @@ matching для security выбора.
 
 Две взаимоисключающие ветви:
 
-```
+```text
 session_scope="current":
     session_id = _current_session_key()   (from identity-store.session_key)
     → "session_id = %s"
@@ -173,7 +173,7 @@ WHERE l.request_id = r.request_id
 3. **Stale event does not inherit next request's user_id** —
    primary logging-pipeline guard. Тест в
    `tests/test_db_logging_service.py`:
-   ```
+   ```text
    register_request(session_key, request_id="A", user_id="alice")
    event = LogEvent(request_id="A", user_id=None)
    register_request(session_key, request_id="B", user_id="bob")

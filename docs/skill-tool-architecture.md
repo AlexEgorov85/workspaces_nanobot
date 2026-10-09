@@ -89,11 +89,21 @@ Skill пишет инструкции **в терминах capability**, а н�
 
 ---
 
-## 6. Read-only SQL — не Agent-facing tool
+## 6. Read-only SQL — Agent-facing tool `duckdb_query`
 
-Agent-facing tool `duckdb_query` **не существует**. Read-only SQL не является
-Agent-facing tool'ом: Agent использует only predefined-скрипты через CLI
-(`scripts/cli.py --mode predefined --script <name>`).
+Agent-facing tool `duckdb_query` **существует**:
+`workspace/tools/duckdb_query_tool.py`, регистрируется через
+`lib/services/project_tool_loader.py` и получает живой `ctx.cache_provider`
+через `set_provider`. Работает **в процессе gateway** — отдельный процесс
+к `cache.duckdb` не открывается (DuckDB отдаёт `File is already open in
+<PID>`, даже в `read_only`), поэтому in-process доступ — единственный
+рабочий путь к capability.
+
+Альтернативный путь — skill-side CLI:
+
+```text
+python scripts/cli.py --mode predefined --script <name>
+```
 
 Read-only политика сохранена как infra-контракт Core:
 
@@ -106,10 +116,13 @@ Read-only политика сохранена как infra-контракт Core
 
 ---
 
-## 7. Semantic search — не Agent-facing tool
+## 7. Semantic search — Agent-facing tool `vector_search`
 
-Agent-facing tool `vector_search` **не существует**. Semantic search не является
-Agent-facing tool'ом: доступ — через CLI skill'а:
+Agent-facing tool `vector_search` **существует**:
+`workspace/tools/vector_search_tool.py`, `set_provider` даёт ему живой
+`CacheProvider.search_vector` (FAISS в памяти gateway).
+
+Альтернативный путь — CLI skill'а:
 
 ```text
 python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
@@ -138,7 +151,8 @@ Step 1: запрос соответствует predefined из `SKILL.md` (ка
         → вызов CLI skill'а `scripts/cli.py --mode predefined --script <name>`
         → выполнение SQL через generic `CacheProvider.query_sql`.
 Step 2: запрос не соответствует ни одному predefined → сообщить пользователю
-        (прямой доступ к свободному SQL и vector search у агента нет).
+        (прямой доступ к свободному SQL и vector search у агента есть —
+        tool'ы `duckdb_query` / `vector_search`).
 Step 3: (operator/benchmark) для NL→SQL — CLI `--mode generated_sql`;
         для семантического поиска — CLI `--mode vector` с `--index-name`.
 Step 4: при ошибке → прочитать message, переформулировать/уточнить запрос,
@@ -152,8 +166,8 @@ Skill `audit_analyzer` — **CLI-only**: автономный skill-side CLI
 `scripts/cli.py --mode <predefined | generated_sql | vector>` (единый entry-point,
 вызывается агентом через `tools.exec`; также используется бенчмарками/CI).
 Generic tools `duckdb_query` (точный SELECT) и `vector_search` (семантика)
-**не существуют** — агент не имеет к ним доступа.
-Подробности — в `docs/skill-tool-inventory.md` и `workspace/skills/audit_analyzer/SKILL.md`.
+**существуют** и доступны агенту напрямую, но доменную логику аудита они
+не подменяют: решение procedure остаётся за `SKILL.md` skill'а.
 
 Tool'ы `run_predefined_script` и `nl_sql_generate` отсутствуют: их логика
 живёт в CLI skill'а (`predefined.run`, `generated_sql_mode.run`) и skill-side
@@ -383,7 +397,7 @@ Skill **запрещено** (дополнительно к общим прав�
 
 ### 12.3 Pipeline
 
-```
+```text
 CLI: --violation "..." --vnd vnd1.pdf --vnd vnd2.docx --output report.md
 
 analyze (1 LLM):

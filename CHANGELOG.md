@@ -830,6 +830,28 @@ default `~/.cache/`). Legacy `<workspace>/data_store/duckdb/` на NFS
 
 ---
 
+## [2.5.0] — 2026-09-11
+
+**MINOR поверх v2.4.0.** Эпиграф: рефакторинг `legal_summarizer`
+(layered package, document-level cache, brief как ровно один Chunk,
+structural packing, вопрос-режим через document cache, e2e 3-mode CLI),
+переработка конфигурационного контракта skills ↔ runtime infrastructure
+(`TableRegistry.register_infra`, `gateway.vector.{embedding,index}.*`,
+`EmbeddingSettings`, hard validation legacy-ключей), generic infrastructure
+tools (`duckdb_query`, `vector_search`, `nl_sql_generate`,
+`column_descriptions`, `history_search`, `compact_context`), SQL
+AST-security-guard, миграции схемы, сервисы времени жизни
+(`ContextCompactionService`, `RuntimeHealth`/`RuntimeReadiness`,
+`ConsolidatorLocale`), перенос утилит `lib/utils/*` (media/jsonb/outbound)
+→ `workspace/utils/*`, vector-storage как инфраструктурный ресурс,
+ремедиация compatibility-shim долга, history_search FTS-baseline.
+
+Breaking changes сводятся в [docs/MIGRATION.md](docs/MIGRATION.md);
+подробные эпиграф и состав релиза — в блоке `## [2.5.0]` ниже по
+истории ветки `release/v2.5`.
+
+---
+
 ## [2.5.1] — 2026-09-13
 
 > **PATCH-релиз v2.5.1:** регрессии и доработки после v2.5.0 — закрытие

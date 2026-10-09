@@ -42,7 +42,7 @@ metadata: {"nanobot":{"emoji":"📎","always":true}}
 
 Использовать `workspace.utils.office_files` (см. `utils.py` рядом):
 
-```
+```python
 from workspace.utils.office_files import extract_text, extract_tables, summarize
 text = extract_text(path)        # str с текстом документа
 tables = extract_tables(path)    # list[list[list[str]]] — таблицы

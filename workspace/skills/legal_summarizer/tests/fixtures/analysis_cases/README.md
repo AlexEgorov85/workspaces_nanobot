@@ -38,7 +38,7 @@
 
 Запущены **все** тесты `workspace/skills/legal_summarizer` через корневой pytest:
 
-```
+```text
 tests/test_skill_legal_summarizer.py
 tests/test_manifest.py
 tests/test_prompts.py

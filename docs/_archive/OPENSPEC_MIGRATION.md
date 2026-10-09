@@ -13,7 +13,7 @@ fully before executing any other step — those rules bind every later action.
 
 ## Authority Hierarchy (binding, cannot be overridden by a change)
 
-```
+```text
 OpenSpec spec                → normative behavior of a capability/change
 docs/TARGET_ARCHITECTURE.md  → permanent architectural invariants
 workspace/AGENTS.md          → AI agent operating rules
@@ -32,7 +32,7 @@ change.
 
 Each STEP uses this format:
 
-```
+```text
 STEP n.m — <title>
 Files:        <paths created, modified, or referenced>
 Action:       <what the agent does>
@@ -55,7 +55,7 @@ CONDITION. Every STOP CONDITION escalates to the human reviewer.
 
 Every significant change follows this sequence:
 
-```
+```text
 Idea
   ↓
 Explore
@@ -655,7 +655,7 @@ Action:       When the agent detects a conflict between spec and code (or
                  implementation until the human resolves the conflict.
 
 `BLOCKED.md` format (mandatory):
-```
+```text
 # BLOCKED
 
 Status: BLOCKED
@@ -682,7 +682,7 @@ status RESOLVED by the human reviewer.
 ```
 
 Chat message format (mandatory):
-```
+```text
 BLOCKED: human decision required.
 
 Change: <name>
@@ -825,7 +825,7 @@ accumulate.
 
 ## Appendix A — File map after bootstrap
 
-```
+```text
 openspec/
 ├── specs/
 │   ├── architecture/

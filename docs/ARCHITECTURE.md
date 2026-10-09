@@ -145,7 +145,7 @@ flowchart LR
 для провайдерских ключей использует провайдер-скоупинг формат
 `.secrets.env`:
 
-```
+```text
 # providers: llm
 api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 ```
@@ -555,7 +555,7 @@ async def _notify(self, session_key, report):
 
 Для ``archived > 0``:
 
-```
+```text
 <текст LLM-сводки (если есть)>
 
 Итог: заархивировано N сообщений (осталось K), BEFORE → AFTER токенов (экономия ≈P%).
@@ -563,13 +563,13 @@ async def _notify(self, session_key, report):
 
 Для ``archived == 0`` (сжатие не потребовалось):
 
-```
+```text
 Сжатие сессии «<key>» не потребовалось: контекст уже в пределах бюджета (N токенов).
 ```
 
 Для ошибки:
 
-```
+```text
 Сжатие не выполнено: <причина>
 ```
 
@@ -1227,7 +1227,7 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 `agent_conversation_messages` это `content = '/stop'`), и реализует
 `poll_priority_inbound` через параметризованный claim:
 
-```
+```text
 MessageExchange._poll_loop:
     poll_priority = getattr(channel, "poll_priority_inbound", None)
     while running:
@@ -1507,7 +1507,7 @@ streamlit-UI, аварийными script'ами после deploy.
 
 ## 📁 Структура проекта
 
-```
+```text
 nanobot/
 ├── docs/                                  # каталог технической документации (навигация — docs/README.md)
 ├── tools/                                # инфраструктурные CLI-утилиты
@@ -1630,7 +1630,7 @@ Python-пакет внутри `scripts/` (корневой `pyproject.toml::pyt
 импорты плоские: `from application.service import ...`, `from document.physical import ...`).
 CLI-обёртки — `cli.py` / `cli_query.py`:
 
-```
+```text
 scripts/
 ├── cli.py                     # практики CLI (audit query) + разовые операции
 ├── cli_query.py               # QA по пакетам документов (tool legal_summarizer_query)

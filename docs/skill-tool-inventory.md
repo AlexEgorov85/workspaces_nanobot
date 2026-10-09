@@ -1,7 +1,9 @@
 # Skill / Tool inventory
 
-Зафиксированное состояние skill/tool в репозитории (skill-side CLI — единый
-entry-point доступа к данным, generic tools для SQL/vector отсутствуют).
+Зафиксированное состояние skill/tool в репозитории. Доступ к данным capability
+дают два пути: skill-side CLI (доменная логика) и generic tools
+`duckdb_query` / `vector_search` (прямой доступ агента через
+`workspace/tools/`, работают в процессе gateway).
 
 Исторические process/baseline-артефакты — в
 [`docs/_archive/`](_archive/).
@@ -11,6 +13,7 @@ entry-point доступа к данным, generic tools для SQL/vector от
 | component | path | type | depends_on_skill | depends_on_tool | depends_on_shared_infra | status |
 |---|---|---|---|---|---|---|
 | `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` + `scripts/` | Skill (domain, **CLI**) | — | следование SKILL.md через CLI `scripts/cli.py --mode predefined` (агент); CLI `--mode <predefined \| generated_sql \| vector>` для бенчмарков/CI/operator | — | active |
+| `audit_formulation_strengthener` Skill | `workspace/skills/audit_formulation_strengthener/SKILL.md` + `prompts/` + `references/` + `scripts/` | Skill (domain, **CLI**) | — | через собственный skill-side CLI `scripts/cli.py --mode <analyze | search | synthesize | all>`; отчёт кладётся в `workspace/data_store/cache/sessions/<session_key>/` (резолвит `scripts/paths.py`) | `lib/services/llm_client.py`, `lib/services/text_splitter.py`, `workspace/utils/office_files.py` | active |
 | `legal_summarizer` Skill | `workspace/skills/legal_summarizer/SKILL.md` + `references/` + `scripts/` | Skill (domain) | — | через собственный skill-side CLI; follow-up через tool `legal_summarizer_query` | `lib/services/llm_client.py` | active |
 | `office_files` Skill | `workspace/skills/office_files/SKILL.md` + `references/` + `scripts/` | Skill (domain) | — | чтение docx/xlsx/xls/pdf/pptx/csv/txt через `workspace/utils/office_files.py` + `lib/services/text_splitter.py` | — | active |
 | `compact_context` tool | `workspace/tools/compact_context.py` | Tool | — | — | `lib/services/context_compaction.py` | active |

@@ -16,7 +16,7 @@ FAISS-индексов. Агент отвечает без эмбеддинго�
 
 Вводим явную фазу подготовки **до** рабочего цикла:
 
-```
+```python
 ctx.start()                     # фоновые сервисы, sync-тред
 └─ _run_startup_preparation()   # фаза подготовки (свой event loop)
    ├─ StartupGate.wait_for_cache()   # сигнал «PG→DuckDB + publish снапшота»

@@ -15,7 +15,7 @@ per-call metadata, `DbLoggingService` — content-rich audit-trail.
 Фиксируются как часть контракта (проверяются через
 контрактные тесты):
 
-```
+```text
 LLMCallObserver = Callable[["LLMCallRecord"], None]
   # из nanobot/providers/base.py:31
 

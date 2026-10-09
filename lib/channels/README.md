@@ -8,7 +8,7 @@
 
 ### Жизненный цикл сообщения
 
-```
+```text
 Пользователь (Streamlit)     PostgresChannel          Agent
         │                         │                     │
         │ INSERT (status=pending)  │                     │
@@ -102,7 +102,7 @@
 
 ### Поток сообщения
 
-```
+```text
 Внешняя система            RedisChannel              Agent
      │                         │                       │
      │ LPUSH nanobot:inbox     │                       │

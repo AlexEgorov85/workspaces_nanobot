@@ -59,7 +59,7 @@
 
 ### Verification — финальный аудит
 
-```
+```text
 document-level legacy symbols в production (scripts/, исключая cache/) = 0
 document-level legacy symbols в cache/document_cache.py                  = N/A (владелец)
 document-level legacy symbols в cache/manifest.py                        = 0 (физически удалены)

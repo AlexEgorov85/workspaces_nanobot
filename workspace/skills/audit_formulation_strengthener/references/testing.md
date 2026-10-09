@@ -15,7 +15,7 @@
 
 ## Структура
 
-```
+```text
 tests/
 ├── conftest.py              # REPO_ROOT в sys.path; фикстуры mock_llm_*, sample_vnd_files
 ├── test_architecture.py     # AST + plain string по scripts/**

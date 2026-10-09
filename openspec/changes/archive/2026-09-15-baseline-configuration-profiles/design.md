@@ -10,7 +10,7 @@ schema without touching production data.
 
 ## Resolution flow
 
-```
+```text
 config.py::load_settings()
         │
         ├─ read project.json (mode-aware overlays via profiles/<mode>.jsonc)

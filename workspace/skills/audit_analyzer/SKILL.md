@@ -87,7 +87,7 @@ Python `REGISTRY` (legacy) отсутствует; единственный пу
 через `scripts/predefined/db_loader.py`. Sql-функция `load_all` живёт
 в `predefined`-подсистеме и **не дублируется** в `generated_sql_mode`.
 
-```
+```text
 PostgreSQL
     ↓ seed/migration
 public.agent_predefined_scripts (6 скриптов)

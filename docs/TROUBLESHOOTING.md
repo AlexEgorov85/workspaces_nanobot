@@ -160,7 +160,7 @@ PowerShell интерпретирует `=` по-своему. Использу�
 и `apply_all()` автоматически выводит **prominent-баннер** (`rich.Panel`,
 stderr), если фактический инвентарь расходится с каноном:
 
-```
+```text
 ┌─ HOOK INVENTORY: critical drift detected ──────────────────────────────┐
 │ MISSING REQUIRED: SessionFileRedirectHook, RecentFilesHook              │
 │ MISSING FACTORY: DatabaseLoggingHook                                    │

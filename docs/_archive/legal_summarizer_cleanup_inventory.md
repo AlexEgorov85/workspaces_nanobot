@@ -5,7 +5,7 @@
 
 ## Baseline audit (legacy references)
 
-```
+```text
 Production legacy references: 73
 Test-only legacy references:   5
 ```

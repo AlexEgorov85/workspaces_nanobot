@@ -75,7 +75,7 @@
 ## Финальная проверка регрессии
 
 ### Skill-тесты
-```
+```text
 449 passed, 4 skipped in 2.38s
 ```
 Baseline был 446 passed / 4 skipped → +3 новых теста
@@ -83,7 +83,7 @@ Baseline был 446 passed / 4 skipped → +3 новых теста
 `test_structure_legacy_regression.py` удалён → нетто +3).
 
 ### Root keyword-subset (17 файлов)
-```
+```text
 98 failed, 430 passed
 ```
 Baseline (на `501693e`) был 111 failed / 411 passed → **−9 failures** (тесты удалены/вычищены), **0 новых failures**.
@@ -91,7 +91,7 @@ Baseline (на `501693e`) был 111 failed / 411 passed → **−9 failures** (
 Удалённые/вычищенные тесты, которые переходили из failed → deleted (фигурировали в baseline failures,
 а в post-state просто отсутствуют):
 
-```
+```text
 test_block_aware_chunking_no_text_lost
 test_block_aware_chunking_oversized_block_falls_back_to_split
 test_block_aware_chunking_preserves_section_metadata

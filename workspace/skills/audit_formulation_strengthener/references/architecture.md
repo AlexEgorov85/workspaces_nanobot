@@ -10,7 +10,7 @@ Skill принимает **текст отклонения** + **файлы ВН
 
 ## Слои
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────┐
 │  CLI  (scripts/cli.py)                                             │
 │  ─ argparse: --violation, --vnd ×N, --mode, --output, --estimate-only│
@@ -61,7 +61,7 @@ Skill принимает **текст отклонения** + **файлы ВН
 
 ## Поток данных
 
-```
+```text
 violation_text ───┐
                   │
 vnd_paths ────────┼──► vnd_io.prepare_vnd() ──► VndBundle(chunks)
@@ -100,7 +100,7 @@ vnd_paths ────────┼──► vnd_io.prepare_vnd() ──► Vn
 
 ### analyze (1 LLM-вызов)
 
-```
+```text
 1. Валидация: violation не пустой
 2. Загрузить prompts/analyze_system.md
 3. Подставить {{VIOLATION_TEXT}}
@@ -112,7 +112,7 @@ vnd_paths ────────┼──► vnd_io.prepare_vnd() ──► Vn
 
 ### search (N LLM-вызовов — map по чанкам → фильтр/top-K)
 
-```
+```text
 1. vnd_io.prepare_vnd() → chunks + size_estimate
 2. (опц.) Резолвить normalized_violation из analyze_result / analyze_result_path;
    fallback — сырой violation
@@ -129,7 +129,7 @@ vnd_paths ────────┼──► vnd_io.prepare_vnd() ──► Vn
 
 ### synthesize (1 LLM-вызов)
 
-```
+```text
 1. Загрузить analyze/search (in-memory или из файла)
 2. Извлечь normalized_violation, severity, key_concepts, vnd_findings
 3. Построить evidence registry F1..FN (≤1500 симв excerpt + relation_type)

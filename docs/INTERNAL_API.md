@@ -309,7 +309,7 @@ CLI skill'а (`scripts/cli.py --mode predefined`).
 
 Точка входа: `python scripts/cli.py` (кросс-платформенный).
 
-```
+```text
 audit_analyze --mode {predefined,generated_sql,vector} [опции]
 ```
 

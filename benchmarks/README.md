@@ -6,7 +6,7 @@
 
 ## 1. Архитектура
 
-```
+```text
 benchmarks/
 ├── __init__.py           # Версия пакета (0.1.0)
 ├── .gitignore            # Игнорирование results/runs/*, __pycache__
@@ -33,7 +33,7 @@ benchmarks/
 
 ### Поток выполнения
 
-```
+```text
 runner.py (CLI)
   │
   ├── load_benchmark(path)        → BenchSuite (loader.py)
@@ -154,7 +154,7 @@ runner.py (CLI)
 
 ### 3.1. Структура файлов
 
-```
+```text
 benchmarks/items/
 ├── _template.yaml        # Шаблон-заготовка (игнорируется загрузчиком)
 ├── simple.yaml           # Простые вопросы, сложность 1–3
@@ -286,7 +286,7 @@ items:
 
 Все ошибки загрузки YAML перехватываются раннером и выводятся в понятном виде:
 
-```
+```text
 ======================================================================
   ERROR: Missing required field in benchmark YAML
 ======================================================================
@@ -327,7 +327,7 @@ items:
     keywords_include: ["тест"]  # ← отступ не совпадает с tools
 ```
 Вывод:
-```
+```text
 ERROR: Failed to load benchmark
 yaml.scanner.ParserError: while parsing a block mapping
   in "file.yaml", line 5, column 5
@@ -339,7 +339,7 @@ yaml.scanner.ParserError: while parsing a block mapping
   difficulty: 1
 ```
 Вывод:
-```
+```text
 ERROR: Missing required field in benchmark YAML
 Missing field: 'id'
 ```
@@ -350,7 +350,7 @@ Missing field: 'id'
   type: "multi_step"       # ← нет steps
 ```
 Вывод:
-```
+```text
 ERROR: Invalid benchmark definition
 Item 'test' has type multi_step but no steps defined
 ```
@@ -358,7 +358,7 @@ Item 'test' has type multi_step but no steps defined
 **Файл с именем `_` игнорируется без ошибки** — вопросы не попадут в прогон, и вы этого не заметите. Проверяйте имена файлов.
 
 **Дубликаты `id`** — загрузчик их не проверяет. Валидация предупредит:
-```
+```text
 Warnings:
   ! DUPLICATE ID 'my-id' — will be overwritten in reports/DB
 ```
@@ -390,7 +390,7 @@ python benchmarks/runner.py --items benchmarks/items/simple.yaml --dry-run
 ```
 
 Пример вывода `--dry-run`:
-```
+```text
 DRY RUN: items
 Total items: 18
 
@@ -415,7 +415,7 @@ python -c "import yaml; yaml.safe_load(open('benchmarks/items/simple.yaml'))"
 #### Шаг 3. Валидация перед запуском
 
 Перед фактическим запуском runner проверяет все items и выводит предупреждения:
-```
+```text
 Warnings:
   ! DUPLICATE ID 'my-id' — will be overwritten in reports/DB
   ! Item 'test' is single but has no question
@@ -629,7 +629,7 @@ warning и прогон на текущем состоянии кэша.
 
 Если YAML-файлы содержат ошибки, runner **не падает с raw traceback**, а выводит понятное сообщение:
 
-```
+```text
 ======================================================================
   ERROR: Missing required field in benchmark YAML
 ======================================================================
@@ -643,7 +643,7 @@ warning и прогон на текущем состоянии кэша.
 #### Уровень 2: Валидация перед запуском
 
 Перед запуском агента runner проверяет все вопросы и предупреждает:
-```
+```text
 Warnings:
   ! DUPLICATE ID 'my-id' — will be overwritten in reports/DB
   ! Item 'test' is single but has no question
@@ -652,7 +652,7 @@ Warnings:
 #### Уровень 3: Live-вывод single-заданий
 
 Для каждого single-задания:
-```
+```text
 [1/6] simple-greeting (difficulty=1)
   -> PASS score=100.00% iter=3 dur=5.2s
 
@@ -678,7 +678,7 @@ Warnings:
 #### Уровень 4: Live-вывод multi_step-заданий
 
 Каждый шаг выводится отдельно с результатом:
-```
+```text
 [4/6] hard-code-test-fix (difficulty=8)
     Step 1/3: Напиши Python скрипт fibonacci.py...
       -> PASS score=100.00% iter=3 dur=5.2s
@@ -692,7 +692,7 @@ Warnings:
 #### Уровень 5: Итоговая сводка
 
 После завершения всех вопросов:
-```
+```text
 ======================================================================
   BENCHMARK COMPLETE: items
 ======================================================================

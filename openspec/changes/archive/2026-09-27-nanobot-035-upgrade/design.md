@@ -146,7 +146,7 @@ Upstream `cmd_compact` (`nanobot/command/builtin.py`) передаёт `events=d
 
 Прямая интроспекция через `inspect.signature` на установленном `nanobot-ai==0.3.5`:
 
-```
+```text
 AgentLoop._assemble_outbound:
 (self, msg, final_content, stop_reason, streamed_content, *, log_content: bool = True, turn_latency_ms: int | None = None)
 

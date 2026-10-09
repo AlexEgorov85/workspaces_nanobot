@@ -7,7 +7,7 @@
 
 ## Архитектурная диаграмма
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │                        LLM Provider                           │
 │                                                               │
@@ -90,7 +90,7 @@ agent = AgentLoop.from_config(
 
 Поля upstream-контракта (см. спеку `storage/usage-store`):
 
-```
+```text
 LLMCallRecord (frozen dataclass):
   started_at_ms: int
   duration_ms: int

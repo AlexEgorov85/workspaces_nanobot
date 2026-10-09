@@ -21,7 +21,7 @@ Skill **не вызывает** Tool программно (`TARGET_ARCHITECTURE.
 
 Универсальная структура:
 
-```
+```text
 workspace/skills/<skill_name>/
     SKILL.md
     scripts/

@@ -33,7 +33,7 @@
 
 ### 0. Конфигурация (статическая, в `project.json`)
 
-```
+```text
 gateway.vector.index.indexes.*     → список индексов (table, pk,
                                      content_columns, embedding_columns,
                                      chunk_size, chunk_overlap, metric,
@@ -183,7 +183,7 @@ DuckDB-lookup'ов). Cold-start целиком перенесён в startup-flo
 
 ### 6. Диаграмма
 
-```
+```text
                     ┌─────────────────────────────────────────┐
                     │  PostgreSQL                              │
                     │  ┌────────────────────────────────────┐  │

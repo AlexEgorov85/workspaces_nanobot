@@ -81,7 +81,7 @@ flowchart LR
 
 ## 📁 Структура проекта
 
-```
+```text
 nanobot/
 ├── README.md  CHANGELOG.md  AGENTS.md
 ├── config.json  project.json  config.py        # 3 конфига
@@ -199,107 +199,25 @@ cross-user выдачи; без identity-store возвращается `missing
 **PATCH поверх v2.5.1, 2026-09-14.** Две группы доработок:
 
 **NFS / DuckDB cache.** Раньше gateway, развёрнутый на NFS-шаре, цикл
-sync-а падал с `IO Error: Could not set lock on file cache.duckdb.tmp:
-Conflicting lock is held in PID 0` (DuckDB `ATTACH` берёт эксклюзивный
-`flock`, который NFS `lockd` не отдаёт). Теперь:
-- **единый механизм** `resolve_publish_path()` — вызывается и из
-  gateway, и из CLI/skill/vector_index_service; путь записи и путь
-  чтения **всегда совпадают** (`b1d2e21`, fix от расхождения после
-  коммита `85cad2a`);
-- safe default — `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX `fcntl`
-  работает там штатно), без escape hatch и без совместимости с NFS
-  (`85cad2a`);
-- единственная опция override — `gateway.cache.local_path` (`c522b55`);
-  legacy `<workspace>/data_store/duckdb/` больше не выбирается
-  через `gateway.cache.use_workspace_path` — опция удалена;
-- startup WARNING при попадании снимка на NFS (`/proc/mounts` check);
-- defensive publish-слой: уникальный `.tmp.<pid>.<ms>.tmp`, retry с
-  backoff на `ATTACH`, понятный `sync_publish_failed` вместо
-  `except OSError: pass` (`605660b`, `652b09d`).
+sync-а падал с `IO Error: Could not set lock on file cache.duckdb.tmp:`
+Conflicting lock is held in PID 0`. Теперь единый механизм
+`resolve_publish_path()`, safe default `~/.cache/nanobot/duckdb/cache.duckdb`,
+единственный override — `gateway.cache.local_path`, startup WARNING при
+попадании снимка на NFS и защитный publish-слой с retry.
 
-**Observability sync-путей.** Единый конвейер `DbLoggingService.try_log_event`
-вместо ad-hoc `logger.warning` (`a1811c5`); ошибки
-`preload` векторов и `channel` lease-loop теперь попадают в долговечный
-`agent_gateway_logs` (`9fb88c4`, `48575e9`); `PG→DuckDB` sync-цикл
-(`initial_load` / `poll_cycle` / `claim` / `release` / `reconnect`)
-полностью пишется в `agent_gateway_logs` (`f58c957`, `d4558f9`).
+**Observability sync-путей.** Единый конвейер
+`DbLoggingService.try_log_event` вместо ad-hoc `logger.warning`; ошибки
+`preload` векторов и `channel` lease-loop попадают в долговечный
+`agent_gateway_logs`.
 
-**Tests:** добавлены `TestResolvePublishPath` (6 кейсов),
-`TestSingleMechanism` (1 кейс — инвариантна согласованности gateway ↔
-CLI/skill) и `TestWarnIfPublishPathOnNfs` (2 кейса); все ранее
-падавшие тесты (включая `preload_service::test_error_returns_none`)
-зелёные.
+Плюс three-mode контракт `audit_analyzer` (без fallback), vector discovery
+declared-vs-runtime (`tools/check_indexes.py`) и preload health summary на
+старте gateway. Полный changelog — в
+[CHANGELOG.md → 2.5.2](CHANGELOG.md#252--2026-09-14).
 
-**Audit-analyzer three-mode contract (`a396c27`).** `audit_analyzer`
-свёрнут в три равноправных режима — `predefined`, `vector`,
-`generated_sql` — **без fallback между ними**. Удалён
-`scripts/column_hints.py` и прежний registry: схема передаётся в LLM
-через `CacheProvider.get_schema()` +
-`lib.utils.sql_safety.format_schema`, few-shot — через
-`predefined.db_loader.load_all`. Если выбранный режим неприменим,
-агент получает явный `RuntimeError` с диагностикой, а не молчаливый
-переход на соседний режим.
-
-**Vector discovery: declared vs runtime.**
-`audit_analyzer/scripts/cli.py::_list_indexes()` читает фактическое
-состояние индексов из DuckDB-снапшота таблицы-хранилища
-(`gateway.vector.index.storage_table`), а не декларативный JSON. Для сверки
-с декларацией (`project.json::gateway.vector.index.indexes.*`) добавлен
-`tools/check_indexes.py`: MISSING / ORPHAN / STALE / INVALID-signature,
-exit 0/1/2, `--json` для CI. См. `docs/VECTOR_INDEXES.md`.
-
-**Preload health summary на старте gateway (`78a57f4`).** После
-`preload_vector_indexes()` gateway печатает в **stderr** многострочный
-summary (`declared/loaded/missing/orphan/stale` + счётчики vectors) и
-пишет одно событие `vector_index_preload_health` в `agent_gateway_logs`
-через `DbLoggingService.try_log_event`: `level="WARN"` при divergence, иначе `INFO`.
-Конструктор `PreloadService(settings, db_logging_service)` —
-сервис логирования пробрасывается явно.
-
-**Tests (полный набор):** добавлены `TestResolvePublishPath` (6),
-`TestSingleMechanism` (1 — инвариантна gateway ↔ CLI/skill),
-`TestWarnIfPublishPathOnNfs` (2), `test_check_indexes` (17 — declared vs
-runtime), `test_preload_service` (+18 health summary, всего 22),
-`test_audit_analyzer_mode_selection` (переписан под three-mode),
-`test_audit_analyzer_generated_sql` (обновлён под `MAX_ATTEMPTS`).
-
-Полный changelog — в [CHANGELOG.md → 2.5.2](CHANGELOG.md#252--2026-09-14).
-
-## 🆕 Что нового в v2.5.1
-
-**PATCH поверх v2.5.0, 2026-09-13.** Регрессии и доработки после MINOR-релиза — закрытие
-lifecycle-deadlock `postgres_channel` при `stream_end` с пустым delta (`71cfcde`),
-удаление agent-tools `duckdb_query` и `vector_search` (`12bf182`), перенос конфига vector-индексов из PG-реестра
-`public.agent_vector_index_config` в `project.json::gateway.vector.index.indexes.*`
-+ хардкод эмбеддинга (`bf59b5a`), DB-first `scripts/predefined` в `audit_analyzer`
-+ удаление `tools/generate_predefined_scripts_sql.py` (`79e0e63`),
-`tools/build_vectors.py --validate-only` + ETA прогресса (`8b70383`), стабилизация
-порядка таблиц в `lib/utils/duckdb_query.build_schema` (`a8e03e8`), перенос тестов
-`audit_analyzer` в `workspace/skills/audit_analyzer/tests/` (`10771cc`),
-синхронизация архитектурной документации и README «Что нового».
-
-Изменения конфигурации: `config.json` — провайдер LLM `qwen3.6-35b-a3b` через
-`https://api.neuraldeep.ru/v1/`, `contextWindowTokens: 40000` (см. `e06b2b0`).
-
-Полный changelog — в [CHANGELOG.md → 2.5.1](CHANGELOG.md#251--2026-09-13).
-
-## 🆕 Что нового в v2.5.0
-
-**MINOR поверх v2.4.0, 2026-09-11.** Рефакторинг `legal_summarizer` (layered package,
-document-level cache, brief как ровно один Chunk, structural
-packing, вопрос-режим через document cache, e2e 3-mode CLI), переработка
-конфигурационного контракта skills ↔ runtime infrastructure (`TableRegistry.register_infra`,
-`gateway.vector.{embedding,index}.*`, `EmbeddingSettings`, hard validation legacy-ключей),
-generic infrastructure tools (`duckdb_query`, `vector_search`, `nl_sql_generate`,
-`column_descriptions`, `history_search`, `compact_context`), SQL AST-security-guard,
-миграции схемы, сервисы времени жизни (`ContextCompactionService`,
-`RuntimeHealth`/`RuntimeReadiness`, `ConsolidatorLocale`), перенос утилит
-`lib/utils/*` (media/jsonb/outbound) → `workspace/utils/*`, vector-storage как
-инфраструктурный ресурс, ремедиация compatibility-shim долга, history_search FTS-baseline.
-Подробный эпиграф с breaking changes — в начале блока v2.5.0.
-
-Полный changelog — в [CHANGELOG.md → 2.5.0](CHANGELOG.md#250--2026-09-11).
-Сводка breaking changes — в [docs/MIGRATION.md](docs/MIGRATION.md).
+История предыдущих релизов: [2.5.1](CHANGELOG.md#251--2026-09-13) и
+[2.5.0](CHANGELOG.md#250--2026-09-11) — там же, в `CHANGELOG.md`;
+сводка breaking changes — в [docs/MIGRATION.md](docs/MIGRATION.md).
 
 ## 🛡 Зависимости и лицензия
 

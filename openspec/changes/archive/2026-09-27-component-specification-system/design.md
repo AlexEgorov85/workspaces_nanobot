@@ -2,7 +2,7 @@
 
 ## Архитектура системы
 
-```
+```text
 openspec/
 ├── changes/
 │   └── component-specification-system/
@@ -48,7 +48,7 @@ openspec/
 
 ### Примеры компонентов
 
-```
+```text
 ApplicationContext    → компонент (lifecycle, assembly root)
 ConfigService         → компонент (configuration resolution)
 PGSessionManager      → компонент (session state)
@@ -60,7 +60,7 @@ Skill                 → компонент (domain capability)
 
 ### Не являются отдельными компонентами
 
-```
+```text
 _private_helper()     → internal helper
 format_name()         → utility function
 small DTO             → data structure
@@ -185,7 +185,7 @@ internal constant     → configuration value
 
 ### Каталог компонента
 
-```
+```text
 openspec/specs/<domain>/<component-name>/spec.md
 ```
 
@@ -195,7 +195,7 @@ openspec/specs/<domain>/<component-name>/spec.md
 
 ### Примеры
 
-```
+```text
 runtime/application-context/spec.md
 data/cache-provider/spec.md
 skills/audit-analyzer/spec.md

@@ -6,7 +6,7 @@ syntax. No assumptions are made beyond observed output.
 
 ## Top-level commands
 
-```
+```text
 init [options] [path]              Initialize OpenSpec in your project
 update [options] [path]            Update OpenSpec instruction files
 list [options]                     List items (changes by default). Use --specs to list specs
@@ -34,7 +34,7 @@ help [command]                     display help for command
 
 ## init options
 
-```
+```text
 --tools <tools>        Configure AI tools non-interactively. Accepted: amazon-q, antigravity,
                        auggie, bob, claude, cline, command-code, codeartsagent, codex, devin,
                        forgecode, codebuddy, continue, costrict, crush, cursor, factory,
@@ -53,7 +53,7 @@ help [command]                     display help for command
 
 ## config subcommands
 
-```
+```text
 path                         Show config file location
 list [options]               Show all current settings
 get <key>                    Get a specific value (raw, scriptable)
@@ -71,7 +71,7 @@ help [command]               display help for command
 
 ## Initial configuration (post-init)
 
-```
+```text
 profile: core
 delivery: both
 telemetry:
@@ -87,7 +87,7 @@ Profile settings:
 
 ## Available schemas
 
-```
+```text
 spec-driven
   Default OpenSpec workflow - proposal → specs → design → tasks
   Artifacts: proposal → specs → design → tasks
@@ -98,7 +98,7 @@ Only `spec-driven` is registered initially. New schemas can be added via the
 
 ## Available extended workflows
 
-```
+```text
 new, continue, ff, bulk-archive, verify, onboard
 ```
 

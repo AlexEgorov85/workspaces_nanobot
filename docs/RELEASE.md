@@ -169,7 +169,7 @@ gh auth status
 
 Под капотом:
 
-```
+```bash
 gh release create v2.5.2 --repo AlexEgorov85/workspaces_nanobot \
   --title v2.5.2 --notes-file <tempfile>
 ```

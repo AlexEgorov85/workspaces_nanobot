@@ -83,7 +83,7 @@ ConfigurationError` и превращаются в `sys.stderr.write + return 2`
 Сервис `SchemaValidationService` принимает `settings: dict` и
 извлекает 6 имён по путям:
 
-```
+```text
 channels.postgres.{table_name, messages_table, meta_table, claims_table}
 logging.db.{table_name, question_runs_table}
 ```
@@ -149,7 +149,7 @@ Greenplum 6.5 и Postgres, минимальный round-trip cost.
 
 Добавляется секция (опциональная, дефолт `True`):
 
-```
+```text
 gateway.startup.schema_validation.enabled: bool = True
 gateway.startup.schema_validation.timeout_sec: float = 5.0
 ```
@@ -171,7 +171,7 @@ gateway.startup.schema_validation.timeout_sec: float = 5.0
 `SchemaValidationError` имеет `.missing: list[MissingTable]` и
 `.profile: str`. При выбросе формируется сообщение:
 
-```
+```text
 Schema validation failed for profile='prod':
 missing runtime tables:
   - public.agent_conversation_messages

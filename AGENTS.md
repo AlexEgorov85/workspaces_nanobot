@@ -294,7 +294,7 @@ grep'абельности.
 
 **Примеры из истории:**
 
-```
+```text
 feat(backfill): AW-миграция legacy-медиа ({data} -> file_id) в agent_conversation_messages
 refactor(media): единый кодек media + общий MessageExchange для postgres/redis/streamlit
 fix(db): не передавать () вместо None в _CursorProxy.execute

@@ -120,7 +120,7 @@ startup уже существует — `SchemaValidationService`
 Приёмочный тест проверяет наблюдаемый порядок событий в реальном
 `_entrypoint_main`, а не наличие вызова гейта:
 
-```
+```text
 cache.connect → sync.start → cache.publish → vector.preload → channels
 ```
 

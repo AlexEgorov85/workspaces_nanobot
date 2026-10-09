@@ -240,7 +240,7 @@ DSN подключается только через `channels.postgres.dsn` в 
 `lib/core/application_context.py` — один `stat`, без БД и DuckDB. Итог пишется
 в лог одной строкой:
 
-```
+```text
 cache snapshot: path=… age=2ч 13м ttl=23ч 0м decision=fresh reuse=True
 ```
 

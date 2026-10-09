@@ -382,7 +382,7 @@ producer: str, event_type: str) -> bool`:
 
 То есть:
 
-```
+```text
 business operation (compact / sync_event / preload)
         ↓
 try_log_event(...)

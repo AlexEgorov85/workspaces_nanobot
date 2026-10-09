@@ -23,7 +23,7 @@
 
 ## 1. Production graph (текущее состояние)
 
-```
+```text
 CLI (scripts/cli.py, cli_query.py)
  ↓
 summarizer.inspect() / summarizer.run()       — legacy path (active)
@@ -89,7 +89,7 @@ Canonical — покрыт тестами, готов к миграции.
 
 ### Локальный skill suite
 
-```
+```text
 workspace/skills/legal_summarizer/tests
 338 passed in 1.49s
 ```
