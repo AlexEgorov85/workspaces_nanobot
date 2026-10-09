@@ -548,7 +548,7 @@ class PgDuckDbSyncService:
                     )
                     self._reconnect()
                     return
-                except psycopg2.errors.UndefinedTable as exc:
+                except psycopg2.errors.UndefinedTable:
                     error_count += 1
                     logger.error(
                         "PgDuckDbSyncService: таблица-источник не найдена: %s "

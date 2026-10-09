@@ -308,7 +308,6 @@ def run_canonical_pipeline(
     validation = validate_structure(struct, physical)
 
     from chunking.chunker import (
-        ChunkPlanner,
         DocumentStructureChunkerConfig,
         build_chunk_config_from_runtime,
     )

@@ -51,13 +51,13 @@ _REPO_ROOT = str(_SKILL_ROOT.parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from workspace.skills.audit_formulation_strengthener.scripts.output import (
+from workspace.skills.audit_formulation_strengthener.scripts.output import (  # noqa: E402
     make_error,
 )
-from workspace.skills.audit_formulation_strengthener.scripts.paths import (
+from workspace.skills.audit_formulation_strengthener.scripts.paths import (  # noqa: E402
     resolve_output_path,
 )
-from workspace.skills.audit_formulation_strengthener.scripts.skill_config import (
+from workspace.skills.audit_formulation_strengthener.scripts.skill_config import (  # noqa: E402
     get_cli_config,
 )
 

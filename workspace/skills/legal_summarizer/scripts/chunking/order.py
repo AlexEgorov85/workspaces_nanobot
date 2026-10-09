@@ -20,7 +20,9 @@ def restore_document_order(
 ) -> list[Chunk]:
     """Восстановить document order (по ``chunk.index``)."""
     if key is None:
-        key = lambda c: c.index
+
+        def key(c: Chunk) -> int:
+            return c.index
     return sorted(chunks, key=key)
 
 

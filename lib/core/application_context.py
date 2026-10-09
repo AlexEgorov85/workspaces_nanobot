@@ -985,7 +985,6 @@ def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
         return
     registered = list(getattr(project_tools_result, "registered", []) or [])
     disabled = list(getattr(project_tools_result, "disabled", []) or [])
-    duplicate = list(getattr(project_tools_result, "duplicate", []) or [])
     failed = list(getattr(project_tools_result, "failed", []) or [])
     error = getattr(project_tools_result, "error", None)
 

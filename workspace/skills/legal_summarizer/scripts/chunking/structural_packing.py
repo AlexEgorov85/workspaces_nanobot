@@ -118,7 +118,6 @@ def _direct_blocks_for_node(
     subtree range ни одного child'а. Исключаем tables и oversized —
     они обрабатываются отдельно как packing barriers.
     """
-    node = struct.nodes[node_id]
     start, end = _node_subtree_range(node_id, struct)
 
     child_ranges: list[tuple[int, int]] = []

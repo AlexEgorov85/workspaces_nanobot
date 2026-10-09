@@ -46,7 +46,6 @@ def full_document_fallback(
     * preserves order.
     """
     cfg = config or FullDocFallbackConfig()
-    est = estimator or TokenEstimator(TokenEstimatorConfig())
 
     if not chunks or cfg.max_chunks <= 0:
         return ()

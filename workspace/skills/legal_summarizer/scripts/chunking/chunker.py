@@ -23,7 +23,10 @@ Chunker, который использует ``DocumentStructure`` как еди
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from chunking.structural_packing import PackableUnit
 
 from chunking.chunks import (
     Chunk,

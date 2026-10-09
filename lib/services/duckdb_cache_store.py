@@ -378,18 +378,6 @@ class DuckDbCacheStore:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def open(self) -> bool:
-        """Открыть (создать при отсутствии) DuckDB-кэш.
-
-        DEPRECATED имя: для нового кода используйте ``connect()`` —
-        имя ``open`` зарезервировано за classmethod-factory в Stage D.
-        Сохранён как alias ``open()`` для back-compat с gateway.py и
-        benchmarks/runner.py — они вызывают ``cache_store.open()``.
-        После change ``unify-cli-gateway-architecture`` alias может быть
-        удалён; новый код MUST использовать ``connect()``.
-        """
-        return self.connect()
-
     def connect(self) -> bool:
         """Открыть DuckDB connection через ``_open_locked`` (post-Stage D)."""
         with self._lock:

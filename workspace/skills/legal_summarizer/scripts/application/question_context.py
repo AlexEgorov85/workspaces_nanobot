@@ -176,7 +176,7 @@ def build_question_context(
 
     # Вычислить «несущую» часть каждого блока (metadata + summaries).
     overhead_per_chunk: list[int] = []
-    for chunk, block in zip(selected_chunks, blocks):
+    for chunk in selected_chunks:
         chunk_summary = chunk_summaries.get(chunk.chunk_id)
         section_summary = (
             section_summaries.get(chunk.section_id)
@@ -218,7 +218,7 @@ def build_question_context(
     per_chunk_source_budget = max(0, available_for_sources // max(1, len(selected_chunks)))
 
     truncated_blocks: list[str] = []
-    for chunk, overhead in zip(selected_chunks, overhead_per_chunk):
+    for chunk in selected_chunks:
         chunk_summary = chunk_summaries.get(chunk.chunk_id)
         section_summary = (
             section_summaries.get(chunk.section_id)

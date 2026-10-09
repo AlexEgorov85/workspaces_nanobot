@@ -176,7 +176,7 @@ def _persist_batch_results(
 
     for (batch_id, batch_chunks, _pending_count), (
         status, batch_meta, chunk_results, last_error,
-    ) in zip(queued, gather_results):
+    ) in zip(queued, gather_results, strict=True):
         if status == "ok":
             assert batch_meta is not None
             assert chunk_results is not None

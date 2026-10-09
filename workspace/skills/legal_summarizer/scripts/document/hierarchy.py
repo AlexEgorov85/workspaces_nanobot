@@ -467,7 +467,7 @@ def build_document_structure(
     )
 
     sibling_ordinals = assign_sibling_ordinals(numbering_list)
-    for nid, ordinal in zip(section_ids, sibling_ordinals):
+    for nid, ordinal in zip(section_ids, sibling_ordinals, strict=True):
         if ordinal is None:
             continue
         node = nodes[nid]

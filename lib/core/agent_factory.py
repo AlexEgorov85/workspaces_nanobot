@@ -173,9 +173,12 @@ class AgentFactory:
                 hook_factories.append(factory)
                 # _populate_agent_box вызывается ПОСЛЕ ``from_config``,
                 # чтобы closure увидел agent.
-                _populate_box = lambda built: _agent_box.append(built)
+                def _populate_box(built: Any) -> None:
+                    _agent_box.append(built)
             else:
-                _populate_box = lambda built: None
+
+                def _populate_box(built: Any) -> None:
+                    return None
 
         kwargs: dict = {
             "session_manager": session_manager,

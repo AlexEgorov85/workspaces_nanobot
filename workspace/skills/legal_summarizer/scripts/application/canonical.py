@@ -158,13 +158,6 @@ def inspect_canonical(
     )
     strategy = strategy_from_pipeline(pipeline_result)
 
-    estimator = TokenEstimator(
-        TokenEstimatorConfig(chars_per_token=3.5),
-    )
-    total_tokens = estimator.estimate_many(
-        [c.text for c in pipeline_result.chunks],
-    )
-
     if strategy == "direct":
         estimated = 1
     else:

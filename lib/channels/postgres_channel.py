@@ -1587,7 +1587,7 @@ class PostgresChannel(BaseChannel):
                 try:
                     await subscriber.feed(msg)
                 except Exception:
-                    logger.opt(exception=True).warning(
+                    self.logger.opt(exception=True).warning(
                         "compaction_event_subscriber feed failed for {}",
                         getattr(msg, "session_key", None),
                     )

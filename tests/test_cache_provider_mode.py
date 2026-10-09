@@ -82,13 +82,14 @@ class TestCacheProviderABCContract:
         finally:
             instance.connect()
 
-    def test_legacy_instance_open_via_connect_alias(
+    def test_instance_connect_after_factory_open(
         self, local_cache_path: Path
     ) -> None:
-        """``store.open()`` (= ``connect()`` alias) — back-compat для gateway.py.
+        """Экземпляр, созданный factory-ом, открывается через ``connect()``.
 
-        ``open`` остаётся classmethod, поэтому instance вызывает
-        ``connect()``. Legacy instance ``open()`` сохранён как alias.
+        ``open`` — только classmethod-factory ``(path, mode)``; отдельного
+        instance-метода ``open()`` в классе нет, поэтому instance API для
+        открытия — ``connect()``.
         """
         from lib.services.cache_ownership import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore

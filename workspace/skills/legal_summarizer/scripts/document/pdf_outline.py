@@ -45,12 +45,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
+
+if TYPE_CHECKING:
+    from document.heading import HeadingCandidate
 
 
 _log = logging.getLogger(__name__)
