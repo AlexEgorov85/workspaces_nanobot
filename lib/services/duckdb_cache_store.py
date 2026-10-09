@@ -442,18 +442,27 @@ class DuckDbCacheStore:
         ``open()`` — это ответственность concrete factory (см.
         ``lib/services/cache_provider.py``).
 
-        ``path`` — путь к ``cache.duckdb``. Должен быть на локальной FS:
+        ``path`` — путь к рабочей БД. Должен быть на локальной FS:
         NFS / SMB / network filesystem MUST быть rejected ДО открытия
         storage (см. ``_reject_unsupported_filesystem``).
         ``mode=CacheAccessMode.READ_ONLY`` → DuckDB открывается с
         ``read_only=True`` (первый уровень защиты по design D12).
         ``mode=CacheAccessMode.READ_WRITE`` → обычное открытие.
 
+        ``path=""`` → рабочая БД **в памяти** (``duckdb.connect()`` без
+        файла; см. ``_open_locked``). Это режим OWNER'а: данные живут в
+        соединении процесса, а ``_publish_path`` остаётся отдельным
+        файлом-снапшотом, который gateway открывает только на время
+        публикации. Так рабочая БД и снапшот перестают быть одним
+        объектом, и файл можно открыть вторым (CLI навыка, READER-процесс) —
+        см. ``publish()`` и ``adopt_snapshot()``.
+
         Raises:
             UnsupportedFilesystemError: ``path`` лежит на network/
                 shared filesystem. Storage НЕ открывается — fail-fast.
         """
-        _reject_unsupported_filesystem(path)
+        if path:
+            _reject_unsupported_filesystem(path)
         instance = cls(cache_path=path)
         instance._mode = mode
         return instance
@@ -917,6 +926,155 @@ class DuckDbCacheStore:
     # Публикация снимка для навыка (CLI читает файл на чтение)
     # ------------------------------------------------------------------
 
+    # -- reuse снапшота (обратная к publish операция) ------------------
+
+    def adopt_snapshot(self, snapshot_path: str, *, tables: list[str] | None = None) -> bool:
+        """Загрузить готовый снапшот в рабочую БД и **отпустить файл**.
+
+        Обратная операция к ``publish()``: файл подключается только на
+        время чтения (``ATTACH ... (READ_ONLY)``), таблицы копируются в
+        рабочую БД, ``DETACH`` — и файл остаётся свободным для всех
+        остальных (CLI навыка, READER-процесс).
+
+        Именно этим реализуется ``gateway.cache.reuse_ttl_hours``: пока
+        снапшот моложе TTL, gateway не перезаливает данные из PostgreSQL,
+        а читает их из файла — и сразу отпускает файл, вместо того чтобы
+        удерживать его открытым весь жизненный цикл процесса.
+
+        Рабочая БД при этом должна быть **не тем же файлом**: если
+        ``_cache_path`` совпадает со снапшотом, «прочитать файл в себя»
+        нечего — возвращается ``False``, и вызывающий код обязан перейти
+        на полную перезагрузку из PostgreSQL.
+
+        Args:
+            snapshot_path: путь к опубликованному снапшоту.
+            tables: какие таблицы загружать (по умолчанию — конфиг
+                store, плюс ``vector_db_table``).
+
+        Returns:
+            True — снапшот загружен и файл отпущен; False — снапшота нет,
+            он недоступен или совпадает с рабочей БД (все эти случаи
+            означают «данных нет, нужен полный пересоздан»).
+        """
+        if not snapshot_path:
+            self._last_error = "adopt_snapshot: пустой путь"
+            return False
+        snap = Path(snapshot_path)
+        if not snap.exists():
+            self._last_error = f"adopt_snapshot: нет файла {snap}"
+            return False
+        if self._cache_path:
+            try:
+                if Path(self._cache_path).resolve() == snap.resolve():
+                    self._last_error = (
+                        "adopt_snapshot: рабочая БД и снапшот — один файл"
+                    )
+                    return False
+            except OSError:
+                pass
+
+        wanted = [t for t in (tables or self._tables or []) if t]
+        if self._vector_db_table and self._vector_db_table not in wanted:
+            wanted.append(self._vector_db_table)
+        if not wanted:
+            self._last_error = "adopt_snapshot: нечего загружать (пустой реестр)"
+            return False
+
+        with self._lock:
+            try:
+                self._open_locked()
+            except Exception as exc:
+                self._last_error = f"adopt_snapshot open: {exc}"
+                return False
+
+            literal = "'" + str(snap).replace("'", "''") + "'"
+            try:
+                self._conn.execute(f"ATTACH {literal} AS __snapshot (READ_ONLY)")
+            except Exception as exc:
+                # Файл может быть занят другим процессом (старый gateway,
+                # упавший publish). Это НЕ «снапшот отсутствует» — но
+                # переиспользовать его нечем, поэтому для вызывающего это
+                # тот же False, что и отсутствие файла: нужен пересоздан.
+                self._last_error = f"adopt_snapshot attach {snap}: {exc}"
+                logger.warning(
+                    "DuckDbCacheStore.adopt_snapshot: не удалось подключить "
+                    "снапшот %s на чтение (%s) — будет полная перезагрузка",
+                    snap, exc,
+                )
+                return False
+
+            copied: list[tuple[str, str]] = []
+            counts: dict[str, int] = {}
+            try:
+                for t in wanted:
+                    schema, name = _split_table(t)
+                    schema = schema or self._schema
+                    exists = self._conn.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_catalog = '__snapshot' "
+                        "AND table_schema = ? AND table_name = ?",
+                        [schema, name],
+                    ).fetchone()
+                    if exists is None:
+                        # Пустой источник в снапшоте не создавался — не ошибка.
+                        continue
+                    self._conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+                    self._conn.execute(
+                        f'CREATE OR REPLACE TABLE "{schema}"."{name}" '
+                        f"AS SELECT * FROM __snapshot.\"{schema}\".\"{name}\""
+                    )
+                    copied.append((schema, name))
+                    counts[f"{schema}.{name}"] = int(
+                        self._conn.execute(
+                            f'SELECT COUNT(*) FROM "{schema}"."{name}"'
+                        ).fetchone()[0]
+                    )
+                if copied:
+                    src_schemas = sorted({c[0] for c in copied})
+                    placeholders = ",".join("?" for _ in src_schemas)
+                    meta_exists = self._conn.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_catalog = '__snapshot' "
+                        "AND table_schema = ? AND table_name = ?",
+                        [_META_SCHEMA, _META_TABLE],
+                    ).fetchone()
+                    if meta_exists is not None:
+                        self._conn.execute(
+                            f'CREATE SCHEMA IF NOT EXISTS "{_META_SCHEMA}"'
+                        )
+                        self._conn.execute(
+                            f'CREATE OR REPLACE TABLE "{_META_SCHEMA}"."{_META_TABLE}" '
+                            f"AS SELECT * FROM __snapshot.\"{_META_SCHEMA}\""
+                            f'."{_META_TABLE}" '
+                            f"WHERE schema_name IN ({placeholders})",
+                            src_schemas,
+                        )
+            except Exception as exc:
+                self._last_error = f"adopt_snapshot copy: {exc}"
+                logger.warning(
+                    "DuckDbCacheStore.adopt_snapshot: копирование из снапшота "
+                    "%s провалилось (%s) — будет полная перезагрузка",
+                    snap, exc,
+                )
+                return False
+            finally:
+                # Файл освобождается в любом случае — даже при ошибке
+                # копирования. Пока он подключён, ни один читатель его
+                # не откроет.
+                try:
+                    self._conn.execute("DETACH __snapshot")
+                except Exception:
+                    pass
+
+            self._is_ready = True
+            logger.info(
+                "DuckDbCacheStore.adopt_snapshot: загружено %d таблиц из %s "
+                "(%s); файл отпущен",
+                len(copied), snap,
+                ", ".join(f"{k}={v}" for k, v in counts.items()) or "-",
+            )
+            return True
+
     def publish(
         self, tables: list[str] | None = None, *, force: bool = False
     ) -> bool:
@@ -958,6 +1116,29 @@ class DuckDbCacheStore:
             import time
 
             target = Path(self._publish_path)
+            # Инвариант: рабочая БД и снапшот — РАЗНЫЕ объекты. Если они
+            # совпали, то publish подменяет файл, на котором открыт handle
+            # собственного соединения: на Windows это WinError 5
+            # (ERROR_SHARING_VIOLATION), а заодно файл недоступен всем
+            # остальным (CLI навыка, READER) весь жизненный цикл.
+            # Раньше здесь был обход close() → replace → reopen; теперь
+            # обхода нет, и конфигурация отвергается явно.
+            if self._cache_path:
+                try:
+                    _same = Path(self._cache_path).resolve() == target.resolve()
+                except OSError:
+                    _same = False
+                if _same:
+                    self._last_error = (
+                        f"publish: рабочая БД и publish_path — один файл "
+                        f"({target}). DuckDB не даёт подменить файл с "
+                        f"открытым handle. Рабочая БД MUST быть отдельной "
+                        f"(path='' — в памяти)."
+                    )
+                    logger.error(
+                        "DuckDbCacheStore.publish: %s", self._last_error,
+                    )
+                    return False
             target.parent.mkdir(parents=True, exist_ok=True)
             # Уникальный .tmp на каждый publish (pid + ms-таймстамп) —
             # защита от коллизий между параллельными запусками и от
@@ -1074,32 +1255,18 @@ class DuckDbCacheStore:
                         )
                 finally:
                     self._conn.execute("DETACH __out")
-                # ``os.replace`` на Windows не может перезаписать файл, пока
-                # на нём открыт handle (ERROR_SHARING_VIOLATION → WinError 5),
-                # в т.ч. на собственное RW-соединение OWNER'а. На Unix
-                # replace поверх открытого файла разрешён, поэтому баг был
-                # невидим. Закрываем соединение → подменяем → открываем заново.
+                # ``os.replace`` НЕ трогает рабочее соединение: рабочая БД
+                # и ``publish_path`` — разные объекты (см.
+                # ``DuckDbCacheStore.open`` и ``adopt_snapshot``).
                 #
-                # Порядок важен и для консистентности: DuckDB на ``close()``
-                # делает checkpoint и УДАЛЯЕТ ``<target>.wal``. Если бы replace
-                # шёл до close, на диске остался бы ``cache.duckdb.wal`` от
-                # старого файла, а сам target был бы уже новым — DuckDB
-                # подхватил бы чужой WAL при следующем открытии.
-                live_conn = self._conn
-                self._conn = None
-                if live_conn is not None:
-                    try:
-                        live_conn.close()
-                    except Exception:
-                        pass
-                try:
-                    os.replace(tmp, target)
-                finally:
-                    if live_conn is not None:
-                        # reopen по тому же cache_path; индексы/метки не
-                        # сбрасываем (close() их затирает, а данные прежние).
-                        self._open_locked()
-                        self._is_ready = True
+                # Раньше здесь стояло close() → replace → reopen: close был
+                # нужен потому, что рабочей БД был сам снапшот — на Windows
+                # ``os.replace`` не может перезаписать файл с открытым
+                # handle (WinError 5 / ERROR_SHARING_VIOLATION), в т.ч. на
+                # собственное RW-соединение OWNER'а. Сейчас этот обход не
+                # нужен, а вместе с ним уходит и лишнее закрытие/переоткрытие
+                # индекса на каждой публикации.
+                os.replace(tmp, target)
                 self._dirty = False
                 self._publishes += 1
                 self._last_publish_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

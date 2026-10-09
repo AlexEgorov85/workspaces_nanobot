@@ -391,22 +391,42 @@ class TestPublish:
         assert store.get_stats()["publishes"] == 2
         store.close()
 
-    def test_publish_works_when_cache_path_equals_publish_path(self, tmp_path):
-        """Регрессия: OWNER держит RW-соединение на САМОМ publish-файле.
+    def test_publish_refuses_when_working_db_is_the_publish_file(self, tmp_path):
+        """Рабочая БД = файл снапшота — конфигурация запрещена.
 
-        Реальная конфигурация (``DuckDbCacheStore.open(path, mode)`` +
-        ``store._publish_path = path``) открывает живое DuckDB-соединение
-        ровно на том файле, который ``publish`` подменяет через
-        ``os.replace``. На Windows replace падает с ``WinError 5``
-        (ERROR_SHARING_VIOLATION), пока на файле открыт handle — в т.ч.
-        собственное соединение. Остальные тесты класса используют
-        ``cache_path=""`` (in-memory) и этот случай не покрывают.
+        Раньше она считалась «реальной», и publish справлялся обходом
+        close() → replace → reopen. Обход удалён вместе с самой
+        конфигурацией: подменять файл с открытым handle на Windows нельзя
+        (WinError 5), и, главное, весь жизненный цикл файл недоступен
+        остальным (CLI навыка, READER). Теперь store отказывает явно.
+        """
+        target = tmp_path / "cache.duckdb"
+        store = DuckDbCacheStore(
+            cache_path=str(target),
+            publish_path=str(target),
+            schema=_test_schema,
+            tables=["audits"],
+        )
+        store.connect()
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+
+        assert store.publish() is False
+        assert "один файл" in (store.get_stats().get("last_error") or "")
+        store.close()
+
+    def test_publish_works_when_working_db_differs_from_publish_path(self, tmp_path):
+        """Рабочий контракт: рабочая БД в памяти, снапшот — отдельный файл.
+
+        Именно так OWNER поднимает store (``_make_sync_services``): publish
+        подменяет файл, не трогая живое соединение, поэтому после публикации
+        данные на месте, соединение рабочее, а файл свободен для читателя —
+        его можно открыть вторым подключением, не закрывая store.
         """
         import duckdb
 
         target = tmp_path / "cache.duckdb"
         store = DuckDbCacheStore(
-            cache_path=str(target),
+            cache_path="",
             publish_path=str(target),
             schema=_test_schema,
             tables=["audits"],
@@ -417,17 +437,15 @@ class TestPublish:
 
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "Б", "status": "open"}])
         assert store.publish() is True, store.get_stats().get("last_error")
+        assert store.get_stats()["publishes"] == 2
 
-        # Соединение должно остаться рабочим после close/reopen в publish.
+        # Соединение осталось рабочим после подмены файла.
         assert store.is_ready() is True
         r = store.query_sql(f"SELECT title FROM {TEST_TABLE} WHERE id = 1")
         assert r["rows"][0]["title"] == "Б"
-        assert store.get_stats()["publishes"] == 2
 
-        # Файл на диске читается отдельным подключением ПОСЛЕ закрытия
-        # живого: DuckDB запрещает два коннекта к одному файлу с разным
-        # config (read_only=True vs RW) в пределах процесса.
-        store.close()
+        # Файл читается ВТОРЫМ подключением, пока store жив и держит
+        # рабочую базу: ровно то, что не могло работать раньше.
         ro = duckdb.connect(str(target), read_only=True)
         try:
             title = ro.execute(
@@ -436,12 +454,13 @@ class TestPublish:
         finally:
             ro.close()
         assert title == "Б"
+        store.close()
 
     def test_publish_leaves_no_tmp_files_behind(self, tmp_path):
         """После успешного publish не остаётся осиротевших .tmp файлов."""
         target = tmp_path / "cache.duckdb"
         store = DuckDbCacheStore(
-            cache_path=str(target),
+            cache_path="",
             publish_path=str(target),
             schema=_test_schema,
             tables=["audits"],
@@ -451,6 +470,81 @@ class TestPublish:
         assert store.publish() is True
         leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp"))
         assert leftovers == [], f" осиротевшие .tmp: {leftovers}"
+        store.close()
+
+    # -- adopt_snapshot (reuse_ttl_hours) ---------------------------------
+
+    def test_adopt_snapshot_loads_tables_and_releases_the_file(self, tmp_path):
+        """OWNER переиспользует готовый снапшот и ОТПУСКАЕТ файл.
+
+        Сценарий ``reuse_ttl_hours``: снапшот моложе TTL → gateway не идёт
+        в PostgreSQL, а читает файл в рабочую базу. Ключевое свойство —
+        после ``adopt_snapshot`` файл не открыт нигде, поэтому его может
+        взять внешний читатель (CLI навыка). Раньше рабочей базой был сам
+        файл снапшота, и такой читатель получал «File is already open».
+        """
+        import duckdb
+
+        target = tmp_path / "cache.duckdb"
+
+        publisher = DuckDbCacheStore(
+            cache_path="",
+            publish_path=str(target),
+            schema=_test_schema,
+            tables=["audits"],
+        )
+        publisher.connect()
+        publisher.upsert_records(
+            TEST_TABLE, [{"id": 1, "title": "из снапшота", "status": "open"}]
+        )
+        assert publisher.publish(force=True) is True
+        publisher.close()
+
+        owner = DuckDbCacheStore(
+            cache_path="",
+            publish_path=str(target),
+            schema=_test_schema,
+            tables=["audits"],
+        )
+        owner.connect()
+        assert owner.adopt_snapshot(str(target)) is True
+        assert owner.is_ready() is True
+
+        r = owner.query_sql(f"SELECT title FROM {TEST_TABLE} WHERE id = 1")
+        assert r["rows"][0]["title"] == "из снапшота"
+
+        # Файл свободен: читается вторым подключением, пока owner жив.
+        ro = duckdb.connect(str(target), read_only=True)
+        try:
+            n = ro.execute(f"SELECT COUNT(*) FROM {TEST_TABLE}").fetchone()[0]
+        finally:
+            ro.close()
+        assert n == 1
+        owner.close()
+
+    def test_adopt_snapshot_missing_file_returns_false(self, tmp_path):
+        store = DuckDbCacheStore(
+            cache_path="",
+            publish_path=str(tmp_path / "out.duckdb"),
+            schema=_test_schema,
+            tables=["audits"],
+        )
+        store.connect()
+        assert store.adopt_snapshot(str(tmp_path / "absent.duckdb")) is False
+        store.close()
+
+    def test_adopt_snapshot_refuses_when_working_db_is_the_snapshot(self, tmp_path):
+        """Нельзя «прочитать файл в себя» — возвращается отказ, а не no-op."""
+        target = tmp_path / "cache.duckdb"
+        store = DuckDbCacheStore(
+            cache_path=str(target),
+            publish_path=str(target),
+            schema=_test_schema,
+            tables=["audits"],
+        )
+        store.connect()
+        assert store.adopt_snapshot(str(target)) is False
+        assert "один файл" in (store.get_stats().get("last_error") or "")
         store.close()
 
     def test_publish_noop_when_not_dirty(self, tmp_path):

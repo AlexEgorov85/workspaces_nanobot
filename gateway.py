@@ -184,14 +184,23 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
             )
         _snapshot_path = ctx.cache_store.get_stats().get("publish_path") or ""
         _decision = evaluate_cache_snapshot(_snapshot_path, _ttl_hours)
-        # Переиспользовать можно только ТОЛЬКО если store реально открыл файл.
-        # Иначе «используем как есть» превратится в молчаливую работу на пустом
-        # кэше: is_ready() False — значит данных нет, нужен полный пересоздан.
-        _reuse = _decision.reuse and ctx.cache_store.is_ready()
+        # «Переиспользовать» = взять данные ИЗ ФАЙЛА. У OWNER рабочая БД
+        # в памяти, поэтому файл нужно прочитать и сразу отпустить
+        # (``adopt_snapshot``); раньше он просто оставался открытым весь
+        # жизненный цикл, и второй процесс не мог его открыть.
+        # ``is_ready()`` как критерий больше не годится: он истинно для
+        # пустой in-memory базы и молча дал бы работу без данных.
+        _reuse = False
+        if _decision.reuse:
+            _adopt = getattr(ctx.cache_store, "adopt_snapshot", None)
+            if callable(_adopt):
+                _reuse = bool(_adopt(_snapshot_path))
+            else:  # store без adopt_snapshot — доверяем факту открытия
+                _reuse = ctx.cache_store.is_ready()
         if _decision.reuse and not _reuse:
             logger.warning(
-                "cache snapshot {} считается свежим (age={}), но store его не "
-                "открыл — принудительный пересоздан",
+                "cache snapshot {} считается свежим (age={}), но загрузить его "
+                "не удалось — принудительный пересоздан",
                 _snapshot_path, format_cache_age(_decision.age_sec),
             )
         logger.info(

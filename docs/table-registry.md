@@ -439,8 +439,21 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 Legacy `TableRegistry.snapshot_path(workspace_path)` через
 `gateway.cache.use_workspace_path` удалён.
 
-Доступ к снимку — через CLI skill'а (`scripts/cli.py --mode predefined`
-и `--list-scripts`); прямой tool `duckdb_query` отсутствует.
+### Снапшот не является рабочей базой gateway
+
+Файл выше — только публикуемый снимок. Рабочая БД OWNER'а живёт
+**в памяти** (`DuckDbCacheStore.open(path="")`), и файл открывается
+только на время публикации и при reuse (`adopt_snapshot()` — ATTACH на
+чтение, копирование таблиц, DETACH).
+
+Причина жёсткая: DuckDB допускает ровно одно соединение на файл. Пока
+gateway держал сам снапшот открытым, второй процесс (CLI навыка,
+READER-процесс) получал `IOException: File is already open in ... PID ...`
+даже с `read_only=True`. `publish()` эту конфигурацию отвергает.
+
+Доступ агента к данным — tool'ы `duckdb_query` / `vector_search`, которые
+исполняются в процессе gateway на его живом `CacheProvider`; CLI skill'а
+остаётся для standalone-разработки.
 
 ## Definition of Done для нового skill'а
 

@@ -1593,7 +1593,10 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         CacheAccessMode,
         CacheOwnershipCoordinator,
     )
-    from lib.services.duckdb_cache_store import DuckDbCacheStore
+    from lib.services.duckdb_cache_store import (
+        DuckDbCacheStore,
+        _reject_unsupported_filesystem,
+    )
     from lib.services.pg_duckdb_sync_service import PgDuckDbSyncService
 
     all_table_names = list(table_registry.table_names())
@@ -1703,8 +1706,27 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
 
     # Concrete factory — DuckDB connection opened с учётом ``mode``.
     # Если path не на локальной FS — ``UnsupportedFilesystemError`` поднимается.
+    #
+    # OWNER (claim.acquired=True): рабочая БД — **в памяти** (``path=""``),
+    # а ``publish_path`` остаётся отдельным файлом-снапшотом. Держать сам
+    # снапшот открытым нельзя: DuckDB допускает ровно одно соединение на
+    # файл, поэтому второй процесс (CLI навыка, READER) получал
+    # ``File is already open in ... PID ...`` даже в ``read_only``.
+    # Готовый снапшот при старте загружается через ``adopt_snapshot()``,
+    # который открывает файл на секунды и отпускает — так ``reuse_ttl_hours``
+    # работает без удержания файла.
+    #
+    # READER: открывает сам снапшот только на чтение — это и есть тот
+    # случай, когда файл свободен.
+    #
+    # NFS-гард: у OWNER рабочая БД в памяти, поэтому ``open(path="")`` не
+    # проверит FS. Проверяем путь снапшота явно — иначе network-FS вскрылся бы
+    # поздно и непонятно (ATTACH/REPLACE падает с «PID 0»), вместо
+    # fail-fast на старте.
+    if claim.acquired:
+        _reject_unsupported_filesystem(publish_path)
     store = DuckDbCacheStore.open(
-        path=publish_path,
+        path=(publish_path if not claim.acquired else ""),
         mode=mode,
     )
     # Конфигурируем store через конструктор args через post-init хак:
