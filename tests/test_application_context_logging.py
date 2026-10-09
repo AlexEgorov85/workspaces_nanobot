@@ -25,6 +25,7 @@ acceptance-критерий —
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import threading
@@ -42,6 +43,18 @@ def minimal_fake_modules(tmp_path):
     ``enable_db_logging=True``. Подменяем зависимости от nanobot /
     psycopg2, чтобы не требовать реальной инфраструктуры.
     """
+    # Снапшот глобального состояния, которое меняет сам bootstrap.
+    # ``ApplicationContext.create()`` → ``SessionStorageService.create()``
+    # жёстко пишет ``os.environ["DATABASE_URL"] = dsn``
+    # (lib/services/session_storage.py:103), а ``workspace`` добавляется
+    # в ``sys.path`` для резолва ``utils.*``. Без отката фейковый DSN
+    # ``postgresql://test`` утекает в процесс на весь сеанс pytest:
+    # тесты, наследующие env (subprocess-проверки entrypoint'ов),
+    # получают хост ``test``, а ``${DATABASE_URL}`` резолвится мусором
+    # при первом импорте ``config``.
+    _saved_db_url = os.environ.get("DATABASE_URL")
+    _saved_sys_path = list(sys.path)
+
     with patch.dict("sys.modules"):
 
         sol = types.ModuleType("nanobot")
@@ -61,6 +74,18 @@ def minimal_fake_modules(tmp_path):
         sys.modules["nanobot.agent"] = sol.agent
         sys.modules["nanobot.agent.loop"] = loop
         sys.modules["nanobot.agent.hook"] = hook
+
+        # nanobot.agent.tools — импортируется AgentFactory.create()
+        # (``from nanobot.agent.tools.registry import ToolRegistry``).
+        # Родительский nanobot.agent — ModuleType без __path__, поэтому
+        # подделывать пакет нужно явно через sys.modules.
+        tools_pkg = types.ModuleType("nanobot.agent.tools")
+        registry = types.ModuleType("nanobot.agent.tools.registry")
+        registry.ToolRegistry = MagicMock()
+        tools_pkg.registry = registry
+        sol.agent.tools = tools_pkg
+        sys.modules["nanobot.agent.tools"] = tools_pkg
+        sys.modules["nanobot.agent.tools.registry"] = registry
 
         sol.bus = types.ModuleType("nanobot.bus")
         bus = types.ModuleType("nanobot.bus.queue")
@@ -256,6 +281,18 @@ def minimal_fake_modules(tmp_path):
             except Exception:
                 pass
 
+        # Cleanup: откатить глобальное состояние к снапшоту из начала
+        # фикстуры. ``DATABASE_URL`` — не просто мусор: значение
+        # наследуют subprocess'ы следующих тестов (проверки entrypoint'ов
+        # вроде ``tests/test_profile_lifecycle.py::test_cli_agent_starts_
+        # without_profile_flag``), где ``${DATABASE_URL}`` резолвится
+        # уже в новом процессе — и без отката даёт exit 1 вместо 0.
+        if _saved_db_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = _saved_db_url
+        sys.path[:] = _saved_sys_path
+
 
 class _FakeCursor:
     def __init__(self, conn):
@@ -314,7 +351,6 @@ class TestFlushIntervalSecPropagation:
             workspace_dir=script / "workspace",
             enable_db_logging=True,
             enable_audit=False,
-            profile="test",
         )
 
         try:
@@ -351,7 +387,6 @@ class TestFlushIntervalSecPropagation:
             workspace_dir=script / "workspace",
             enable_db_logging=True,
             enable_audit=False,
-            profile="test",
         )
 
         try:
@@ -385,7 +420,6 @@ class TestFlushIntervalSecPropagation:
                 workspace_dir=script / "workspace",
                 enable_db_logging=True,
                 enable_audit=False,
-                profile="test",
             )
         # Сообщение должно явно указывать на ``flush_interval_sec``,
         # чтобы оператор понимал, какой ключ не прошёл валидацию.
