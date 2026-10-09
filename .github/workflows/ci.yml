@@ -41,7 +41,7 @@ jobs:
         env:
           NANOBOT_LIVE_E2E: "0"
           NANOBOT_INTEGRATION: "0"
-        run: pytest tests/ -m "not live and not integration" -q --tb=short
+        run: pytest tests/ workspace/skills/audit_formulation_strengthener/tests -m "not live and not integration" -q --tb=short
 
   coverage:
     name: Coverage report
@@ -68,7 +68,7 @@ jobs:
           NANOBOT_LIVE_E2E: "0"
           NANOBOT_INTEGRATION: "0"
         run: |
-          coverage run -m pytest tests/ -m "not live and not integration" -q
+          coverage run -m pytest tests/ workspace/skills/audit_formulation_strengthener/tests -m "not live and not integration" -q
           coverage report
           coverage xml -o coverage.xml
 

@@ -3,7 +3,11 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "workspace/skills/audit_analyzer/tests"]
+testpaths = [
+    "tests",
+    "workspace/skills/audit_analyzer/tests",
+    "workspace/skills/audit_formulation_strengthener/tests",
+]
 python_files = ["test_*.py"]
 pythonpath = [
     ".",
