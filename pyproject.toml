@@ -60,7 +60,6 @@ select = ["E", "F", "W", "I", "B", "UP"]
 ignore = [
     "E501",  # line too long — handled by formatter
     "B008",  # function call in defaults (pydantic Field pattern)
-    "UP038", # isinstance tuple form (3.12 deprecation, fix later)
 ]
 
 [tool.pylint]
