@@ -135,11 +135,24 @@ def apply_migration(conn, mig: Migration, force: bool = False) -> bool:  # noqa:
 
 
 def stamp_migration(conn, mig: Migration) -> None:  # noqa: ANN001
+    """Штампует версию как применённую (идемпотентно).
+
+    ``INSERT ... ON CONFLICT (version) DO NOTHING`` недоступен в Greenplum
+    6.x (появился в PostgreSQL 9.5 / Greenplum 7), поэтому existence-check
+    + INSERT в одной транзакции: уже проштампованная версия не трогается.
+    """
     cur = conn.cursor()
     try:
         cur.execute(
+            f"SELECT 1 FROM {TRACKING_TABLE} WHERE version = %s",
+            (mig.version,),
+        )
+        if cur.fetchone() is not None:
+            conn.commit()
+            return
+        cur.execute(
             f"INSERT INTO {TRACKING_TABLE} (version, name, checksum, duration_ms) "
-            "VALUES (%s, %s, %s, 0) ON CONFLICT (version) DO NOTHING",
+            "VALUES (%s, %s, %s, 0)",
             (mig.version, mig.name, mig.checksum),
         )
         conn.commit()
