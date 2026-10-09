@@ -46,7 +46,7 @@ Side-channel использовался для решения инцидента
 
 * `docs/ARCHITECTURE.md:1544`
 * `docs/architecture/nanobot-inventory.json:893`
-* `openspec/changes/nanobot-035-upgrade/proposal.md:44`
+* `openspec/changes/archive/2026-09-27-nanobot-035-upgrade/proposal.md:44`
 
 `lib/cli/hook_loader.py::scan_and_register` переводится на allowlist с явным
 списком плагинов. Удаление плагина из allowlist защищает от регрессии —
@@ -87,5 +87,5 @@ Side-channel использовался для решения инцидента
 
 * Инцидент 2026-08-27 не закрыт. Если он воспроизведётся в 0.3.5
   (Consolidator не активен по умолчанию в 0.3.5, см.
-  `openspec/changes/nanobot-035-upgrade/design.md`), нужно отдельное
+  `openspec/changes/archive/2026-09-27-nanobot-035-upgrade/design.md`), нужно отдельное
   решение.
