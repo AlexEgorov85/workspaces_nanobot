@@ -301,6 +301,50 @@
           "llm_max_tokens": 8192                    // Резерв под output.
         }
       }
+    },
+
+    // -------------------------------------------------------------------------
+    //  audit_formulation_strengthener — анализ формулировки отклонения по ВНД.
+    //  На входе: текст отклонения + один/несколько файлов ВНД (.pdf/.docx/.txt).
+    //  На выходе: человекочитаемый отчёт (.md/.docx/.txt) в строгом
+    //  русском юридическом стиле.
+    //
+    //  Извлечение текста — workspace.utils.office_files.extract_text;
+    //  чанкование — lib.services.text_splitter.split_text (без секций);
+    //  LLM-вызовы — lib.services.llm_client.call_llm через тонкую
+    //  обёртку scripts/llm.py.
+    //
+    //  У skill'а нет PG-таблиц и vector-индексов (ВНД приходят файлами
+    //  каждый раз заново), поэтому tables[] и vector_indexes[] пусты.
+    //
+    //  skill использует только ключи существующей SkillSettings-схемы
+    //  (extra="forbid"). Никаких новых ключей не введено.
+    // -------------------------------------------------------------------------
+    "audit_formulation_strengthener": {
+      "enabled": true,
+
+      "tables": [],
+      "vector_indexes": [],
+
+      "cli": {                                       // audit_formulation_strengthener --mode <analyze|search|synthesize|all>
+        "default_mode": "all",                       // Полный пайплайн по умолчанию.
+        "timeout_sec": 120,
+        "max_retries": 3                             // Retry при невалидном JSON от LLM.
+      },
+
+      "llm": {                                       // Параметры LLM-вызовов для skill'а.
+        "max_tokens": 4096,
+        "temperature": 0.1                           // Низкая температура для юридического стиля.
+      },
+
+      "chunking": {                                  // Размер/перекрытие чанков ВНД (для search-фазы).
+        "chunk_size": 6000,                          // Под LLM-вызов по одному чанку (map).
+        "chunk_overlap": 400
+      },
+
+      "execution": {                                 // Safety net для оценки размера.
+        "max_chunks_for_execution": 50               // chunks_total > этого → явная ошибка too_many_chunks.
+      }
     }
   },
 
