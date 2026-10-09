@@ -2,6 +2,8 @@
 
 Покрывают контракт:
   * имена таблиц не зашиты — берутся из SETTINGS;
+  * схемы не зашиты — берутся из SETTINGS по секциям
+    (`channels.postgres.schema` / `logging.db.schema`);
   * отсутствие хотя бы одной таблицы → ``SchemaValidationError``;
   * отсутствие ключей в settings → ``_MissingConfigKeys`` (наследник
     ``SchemaValidationError`` → ``ConfigurationError``);
@@ -19,6 +21,7 @@ import pytest
 
 from config import ConfigurationError
 from lib.services.schema_validation import (
+    DEFAULT_SCHEMA,
     DEFAULT_TIMEOUT_SEC,
     MissingTable,
     SchemaValidationError,
@@ -272,6 +275,123 @@ class TestExpectedTableNames:
         ]
         # Сообщение не должно содержать ``<settings>``.
         assert "<settings>" not in str(exc_info.value)
+
+
+class TestSchemaResolution:
+    """Схема резолвится из настроек, а не фиксируется в коде проверки.
+
+    Реальный кейс: ``channels.postgres.schema = "public2"`` при
+    ``logging.db.schema = "public"``. Валидатор обязан проверять каждую
+    таблицу в схеме её секции, иначе он либо блокирует старт при
+    наличии нужной таблицы, либо подтверждает наличие несуществующей.
+    """
+
+    @staticmethod
+    def _settings_with_schemas(pg_schema: Any, log_schema: Any) -> dict[str, Any]:
+        settings = _full_settings()
+        settings["channels"]["postgres"]["schema"] = pg_schema
+        settings["logging"]["db"]["schema"] = log_schema
+        return settings
+
+    def test_each_group_uses_schema_of_its_own_section(self) -> None:
+        names = SchemaValidationService.expected_table_names(
+            self._settings_with_schemas("public2", "audit")
+        )
+        assert [s for s, _ in names] == [
+            "public2",
+            "public2",
+            "public2",
+            "public2",
+            "audit",
+            "audit",
+        ]
+
+    def test_sections_may_share_one_schema(self) -> None:
+        names = SchemaValidationService.expected_table_names(
+            self._settings_with_schemas("nanobot", "nanobot")
+        )
+        assert {s for s, _ in names} == {"nanobot"}
+
+    def test_absent_schema_key_falls_back_to_runtime_default(self) -> None:
+        names = SchemaValidationService.expected_table_names(_full_settings())
+        assert {s for s, _ in names} == {DEFAULT_SCHEMA}
+
+    @pytest.mark.parametrize("bad", [None, "", 42, ["public"]])
+    def test_invalid_schema_falls_back_to_runtime_default(self, bad: Any) -> None:
+        """Мусорный ``schema`` → дефолт, а не падение и не мусор в SQL.
+
+        Тот же дефолт применяют ``PostgresChannel._get("schema", "public")``
+        и ``DbLoggingService(schema=db_cfg.get("schema", "public"))``, то
+        есть валидатор проверяет именно ту схему, в которой сервисы
+        будут работать.
+        """
+        names = SchemaValidationService.expected_table_names(
+            self._settings_with_schemas(bad, bad)
+        )
+        assert {s for s, _ in names} == {DEFAULT_SCHEMA}
+
+    def test_schema_value_is_passed_verbatim(self) -> None:
+        """Схема не нормализуется: она уходит в SQL параметром, а
+        не склеивается в строку — нестандартные имена допустимы.
+        """
+        names = SchemaValidationService.expected_table_names(
+            self._settings_with_schemas("nanobot$dev", "nanobot$dev")
+        )
+        assert {s for s, _ in names} == {"nanobot$dev"}
+
+    def test_validate_passes_for_tables_in_configured_schema(self) -> None:
+        settings = self._settings_with_schemas("public2", "public")
+        names = SchemaValidationService.expected_table_names(settings)
+        schemas_in = {s for s, _ in names}
+        names_in = {n for _, n in names}
+
+        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+            # БД отвечает по `table_schema IN (...) AND table_name IN (...)`.
+            return [
+                {"table_schema": s, "table_name": n}
+                for s, n in names
+                if s in schemas_in and n in names_in
+            ]
+
+        SchemaValidationService.validate(settings, fetch=_fetch)  # no raise
+
+    def test_validate_reports_configured_schema_in_missing(self) -> None:
+        """Регрессия на захардкоженный ``public``: таблицы канала в
+        ``public2``, валидатор обязан искать их там и назвать в ошибке
+        именно ``public2.agent_*``, а не ``public.agent_*``.
+        """
+        settings = self._settings_with_schemas("public2", "public")
+        names = SchemaValidationService.expected_table_names(settings)
+
+        def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
+            # Таблицы журнала в public (как и объявлено), канала — нет.
+            return [
+                {"table_schema": "public", "table_name": n}
+                for _, n in names
+                if n in {"agent_gateway_logs", "agent_question_runs"}
+            ]
+
+        with pytest.raises(SchemaValidationError) as exc_info:
+            SchemaValidationService.validate(settings, fetch=_fetch)
+        missing = {m.full_name for m in exc_info.value.missing}
+        assert missing == {
+            "public2.agent_conversation_messages",
+            "public2.agent_session_messages",
+            "public2.agent_session_meta",
+            "public2.agent_worker_claims",
+        }
+        assert "public2.agent_conversation_messages" in str(exc_info.value)
+
+    def test_lazy_settings_with_custom_schema(self) -> None:
+        from config import AttrDict, _LazySettings
+
+        proxy = _LazySettings()
+        proxy._inner_dict = AttrDict(
+            self._settings_with_schemas("public2", "public")
+        )
+        names = SchemaValidationService.expected_table_names(proxy)
+        assert names[0] == ("public2", "agent_conversation_messages")
+        assert names[-1] == ("public", "agent_question_runs")
 
 
 class TestCheckTables:

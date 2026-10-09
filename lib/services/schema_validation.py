@@ -3,8 +3,9 @@
 Единая точка проверки перед подъёмом сервисов ``ApplicationContext.start()``.
 Источник имён — ``SETTINGS["channels"]["postgres"]`` и
 ``SETTINGS["logging"]["db"]`` (те же 6 ключей, что проходят
-``validate_runtime_isolation`` в ``config.py``). Имена не зашиты в
-коде проверки — они передаются как параметры SQL.
+``validate_runtime_isolation`` в ``config.py``). Имена **и схемы**
+не зашиты в коде проверки: таблица проверяется в той схеме, которую
+объявляет её секция настроек, и передаётся в SQL параметрами.
 
 Failure mode: при отсутствии любой из таблиц выбрасывается
 ``SchemaValidationError`` (наследник ``config.ConfigurationError``).
@@ -26,14 +27,56 @@ from config import ConfigurationError
 
 DEFAULT_TIMEOUT_SEC = 5.0
 
-_EXPECTED_KEYS: tuple[tuple[str, ...], ...] = (
-    ("channels", "postgres", "table_name"),
-    ("channels", "postgres", "messages_table"),
-    ("channels", "postgres", "meta_table"),
-    ("channels", "postgres", "claims_table"),
-    ("logging", "db", "table_name"),
-    ("logging", "db", "question_runs_table"),
+# Схема по умолчанию. Совпадает с поведением runtime при отсутствии
+# ключа (``PostgresChannel._get("schema", "public")`` и
+# ``ApplicationContext`` → ``DbLoggingService(schema=db_cfg.get("schema",
+# "public"))``): валидатор обязан проверять ту же схему, в которой
+# сервисы реально работают, иначе он валидирует не тот объект.
+DEFAULT_SCHEMA = "public"
+
+# Группы runtime-таблиц: (путь к ключу ``schema``, пути к ключам таблиц).
+# Схема резолвится в той же секции, что и её таблицы: секции
+# независимы, поэтому ``channels.postgres.schema`` может отличаться от
+# ``logging.db.schema`` (и обычно отличается).
+_SCHEMA_GROUPS: tuple[tuple[tuple[str, ...], tuple[tuple[str, ...], ...]], ...] = (
+    (
+        ("channels", "postgres", "schema"),
+        (
+            ("channels", "postgres", "table_name"),
+            ("channels", "postgres", "messages_table"),
+            ("channels", "postgres", "meta_table"),
+            ("channels", "postgres", "claims_table"),
+        ),
+    ),
+    (
+        ("logging", "db", "schema"),
+        (
+            ("logging", "db", "table_name"),
+            ("logging", "db", "question_runs_table"),
+        ),
+    ),
 )
+
+# Плоский список ключей таблиц в фиксированном порядке вывода —
+# производная от ``_SCHEMA_GROUPS`` (детерминированный порядок
+# ``expected_table_names`` и ``SchemaValidationError.missing``).
+_EXPECTED_KEYS: tuple[tuple[str, ...], ...] = tuple(
+    path for _schema_path, table_paths in _SCHEMA_GROUPS for path in table_paths
+)
+
+
+def _lookup(raw: dict[str, Any], path: tuple[str, ...]) -> Any:
+    """Значение по пути в ``raw``; ``None``, если путь не резолвится.
+
+    Отсутствие пути и явный ``None`` неразличимы намеренно: оба
+    случая трактуются вызывающим как «ключа нет».
+    """
+    cur: Any = raw
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return None
+        cur = cur[k]
+    return cur
 
 
 def _hint_for_profile(profile: str) -> str:
@@ -178,25 +221,32 @@ class SchemaValidationService:
         (разворачивается через ``_inner_dict``). Источник истины —
         6 ключей ``channels.postgres.{table_name, messages_table,
         meta_table, claims_table}`` +
-        ``logging.db.{table_name, question_runs_table}``. Если
-        какого-то ключа нет — выбрасывается ``_MissingConfigKeys``
-        (наследник ``SchemaValidationError`` → ``ConfigurationError``).
+        ``logging.db.{table_name, question_runs_table}``.
+
+        Схема НЕ фиксирована: каждая группа таблиц резолвится в
+        схеме своей секции (``channels.postgres.schema`` для 4
+        таблиц канала, ``logging.db.schema`` для 2 таблиц журнала) —
+        секции независимы и могут указывать на разные схемы.
+        Отсутствующий или пустой ключ ``schema`` даёт
+        ``DEFAULT_SCHEMA``, совпадающий с дефолтом runtime.
+
+        Если какого-то ключа таблицы нет — выбрасывается
+        ``_MissingConfigKeys`` (наследник ``SchemaValidationError`` →
+        ``ConfigurationError``).
         """
         raw = _unwrap_settings(settings)
         missing_keys: list[str] = []
         names: list[tuple[str, str]] = []
-        for path in _EXPECTED_KEYS:
-            cur: Any = raw
-            ok = True
-            for k in path:
-                if not isinstance(cur, dict) or k not in cur:
-                    ok = False
-                    break
-                cur = cur[k]
-            if not ok or not isinstance(cur, str) or not cur:
-                missing_keys.append(".".join(path))
-                continue
-            names.append(("public", cur))
+        for schema_path, table_paths in _SCHEMA_GROUPS:
+            schema = _lookup(raw, schema_path)
+            if not isinstance(schema, str) or not schema:
+                schema = DEFAULT_SCHEMA
+            for path in table_paths:
+                table = _lookup(raw, path)
+                if not isinstance(table, str) or not table:
+                    missing_keys.append(".".join(path))
+                    continue
+                names.append((schema, table))
         if missing_keys:
             profile = str(raw.get("profile", "<unknown>"))
             raise _MissingConfigKeys(missing_keys, profile)
@@ -277,6 +327,7 @@ class SchemaValidationService:
 
 
 __all__ = [
+    "DEFAULT_SCHEMA",
     "DEFAULT_TIMEOUT_SEC",
     "MissingTable",
     "SchemaValidationError",

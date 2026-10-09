@@ -8,6 +8,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `lib/services/schema_validation.py`: `SchemaValidationService.expected_table_names()`
+  больше не проверяет все 6 runtime-таблиц в захардкоженной схеме
+  `public`. Схема резолвится из настроек той секции, которой принадлежит
+  таблица: `channels.postgres.schema` для 4 таблиц канала и
+  `logging.db.schema` для 2 таблиц журнала (секции независимы и могут
+  указывать на разные схемы). При `channels.postgres.schema != "public"`
+  валидатор подтверждал наличие таблиц не в той схеме, в которой с ними
+  работает канал, — то есть пропускал битую конфигурацию либо блокировал
+  рабочий старт. При отсутствии/пустом/нестроковом ключе `schema`
+  используется `DEFAULT_SCHEMA = "public"` — тот же дефолт, что и в
+  `PostgresChannel` / `DbLoggingService`; новых требований к конфигурации
+  не возникает. Сообщение об ошибке теперь называет реальную схему
+  (`public2.agent_conversation_messages` вместо `public.…`).
+  Тесты: `tests/test_schema_validation.py::TestSchemaResolution`.
+
 _(пусто — новые изменения добавляются следующим релизом)_
 
 ## [2.5.4] — 2026-10-09
