@@ -254,7 +254,8 @@ PG — 63 мс на холодном соединении и 35 мс на про
 Путь переиспользования не пишет в файл (проверено замером `mtime` до и после
 прогона), поэтому TTL честен: снимок протухает и обновляется из PG, а не
 «омолаживается» каждым рестартом. Полный контракт —
-`openspec/changes/cache-snapshot-reuse-ttl`.
+`openspec/specs/data/cache-provider/spec.md` (change архивирован как
+`openspec/changes/archive/2026-10-09-cache-snapshot-reuse-ttl/`).
 
 Схема в `gateway.py::main()` (callbacks между сервисами — `main()` 77-124):
 
