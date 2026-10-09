@@ -201,11 +201,65 @@ class TestScenario5SkillSelfContained:
                 f"references/*.md должны быть удалены: {md_files}"
             )
 
-    def test_no_agent_tools_modules_exist(self) -> None:
-        """Agent-facing tools удалены (этап 18): duckdb_query / vector_search."""
-        removed = [
+    def test_agent_tools_are_the_only_audit_data_path(self) -> None:
+        """Agent-facing tools — единственный рабочий путь к данным.
+
+        Этап 18 удалил ``duckdb_query`` / ``vector_search`` и оставил агенту
+        только CLI skill'а. Это решение оказалось неисполнимым: gateway
+        держит ``cache.duckdb`` открытым весь свой жизненный цикл, поэтому
+        CLI в отдельном процессе получает ``File is already open in ... PID
+        ...`` даже в ``read_only`` и падает с «DuckDB-кеш не найден» при
+        существующем файле. Агент остался без доступа к данным capability.
+
+        Инвариант, который здесь защищается, — не «tool'ов нет», а
+        «tool'ы есть И агент не отправлен в CLI»: tool исполняется в
+        процессе gateway на его открытом ``CacheProvider``.
+        """
+        present = [
             "workspace/tools/duckdb_query_tool.py",
             "workspace/tools/vector_search_tool.py",
         ]
-        for path in removed:
-            assert not Path(path).exists(), f"{path} должен быть удалён (этап 18)"
+        for path in present:
+            assert Path(path).exists(), (
+                f"{path} должен существовать: это единственный рабочий путь "
+                "агента к данным capability (CLI нерабочий при запущенном gateway)"
+            )
+
+    def test_agent_docs_do_not_route_to_cli(self) -> None:
+        """Доки агента не отправляют его в CLI skill'а.
+
+        Отдельная проверка от существования tool'ов: именно перенаправление
+        в CLI («Tools ... отсутствуют — доступ через scripts/cli.py») держало
+        агента в тупике.
+
+        Проверяются не подстроки ``cli.py``, а однозначные маркеры
+        **инструкции** отправлять в CLI. Ссылка на CLI в запрете («не
+        вызывай») — это корректный текст, и ловить его нельзя: такой
+        строковый запрет запрещал бы и правильную формулировку.
+        """
+        instruction_markers = {
+            "AGENTS.md": "Tools `duckdb_query`/`vector_search` отсутствуют",
+            "workspace/TOOLS.md": "## audit_analyzer — доступ через CLI",
+            "workspace/skills/audit_analyzer/SKILL.md": "Доступ агента — через CLI",
+        }
+        for rel, marker in instruction_markers.items():
+            path = Path(rel)
+            if not path.is_file():
+                continue
+            assert marker not in path.read_text(encoding="utf-8"), (
+                f"{rel}: агент всё ещё отправляется в CLI ({marker!r})"
+            )
+
+    def test_agent_docs_name_the_tools(self) -> None:
+        """Доки, которые читает агент, называют оба tool'а."""
+        for rel in (
+            "AGENTS.md",
+            "workspace/TOOLS.md",
+            "workspace/skills/audit_analyzer/SKILL.md",
+        ):
+            path = Path(rel)
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for tool in ("duckdb_query", "vector_search"):
+                assert tool in text, f"{rel}: не упоминает {tool}"

@@ -15,7 +15,7 @@ TOOL = REPO_ROOT / "tools" / "diagnose_startup.py"
 USER_LOG = """
 \u2713 Hooks connected: StreamDiagnosisHook, RecentFilesHook, SessionFileRedirectHook, ToolAuditHook, TerminalToolPrintHook, 1 hook factory (per-turn)
 Registered 22 tools: ['apply_patch', 'run_cli_app', 'create_goal', 'edit_file', 'exec_session', 'exec', 'find_files', 'grep', 'list_dir', 'list_exec_sessions', 'list_sessions', 'message', 'my', 'read_file', 'read_session', 'search_sessions', 'send_session_message', 'spawn', 'update_goal', 'web_fetch', 'web_search', 'write_file']
-Custom (project) tools: 3 project tools registered: compact_context, history_search, legal_summarizer_query; 1 disabled by config: ExampleTool
+Custom (project) tools: 5 project tools registered: compact_context, duckdb_query, history_search, legal_summarizer_query, vector_search; 1 disabled by config: ExampleTool
 Runtime patches
 ----------------
 \u2713 assemble_outbound
@@ -32,7 +32,7 @@ Runtime patches
 CRITICAL_LOG = """
 \u2713 Hooks connected: ToolAuditHook, TerminalToolPrintHook
 Registered 22 tools: ['apply_patch', 'exec']
-Custom (project) tools: 3 project tools registered: compact_context, history_search, legal_summarizer_query; 1 disabled by config: ExampleTool
+Custom (project) tools: 5 project tools registered: compact_context, duckdb_query, history_search, legal_summarizer_query, vector_search; 1 disabled by config: ExampleTool
 Runtime patches
 ----------------
 \u2713 assemble_outbound
@@ -75,7 +75,8 @@ class TestParser:
         assert facts.hook_factory_count == 1
         assert len(facts.builtin_tool_names) == 22
         assert facts.project_tools_registered == [
-            "compact_context", "history_search", "legal_summarizer_query",
+            "compact_context", "duckdb_query", "history_search",
+            "legal_summarizer_query", "vector_search",
         ]
         assert facts.project_tools_disabled == ["ExampleTool"]
         assert "subagent_logging" in facts.runtime_patches_applied

@@ -558,13 +558,21 @@ class TestProjectToolsInventoryBanner:
         """Если drift нет (всё совпадает с canonical) — banner молчит."""
         from lib.core.application_context import _emit_project_tools_inventory_banner
         from lib.services.project_tool_loader import ProjectToolsLoadResult
+        from lib.services.runtime_inventory import canonical_project_tools
+
+        # Список — из инвентаря, а не захардкожен: тест проверяет «нет
+        # дрейфа», и хардкод молча ломался на каждом новом tool'е.
+        required = [t.name for t in canonical_project_tools() if t.required]
 
         result = ProjectToolsLoadResult(
-            registered=["compact_context", "history_search", "legal_summarizer_query"],
+            registered=list(required),
             disabled=["ExampleTool"],
             duplicate=[],
             failed=[],
-            detail="3 project tools registered: ...; 1 disabled by config: ExampleTool",
+            detail=(
+                f"{len(required)} project tools registered: ...; "
+                "1 disabled by config: ExampleTool"
+            ),
             error=None,
         )
 

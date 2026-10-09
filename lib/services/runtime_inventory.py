@@ -126,7 +126,19 @@ def canonical_hook_factories() -> list[HookSpec]:
 
 
 def canonical_project_tools() -> list[ToolSpec]:
-    """Project tools из ``workspace/tools/*.py`` (auto-discover)."""
+    """Project tools из ``workspace/tools/*.py`` (auto-discover).
+
+    ``duckdb_query`` и ``vector_search`` — доступ агента к данным capability
+    **через gateway**: loader прокидывает в них живой ``ctx.cache_provider``
+    (``set_provider``), поэтому запрос исполняется на уже открытом
+    соединении внутри процесса gateway.
+
+    Это не оптимизация, а требование: gateway держит ``cache.duckdb``
+    открытым весь свой жизненный цикл, поэтому второй процесс (навык,
+    запущенный через ``exec``) этот файл не откроет — DuckDB отдаёт
+    ``File is already open in ... PID ...`` даже в ``read_only``-режиме.
+    Подробности — ``docs/ARCHITECTURE.md``.
+    """
     return [
         ToolSpec(
             name="compact_context",
@@ -141,6 +153,26 @@ def canonical_project_tools() -> list[ToolSpec]:
             required=True,
             description="generic-поиск по долговечному журналу agent_gateway_logs",
             config_key="tools.history_search.enable",
+        ),
+        ToolSpec(
+            name="duckdb_query",
+            module="duckdb_query_tool",
+            required=True,
+            description=(
+                "read-only SQL к кэшу через живой CacheProvider gateway'а "
+                "(без отдельного процесса и без открытия файла)"
+            ),
+            config_key="tools.duckdb_query.enable",
+        ),
+        ToolSpec(
+            name="vector_search",
+            module="vector_search_tool",
+            required=True,
+            description=(
+                "семантический поиск по FAISS-индексам в памяти gateway'а "
+                "через CacheProvider.search_vector"
+            ),
+            config_key="tools.vector_search.enable",
         ),
         ToolSpec(
             name="legal_summarizer_query",

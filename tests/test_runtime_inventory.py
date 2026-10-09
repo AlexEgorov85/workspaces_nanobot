@@ -37,7 +37,13 @@ class TestCanonical:
         from lib.services.runtime_inventory import canonical_project_tools
 
         required = {t.name for t in canonical_project_tools() if t.required}
-        assert required == {"compact_context", "history_search", "legal_summarizer_query"}
+        assert required == {
+            "compact_context",
+            "duckdb_query",
+            "history_search",
+            "legal_summarizer_query",
+            "vector_search",
+        }
 
     def test_example_tool_is_optional(self) -> None:
         from lib.services.runtime_inventory import canonical_project_tools
@@ -187,7 +193,13 @@ class TestDiffProjectTools:
         from lib.services.runtime_inventory import diff_project_tools
 
         diff = diff_project_tools(
-            registered=["compact_context", "history_search", "legal_summarizer_query"],
+            registered=[
+                "compact_context",
+                "duckdb_query",
+                "history_search",
+                "legal_summarizer_query",
+                "vector_search",
+            ],
             skipped_disabled=["ExampleTool"],
         )
         assert diff["missing_required"] == []
