@@ -177,10 +177,20 @@ def run(
         key_concepts = []
 
     vnd_findings: list[dict[str, Any]] = []
+    search_payload: dict[str, Any] = {}
     if search_data and isinstance(search_data, dict):
-        vnd_findings = (search_data.get("data") or {}).get("vnd_findings") or []
+        search_payload = search_data.get("data") or {}
+        vnd_findings = search_payload.get("vnd_findings") or []
     if not isinstance(vnd_findings, list):
         vnd_findings = []
+    if not isinstance(search_payload, dict):
+        search_payload = {}
+
+    # Статистика покрытия ВНД из search-фазы. Если часть чанков упала на
+    # LLM-вызове, отчёт обязан это показать: иначе аудитор читает внешне
+    # полный отчёт, построенный по неполному набору фрагментов.
+    chunks_processed = _as_int(search_payload.get("chunks_processed"))
+    chunks_failed = _as_int(search_payload.get("chunks_failed"))
 
     # Загрузить промпт.
     try:
@@ -251,6 +261,8 @@ def run(
         valid_citations=valid_citations,
         source_findings_count=len(evidence_registry),
         citations_dropped=dropped_count,
+        chunks_processed=chunks_processed,
+        chunks_failed=chunks_failed,
     )
     if data is None:
         return (
@@ -332,6 +344,21 @@ def _load_resume(
                 error_type=f"{kind}_result_unreadable",
             )
     return None, None
+
+
+def _as_int(value: Any) -> int | None:
+    """Мягко привести значение к ``int``; нечисловое → ``None``.
+
+    Статистика покрытия ВНД приходит из результата search-фазы, который
+    может быть собран из файла вручную. Нечисловое значение не должно
+    ронять сборку отчёта — оно просто не показывается.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_evidence_registry(
@@ -432,6 +459,8 @@ def _assemble_data(
     valid_citations: list[dict[str, Any]],
     source_findings_count: int,
     citations_dropped: int,
+    chunks_processed: int | None = None,
+    chunks_failed: int | None = None,
 ) -> dict[str, Any] | None:
     """Собрать финальный dict данных отчёта из ответа LLM."""
     if not isinstance(parsed, dict):
@@ -459,6 +488,8 @@ def _assemble_data(
         "normalized_violation": normalized_violation,
         "severity": severity,
         "source_findings_count": source_findings_count,
+        "chunks_processed": chunks_processed,
+        "chunks_failed": chunks_failed,
     }
 
 

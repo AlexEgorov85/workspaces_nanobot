@@ -167,6 +167,12 @@ vnd_paths ────────┼──► vnd_io.prepare_vnd() ──► Vn
    Цитата = `(source_file, chunk_index, text_excerpt)`.
 7. **Без SHA-256 cache_key.** Прежнее поле было мёртвым (без реального
    cache-провайдера) и удалено.
+8. **Путь артефакта резолвится в одном месте — `cli.main()`.** Всё, что пишет
+   на диск (`modes/synthesize.py`, `cli._emit`), получает уже абсолютный путь
+   внутри `workspace/data_store/cache/sessions/<session_key>/`; сам код записи
+   не решает, куда класть файл. Логика — в `scripts/paths.py`, папка
+   назначения создаётся там же. Причина: CLI — подпроцесс, записи из него не
+   перехватывает `SessionFileRedirectHook`.
 
 ## Конфигурация
 

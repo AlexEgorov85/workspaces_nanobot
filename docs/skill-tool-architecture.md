@@ -374,6 +374,12 @@ Skill **запрещено** (дополнительно к общим прав�
 - ❌ Возвращать JSON как пользовательский артефакт (только `.md`/`.txt`/`.docx`).
 - ❌ Добавлять skill-specific ключи в `project.json::skills.<name>` — `SkillSettings(extra="forbid")`.
 - ❌ Модифицировать `sys.path` где-либо кроме `scripts/cli.py` (единственная разрешённая точка bootstrap).
+- ❌ Класть артефакт мимо дерева сессий. Путь резолвит `scripts/paths.py`
+  (единственный вызов из `cli.main()`): короткое имя файла `--output report.md`
+  попадает в `workspace/data_store/cache/sessions/<session_key>/`, путь с
+  каталогом используется как есть, но вне дерева сессий CLI предупреждает в
+  stderr. Причина — CLI-скилл это подпроцесс, а `SessionFileRedirectHook`
+  перехватывает только `write`/`edit`.
 
 ### 12.3 Pipeline
 

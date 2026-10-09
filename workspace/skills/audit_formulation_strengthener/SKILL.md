@@ -50,7 +50,13 @@ python workspace/skills/audit_formulation_strengthener/scripts/cli.py \
 - **`--mode analyze|search|synthesize|all`** — режим (по умолчанию `all`).
 - **`--output-format md|docx|txt`** — формат файла отчёта при `--output` (по умолчанию `md`).
 - **`--internal-format json|report`** — формат вывода для `synthesize` (по умолчанию `report`). Для `analyze`/`search` всегда JSON.
-- **`--output`** — путь к итоговому файлу. Если не указан — stdout. **Игнорируется вместе с `--estimate-only`** (нет артефакта — нет файла).
+- **`--output`** — путь к итоговому файлу. Короткое имя без каталога
+  (`report.md`) отчёт кладёт в папку сессии
+  `workspace/data_store/cache/sessions/<session_key>/` — именно оттуда его
+  можно прикрепить к ответу в канале; выбранный путь печатается в stderr и в
+  `saved_to`. Путь с каталогом используется как есть, но если он вне дерева
+  сессий — в stderr идёт предупреждение. Если не указан — stdout.
+  **Игнорируется вместе с `--estimate-only`** (нет артефакта — нет файла).
 - **`--estimate-only`** — только оценка без LLM. Работает во всех режимах. Для `all` — форма `synthesize-estimate + vnd_count` (`1+N+1` вызовов). Exit 0, JSON в stdout.
 - **`--analyze-result /path/to/analyze.json`** / **`--search-result`** — резюмировать финальный отчёт из кэшированных результатов предыдущих фаз.
 
@@ -106,6 +112,10 @@ Resume читает кэшированные JSON; не требует повт�
 
 Стиль — строгий русский юридический: «установлено, что», «в ходе проверки выявлено», «не соответствует требованиям», «данное обстоятельство свидетельствует о нарушении».
 
+Если часть фрагментов ВНД не разобралась (сбой LLM-вызова), прогон
+не падает, но в шапке отчёта появляется блок «Покрытие ВНД неполное» с
+числом выпавших фрагментов — выводы могут не охватывать часть документов.
+
 ## Что внутри
 
 | Файл | Назначение |
@@ -115,6 +125,7 @@ Resume читает кэшированные JSON; не требует повт�
 | `scripts/output.py` | Формат `{mode, status, data}` + `make_error` + `sanitize_output` |
 | `scripts/llm.py` | Тонкая обёртка над `lib.services.llm_client.call_llm` + `chat_json` с одной повторной попыткой и локальным `JsonParseError` |
 | `scripts/vnd_io.py` | Извлечение текста (`extract_text`) + чанкование (`split_text`) + оценка размера |
+| `scripts/paths.py` | Резолвинг пути отчёта в `data_store/cache/sessions/<session_key>/` (единственный вызов из `cli.main()`) |
 | `scripts/prompts.py` | `load_prompt` + `render_prompt` с проверкой неразрешённых `{{...}}` |
 | `scripts/modes/analyze.py` | Нормализация отклонения (1 LLM-вызов) |
 | `scripts/modes/search.py` | Поиск релевантных фрагментов (map → фильтр → top-K, N LLM-вызовов) |

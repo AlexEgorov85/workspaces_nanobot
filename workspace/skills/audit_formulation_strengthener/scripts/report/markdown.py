@@ -43,6 +43,24 @@ def render_markdown(data: dict[str, Any]) -> str:
             f"**Отклонено проверкой:** {dropped} "
             f"цитат не прошли сверку с источником"
         )
+    chunks_failed = data.get("chunks_failed") or 0
+    if chunks_failed:
+        try:
+            failed_n = int(chunks_failed)
+        except (TypeError, ValueError):
+            failed_n = 0
+        if failed_n > 0:
+            processed_raw = data.get("chunks_processed")
+            try:
+                processed_n = int(processed_raw) if processed_raw is not None else None
+            except (TypeError, ValueError):
+                processed_n = None
+            scope = f" из {processed_n}" if processed_n is not None else ""
+            lines.append(
+                f"> **Покрытие ВНД неполное:** {failed_n} фрагмент(ов){scope} "
+                f"не разобраны — они выпали из анализа при сбое LLM-вызова. "
+                f"Выводы отчёта могут не охватывать часть документов."
+            )
     if normalized:
         lines.append("")
         lines.append(f"> **Нормализованная формулировка:** {normalized}")

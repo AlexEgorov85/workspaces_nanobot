@@ -86,9 +86,15 @@ monkeypatch.setattr(llm_mod, "chat_json", fake_chat_json)
 - Без `--vnd` (для search/synthesize/all) → exit 2, JSON `no_vnd` в stdout.
 - Несуществующий файл → exit 2, JSON `vnd_not_found`.
 - Пустой violation → exit 2, JSON `empty_violation`.
-- `--output /tmp/x.md` + synthesize → файл создан И JSON `{mode, status, saved_to}` в stdout.
+- `--output /tmp/x.md` + synthesize → файл создан (путь с каталогом honored
+  как есть), И JSON `{mode, status, saved_to}` в stdout.
+- `--output report.md` (короткое имя) + synthesize → файл создан в
+  `workspace/data_store/cache/sessions/<session_key>/report.md`, в stderr —
+  строка о переносе пути; в `saved_to` — абсолютный путь в папке сессии.
 - `--estimate-only + --output` → `--output` игнорируется, файл не создаётся, JSON в stdout.
 - `--internal-format json` → JSON в stdout для synthesize.
+- `chunks_failed > 0` в результате search → в отчёте строка «Покрытие ВНД неполное»;
+  `chunks_failed == 0` или отсутствие ключей → строки нет, отчёт строится.
 - Exit-коды для всех error_type (parametrize).
 
 ### helpers

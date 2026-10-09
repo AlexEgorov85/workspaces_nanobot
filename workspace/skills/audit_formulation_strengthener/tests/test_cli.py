@@ -6,6 +6,7 @@ import io
 import json
 import sys
 from contextlib import redirect_stdout
+from pathlib import Path
 
 import pytest
 
@@ -210,6 +211,60 @@ def test_cli_synthesize_with_output_creates_file_and_brief(
     assert brief["mode"] == "synthesize"
     assert brief["status"] == "success"
     assert brief["saved_to"].endswith("report.md")
+
+
+def test_cli_bare_output_name_lands_in_session_dir(
+    mock_llm_all, sample_vnd_files, tmp_path, monkeypatch
+) -> None:
+    """Регрессия (файловая политика): короткое имя файла не пишет в cwd.
+
+    Вызывающий передаёт ``--output report.md`` — раньше файл появлялся
+    относительно текущего каталога, то есть в корне репозитория, мимо
+    ``data_store/cache/sessions/<session_key>/``, и его нельзя было
+    прикрепить к ответу в канале. Теперь такое имя резолвится в папку
+    сессии.
+    """
+    monkeypatch.setattr(cli, "_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SESSION_KEY", "cli:99")
+    monkeypatch.chdir(tmp_path)
+
+    mock_llm_all.set_response(
+        "synthesize",
+        {
+            "title": "Тестовый отчёт",
+            "violation_summary": ["s"],
+            "established_facts": ["f"],
+            "deviation_analysis": ["a"],
+            "vnd_citations": [],
+            "verdict": {"category": "средняя", "verdict_text": ["v"]},
+            "recommended_formulation": ["r"],
+        },
+    )
+
+    exit_code, stdout, stderr = _run(
+        [
+            "--mode", "synthesize",
+            "--violation", "x",
+            "--vnd", str(sample_vnd_files["file1"]),
+            "--output", "report.md",
+        ]
+    )
+
+    expected = (
+        tmp_path
+        / "workspace"
+        / "data_store"
+        / "cache"
+        / "sessions"
+        / "cli_99"
+        / "report.md"
+    )
+    assert exit_code == 0
+    assert expected.exists(), "отчёт должен лежать в папке сессии"
+    assert not (tmp_path / "report.md").exists(), "в cwd отчёт писаться не должен"
+    brief = json.loads(stdout.strip())
+    assert brief["saved_to"] == str(expected)
+    assert "папку сессии" in stderr
 
 
 # -----------------------------------------------------------------------------

@@ -24,6 +24,10 @@ Exit-коды:
 
 * ``--estimate-only + --output`` → ``--output`` игнорируется (нет
   артефакта — нет файла).
+* ``--output report.md`` (имя файла без каталога) → отчёт кладётся в
+  ``workspace/data_store/cache/sessions/<session_key>/``; путь с каталогом
+  используется как есть, но если он вне дерева сессий — в stderr
+  печатается предупреждение (см. ``scripts/paths.py``).
 * Пустой ``--vnd`` → JSON ``no_vnd`` в stdout + exit 2 (а не
   ``argparse.SystemExit(2)`` с usage в stderr).
 * При записи в файл через ``--output`` в stdout также печатается краткий
@@ -49,6 +53,9 @@ if _REPO_ROOT not in sys.path:
 
 from workspace.skills.audit_formulation_strengthener.scripts.output import (
     make_error,
+)
+from workspace.skills.audit_formulation_strengthener.scripts.paths import (
+    resolve_output_path,
 )
 from workspace.skills.audit_formulation_strengthener.scripts.skill_config import (
     get_cli_config,
@@ -152,7 +159,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output",
         default=None,
         help=(
-            "Путь к файлу-результату. Если не указан — stdout. "
+            "Путь к файлу-результату. Короткое имя без каталога "
+            "(например report.md) — отчёт попадёт в папку сессии "
+            "workspace/data_store/cache/sessions/<session_key>/. "
+            "Путь с каталогом используется как есть; если он вне дерева "
+            "сессий — печатается предупреждение в stderr. "
+            "Если не указан — stdout. "
             "Игнорируется вместе с --estimate-only (оценка только в stdout)."
         ),
     )
@@ -334,6 +346,33 @@ def main(argv: list[str] | None = None) -> int:
             )
             _emit(err, kind="json", target_path=None, mode=args.mode)
             return 2
+
+    # Путь артефакта резолвится ОДИН раз, здесь. И synthesize, и _emit
+    # получают уже абсолютный путь внутри папки сессии — сам факт записи
+    # больше нигде не решает, куда положить файл (см. scripts/paths.py).
+    # Порядок важен: после проверки существования файлов ВНД, чтобы
+    # невалидный ввод не создавал папки сессий.
+    if args.output and not args.estimate_only:
+        resolved_output = resolve_output_path(
+            args.output,
+            vnd_paths=list(args.vnd_paths),
+            repo_root=_REPO_ROOT,
+        )
+        if resolved_output.note:
+            print(resolved_output.note, file=sys.stderr)
+        if resolved_output.path is not None:
+            # Папка сессии может быть новой (ключ только что резолвнулся),
+            # а synthesize/_emit не создают каталоги под цель записи.
+            try:
+                resolved_output.path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                err = make_error(
+                    f"Не удалось подготовить папку для артефакта: {exc}",
+                    error_type="io_error",
+                )
+                _emit(err, kind="json", target_path=None, mode=args.mode)
+                return 1
+        args.output = str(resolved_output.path)
 
     try:
         if args.mode == "analyze":

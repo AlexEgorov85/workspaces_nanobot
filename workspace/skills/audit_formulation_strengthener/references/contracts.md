@@ -215,17 +215,43 @@ Exit-коды: **0** — успех, **1** — ошибка обработки, 
     "normalized_violation": "<использованная нормализованная формулировка>",
     "severity": "<severity из analyze>",
     "source_findings_count": <int, всего в реестре>,
+    "chunks_processed": <int|null, чанков ВНД обработано в search-фазе>,
+    "chunks_failed": <int|null, чанков упало на LLM-вызове>,
     "date_iso": "<ISO-8601 UTC>"
   },
   "saved_to": "<абсолютный путь к файлу, если --output указан>"
 }
 ```
 
+**Куда ложится артефакт (`--output`):**
+
+| Значение `--output` | Куда попадёт файл |
+|---|---|
+| не задан | stdout, файл не создаётся |
+| `report.md` (имя без каталога) | `workspace/data_store/cache/sessions/<session_key>/report.md` |
+| путь с каталогом | как есть; если вне `data_store/cache/sessions/` — предупреждение в stderr |
+
+Ключ сессии определяется по убыванию приоритета: `$SESSION_KEY` → ключ в пути
+файла ВНД → basename первого ВНД → `__nosession__`.
+
+Резолвинг живёт в `scripts/paths.py`, единственный вызов — из `cli.main()`;
+там же создаётся папка назначения. Отдельный резолвинг нужен потому, что CLI
+скилла — подпроцесс: `SessionFileRedirectHook` перехватывает только tool'ы
+`write`/`edit`, а запись из подпроцесса остаётся как есть (см.
+`workspace/AGENTS.md`, раздел «Пути к media-attach при вызове CLI skill'ов
+через `exec`»). Без этого отчёт с коротким именем файла оказывался в корне
+репозитория и не мог прикрепиться к ответу в канале.
+
 **Нормализация:**
 - `verdict.category` — fallback на severity из analyze; невалидное → `"средняя"`.
 - `vnd_citations[i].relation_type` — **берётся из находки**, не из LLM. LLM возвращает
   только `excerpt` и `relation_explanation`.
 - `*_summary`/`*_facts`/`*_analysis`/`*_formulation` — `list[str]`, пустые строки отбрасываются.
+- `chunks_processed`/`chunks_failed` переносятся из результата search-фазы без
+  изменений; при их отсутствии — `null`, отчёт строится как обычно.
+- **`chunks_failed > 0` печатается в отчёте** блоком «Покрытие ВНД неполное».
+  Graceful degradation остаётся (прогон не падает), но неполнота разбора
+  обязана быть видна аудитору, а не жить только в stdout-JSON.
 
 **Валидация цитат (пункт 6 ревью):**
 

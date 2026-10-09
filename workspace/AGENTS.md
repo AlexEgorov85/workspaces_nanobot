@@ -93,9 +93,19 @@ context канала (он лежит в `media` payload сообщения).
 ```bash
 python workspace/skills/audit_formulation_strengthener/scripts/cli.py \
     --violation "<текст отклонения>" \
-    --vnd "<путь_к_vnd1>" [--vnd "<путь_к_vnd2>" ...] \
+    --vnd data_store/cache/sessions/<session_key>/<файл_ВНД>.pdf \
+    [--vnd data_store/cache/sessions/<session_key>/<файл_ВНД2>.docx ...] \
     --output report.md
 ```
+
+`--vnd` только с basename (без `data_store/cache/sessions/<session_key>/`)
+не работает — skill вернёт `vnd_not_found`, потому что в cwd такого файла нет
+(см. раздел «Пути к media-attach при вызове CLI skill'ов через `exec`»).
+
+`--output report.md` — короткое имя файла: skill сам кладёт отчёт в папку
+сессии `data_store/cache/sessions/<session_key>/` и печатает выбранный путь
+в stderr и в `saved_to`. Абсолютные пути вида `/home/<user>/...` указывать
+не нужно — на сервере их нет.
 
 Перед запуском на больших ВНД рекомендуется оценить объём работы
 (`--mode all --estimate-only`) — skill без LLM-вызовов вернёт `size_estimate`

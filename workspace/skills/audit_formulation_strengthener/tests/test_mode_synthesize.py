@@ -344,3 +344,99 @@ def test_docx_import_error_message() -> None:
             docx_mod.write_docx(data, "/tmp/nope.docx")
     finally:
         builtins.__import__ = real_import
+
+
+def _search_with_chunks(chunks_processed: int, chunks_failed: int):
+    return make_search_result(
+        findings=[
+            {
+                "evidence_id": "F1",
+                "source_file": "vnd1.txt",
+                "chunk_index": 0,
+                "text_excerpt": "Точный текст из ВНД.",
+                "relation_type": "контекст",
+                "relevance_score": 0.7,
+                "why_matches": "x",
+            },
+        ],
+        chunks_processed=chunks_processed,
+        chunks_failed=chunks_failed,
+    )
+
+
+def _valid_synthesize_response():
+    return {
+        "title": "Анализ",
+        "violation_summary": ["x"],
+        "established_facts": ["x"],
+        "deviation_analysis": ["x"],
+        "vnd_citations": [
+            {
+                "evidence_id": "F1",
+                "excerpt": "Точный текст из ВНД.",
+                "relation_explanation": "x",
+            },
+        ],
+        "verdict": {"category": "средняя", "verdict_text": ["x"]},
+        "recommended_formulation": ["x"],
+    }
+
+
+def test_partial_chunk_failure_visible_in_report(mock_llm_all) -> None:
+    """Часть чанков упала на LLM → отчёт обязан об этом сказать.
+
+    Иначе аудитор читает внешне полный отчёт, построенный по 3 фрагментам
+    из 50, и делает вывод о документе, который никто не прочитал.
+    """
+    analyze_res = make_analyze_result()
+    search_res = _search_with_chunks(chunks_processed=50, chunks_failed=47)
+    mock_llm_all.set_response("synthesize", _valid_synthesize_response())
+
+    result, report_text = synthesize.run(
+        violation="X",
+        analyze_result=analyze_res,
+        search_result=search_res,
+    )
+
+    assert result["status"] == "success"
+    assert result["data"]["chunks_failed"] == 47
+    assert result["data"]["chunks_processed"] == 50
+    assert "Покрытие ВНД неполное" in report_text
+    assert "47" in report_text
+
+
+def test_full_coverage_has_no_coverage_warning(mock_llm_all) -> None:
+    """Все чанки разобраны — предупреждения о покрытии быть не должно."""
+    analyze_res = make_analyze_result()
+    search_res = _search_with_chunks(chunks_processed=10, chunks_failed=0)
+    mock_llm_all.set_response("synthesize", _valid_synthesize_response())
+
+    result, report_text = synthesize.run(
+        violation="X",
+        analyze_result=analyze_res,
+        search_result=search_res,
+    )
+
+    assert result["status"] == "success"
+    assert result["data"]["chunks_failed"] == 0
+    assert "Покрытие ВНД неполное" not in report_text
+
+
+def test_missing_chunk_stats_do_not_break_report(mock_llm_all) -> None:
+    """Статистики покрытия нет (старый JSON, ручная сборка) — отчёт строится."""
+    analyze_res = make_analyze_result()
+    search_res = make_search_result(findings=[])
+    # Старый/ручной JSON результата search может не содержать статистики.
+    search_res["data"].pop("chunks_processed", None)
+    search_res["data"].pop("chunks_failed", None)
+    mock_llm_all.set_response("synthesize", _valid_synthesize_response())
+
+    result, report_text = synthesize.run(
+        violation="X",
+        analyze_result=analyze_res,
+        search_result=search_res,
+    )
+
+    assert result["status"] == "success"
+    assert result["data"]["chunks_failed"] is None
+    assert "Покрытие ВНД неполное" not in report_text
