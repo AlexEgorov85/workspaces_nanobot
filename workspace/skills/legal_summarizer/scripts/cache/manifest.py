@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 MANIFEST_VERSION_V2 = 2
 
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 _SKILL_ROOT = Path(__file__).resolve().parents[2]
 _PROMPTS_DIR = _SKILL_ROOT / "prompts"
 

@@ -221,8 +221,8 @@ def get_in_memory_cache_path(skill_root: Path | str) -> str:
     ``max_age_sec`` / ``refresh_interval_sec`` не пробрасывались в
     ``PostgresDuckDbProvider``). См. commit «skill configuration boundary».
     """
-    from lib.core.application_context import resolve_publish_path
     from config import SETTINGS
+    from lib.core.application_context import resolve_publish_path
 
     workspace_root = Path(skill_root).parent.parent
     gateway_cache_cfg = (SETTINGS.get("gateway") or {}).get("cache") or {}

@@ -23,26 +23,25 @@ Chunker, который использует ``DocumentStructure`` как еди
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from chunking.structural_packing import PackableUnit
 
-from chunking.chunks import (
-    Chunk,
-    ChunkConfig,
-    _split_block_with_offsets,
+from document.physical import (
+    PhysicalDocument,
 )
 from document.structure import (
     DocumentStructure,
     build_block_ownership,
     owner_for_block,
 )
-from document.physical import (
-    DocumentBlock,
-    PhysicalDocument,
-)
 
+from chunking.chunks import (
+    Chunk,
+    ChunkConfig,
+    _split_block_with_offsets,
+)
 
 _MAJOR_SEMANTIC_TYPES = frozenset({"chapter", "section", "appendix", "razdel"})
 
@@ -175,7 +174,7 @@ def _ancestor_chain_titles(
 
 
 def _build_context_preamble(
-    unit: "PackableUnit",
+    unit: PackableUnit,
     struct: DocumentStructure,
     cache: dict[str, str],
 ) -> str:
@@ -504,13 +503,12 @@ def chunk_from_structure_with_diagnostics(
     struct: DocumentStructure,
     *,
     config: DocumentStructureChunkerConfig | None = None,
-) -> tuple[list[Chunk], "ChunkingDiagnostics"]:
+) -> tuple[list[Chunk], ChunkingDiagnostics]:
     """Создать chunks + вернуть ``ChunkingDiagnostics``.
 
     Diagnostics собирается по результату chunking'а и не влияет на сам
     алгоритм. Полезно для smoke-тестов и CLI-отчётов.
     """
-    from dataclasses import dataclass
 
     chunks = chunk_from_structure(doc, struct, config=config)
 

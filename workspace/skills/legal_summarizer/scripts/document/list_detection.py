@@ -40,7 +40,6 @@ from document.physical import (
     DocumentBlock,
 )
 
-
 _RE_NUMBERED_LEVEL_1 = re.compile(r"^\s*(\d+)\.\s+(.{2,200})$")
 _RE_NUMBERED_LEVEL_2 = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+(.{2,200})$")
 

@@ -23,12 +23,10 @@ from typing import Any
 
 from lib.core.skill_config import get_tool_config
 from lib.services.text_splitter import split_text
-from workspace.utils.office_files import extract_text
-
 from workspace.skills.audit_formulation_strengthener.scripts.skill_config import (
     get_chunking_config,
 )
-
+from workspace.utils.office_files import extract_text
 
 _SKILL_NAME = "audit_formulation_strengthener"
 

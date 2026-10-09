@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import get_setting, SETTINGS
+from config import SETTINGS, get_setting
 
 
 class SubprocessManager:

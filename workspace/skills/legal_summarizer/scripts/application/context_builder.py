@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from application.chunk_selection import select_chunks_for_mode
-from application.inspection import Inspection
+import planning.strategy as _planning_strategy_mod
 from chunking.chunks import Chunk
 from planning.plan import ExecutionPlan
-import planning.strategy as _planning_strategy_mod
+
+from application.chunk_selection import select_chunks_for_mode
+from application.inspection import Inspection
 
 
 @dataclass(frozen=True)

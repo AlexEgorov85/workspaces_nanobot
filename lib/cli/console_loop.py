@@ -30,7 +30,6 @@ fallback и возвращается к ``You:``. Upstream полагается 
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Any
 
 from rich.console import Console
@@ -244,7 +243,7 @@ async def run_repl(
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break

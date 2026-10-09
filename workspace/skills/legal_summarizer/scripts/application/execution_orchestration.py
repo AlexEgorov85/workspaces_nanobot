@@ -25,18 +25,16 @@ from typing import Any
 
 import llm.calls as _llm_calls_mod
 import llm.sanitize as _llm_sanitize_mod
-from application.manifest_builder import build_manifest
 from cache.document_cache import DocumentCache
 from cache.manifest import (
     NormalizedManifest,
     save_manifest,
     write_result,
 )
-from chunking.chunks import Chunk
 from chunking._text_helpers import (
     fit_input,
-    progress,
 )
+from chunking.chunks import Chunk
 from document.analysis import DocumentAnalysis
 from document.section_helpers import (
     count_meaningful_sections_canonical,
@@ -50,6 +48,8 @@ from execution.map_reduce import (
 )
 from execution.pipeline import now_iso
 from planning.plan import ExecutionPlan
+
+from application.manifest_builder import build_manifest
 
 
 def map_plan_to_chunk_batches(
@@ -291,6 +291,8 @@ def run_map_reduce(
 
     from cache.manifest import (
         load_cached_partials as _load_cached_partials,
+    )
+    from cache.manifest import (
         write_chunk_result as _write_chunk_result,
     )
     from execution.pipeline import run_one_batch_async as _run_one_batch_async

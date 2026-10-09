@@ -21,10 +21,10 @@ Fail-soft: если ``set_llm_call_observer`` бросает исключени�
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from loguru import logger
-
 from nanobot.providers.base import LLMProvider
 
 

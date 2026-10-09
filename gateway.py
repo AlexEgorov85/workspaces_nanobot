@@ -15,7 +15,6 @@ import sys
 import traceback
 from pathlib import Path
 
-
 _SUPPORTED_PROFILES = ("prod", "test")
 
 
@@ -29,8 +28,7 @@ from lib.services.startup_gate import (  # noqa: E402
     StartupGateError,
     ThreadSafeSignal,
 )
-
-from lib.utils.windows_terminal import enable_vt, is_windows_console
+from lib.utils.windows_terminal import enable_vt, is_windows_console  # noqa: E402
 
 if is_windows_console():
     enable_vt()
@@ -98,8 +96,8 @@ if sys.platform != "win32":
     os.environ.setdefault("LC_ALL", "C.UTF-8")
     os.environ.setdefault("LANG", "C.UTF-8")
 
-from loguru import logger
-from rich.console import Console
+from loguru import logger  # noqa: E402
+from rich.console import Console  # noqa: E402
 
 
 def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: Path) -> None:
@@ -124,7 +122,7 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     )
     from lib.lifecycle.gateway_runner import GatewayRunner
 
-    ctx = ApplicationContext.create(role='gateway', 
+    ctx = ApplicationContext.create(role='gateway',
         script_dir=script_dir,
         workspace_dir=workspace_dir,
     )
@@ -135,8 +133,9 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     # Импорты — выше ``if args.smoke:`` чтобы избежать
     # UnboundLocalError (Python видит имя в теле функции и считает
     # его локальным; ветка else не имеет своего импорта).
-    from lib.utils.project_version import project_version
     from nanobot.cli.commands import __logo__, __version__
+
+    from lib.utils.project_version import project_version
 
     if args.smoke:
         runtime_table = ctx.settings["logging"]["db"]["table_name"]
@@ -164,7 +163,7 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     # worker-треда, а ждёт его startup-фаза в своём loop. Без явного
     # ``call_soon_threadsafe`` такое ожидание (а таймаутов здесь нет по
     # решению фичи) могло бы длиться бесконечно уже после загрузки.
-    first_sync_event: "ThreadSafeSignal | None" = None
+    first_sync_event: ThreadSafeSignal | None = None
     if ctx.sync_service is not None and ctx.cache_store is not None:
         ctx.cache_store.connect()
 
@@ -640,7 +639,7 @@ def _report_db_pool_startup() -> None:
     (при недоступной БД это честно выявляет ошибку вместо «0 connected»).
     """
     try:
-        from utils.db import probe_connections, get_stats
+        from utils.db import get_stats, probe_connections
 
         probe_connections()
         s = get_stats()

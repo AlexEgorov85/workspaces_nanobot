@@ -45,7 +45,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-
 # Подключаем scripts/ и корень проекта, чтобы sibling-модули импортировались.
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 _PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
@@ -60,10 +59,10 @@ from skill_config import (  # noqa: E402
     get_in_memory_cache_path,
     get_predefined_scripts_table,
 )
-from workspace.skills.audit_analyzer.scripts.predefined import run as predefined_run  # noqa: E402
 
 # IndexIntegrityError — generic core exception для STALE/INVALID FAISS.
 from lib.services.cache_provider import IndexIntegrityError  # noqa: E402
+from workspace.skills.audit_analyzer.scripts.predefined import run as predefined_run  # noqa: E402
 
 MODES = ("predefined", "generated_sql", "vector")
 

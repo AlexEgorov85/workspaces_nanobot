@@ -15,8 +15,11 @@ from chunking.chunks import Chunk
 from document.analysis import (
     DocumentAnalysis,
 )
+
 from retrieval.followup import (
-    FollowupConfig, FollowupResult, build_followup_response,
+    FollowupConfig,
+    FollowupResult,
+    build_followup_response,
 )
 
 

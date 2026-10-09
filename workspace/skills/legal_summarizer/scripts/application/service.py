@@ -24,13 +24,24 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import application.chunk_selection as _chunk_selection_mod
+import llm.calls as _llm_calls_mod
+import llm.config as _llm_config_mod
+import llm.sanitize as _llm_sanitize_mod
+from cache.document_cache import DocumentCache
+from cache.manifest import (
+    load_manifest,
+    read_result,
+)
+from document.analysis import DocumentAnalysis
+from document.structure import DocumentStructure
+from llm.prompts_runtime import LENGTH_INSTRUCTIONS
+from planning.strategy import (
+    build_execution_plan,
+)
+
 import application.context_builder as _ctx_builder_mod
 import application.estimation as _estimation_mod
-import application.execution_orchestration as _exec_orchestration_mod
 import application.inspection as _inspection_mod
-import application.operation_id as _operation_id_mod
-import application.pipeline_structure as _pipeline_structure_mod
 from application.chunk_selection import (
     relaxed_lexical_fallback,
     select_chunks_for_mode,
@@ -55,24 +66,7 @@ from application.inspection import Inspection, inspect
 from application.operation_id import (
     make_operation_id,
 )
-from application.pipeline_structure import (
-    run_canonical_pipeline,
-)
 from application.question_context import build_question_context
-from cache.document_cache import DocumentCache
-from cache.manifest import (
-    load_manifest,
-    read_result,
-)
-from document.structure import DocumentStructure
-from document.analysis import DocumentAnalysis
-import llm.config as _llm_config_mod
-import llm.calls as _llm_calls_mod
-import llm.sanitize as _llm_sanitize_mod
-from llm.prompts_runtime import LENGTH_INSTRUCTIONS
-from planning.strategy import (
-    build_execution_plan,
-)
 
 
 def _try_question_via_document_cache(

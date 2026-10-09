@@ -25,22 +25,22 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
-from datetime import datetime, timezone
-from typing import Any, Sequence
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Any
 
 import llm.calls as _llm_calls_mod
-from llm.prompts import ChunkResultParseError
 from chunking.chunks import Chunk
 from document.structure import DocumentStructure
+from llm.prompts import ChunkResultParseError
 from llm.single_flight import LLM_FLIGHT_LOCK
-
 
 MAX_BATCH_PARSE_RETRIES = 3
 
 
 def now_iso() -> str:
     """Текущее время в ISO 8601 (UTC)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def process_context_batch(

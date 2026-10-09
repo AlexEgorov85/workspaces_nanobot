@@ -22,11 +22,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from chunking.chunks import Chunk
-from document.structure import (
-    DocumentStructure,
-)
 from document.physical import (
     PhysicalDocument,
+)
+from document.structure import (
+    DocumentStructure,
 )
 
 

@@ -17,10 +17,8 @@ import re
 from typing import Any
 
 from workspace.skills.audit_analyzer.scripts.predefined.models import (
-    ParamDefinition,
     ScriptDefinition,
 )
-
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 

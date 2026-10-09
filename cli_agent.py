@@ -22,14 +22,12 @@ import shutil
 import sys
 from pathlib import Path
 
-
 CLI_FIXED_PROFILE = "test"
 CLI_REJECTED_FLAGS = frozenset({"--profile", "-profile", "-p"})
 
 
 from config import ConfigurationError  # noqa: E402 — module-level import is safe
-
-from lib.utils.windows_terminal import enable_vt, is_windows_console
+from lib.utils.windows_terminal import enable_vt, is_windows_console  # noqa: E402
 
 # Без ENABLE_VIRTUAL_TERMINAL_PROCESSING Windows-консоль рендерит
 # ANSI escape как "?" — поэтому "[dim]→ LLM: ..." выходит как
@@ -91,7 +89,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-from rich.console import Console
+from rich.console import Console  # noqa: E402
 
 
 def _entrypoint_main(args: argparse.Namespace) -> None:
@@ -105,8 +103,6 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
     # читаем из окружения и НЕ принимаем --profile.
     _cfg._initialize_settings(profile=CLI_FIXED_PROFILE)
 
-    from lib.cli.console_loop import run_repl
-    from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext
 
     console.print(
@@ -116,10 +112,11 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
     # Smoke-режим: печатает баннер + runtime-таблицу, выходит 0
     # без открытия REPL/миграции cron/auto-scan хуков.
     if args.smoke:
-        from lib.utils.project_version import project_version
         from nanobot.cli.commands import __version__
 
-        cfg = ApplicationContext.create(role='cli', 
+        from lib.utils.project_version import project_version
+
+        cfg = ApplicationContext.create(role='cli',
             script_dir=script_dir_for_runtime(),
             workspace_dir=script_dir_for_runtime() / "workspace",
         )
@@ -145,7 +142,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
     from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext
 
-    ctx = ApplicationContext.create(role='cli', 
+    ctx = ApplicationContext.create(role='cli',
         script_dir=script_dir_for_runtime(),
         workspace_dir=script_dir_for_runtime() / "workspace",
         session_override=args.session,
@@ -165,11 +162,9 @@ def _run_vanilla(args: argparse.Namespace) -> None:
 
 def _run_patched(args: argparse.Namespace) -> None:
     """CLI-агент с PGSessionManager и workspace-хуками."""
-    from lib.cli.console_loop import run_repl
-    from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext
 
-    ctx = ApplicationContext.create(role='cli', 
+    ctx = ApplicationContext.create(role='cli',
         script_dir=script_dir_for_runtime(),
         workspace_dir=script_dir_for_runtime() / "workspace",
         storage_override=args.storage,

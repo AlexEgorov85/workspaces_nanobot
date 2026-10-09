@@ -26,7 +26,6 @@ from typing import Any
 
 from document.structure import NumberingInfo
 
-
 _DECIMAL_RE = re.compile(r"^\s*(\d+(?:\.\d+)+|\d+)\.?\s+(.{2,200})$")
 _LEGAL_ARTICLE_RE = re.compile(
     r"^\s*Статья\s+(\d+(?:\.\d+)+|\d+)\s*\.?\s*(.*)$", re.IGNORECASE

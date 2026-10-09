@@ -34,7 +34,7 @@ for _p in (str(_REPO), str(_WORKSPACE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from utils.db import configure, execute, fetch, start, shutdown  # noqa: E402
+from utils.db import configure, execute, fetch, shutdown, start  # noqa: E402
 from utils.media import normalize_storage_entry  # noqa: E402
 
 

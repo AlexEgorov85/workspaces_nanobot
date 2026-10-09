@@ -32,7 +32,6 @@ import sys
 import traceback
 from pathlib import Path
 
-
 # Подключаем корень репо и scripts/, чтобы sibling-модули
 # (``workspace.*``, ``application.*``, ``chunking.*``, ``llm.*``, ``output.*``)
 # импортировались и без выставленного PYTHONPATH. Это нужно потому, что
@@ -283,9 +282,9 @@ def _ensure_registered() -> None:
     if not _cfg.is_settings_initialized():
         _cfg._initialize_settings(profile="test")
 
+    from config import SETTINGS
     from lib.core.infra_registration import register_vector_storage
     from lib.core.skill_registration import register_skill_from_config
-    from config import SETTINGS
 
     legal_cfg = SETTINGS.get("skills", {}).get("legal_summarizer", {})
     register_skill_from_config("legal_summarizer", legal_cfg)
@@ -303,6 +302,8 @@ def main() -> None:
         from application.estimation import estimate_for_run
         from application.service import (
             inspect as _inspect,
+        )
+        from application.service import (
             load_text,
             needs_confirmation,
             quick_estimate,

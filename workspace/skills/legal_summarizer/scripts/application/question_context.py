@@ -24,8 +24,6 @@ document-level cache без повторного map-вызова LLM.
 
 from __future__ import annotations
 
-from typing import Iterable
-
 from cache.document_cache import DocumentCache
 from chunking.chunks import Chunk
 
@@ -72,7 +70,7 @@ def _format_section_summary_block(
 
 
 def _summaries_block_text(
-    chunk: "Chunk",
+    chunk: Chunk,
     *,
     section_summary: str | None,
     chunk_summary: str | None,

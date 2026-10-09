@@ -21,14 +21,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from planning.plan import (
-    ExecutionPlan,
-)
 from document.structure import (
     DocumentStructure,
 )
 from llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
+    TokenEstimator,
+    TokenEstimatorConfig,
+)
+
+from planning.plan import (
+    ExecutionPlan,
 )
 
 
@@ -127,12 +129,14 @@ def build_execution_plan(
     strategy selection и adjacent packing. ``AdjacentPackingConfig``
     формируется **из** ``ExecutionPolicy``; никаких скрытых defaults.
     """
-    from planning.plan import (
-        build_direct_plan, build_map_plan,
-    )
     from chunking.packing import (
         AdjacentPackingConfig,
         pack_chunks_with_adjacent,
+    )
+
+    from planning.plan import (
+        build_direct_plan,
+        build_map_plan,
     )
 
     cfg = policy or ExecutionPolicy()

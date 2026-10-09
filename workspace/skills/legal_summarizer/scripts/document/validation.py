@@ -25,15 +25,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from document.structure import (
-    DocumentStructure,
-    StructureNode,
-)
 from document.physical import (
     PhysicalDocument,
+)
+from document.structure import (
+    DocumentStructure,
 )
 
 
@@ -49,7 +48,7 @@ class ValidationIssue:
         return {"kind": self.kind, "detail": self.detail, "node_id": self.node_id}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ValidationIssue":
+    def from_dict(cls, data: dict[str, Any]) -> ValidationIssue:
         """Обратная сериализация для ``to_dict``."""
         return cls(
             kind=str(data.get("kind", "")),
@@ -78,7 +77,7 @@ class ValidationReport:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ValidationReport":
+    def from_dict(cls, data: dict[str, Any]) -> ValidationReport:
         """Обратная сериализация для ``to_dict``.
 
         Используется при восстановлении ``PipelineResult.validation``
@@ -200,7 +199,7 @@ def validate_structure(
         if node.parent_id is None:
             issues.append(ValidationIssue(
                 kind="non_root_without_parent",
-                detail=f"non-root node has parent_id=None",
+                detail="non-root node has parent_id=None",
                 node_id=nid,
             ))
             continue

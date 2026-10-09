@@ -31,21 +31,22 @@ from chunking.packing import (
     AdjacentPackingConfig,
     pack_chunks_with_adjacent,
 )
-from planning.plan import (
-    ExecutionPlan,
-)
-from application.pipeline_structure import (
-    PipelineResult,
-    run_canonical_pipeline,
-)
 from llm.tokens import (
     TokenEstimator,
     TokenEstimatorConfig,
+)
+from planning.plan import (
+    ExecutionPlan,
 )
 from planning.strategy import (
     ExecutionPolicy,
     build_execution_plan,
     select_strategy,
+)
+
+from application.pipeline_structure import (
+    PipelineResult,
+    run_canonical_pipeline,
 )
 
 

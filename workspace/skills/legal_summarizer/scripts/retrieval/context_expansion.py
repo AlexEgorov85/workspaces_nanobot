@@ -36,7 +36,8 @@ from document.structure import (
     DocumentStructure,
 )
 from llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
+    TokenEstimator,
+    TokenEstimatorConfig,
 )
 
 

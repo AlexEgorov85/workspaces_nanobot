@@ -31,14 +31,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from retrieval.context_expansion import (
-    ContextExpansionConfig, expand_context,
-)
 from document.analysis import (
     DocumentAnalysis,
 )
+
+from retrieval.context_expansion import (
+    ContextExpansionConfig,
+    expand_context,
+)
 from retrieval.fallback import (
-    FullDocFallbackConfig, decide_retrieval, full_document_fallback,
+    FullDocFallbackConfig,
+    decide_retrieval,
+    full_document_fallback,
 )
 from retrieval.query import (
     RetrievalConfig,

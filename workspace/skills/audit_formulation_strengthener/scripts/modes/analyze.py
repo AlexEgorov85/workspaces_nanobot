@@ -39,7 +39,6 @@ from workspace.skills.audit_formulation_strengthener.scripts.prompts import (
     render_prompt,
 )
 
-
 __all__ = ["run"]
 
 

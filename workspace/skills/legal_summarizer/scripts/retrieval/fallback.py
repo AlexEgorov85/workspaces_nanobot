@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from chunking.chunks import Chunk
 from llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
+    TokenEstimator,
 )
 
 

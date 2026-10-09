@@ -680,7 +680,7 @@ class RuntimePatcher:
         plural = "module" if count == 1 else "modules"
         return f"scanned {tools_dir} ({count} {plural})"
 
-    
+
 
     # ------------------------------------------------------------------
     # Патч 1: ContextGovernor.normalize_tool_result
@@ -1646,7 +1646,7 @@ class RuntimePatcher:
             log_to_db = _DEFAULT_LOG_TO_DB
 
         try:
-            TurnDelivery = getattr(td_module, "TurnDelivery")
+            TurnDelivery = td_module.TurnDelivery
         except AttributeError:
             return False, "TurnDelivery class not found in module"
         original_fail = getattr(TurnDelivery, "fail", None)
@@ -1851,9 +1851,8 @@ class RuntimePatcher:
         try:
             from nanobot.agent.subagent import _SubagentHook
 
-            from lib.hooks.database_logging_hook import DatabaseLoggingHook
+            from lib.hooks.database_logging_hook import DatabaseLoggingHook, _usage_to_dict
             from lib.services.db_logging_service import LogEvent
-            from lib.hooks.database_logging_hook import _usage_to_dict
         except Exception as exc:
             return False, f"import failed: {exc}"
 

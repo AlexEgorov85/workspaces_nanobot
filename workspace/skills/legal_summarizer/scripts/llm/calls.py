@@ -12,11 +12,12 @@ Single LLM boundary: каждый вызов ``llm.chat`` в этом модул
 """
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
-from llm import client as llm
 from chunking.chunks import Chunk
 from document.structure import DocumentStructure
+
+from llm import client as llm
 from llm.prompts import (
     build_batch_user_message,
     parse_batch_response,
@@ -26,7 +27,6 @@ from llm.prompts_runtime import (
     system_instruction,
 )
 from llm.single_flight import (
-    LLM_FLIGHT_LOCK,
     guarded_chat,
 )
 

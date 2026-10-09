@@ -24,14 +24,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from chunking.chunks import Chunk
+
 from document.identity import (
     DocumentIdentity,
 )
-from document.structure import (
-    DocumentStructure,
-)
 from document.physical import (
     PhysicalDocument,
+)
+from document.structure import (
+    DocumentStructure,
 )
 
 if TYPE_CHECKING:
@@ -95,7 +96,7 @@ class DocumentAnalysis:
         semantic_records: dict[str, SemanticRecord] | None = None,
         include_retrieval_index: bool = True,
         created_at: str = "",
-    ) -> "DocumentAnalysis":
+    ) -> DocumentAnalysis:
         """Построить DocumentAnalysis из ингредиентов.
 
         Это **canonical** сборка. ``DocumentAnalysis`` —

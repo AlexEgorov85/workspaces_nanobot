@@ -15,11 +15,10 @@ Deterministic score на основе:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from chunking.chunks import Chunk
-
 
 _LEGAL_KEYWORDS = (
     "статья", "глава", "раздел", "пункт", "часть", "§",

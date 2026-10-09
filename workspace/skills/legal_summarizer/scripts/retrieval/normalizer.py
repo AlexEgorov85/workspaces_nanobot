@@ -25,7 +25,6 @@ from retrieval.query import (
     _WORD_RE,
 )
 
-
 _LEGAL_ALIASES = {
     "штраф": ("неустойка", "пени", "penalty"),
     "оплата": ("платёж", "расчёт", "payment"),

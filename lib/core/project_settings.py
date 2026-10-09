@@ -375,7 +375,7 @@ class LoggingDbSettings(_StrictOptional):
     flush_interval_sec: float | None = Field(default=None, ge=0.5, le=60.0)
 
     @model_validator(mode="after")
-    def _default_flush_interval_sec(self) -> "LoggingDbSettings":
+    def _default_flush_interval_sec(self) -> LoggingDbSettings:
         """Подменить ``None`` на канонический дефолт ``5.0``.
 
         Спека change ``improve-history-search-pagination-and-logging``

@@ -20,19 +20,16 @@ chunks в 5-10x для документов с nested sections.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
-from chunking.chunks import Chunk
 from document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
 from document.structure import (
     DocumentStructure,
-    StructureNode,
 )
-
 
 _MAJOR_SEMANTIC_TYPES = frozenset({"chapter", "section", "appendix", "razdel"})
 

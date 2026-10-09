@@ -38,20 +38,15 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from workspace.utils.office_files import (
-    detect_format,
-    extract_tables,
-)
 from cache.manifest import manifest_root
+
 from document.identity import (
     DocumentIdentity,
 )
-
 
 SUPPORTED_FORMATS: frozenset[str] = frozenset({"pdf", "docx", "txt"})
 
@@ -115,12 +110,12 @@ class PhysicalDocument:
     size_bytes: int
     blocks: tuple[DocumentBlock, ...]
     page_count: int
-    _blocks_by_ord_cache: dict[int, "DocumentBlock"] | None = field(
+    _blocks_by_ord_cache: dict[int, DocumentBlock] | None = field(
         default=None, repr=False, compare=False,
     )
 
     @property
-    def blocks_by_ord(self) -> dict[int, "DocumentBlock"]:
+    def blocks_by_ord(self) -> dict[int, DocumentBlock]:
         """Lookup ``DocumentBlock`` по ``ordinal`` (identity, не position).
 
         Invariant в текущей реализации: ``blocks[i].ordinal == i``. Этот
@@ -148,7 +143,7 @@ class PhysicalDocument:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PhysicalDocument":
+    def from_dict(cls, data: dict[str, Any]) -> PhysicalDocument:
         blocks = tuple(DocumentBlock(**b) for b in data["blocks"])
         return cls(
             path=data["path"],

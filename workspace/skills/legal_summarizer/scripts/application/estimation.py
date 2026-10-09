@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import llm.config as _llm_config_mod
 from chunking.chunks import Chunk
 from document.structure import DocumentStructure
 from execution.config import (
@@ -18,9 +19,7 @@ from execution.config import (
     MID_REDUCE_GROUP_SIZE,
 )
 from llm.config import get_chunking_config
-import llm.config as _llm_config_mod
 from planning.plan import ExecutionPlan
-
 
 _QUICK_SAMPLE_PAGES = 10
 _CHARS_OVERESTIMATE = 1.3

@@ -84,11 +84,12 @@ def select_chunks_for_mode(
         progress("question: keyword miss → bounded top-of-document fallback")
         return insp.chunks[:_fallback_max]
     if length == "brief":
+        from llm.config import get_brief_context_config
+
         from application.brief_context import (
             BriefContextConfig,
             build_brief_chunk,
         )
-        from llm.config import get_brief_context_config
 
         if insp.analysis is None:
             return []

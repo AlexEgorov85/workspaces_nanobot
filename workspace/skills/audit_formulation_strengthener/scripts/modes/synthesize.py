@@ -27,7 +27,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +41,6 @@ from workspace.skills.audit_formulation_strengthener.scripts.prompts import (
     load_prompt,
     render_prompt,
 )
-from workspace.skills.audit_formulation_strengthener.scripts.vnd_io import (
-    VndInputError,
-    prepare_vnd,
-)
-
 from workspace.skills.audit_formulation_strengthener.scripts.report.docx_render import (
     write_docx as _write_docx,
 )
@@ -55,7 +50,10 @@ from workspace.skills.audit_formulation_strengthener.scripts.report.markdown imp
 from workspace.skills.audit_formulation_strengthener.scripts.report.plain import (
     render_plain as _render_plain,
 )
-
+from workspace.skills.audit_formulation_strengthener.scripts.vnd_io import (
+    VndInputError,
+    prepare_vnd,
+)
 
 __all__ = ["run"]
 
@@ -273,7 +271,7 @@ def run(
             None,
         )
 
-    data["date_iso"] = datetime.now(timezone.utc).isoformat()
+    data["date_iso"] = datetime.now(UTC).isoformat()
 
     # Рендер markdown (всегда для stdout).
     md_text = _render_markdown(data)

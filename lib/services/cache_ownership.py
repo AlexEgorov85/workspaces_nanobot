@@ -41,7 +41,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import workspace.utils.db as _db
-from workspace.utils.db import execute, transaction
+from workspace.utils.db import transaction
 
 logger = logging.getLogger(__name__)
 

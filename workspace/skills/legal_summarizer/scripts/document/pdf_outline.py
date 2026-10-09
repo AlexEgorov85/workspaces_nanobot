@@ -44,11 +44,10 @@ outline даёт очень высокую confidence (0.95).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from document.physical import (
-    DocumentBlock,
     PhysicalDocument,
 )
 
@@ -336,7 +335,7 @@ def map_pdf_outline(
 
 def mapped_to_heading_candidates(
     mapped: list[MappedOutlineCandidate],
-) -> list["HeadingCandidate"]:
+) -> list[HeadingCandidate]:
     """Преобразовать успешно mapped кандидатов в ``HeadingCandidate``.
 
     Провалившие (с ``block_index = -1``) **отбрасываются** —

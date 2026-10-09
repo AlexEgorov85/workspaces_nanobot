@@ -14,21 +14,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from chunking.chunks import Chunk
-from document.structure import (
-    DocumentStructure,
-)
 from document.physical import (
     PhysicalDocument,
 )
+from document.structure import (
+    DocumentStructure,
+)
+
 from retrieval.normalizer import (
     tokenize_normalized,
 )
 from retrieval.query import (
-    RetrievalHit, RetrievalConfig, score_chunk,
+    RetrievalConfig,
+    RetrievalHit,
+    score_chunk,
 )
 
 
@@ -83,7 +87,7 @@ class RetrievalIndex:
         structure: DocumentStructure,
         physical: PhysicalDocument | None = None,
         document_id: str = "doc",
-    ) -> "RetrievalIndex":
+    ) -> RetrievalIndex:
         """Построить inverted index из chunks.
 
         ``L3`` строится один раз — повторные вызовы ``retrieve``

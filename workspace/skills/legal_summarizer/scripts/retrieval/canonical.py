@@ -15,6 +15,7 @@ from __future__ import annotations
 from document.analysis import (
     DocumentAnalysis,
 )
+
 from retrieval.followup import (
     FollowupConfig,
     FollowupResult,

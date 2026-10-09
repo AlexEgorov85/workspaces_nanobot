@@ -14,7 +14,6 @@ from workspace.skills.audit_formulation_strengthener.scripts.report.markdown imp
     render_markdown,
 )
 
-
 __all__ = ["render_plain"]
 
 

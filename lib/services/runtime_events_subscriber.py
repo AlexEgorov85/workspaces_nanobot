@@ -44,10 +44,10 @@ runtime-events-observability/spec.md` для нормативного контр
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from loguru import logger
-
 from nanobot.bus.runtime_events import TurnCompleted, TurnRuntimeAdmitted
 
 from lib.events.subagent import SubagentTurnCompleted

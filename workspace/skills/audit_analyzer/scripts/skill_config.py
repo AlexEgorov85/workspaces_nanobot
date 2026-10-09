@@ -24,7 +24,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from lib.core import skill_config as _lib  # noqa: E402
 
-
 _SKILL_NAME = "audit_analyzer"
 
 

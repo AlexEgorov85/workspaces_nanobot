@@ -81,7 +81,7 @@ class DocumentIdentity:
         }
 
     @classmethod
-    def from_path(cls, path: str | Path) -> "DocumentIdentity":
+    def from_path(cls, path: str | Path) -> DocumentIdentity:
         p = Path(path)
         st = p.stat()
         raw = f"{p.resolve()}|{st.st_size}|{st.st_mtime_ns}"
@@ -96,7 +96,7 @@ class DocumentIdentity:
         )
 
     @classmethod
-    def from_path_with_mtime(cls, path: str | Path, *, size_bytes: int, mtime_ns: int) -> "DocumentIdentity":
+    def from_path_with_mtime(cls, path: str | Path, *, size_bytes: int, mtime_ns: int) -> DocumentIdentity:
         """Создать identity по явно переданным ``size_bytes``/``mtime_ns``.
 
         Полезно для back-compat с ``_physical_cache_key``,

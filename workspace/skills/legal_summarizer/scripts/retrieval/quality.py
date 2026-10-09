@@ -23,17 +23,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from chunking.chunks import Chunk
-from retrieval.provenance import (
-    ProvenanceChain, build_provenance_chain,
-)
-from retrieval.qa import (
-    ReferenceQASet, evaluate_retrieval,
-)
 from retrieval.index import (
     RetrievalIndex,
+)
+from retrieval.provenance import (
+    ProvenanceChain,
+)
+from retrieval.qa import (
+    ReferenceQASet,
+    evaluate_retrieval,
 )
 
 

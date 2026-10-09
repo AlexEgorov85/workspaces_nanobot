@@ -16,10 +16,8 @@ import os
 import sys
 import time as _time
 
-from llm.config import get_cli_config, get_llm_config
-
 from lib.services.llm_client import call_llm
-
+from llm.config import get_cli_config, get_llm_config
 
 _LLM_TRACE_ENABLED = (
     "--llm-trace" in sys.argv

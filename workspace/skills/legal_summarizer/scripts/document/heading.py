@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
-from document.structure import NumberingInfo
+from document.list_detection import (
+    ambiguous_decimal_penalty,
+    detect_list_runs,
+    list_penalty_for_candidate,
+)
 from document.numbering import parse_numbering
 from document.pdf_outline import (
     map_pdf_outline,
@@ -30,12 +34,6 @@ from document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
-from document.list_detection import (
-    ambiguous_decimal_penalty,
-    detect_list_runs,
-    list_penalty_for_candidate,
-)
-
 
 CONFIDENCE_THRESHOLD = 0.60
 
@@ -198,7 +196,7 @@ def detect_heading_candidates(
     blocks: tuple[DocumentBlock, ...],
     pdf_path: str | None,
     *,
-    physical_doc: Optional[PhysicalDocument] = None,
+    physical_doc: PhysicalDocument | None = None,
 ) -> list[HeadingCandidate]:
     """Найти всех кандидатов в heading'и (DOCX style + regex + PDF outline).
 

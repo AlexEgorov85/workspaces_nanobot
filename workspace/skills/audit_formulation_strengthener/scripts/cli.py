@@ -61,7 +61,6 @@ from workspace.skills.audit_formulation_strengthener.scripts.skill_config import
     get_cli_config,
 )
 
-
 _MODES_PACKAGE = "workspace.skills.audit_formulation_strengthener.scripts.modes"
 
 

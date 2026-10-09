@@ -42,7 +42,6 @@ from workspace.skills.audit_analyzer.scripts.predefined.validator import (
     ValidationError,
 )
 
-
 __all__ = [
     "BuildError",
     "DBScriptProvider",

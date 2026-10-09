@@ -457,7 +457,6 @@ class ApplicationContext:
         from lib.services.runtime_health import (
             RuntimeHealth,
             RuntimeReadiness,
-            ComponentStatus,
         )
 
         ctx.runtime_health = RuntimeHealth()
@@ -775,6 +774,7 @@ class ApplicationContext:
             return
         try:
             from utils.db import fetch as _db_fetch
+
             from lib.services.schema_validation import SchemaValidationService
         except Exception as exc:
             # Если зависимости не загрузились — это серьёзная проблема,
@@ -1071,7 +1071,6 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
     """
     from lib.services.runtime_health import (
         ComponentStatus,
-        compute_overall_status,
     )
 
     def check_postgres() -> ComponentStatus | None:
@@ -1289,7 +1288,7 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
     )
 
 
-def _default_local_cache_dir() -> "Path":
+def _default_local_cache_dir() -> Path:
     """Безопасный default для runtime-кеша: ``~/.cache/nanobot/duckdb``.
 
     DuckDB ATTACH берёт эксклюзивный flock, который NFS не отдаёт

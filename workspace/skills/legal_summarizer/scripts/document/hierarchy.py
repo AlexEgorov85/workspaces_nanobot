@@ -37,13 +37,17 @@ Back-compat: builder производит **только** ``DocumentStructure``
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from loguru import logger
 
 from document.heading import (
     HeadingCandidate,
+)
+from document.numbering import (
+    assign_sibling_ordinals,
+    parse_numbering,
 )
 from document.structure import (
     DocumentStructure,
@@ -52,10 +56,6 @@ from document.structure import (
     StructureEvidence,
     StructureNode,
     _make_node_id,
-)
-from document.numbering import (
-    assign_sibling_ordinals,
-    parse_numbering,
 )
 
 

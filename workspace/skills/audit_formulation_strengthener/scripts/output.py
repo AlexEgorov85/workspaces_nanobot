@@ -13,7 +13,6 @@ from typing import Any
 
 from lib.utils.text_utils import sanitize_value
 
-
 __all__ = ["prepare_output", "make_error", "sanitize_output"]
 
 

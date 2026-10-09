@@ -241,8 +241,8 @@ class PreloadService:
         # Сбор declared
         try:
             from lib.services.cache_provider_impl import (
-                read_vector_index_config,
                 list_runtime_vector_indexes,
+                read_vector_index_config,
             )
             declared = read_vector_index_config({}) or {}
         except Exception:  # noqa: BLE001

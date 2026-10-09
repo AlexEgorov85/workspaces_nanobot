@@ -38,7 +38,6 @@ from workspace.skills.audit_analyzer.scripts.predefined.validator import (
     ParameterValidator,
 )
 
-
 __all__ = [
     "run",
     "list_available",

@@ -14,7 +14,6 @@ from lib.services.table_registry import (
     table_registry,
 )
 
-
 INFRA_KEY_VECTOR_STORAGE = "vector.storage"
 
 

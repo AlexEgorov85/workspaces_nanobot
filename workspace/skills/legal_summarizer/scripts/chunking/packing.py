@@ -24,10 +24,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chunking.chunks import Chunk
 from llm.tokens import (
-    TokenEstimator, TokenEstimatorConfig,
+    TokenEstimator,
+    TokenEstimatorConfig,
 )
+
+from chunking.chunks import Chunk
 
 
 @dataclass(frozen=True)

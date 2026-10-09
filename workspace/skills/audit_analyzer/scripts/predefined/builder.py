@@ -24,10 +24,8 @@ import re
 from typing import Any
 
 from workspace.skills.audit_analyzer.scripts.predefined.models import (
-    ParamDefinition,
     ScriptDefinition,
 )
-
 
 __all__ = ["DynamicQueryBuilder", "BuildError", "_param_usage_count"]
 

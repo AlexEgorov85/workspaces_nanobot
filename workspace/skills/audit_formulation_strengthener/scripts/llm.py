@@ -16,13 +16,11 @@ import re
 from typing import Any
 
 from lib.services.llm_client import call_llm
-
 from workspace.skills.audit_formulation_strengthener.scripts.skill_config import (
     get_cli_config,
     get_llm_config,
     get_max_retries,
 )
-
 
 __all__ = ["chat", "chat_json", "JsonParseError"]
 

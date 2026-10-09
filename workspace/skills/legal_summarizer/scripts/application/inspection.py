@@ -11,9 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import application.pipeline_structure as _pipeline_struct_mod
 from document.analysis import DocumentAnalysis
 from document.structure import DocumentStructure
+
+import application.pipeline_structure as _pipeline_struct_mod
 
 
 @dataclass(frozen=True)

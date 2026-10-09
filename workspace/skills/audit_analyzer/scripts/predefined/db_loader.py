@@ -24,7 +24,6 @@ from workspace.skills.audit_analyzer.scripts.predefined.models import (
     ScriptDefinition,
 )
 
-
 __all__ = [
     "DBScriptProvider",
     "load_all",

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
 
 from document.structure import DocumentStructure
+
 from execution.config import HierarchicalReducerConfig
+
 
 def deterministic_truncate(text: str, max_chars: int) -> str:
     """Deterministic head + tail truncate с omission marker.

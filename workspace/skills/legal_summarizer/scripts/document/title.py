@@ -19,14 +19,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-from document.structure import (
-    DocumentTitle,
-)
 from document.physical import (
     DocumentBlock,
     PhysicalDocument,
+)
+from document.structure import (
+    DocumentTitle,
 )
 
 

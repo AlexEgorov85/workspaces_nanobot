@@ -8,7 +8,6 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
 
 # Кросс-платформенная UTF-8 кодировка для ВСЕХ exec-подпроцессов (см. gateway.py).
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -84,7 +83,8 @@ if _resolved_profile not in _SUPPORTED_PROFILES:
 #
 # Это превращает guard в **декларативную проверку реального lifecycle state**,
 # а не в эфемерный module-attr флаг.
-import config as _streamlit_cfg
+import config as _streamlit_cfg  # noqa: E402
+
 if not hasattr(_streamlit_cfg.SETTINGS, "_inner_dict") or _streamlit_cfg.SETTINGS._inner_dict is None:
     # Первый (или первый после реального process restart) запуск —
     # делаем init. Если ``st.rerun()`` действительно re-executed
@@ -95,21 +95,21 @@ if not hasattr(_streamlit_cfg.SETTINGS, "_inner_dict") or _streamlit_cfg.SETTING
     _streamlit_cfg._initialize_settings(profile=_resolved_profile)
 
 
-import streamlit as st
+import streamlit as st  # noqa: E402
 
 # Подключаем workspace, чтобы импортировать utils.db
 _workspace = str(Path(__file__).resolve().parent / "workspace")
 if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
-from utils.db import configure, fetch, fetchone, execute
-from utils.session_file_store import SessionFileStore
-from utils.jsonb import decode_jsonb as _decode_jsonb
-from utils.jsonb import decode_json_list as _decode_media_list
-from utils.media import serialize as _media_serialize
-from utils.media import read_for_ui as _media_read_for_ui
-from utils.media import entry_from_data_url as _media_entry_from_data_url
-from config import SETTINGS
+from utils.db import configure, execute, fetch, fetchone  # noqa: E402
+from utils.jsonb import decode_json_list as _decode_media_list  # noqa: E402
+from utils.jsonb import decode_jsonb as _decode_jsonb  # noqa: E402
+from utils.media import entry_from_data_url as _media_entry_from_data_url  # noqa: E402
+from utils.media import read_for_ui as _media_read_for_ui  # noqa: E402
+from utils.session_file_store import SessionFileStore  # noqa: E402
+
+from config import SETTINGS  # noqa: E402
 
 _pg = (getattr(SETTINGS, "channels", {}) or {}).get("postgres", {})
 _dsn = _pg.get("dsn", "")
@@ -143,7 +143,7 @@ if _dsn:
 
 def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
     """Загрузить историю чата из БД.
-    
+
     Возвращает список сообщений в формате для st.session_state.messages.
     """
     rows = fetch(
@@ -153,18 +153,18 @@ def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
         f"ORDER BY created_at ASC",
         chat_id,
     )
-    
+
     messages = []
     for row in rows:
         role = row["role"]
         content = row["content"] or ""
         metadata = _decode_jsonb(row["metadata"])
         media = _decode_media_list(row["media"])
-        
+
         # Пропускаем системные/технические сообщения
         if role not in ("user", "assistant"):
             continue
-        
+
         msg_entry: dict = {"role": role, "content": content}
 
         # Служебная заметка о сжатии контекста (ContextCompactionService).
@@ -185,13 +185,13 @@ def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
         # Добавляем reasoning если есть
         if role == "assistant" and metadata.get("reasoning"):
             msg_entry["reasoning"] = metadata["reasoning"]
-        
+
         # Добавляем файлы если есть
         if media:
             msg_entry["media"] = media
-        
+
         messages.append(msg_entry)
-    
+
     return messages
 
 
@@ -227,7 +227,7 @@ def _save_file_from_data_url(data_url: str, filename: str) -> str | None:
 
 def _check_response(msg_id: str) -> tuple[str | None, dict | None]:
     """Проверяет ответ assistant'а.
-    
+
     Возвращает кортеж (контент, метаданные) или (None, None).
     """
     row = fetchone(
@@ -237,7 +237,7 @@ def _check_response(msg_id: str) -> tuple[str | None, dict | None]:
     )
     if not row:
         return None, None
-    
+
     status = row["status"]
     if status == "completed":
         metadata = _decode_jsonb(row["metadata"])
@@ -408,7 +408,7 @@ for entry in st.session_state.messages:
         cw = entry.get("context_window")
         if isinstance(cw, dict):
             _render_context_window(cw)
-        
+
         # Отображение файлов если есть
         media = entry.get("media", [])
         if media:
@@ -423,7 +423,7 @@ for entry in st.session_state.messages:
                             header = media_item.split(",")[0]
                             if ":" in header and ";" in header:
                                 mime_type = header.split(":")[1].split(";")[0]
-                        
+
                         ext = _get_extension_from_mime(mime_type) if mime_type else ""
                         filename = f"file_{uuid.uuid4().hex[:8]}{ext}"
                         saved_path = _save_file_from_data_url(media_item, filename)
@@ -453,7 +453,7 @@ for entry in st.session_state.messages:
                     # Толерантный читатель: file_id (новый AW) → data (legacy)
                     # → path (после декодинга). Схему UI здесь не знает.
                     data_url, path, filename = _media_read_for_ui(media_item)
-                    
+
                     if data_url and data_url.startswith("data:"):
                         # Извлекаем MIME-тип из data URL для определения расширения
                         mime_type = ""
@@ -461,13 +461,13 @@ for entry in st.session_state.messages:
                             header = data_url.split(",")[0]
                             if ":" in header and ";" in header:
                                 mime_type = header.split(":")[1].split(";")[0]
-                        
+
                         ext = _get_extension_from_mime(mime_type) if mime_type else ""
-                        
+
                         # Если в filename нет расширения, добавляем его из MIME-типа
                         if not Path(filename).suffix and ext:
                             filename = f"{Path(filename).stem}{ext}"
-                        
+
                         saved_path = _save_file_from_data_url(data_url, filename)
                         if saved_path:
                             file_path = Path(saved_path)

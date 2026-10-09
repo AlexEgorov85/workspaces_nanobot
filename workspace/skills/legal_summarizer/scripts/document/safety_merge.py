@@ -26,12 +26,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from document.physical import (
+    DocumentBlock,
+)
 from document.structure import (
     DocumentStructure,
     StructureNode,
-)
-from document.physical import (
-    DocumentBlock,
 )
 
 

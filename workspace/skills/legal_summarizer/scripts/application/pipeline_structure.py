@@ -29,15 +29,12 @@ from pathlib import Path
 from typing import Any
 
 from cache.document_cache import DocumentCache
-from chunking.chunks import Chunk
-from document.analysis import (
-    DocumentAnalysis,
-)
 from chunking.chunker import (
     ChunkPlanner,
 )
-from document.loader import (
-    DocumentLoader,
+from chunking.chunks import Chunk
+from document.analysis import (
+    DocumentAnalysis,
 )
 from document.heading import (
     detect_heading_candidates,
@@ -49,8 +46,8 @@ from document.hierarchy import (
 from document.identity import (
     DocumentIdentity,
 )
-from document.structure import (
-    DocumentStructure,
+from document.loader import (
+    DocumentLoader,
 )
 from document.physical import (
     PhysicalDocument,
@@ -58,11 +55,15 @@ from document.physical import (
 from document.repair import (
     repair_structure,
 )
+from document.structure import (
+    DocumentStructure,
+)
 from document.title import (
     resolve_title,
 )
 from document.validation import (
-    ValidationReport, validate_structure,
+    ValidationReport,
+    validate_structure,
 )
 
 

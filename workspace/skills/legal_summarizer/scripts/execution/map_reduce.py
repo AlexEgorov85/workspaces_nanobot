@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+import llm.calls as _llm_calls_mod
 from chunking._text_helpers import (
     fit_input,
     format_chunk_block,
@@ -35,6 +37,12 @@ from document.section_helpers import (
     count_sections,
 )
 from document.structure import DocumentStructure
+from llm.sanitize import (
+    extract_subject,
+    strip_think_blocks,
+)
+from planning.plan import ExecutionPlan
+
 from execution.config import (
     MAX_REDUCE_ROUNDS,
     MID_REDUCE_GROUP_SIZE,
@@ -43,13 +51,6 @@ from execution.hierarchical import (
     HierarchicalReducerConfig,
     reduce_chunks_hierarchical,
 )
-import llm.calls as _llm_calls_mod
-from llm.sanitize import (
-    extract_subject,
-    strip_think_blocks,
-)
-from planning.plan import ExecutionPlan
-
 
 DOCUMENT_REDUCE_INPUT_BUDGET_CHARS = 60_000
 _SECTION_SUMMARY_MAX_CHARS = 12_000

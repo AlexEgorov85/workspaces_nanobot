@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sys
 from pathlib import Path
@@ -171,8 +170,9 @@ def list_runtime_vector_indexes(
         conn = fetch_fn
     else:
         try:
-            import duckdb
             from pathlib import Path
+
+            import duckdb
 
             cache_cfg = ((SETTINGS.get("gateway") or {}).get("cache") or {})
             local_path = cache_cfg.get("local_path") or ""

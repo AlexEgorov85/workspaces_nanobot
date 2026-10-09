@@ -64,8 +64,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from lib.services.db_logging_service import LogEvent
 
@@ -99,7 +100,7 @@ class StartupGateError(RuntimeError):
         report: ``StartupGateReport`` с фазой и причиной.
     """
 
-    def __init__(self, report: "StartupGateReport") -> None:
+    def __init__(self, report: StartupGateReport) -> None:
         super().__init__(
             "vector indexes are not ready and "
             f"gateway.startup.vector_preload.on_unavailable=fail "

@@ -20,7 +20,6 @@ from typing import Any
 
 from lib.utils.text_utils import sanitize_value
 
-
 __all__ = ["prepare_output", "sanitize_output"]
 
 

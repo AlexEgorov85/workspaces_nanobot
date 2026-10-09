@@ -14,7 +14,6 @@ from typing import Any
 
 from lib.core import skill_config as _lib
 
-
 _SKILL_NAME = "audit_formulation_strengthener"
 
 

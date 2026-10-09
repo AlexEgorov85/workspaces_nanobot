@@ -20,9 +20,7 @@ duck typing (``hasattr``), чтобы не зависеть от приватн�
 from __future__ import annotations
 
 import nanobot.agent  # noqa: F401  # фикс circular import в nanobot 0.3.0
-
 from nanobot.command.router import CommandRouter
-
 
 _DEFAULT_PRIORITY_COMMANDS: tuple[str, ...] = (
     "/stop",

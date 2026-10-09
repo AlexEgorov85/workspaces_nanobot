@@ -40,7 +40,6 @@ from workspace.skills.audit_formulation_strengthener.scripts.vnd_io import (
     prepare_vnd,
 )
 
-
 __all__ = ["run"]
 
 

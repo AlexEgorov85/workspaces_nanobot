@@ -18,8 +18,6 @@ gateway) и в standalone-утилитах (``tools/build_vectors.py``).
 
 from __future__ import annotations
 
-from typing import Any
-
 from lib.services.table_registry import (
     SkillRegistration,
     TableResource,

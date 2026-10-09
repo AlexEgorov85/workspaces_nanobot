@@ -59,8 +59,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chunking.chunks import Chunk
 from chunking.chunker import _make_chunk_id as _canonical_chunk_id
+from chunking.chunks import Chunk
 from document.analysis import DocumentAnalysis
 from document.physical import DocumentBlock
 from document.structure import (
@@ -72,7 +72,6 @@ from application.brief_compression import (
     BriefSection,
     render_sections,
 )
-
 
 _MEANINGFUL_NODE_TYPES = frozenset({
     "section",

@@ -15,8 +15,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from document.physical import (
-    PhysicalDocument,
     SUPPORTED_FORMATS,
+    PhysicalDocument,
     _iter_docx_blocks,
     _iter_pdf_blocks,
     _iter_txt_blocks,
