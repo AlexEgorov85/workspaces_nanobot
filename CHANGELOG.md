@@ -8,150 +8,19 @@
 
 ## [Unreleased]
 
-### Added
+_(пусто — новые изменения добавляются следующим релизом)_
 
-- **Время жизни снапшота кэша `gateway.cache.reuse_ttl_hours` (дефолт 23 ч)**:
-  Пока `cache.duckdb` моложе TTL, gateway **не удаляет снапшот и не грузит данные заново** — берёт готовый файл и пропускает фазу загрузки данных. `0` — всегда пересоздавать (прежнее поведение).
-  - `lib/core/application_context.py` → `evaluate_cache_snapshot(path, ttl_hours, now=…)` + `format_cache_age()`: чистое решение (один `stat`, без БД/DuckDB), покрытое тестами.
-  - **Считается по `mtime`, а не по дате создания.** `mtime` = момент последней публикации (`publish()` делает `os.replace` свежего файла поверх старого), то есть «сколько прошло с последней успешной публикации». Дата создания для свежести данных непригодна: на POSIX это `st_ctime` (меняется при правке метаданных), в Windows — другая семантика.
-  - `gateway.py`: решение о свежести связано с удалением снапшота — устаревший файл удаляется, свежие сохраняются. Пропуск возможен **только если store реально открыл файл** (`is_ready()`), иначе принудительный пересоздан: иначе «используем как есть» превратилось бы в молчаливую работу на пустом кэше (процесс жив, отвечает, данных нет).
-  - `ApplicationContext.skip_data_load` + `_start_sync_or_skip()`: при пропуске синхронизатор **не стартует вовсе**, а не «стартует без `initial_load`» — poll-цикл с пустым `_last_sync` на первом такте всё равно сделал бы полный `_fetch_all`, то есть «пропуск» не был бы пропуском.
-  - **Гейт не виснет:** `StartupGate` ждёт сигнал без таймаутов, а синк при пропуске его никогда не поставит — gateway доводит сигнал явно, после проверки готовности store.
-  - **Цена решения** (замерено на этой БД): вычитка всех 6 таблиц из PG — **63 мс** на холодном соединении и **35 мс** на прогретом, то есть выигрыш по времени близок к нулю; платим свежестью: пока кэш свежий, изменения в PG не видны (новые строки, новые predefined-скрипты, **удалённые** строки) и `full_resync_every` не сверяет удаления. Если это неприемлемо — `reuse_ttl_hours: 0`.
-  - **Tests**: `tests/test_cache_snapshot_ttl.py` (15) — решение TTL, границы, `ttl=0`, чтение по `mtime`, а не по `ctime`; `tests/test_gateway_startup_gate.py` (+6) — пропуск, пересоздание по TTL, сброс при неоткрытом снапошоте, отсутствие зависания гейта; `tests/test_application_context_skip_data_load.py` (8) — контракт `skip_data_load` на реальном `_start_sync_or_skip`. Все гарды проверены подсадкой дефекта в живой код.
-  - Проверено на живых прогонах gateway (роль OWNER подтверждалась по логу): протухший кэш → `decision=stale`, 6 таблиц загружено, 3 индекса; свежий → `decision=fresh reuse=True`, публикаций 0, 3 индекса собраны из файла, снапшот на месте. Отдельно подтверждено, что путь reuse **не пишет** в файл (mtime до/после совпадает) — иначе кэш омолаживался бы вечно и данные из PG не обновлялись бы никогда.
+## [2.5.4] — 2026-10-09
 
-### Fixed
-
-- **Gateway больше не держит открытым файл кэша — снапшот стал отдельным от рабочей базы.** Symptom: skill не мог прочитать кэш при работающем gateway, получая «DuckDB-кеш не найден» при существующем файле.
-  - **Причина.** Начиная с `85e962c5` (Stage B+E) OWNER открывал рабочую БД **на самом файле снапшота** (`DuckDbCacheStore.open(path=publish_path, mode=READ_WRITE)`), и это делалось ради `reuse_ttl_hours` — чтобы «не грузить заново», нужен был доступ к данным из самого файла. DuckDB допускает ровно одно соединение на файл, поэтому второй процесс (CLI навыка, READER) получал `IOException: File is already open in <python> (PID ...)` даже с `read_only=True`. `open_cache()` глотал причину (`except Exception: return False`), а `_open_db()` превращал её в «файла нет / запустите gateway» — при том, что gateway как раз был запущен. Вектора при этом работали: `search_vector` читает то же самое уже открытое соединение, второго открытия он не делает.
-  - **Что сделано.** OWNER держит рабочую БД **в памяти** (`DuckDbCacheStore.open(path="")`), снапшот — отдельный файл, который открывается только на время публикации. Новая `DuckDbCacheStore.adopt_snapshot()` реализует reuse: `ATTACH <snapshot> (READ_ONLY)` → копирование таблиц и `__cache_meta` → `DETACH`, после чего файл свободен.
-  - **В `publish()`** удалён обход `close() → os.replace → reopen`, который существовал только из-за совпадения рабочей базы и снапшота (на Windows `os.replace` поверх файла с открытым handle даёт `WinError 5`). Такая конфигурация теперь **отвергается явно** вместо тихой поломки; `tests/test_duckdb_cache_store.py` закрепляет оба исхода.
-  - **В `gateway.py`** «переиспользовать» теперь означает «прочитать файл» (`adopt_snapshot`), а не «файл уже открыт»: прежний критерий `is_ready()` для in-memory базы был истинно при полном отсутствии данных и мог молча поднять gateway без кэша.
-  - **Доступ агента к аудиту** переведён с CLI на in-process tool'ы `duckdb_query` / `vector_search` (возвращены из `12bf1823^`): они исполняются в процессе gateway на его живом `CacheProvider` и файла не касаются. Документация агента (`AGENTS.md`, `workspace/TOOLS.md`, `skills/audit_analyzer/SKILL.md`) переведена с CLI на tool'ы; гард «этап 18» в `tests/test_skill_tool_integration.py` заменён на проверку «tool'ы есть И доки не отправляют агента в CLI».
-  - **Проверено на живых данных**: процесс-OWNER (рабочая БД в памяти, снапшот загружен через `adopt_snapshot`) и дочерний процесс с `cli.py --list-scripts` одновременно — `status=success`, 6 скриптов из `public.agent_predefined_scripts`.
-
-- **Агент больше не бросает много-минутный анализ документов на середине.** Symptom: `legal_summarizer` на большом документе (skill сам оценивает `estimated_total_sec ≈ 440`) бросался живьём, агент начинал заново, контекст оборота раздувался до `ContextWindowExceededError`.
-  - **Ограничение было не в shell.** Фактический бюджет задаётся `gateway.exec_timeout` (`project.json`), и он уже `0` — без лимита; `apply_timeouts` переносит его в `config.tools.exec.timeout`, поэтому правка последнего бесполезна. Потолок явного per-call `timeout=` поднимает `RuntimePatcher.patch_exec_timeout_cap` до `gateway.exec_timeout_cap_sec = 3600`.
-  - **А настоящее ограничение было в инструкции для агента:** ПРАВИЛО #5 в `skills/legal_summarizer/SKILL.md` разрешало «не более 2 попыток `write_stdin(wait_timeout_ms=120000)`» — это ≈4 минуты ожидания против ≈7-минутной оценки самого навыка. Живые фоновые процессы бросались, запуски дублировались, оборот раздувался.
-  - **ПРАВИЛА #4 и #5 переписаны:** ожидание строится по `estimated_total_sec` (+30% запаса), а потолок `wait_timeout_ms ≤ 120000` трактуется как ограничение **одного** вызова, а не всего ожидания. Перезапуск без `--operation-id` по-прежнему запрещён — он и был источником дублирования работы.
-  - **Мёртвый ключ помечен:** `project.json::cli.exec_timeout = 60` не читается ни кодом проекта, ни nanobot; в комментарии сказано, что реальный бюджет — `gateway.exec_timeout`.
-  - **Гард:** `tests/test_docs_consistency.py` — запрет возврата правила «не более 2 попыток» и требование, чтобы `gateway.exec_timeout` не убивал много-минутные навыки (`0` или ≥ 900). Проверено подсадкой старого правила: тест краснеет, файл восстанавливается побайтово.
-
-- **`gateway.py` больше не затирает PK-aware колбэк upsert.** `_make_sync_services` вешает `_upsert_with_pk`, которая передаёт `key_column=sync.key_column_for(table)`, но entrypoint переустанавливал колбэк на голый `cache_store.upsert_records` (`key_column=None`). Таблицы с PK не `id` (`public.agent_predefined_scripts`, PK `name`) уходили в ветку `CREATE OR REPLACE`, а батчи `_fetch_incremental` являются дельтой — несвязанные строки молча терялись. Симптом («нет ключа upsert») проявлялся только когда таблица уже была в DuckDB, то есть не на первом запуске, а на всех последующих — из-за чего дефект и выглядел не связанным с профилем.
-
-- **Порядок старта «DuckDB → векторы → каналы» (change `startup-vector-preload-gate`)**:
-  Каналы (приём вопросов) больше не стартуют, пока не загружены данные и не собраны FAISS-индексы. Раньше preload векторов уезжал в фоновую задачу, а `channels.start_all()` стартовал сразу — первые вопросы обслуживались с пустым FAISS-кэшем, что выглядело как «модель дурит».
-  - `lib/services/startup_gate.py` → `StartupGate`: два явных шага — `wait_for_cache(signal)` (ждёт сигнал `PgDuckDbSyncService` «данные в DuckDB + снапшот опубликован») и `load_vectors()` (ждёт завершения сборки индексов). Фазы `pending → cache_ready → vectors_ready | unavailable | skipped`; фаза читается readiness-проверкой `vector_search`.
-  - **Без таймаутов и ретраев**: готовность определяется сигналом, а не истечением времени — иначе процесс «незаметно» начинал бы отвечать без векторов. Гард — `tests/test_startup_gate.py::TestNoTimeoutsInGate` (AST-проверка вызовов `wait_for`/`sleep`/`timeout=` + проба подсаженным дефектом).
-  - `ThreadSafeSignal`: сигнал из worker-треда синхронизации будит ожидающий loop через `call_soon_threadsafe`. Наивный `asyncio.Event.set()` из чужого потока loop не будит — без таймаутов ожидание зависло бы навсегда уже после загрузки данных.
-  - `gateway.py`: фаза `_run_startup_preparation()` выполняется ДО `GatewayRunner.run_forever` (у подготовки своя семантика отказа — рестарт по backoff повторял бы ошибку по кругу). `_run(ctx)` поднимает каналы, уже зная, что векторы готовы. Сигнал готовности данных выставляется ПОСЛЕ `publish()` снапшота.
-  - Политика `gateway.startup.vector_preload.on_unavailable`: `warn` (дефолт) — degraded-старт с предупреждением; `fail` — `StartupGateError` → `FATAL` + `exit 2`, каналы не подняты. Плюс явные выключатели `enabled` и `await_ready` (старый режим «индексы в фоне»).
-  - Composition: `ApplicationContext.create()` публикует `ctx.startup_gate` (+ `ctx.cache_ready_signal`, `ctx.background_vector_preload`); конфиг типизирован через `StartupVectorPreloadSettings` и задокументирован в `project.json`. Результат фазы пишется событием `startup_vector_preload` в `agent_gateway_logs`.
-  - **Tests**: `tests/test_startup_gate.py` (33), `tests/test_gateway_startup_gate.py` (13) — приёмка проверяет наблюдаемый порядок в реальном `_entrypoint_main` (`cache.connect → sync.start → cache.publish → vector.preload → channels`) и то, что подсаженный дефект порядка её роняет.
-  - **Fix (попутно)**: фикстура fake-модулей в `tests/test_application_context.py` дополнена пакетом `nanobot.agent.tools` (`registry` + `base`) под nanobot 0.3.5 — чинит 8 ранее падавших тестов файла (`ModuleNotFoundError: nanobot.agent.tools`).
-
-- **`change `unify-cli-gateway-architecture` — Stage C/D/B/E/F/7 (композиция CLI/Gateway, CacheProvider mode + ownership, CLI = fixed test profile)**:
-  - `sql/migrations/V005__create_agent_cache_ownership.sql` — таблица `public.agent_cache_ownership` (`resource_key`, `owner_id`, `generation`, `acquired_at`, `last_heartbeat_at`, `expires_at`). Фиксированный `resource_key='local_cache'` идентифицирует логический cache resource. `generation` — монотонно растущий fencing token. TTL 60 сек. `INSERT ... ON CONFLICT` под `pg_advisory_xact_lock(hashtext(resource_key))`.
-  - `lib/services/cache_ownership.py` — `CacheOwnershipCoordinator` (`try_claim` / `heartbeat` / `release` / `acquire_write_fence`), `CacheAccessMode` (READ_WRITE/READ_ONLY), `ClaimResult` (frozen dataclass), `OwnershipLostError`. Атомарный PG-claim с инкрементом generation при takeover.
-  - `lib/services/cache_provider.py` — два новых exception: `UnsupportedSqlError` (DDL rejected в любом mode), `ReadOnlyAssertionError` (DML rejected в READ_ONLY). `CacheProvider` ABC MUST NOT иметь метода `open()` — это ответственность concrete factory (D14 layered architecture).
-  - `lib/services/duckdb_cache_store.py` — `@classmethod DuckDbCacheStore.open(path, mode)` — concrete factory. `mode=READ_ONLY` → DuckDB physical read-only connection (первый уровень защиты). `mode=READ_WRITE` → обычное открытие. `_reject_unsupported_filesystem(path)` — NFS/SMB/CIFS rejection через `/proc/mounts` (D11/D12). `query_sql()` — `_assert_query_sql_allowed_locked` (второй уровень защиты): DDL → UnsupportedSqlError, DML в READ_ONLY → ReadOnlyAssertionError. CREATE SCHEMA skipped в READ_ONLY mode (DuckDB физически запрещает). Instance method `open()` сохранён как alias `connect()` для back-compat с `gateway.py`/`runner.py`.
-  - `lib/services/pg_duckdb_sync_service.py` — fencing integration: `__init__` принимает `ownership_coordinator` + `cache_provider` (kw-only). `_sync_cycle_with_fence()` оборачивает `_poll_changes()` в `coord.acquire_write_fence()`. При `OwnershipLostError` — log + `_running=False` (worker останавливается, следующий takeover может перехватить ownership).
-  - `lib/core/application_context.py` — composition wiring:
-    * `ApplicationContext.create(role: Literal["gateway", "cli"], **kwargs)` — typed signature без `profile`/`enable_*` в named params; deprecated kwargs через `**kwargs` с `DeprecationWarning` + defaults из `SETTINGS["gateway"].*`.
-    * `ctx.role`, `ctx.enable_db_logging`, `ctx.enable_audit`, `ctx.enable_cron`, `ctx.print_llm_calls`, `ctx.ownership_coordinator`, `ctx.cache_provider` — новые поля.
-    * `_make_sync_services` создаёт `CacheOwnershipCoordinator`, делает `try_claim()`, открывает `DuckDbCacheStore.open(path, mode)` с mode из claim (READ_WRITE для OWNER, READ_ONLY для READER). `sync_service` создаётся ТОЛЬКО для OWNER.
-    * `CronService` создаётся только при `role="gateway"`. При `role="cli"` значение `gateway.enable_cron` MUST быть проигнорировано (D7 cron = gateway-only).
-    * `ctx.stop()` вызывает `ownership_coordinator.release()`.
-  - `cli_agent.py` (Stage F) — `CLI_FIXED_PROFILE = 'test'`; `--profile` MUST NOT приниматься; передача → `ConfigurationError` + `exit 2`. CLI не читает profile из окружения (D8).
-  - `config.py::PROFILE_OWNED_RUNTIME_KEYS` — явно документировано: `gateway.cache.local_path` MUST NOT быть profile-owned (shared runtime resource, D11).
-  - **Tests**: `test_cache_ownership_claim.py` (18), `test_cache_provider_mode.py` (21), `test_application_context_role.py` (10), `test_application_context_cache_lifecycle.py` (14), `test_cli_agent_profile.py` (11), `test_shared_cache_path_across_profiles.py` (6).
-
-### Changed
-
-- **Production entrypoints больше не передают deprecated kwargs в `ApplicationContext.create(...)`** — `cli_agent.py` (smoke/`_run_vanilla`/`_run_patched`), `gateway.py`, `benchmarks/runner.py`. Раньше каждый запуск CLI печатал 4× `DeprecationWarning` (`enable_db_logging` / `enable_audit` / `enable_cron` / `print_llm_calls`) и подставлял значения в обход конфига; теперь они берутся из `project.json::gateway` через `_resolve_enable_kwargs()` (fallback в `lib/core/application_context.py:77-82`: `enable_db_logging=True`, `enable_audit=True`, `enable_cron=False`, `print_llm_calls=False`). Поведенческое изменение одно: CLI создаёт cache runtime (`enable_audit` `False` → `True`), т.е. `CacheOwnershipCoordinator` claim + `DuckDbCacheStore` — это соответствует спеке (audit и cache lifecycle разделены, `enable_audit` не должен отключать кеш). Зафиксировано AST-guard тестом `tests/test_application_context_role.py::TestProductionCallersDoNotUseDeprecatedKwargs` (параметризован на 3 entrypoint'а). Побочный эффект: флаг `benchmarks/runner.py --no-audit` больше не влияет на `ApplicationContext` (compat-граница удалена из вызова); для возврата контроля нужен отдельный конфиг-ключ вместе с change `remove-deprecated-enable-kwargs`.
-- **CLI/Gateway теперь используют единый `ApplicationContext`** с typed signature `ApplicationContext.create(role=..., **kwargs)`. **BREAKING** для callers передающих `profile`/`enable_*` как named params — переход на `**kwargs` или `SETTINGS["gateway"].*`.
-- **CLI = фиксированный профиль `test`** (design D8). **BREAKING**: пользователи запускавшие `cli_agent.py --profile=prod` должны перейти на `gateway.py`. Спецификация: `openspec/changes/unify-cli-gateway-architecture/specs/runtime/entrypoints/spec.md`.
-- **Cron = gateway-only** (design D7). **BREAKING**: в CLI `CronService` НЕ создаётся, даже если `gateway.enable_cron=True`. Решает проблему «два процесса выполняют один jobs.json дважды».
-- `gateway.enable_db_logging/enable_audit/enable_cron/print_llm_calls` — deprecated в `**kwargs`-обработке (`DeprecationWarning` с stacklevel=2). После change `remove-deprecated-enable-kwargs` — `TypeError`.
-
-### Deprecated
-
-- Передача `enable_db_logging`/`enable_audit`/`enable_cron`/`print_llm_calls` как keyword arguments в `ApplicationContext.create(...)` — use `SETTINGS["gateway"].*`. Будет удалено в change `remove-deprecated-enable-kwargs`.
-
-- `lib/services/schema_validation.py` — `SchemaValidationService`, `MissingTable`, `SchemaValidationError` (наследник `ConfigurationError`). Pre-startup проверка наличия 6 runtime-таблиц (`channels.postgres.{table_name,messages_table,meta_table,claims_table}` + `logging.db.{table_name,question_runs_table}`) через один SELECT к `information_schema.tables`. Имена таблиц резолвятся из merged `SETTINGS` — **не зашиты в коде**. Спека: `openspec/specs/runtime/startup-schema-validation`.
-- Секция `gateway.startup.schema_validation.*` в `project.json`: `enabled: bool = true`, `timeout_sec: float = 5.0` (диапазон `0.1 ≤ value ≤ 60.0`). Позволяет временно отключить pre-startup проверку без правки кода.
-- `lib/services/runtime_inventory.py` — single source of truth для startup-инвентаря: канонические списки (`canonical_framework_hooks()` / `canonical_plugin_hooks()` / `canonical_project_tools()` / `canonical_runtime_patches()`) + diff-функции (`diff_hooks` / `diff_project_tools` / `diff_runtime_patches`). Используется в `ApplicationContext` для prominent-баннеров (`rich.Panel`, stderr) при missing-required / failed-required / unexpected — после `_log_connected_hooks()` и `apply_all()`, рядом с обычным loguru-логом. Тесты: `tests/test_runtime_inventory.py` (18 кейсов).
-- `tools/diagnose_startup.py` — CLI-парсер startup-лога gateway/CLI: извлекает секции `Hooks connected` / `Registered N tools` / `Custom (project) tools` / `Runtime patches`, сверяет с `runtime_inventory`, печатает таблицу OK / DRIFT / CRITICAL. Опции `--log PATH` или stdin; `--strict` (warning → exit 1); `--json` (для CI); `--no-color` (для log-файлов). Exit code: 0 — ОК, 1 — critical drift, 2 — только warning. Использование: `python gateway.py --profile=prod > gateway.log 2>&1 && python tools/diagnose_startup.py --log gateway.log`. Тесты: `tests/test_diagnose_startup.py` (7 кейсов, в т.ч. CLI через subprocess).
-- `lib/services/project_tool_loader.py` — новый stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(agent, workspace_dir, *, settings, cache_store, db_logging_service) -> ProjectToolsLoadResult`. Best-effort с частичным успехом; ``detail``-формат совместим с ``runtime_inventory.parse_project_tools_detail``. Вызывается из `ApplicationContext.create()` сразу после `RuntimePatcher.apply_all()` как независимый stage composition root'а (см. opencode change `runtime-patcher-composition-cleanup`, Decision 3).
-- `lib/services/runtime_patcher.py` — поле `PatchSpec.required: bool = False` (единый источник истины для criticality); явно проставлено `required=True` для 4 критичных: `assemble_outbound`, `save_turn`, `subagent_logging`, `context_governor`. `_PATCH_SPECS` расширен `PatchSpec` для `turn_delivery_fail` и `session_dir_watch` (раньше вызывались без спека — drift). Финальный inventory: **ровно 12 patches** в `apply_all()` / `_PATCH_SPECS` / `canonical_runtime_patches()` (попарно равны — exact-match тест `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`).
-- `lib/cli/hook_loader.py` — `scan_and_register` теперь **действительно блокирующий**: файл вне `_allowed_hook_names()` пропускается без импорта, без `exec_module`, без warning'а (только `logger.info("hook ... not in allowlist, skipped")`). Прежнее поведение «warn + продолжить» удалено.
-- `tests/test_runtime_patcher_no_project_tools_boundary.py` — AST-guard: `RuntimePatcher` не импортирует `workspace.tools.*` / `nanobot.agent.tools.base`, не строит `ToolContext`, не вызывает `.register(...)`. Защищает архитектурную границу.
-- `tests/test_hook_allowlist.py` — регрессионные тесты на `monkeypatch.setattr(_allowed_hook_names, ...)`: не-alwisted hook не выполняет module body; alwisted — инстанцируется.
-- `tests/test_application_context_single_application_point.py` — AST-guard `cli_agent.py` не вызывает `patch_*` методы `RuntimePatcher` после `ApplicationContext.create()`.
-- `tests/contract/test_hook_subclass_contract.py` — контракт на наследование `AgentHook`: параметризованно для `DatabaseLoggingHook` / `ToolAuditHook` / `TerminalToolPrintHook` (а) `issubclass(cls, AgentHook)`, (б) все 17 lifecycle-методов присутствуют на классе (через `getattr`), (в) `__init__` содержит `super().__init__()` (иначе `AgentHook._reraise` не инициализируется → `CompositeHook._for_each_hook_safe` теряет reraise-флаг). Ловит регрессию «nanobot добавил lifecycle-метод, наш хук — bare-класс» после любого апгрейда nanobot без изменения тестов.
-- `tests/contract/test_composite_hook_lifecycle.py` — интеграционный smoke `CompositeHook([DatabaseLoggingHook, ToolAuditHook, TerminalToolPrintHook])` с реальными нано-типами: `AgentHookContext` / `AgentRunHookContext` / `LLMUsage.reported(...)` / `LLMResponse(...)` / `ToolCallRequest(...)` из nanobot 0.3.5 (НЕ MagicMock). Прогоняются все public-lifecycle методы: `before_run` / `after_run` / `on_error` / `on_finally` / `before_iteration` / `after_iteration` / `finalize_content` (без isolation, ошибка должна всплывать) / `before_execute_tool` / `after_execute_tool` / `wants_streaming`. Каждый метод ассертит, что `CompositeHook` отрабатывает без `AttributeError`/`TypeError`. Защита от регресс-паттерна «mock-тест + upstream-тип поменялся».
-- `tests/contract/test_usage_to_dict_contract.py` — type contract для `_usage_to_dict`: `None` → `None`, `{}` → `None`, dict → копия (не deep-copy), `LLMUsage` → turn-shape dict (`prompt_tokens`/`completion_tokens`/`total_tokens`/`cached_tokens`/`cache_write_tokens`/etc.), dataclass с `to_turn_dict()` → нормализуется. Дополнительно: `_store_iteration_usage(session_key, LLMUsage)` пишет в `_CONTEXT_BRIDGE[session_key]["usage"]` строго `dict` (иначе downstream `get_context_window` упадёт на `.get(...)`). Закрывает регрессию `nanobot 0.3.5: usage стал LLMUsage-dataclass'ом вместо dict`.
-- `tests/contract/test_database_logging_get_model.py` — контаркт на closure `get_model: Callable[[], str | None]` в `DatabaseLoggingHook` (nanobot 0.3.5+: `LLMResponse.model` удалён → резолв модели идёт через `AgentLoop.model` → `runtime_resolver.runtime.model`). Кейсы: модель захвачена, без callable возвращается `None`, raise → `None`, factory пробрасывает callable в per-turn инстансы, lazy-rebinding при runtime-смене модели.
-- `tests/test_priority_commands.py` — регресс для `CommandRouter._priority` в nanobot 0.3.5 (атрибут существует как `{}` после `CommandRouter()`). Тесты: defaults floor, объединение с router, дедуп, поддержка dict/list/tuple/set атрибута `priority_commands`, mock-фильтр.
-- `tests/test_outbound_meta.py` — регресс для удалённого `outbound_event_from_message`: `_typed_event` возвращает `msg.event` напрямую без legacy-fallback (sanity-проверка API: `FINAL_TURN_KEY`, `OUTBOUND_DROPPED_KEYS`).
-- `tools/audit_nanobot_contracts.py` — AST-аудит `nanobot.*` контрактов: сканирует `lib/`/`workspace/`/`tools/`, репортит MISSING (False Positive на dataclass fields/private DI-attrs — annoted в выводе). Первая линия обороны при апгрейдах nanobot.
-
-### Changed
-
-- `ApplicationContext.start()`: после `_start_db_pool()` и до `RuntimeEventsSubscriber.start()` добавлен вызов `_validate_runtime_schema()`. При отсутствии любой из 6 runtime-таблиц — старт блокируется `SchemaValidationError` → `exit 2` + `stderr` через `gateway.main()` / `cli_agent.main()`. **BREAKING** для развёртываний, где таблицы не созданы — нужно предварительно применить `tools/migrate.py --apply` (для prod) или `tools/apply_test_profile_tables.py` (для test).
-- Дефолтный текст fallback-ответа при internal-ошибке (`RuntimePatcher._DEFAULT_INTERNAL_ERROR_TEXT`): `"Произошла внутренняя ошибка. Попробуйте позже."` → `"Не справился с этим запросом. Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."` — мягче, дружелюбнее, предлагает действие.
-- **`RuntimePatcher.apply_all` теперь вызывается строго один раз** из `ApplicationContext.create()` (см. `application_context.py:339-346`); удалён повторный вызов `patch_assemble_outbound` из `cli_agent._run_patched()` (был `cli_agent.py:174`). Контракт держится архитектурно (отсутствие повторных call site'ов) — никаких `already_patched`-флагов.
-- **`RuntimePatcher` больше не отвечает за регистрацию project tools.** Раньше `patch_project_tools` жил в `runtime_patcher.py:2279-2509` и звался из `apply_all()`. Тело переехало в `lib/services/project_tool_loader.py::register_project_tools`; `apply_all` больше не вызывает его; `PatchReport.details["project_tools"]` удалён; результат хранится в `ctx.project_tools_result: ProjectToolsLoadResult`. Баннер `_emit_project_tools_inventory_banner` (`application_context.py`) читает `project_tools_result.detail`, а не `patch_report.details["project_tools"]`. Семантика best-effort с частичным успехом и `[INTERNAL_FAILED]`-маркер на детали сохранена без изменений; `parse_project_tools_detail()` в `runtime_inventory.py` не переписывалась.
-- **Канонический runtime-patch inventory** теперь **попарно равен** в трёх источниках: имёнa patches из `apply_all()` AST, ключи `_PATCH_SPECS`, имена `canonical_runtime_patches()`. Все три множества содержат ровно **12 имён**. Точное соответствие проверяется exact-match тестом `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`; sanity-check на количество — отдельный тест `test_inventory_size_is_12`. Прежняя subset-проверка (`for key in expected: assert key in actual`) удалена — она маскировала drift (DEPRECATED-остатки).
-- **`PatchSpec.required` — единственный источник истины для criticality.** Удалён локальный hardcoded set `high_risk_required` из `runtime_inventory.canonical_runtime_patches()`; проекция идёт через `spec.required`. Семантика: `required=True` — failed/missing патч подсвечивается в startup-баннере (`_emit_patch_inventory_banner`) и в `diff_runtime_patches` как `missing_required` / `failed_required`. **НЕ** триггер прерывания startup (см. `openspec/specs/runtime/context/spec.md`, `openspec/specs/runtime/runtime-patcher/spec.md`).
-- `lib/services/schema_validation.py`: сообщения `SchemaValidationError` и `_MissingConfigKeys` переведены на русский (имена таблиц / профиля / config-ключей остаются латиницей). Подсказка стала actionable: для профиля `prod` — `python tools/migrate.py --apply`, для `test` — `python tools/apply_test_profile_tables.py`, для остальных — generic-вариант «примените миграции для выбранного профиля». Выбор команды — helper `_hint_for_profile(profile)`. Спека: `openspec/specs/runtime/startup-schema-validation/spec.md` (MODIFIED requirement «Сообщение об ошибке содержит список недостающих таблиц» + ADDED requirement про `_MissingConfigKeys`), opencode change `i18n-schema-validation-error`. Заодно исправлен структурный заголовок спеки (`## Требования` → `## Requirements`) — ранее archive OpenSpec не проходил из-за несоответствия грамматике.
-
-### Fixed
-
-- **CLI вывод в Windows-консоли: ANSI-стили (``[dim]→ LLM: ...``) рендерились как ``?[2m→ LLM: ...?[0m``.** Без `ENABLE_VIRTUAL_TERMINAL_PROCESSING` legacy Windows-консоль (cmd/PowerShell ISE) интерпретирует `\x1b` как непечатный символ и подменяет на `?` — все Rich-выводы (DB hook `→ LLM:`/`← LLM:`, `📊 Контекст:`, dim-italic reasoning) выглядели одинаково с plain-текстом и одновременно портили прокрутку. Современный Windows Terminal включает VT по умолчанию, классический cmd/ISE — нет. Добавлен `lib/utils/windows_terminal.py::enable_vt()` (`ctypes.SetConsoleMode(... | 0x4)` на STDOUT/STDERR) — вызывается на старте из `cli_agent.py` и `gateway.py` в самом начале импорта (ДО первого Rich-вывода и `Console()`-инициализации); fail-soft на не-Windows и на stdout-не-tty. Покрыто `tests/test_windows_terminal.py` (3 кейса: posix no-op, piped-stdout skip, win32-tty invokes SetConsoleMode дважды с флагом 0x4).
-- **`ApplicationContext.stop()` НЕ закрывал `cache_provider` → `cache.duckdb` оставался залоченным.** DuckDB-коннект OWNER-процесса не освобождал файл даже после явного `exit` — следующий инстанс (`python cli_agent.py` повторно или `gateway.py` на той же машине) падал с `IO Error: Cannot open file "cache.duckdb": Процесс не может получить доступ к файлу`. Добавлен `cache_provider.close()` в `stop()` между `usage_store.close()` и `ownership_coordinator.release()` — fail-soft. Покрыто `tests/test_application_context_role.py::TestStopClosesCacheProvider` (3 кейса: close вызывается, skip когда `cache_provider is None`, идемпотентность при `_started=False`).
-- **`DatabaseLoggingHook._print_llm_tokens` → plain `print()` вместо `Rich Console.print("[dim]...")`.** После включения `ENABLE_VIRTUAL_TERMINAL_PROCESSING` prompt_toolkit при инициализации сессии и при `_read_interactive_input_async()` откатывает `ConsoleMode` (line-input mode → VT сброшен) — последующий Rich-вывод уезжал с ANSI в legacy cmd/PowerShell ISE как ``?[2m→ LLM: ...?[0m`` (видим на 2+ turn). Двойная мера: (1) DB hook больше не использует Rich для этих строк — `print()` без ANSI, debug-вывод всегда читаем; (2) `lib/cli/console_loop.py::run_repl` после `_init_prompt_session()` и после каждого `_read_interactive_input_async()` повторно вызывает `enable_vt()` (fail-soft, no-op на POSIX). Покрыто: `tests/test_hooks_database_logging.py::test_after_iteration_prints_llm_tokens` (мок `builtins.print`), `tests/test_hooks_database_logging.py::test_after_iteration_does_not_print_when_disabled`. Параллельно убран неиспользуемый `from rich.console import Console; console = Console()` из модуля DB hook.
-- **Данные PG доходят до DuckDB-кэша: были потеряны колбэки `PgDuckDbSyncService`.** `_make_sync_services` создавал `PgDuckDbSyncService`, но никогда не вызывал `set_on_new_records_callback()` / `set_on_replace_records_callback()` / `set_on_sync_callback()`. `_dispatch()` при `_on_new_records=None` делает **молчаливый** `return` — строки из PG терялись без исключения и без traceback. Wiring жил в callers (`gateway.py`, `benchmarks/runner.py`) и потерялся при консолидации; теперь выставляется в composition root (`lib/core/application_context.py`), а callers, которым нужен свой хук, MUST chaining-ить предыдущий колбэк (как это делал прежний `benchmarks/runner.py` для `first_sync_event`).
-- **`DuckDbCacheStore.publish()` на Windows: `WinError 5` при `os.replace`.** Реальная конфигурация OWNER'а открывает живое RW-соединение DuckDB ровно на том файле, который `publish()` подменяет через `os.replace`. На Unix replace поверх открытого файла разрешён, поэтому баг был невидим; на Windows — `ERROR_SHARING_VIOLATION` («целевой файл занят читателем»). Теперь соединение закрывается → файл подменяется → соединение открывается заново. Порядок важен и для консистентности: DuckDB на `close()` делает checkpoint и **удаляет** `<target>.wal`, поэтому replace до close оставил бы осиротевший `cache.duckdb.wal` от старого файла. Покрыто `test_publish_works_when_cache_path_equals_publish_path` и `test_publish_leaves_no_tmp_files_behind` — остальные publish-тесты использовали `cache_path=""` (in-memory) и этот случай не покрывали.
-- **Устранена латентная потеря строк при инкрементальном sync для таблиц без колонки `id`.** `_upsert_locked()` дефолтно использовал колонку `id` как ключ upsert; для таблиц с другим PK (`public.agent_predefined_scripts` → PK `name`) он уходил в `CREATE OR REPLACE TABLE`. Поскольку `_fetch_incremental()` отдаёт **дельту** (`WHERE track_col > last`), несвязанные строки молча удалялись — при правке одного скрипта в кэше осталась бы одна строка вместо шести. Добавлен `PgDuckDbSyncService.key_column_for()` (резолв PK из `pg_index`/`pg_attribute`, кэш на таблицу, составной PK → `None`) и keyword `key_column` в `DuckDbCacheStore.upsert_records()`. Fallback-пересоздание сохранён, но его warning теперь прямо называет себя деструктивным для дельты.
-- **`lib/cli/console_loop.py` — интерактивный REPL CLI не запускался на nanobot 0.3.5.** `run_repl()` импортировал приватные REPL-хелперы из `nanobot.cli.commands`, но в 0.3.5 они переехали в `nanobot.cli.terminal` (upstream сам импортирует его как `cli_terminal` в `nanobot/cli/agent.py`): `_init_prompt_session`, `_is_exit_command`, `_read_interactive_input_async`, `_restore_terminal` отсутствовали → `ImportError: cannot import name '_init_prompt_session' from 'nanobot.cli.commands'` на каждом старте `python cli_agent.py` после баннера. Добавлен version-agnostic адаптер **`lib/cli/nanobot_cli_compat.py`** (именно он был предписан в `docs/architecture/nanobot-inventory.md:100` как RED-запись «изоляция: тонкий адаптер `lib/cli/nanobot_cli_compat.py`»): `get_repl_helpers()` резолвит 6 приватных хелперов по кандидатам `nanobot.cli.terminal` → `nanobot.cli.commands` и `nanobot.cli.runtime_config` → `nanobot.cli.commands` → `nanobot.cli.terminal`, выбирая модуль с наибольшим числом совпадений; при недоступном символе бросается `AttributeError` с поимённым списком отсутствующих имён (вместо невнятного `ImportError` на длинном кортеже); результат кэшируется в `_resolved`. `__logo__`/`__version__` берутся из публичного `nanobot` (`get_logo_version()`), `_model_display` обёрнут в `model_display()` со `str()`-coercion. `console_loop.run_repl()` больше не содержит ни одного version-specific импорта. Регрессия закрыта `tests/contract/test_nanobot_cli_compat.py` (8 кейсов, включая AST-guard «в `run_repl` нет прямых импортов `nanobot.cli.commands`/`nanobot.cli.terminal`» и проверку диагностического `AttributeError`).
-- **`cli_agent.py` — `python cli_agent.py` падал с `TypeError` ещё до REPL.** Оба call-site'а `run_repl()` (`_run_vanilla` и `_run_patched`) передавали несуществующий kwarg `db_logging_service=ctx.db_logging_service` → `TypeError: run_repl() got an unexpected keyword argument 'db_logging_service'`. Мёртвый kwarg удалён из обоих вызовов; 4 теста `TestParseArgs` в `tests/test_cli_agent.py` переведены на Stage F-контракт (CLI без `--profile`, `args.profile == "test"`).
-- `lib/services/schema_validation.py`: сервис не разворачивал `_LazySettings` proxy при извлечении 6 runtime-имён из `SETTINGS` — `isinstance(proxy, dict) == False`, поэтому обход по путям падал на первом уровне и `SchemaValidationService.expected_table_names()` поднимала `_MissingConfigKeys` со списком ВСЕХ 6 ключей (`<settings>.channels.postgres.table_name` …), блокируя старт gateway **даже когда таблицы есть в БД**. Добавлен `_unwrap_settings()` (тот же паттерн, что в `config.require_setting` / `config.get_setting`); формат сообщения для `_MissingConfigKeys` переработан — `MissingTable` тут неуместен (ключ конфига ≠ таблица БД).
-- `lib/hooks/database_logging_hook.py`: добавлен адаптер `_usage_to_dict(usage: Any) -> dict | None` для нормализации `LLMUsage` dataclass / `dict` / `None` → per-turn dict с полями `prompt_tokens`/`completion_tokens`/`total_tokens`/etc. Контракт по дизайну D2 opencode change `post-0-3-5-hook-migration` (см. `openspec/changes/archive/2026-09-27-post-0-3-5-hook-migration/design.md:36-66`). Без адаптера `RuntimePatcher.patch_subagent_logging` (`lib/services/runtime_patcher.py:1882`) падал с `ImportError: cannot import name '_usage_to_dict'` и подагент-логирование в `agent_gateway_logs` не работало — в startup-логе это проявлялось как warning `1 runtime patch(es) failed: ['subagent_logging']`. Адаптер fail-soft (на любом неожиданном типе или исключении — `None`).
-- `RuntimePatcher.patch_turn_delivery_fail`: исправлена отправка двойного outbound — пользователь получал и fallback-ответ, и upstream-литерал `"Sorry, I encountered an error."`. Теперь на время вызова оригинального `fail()` атрибут `self.bus` подменяется на per-instance прокси `_OutboundSilencer`, который подавляет `publish_outbound`, но пропускает остальные методы bus и сохраняет `turn_completed` runtime-event (`openspec/changes/fix-error-fallback-double-outbound`).
-- `RuntimePatcher.patch_turn_delivery_fail`: payload `turn_failed` в `agent_gateway_logs` дополнен полями `exception_type`, `exception_message`, `exception_available`, `sender_id`, `agent_id`. Захват исключения через `sys.exception()` (вызов идёт изнутри `except`-блока в `loop.py:1480-1482`); `session_key` теперь берётся из `TurnDelivery.session_key` (раньше всегда был `null` — `lifecycle_message.session_key` не существует), идентификатор пользователя — из `lifecycle_message.sender_id` (раньше `null` — `lifecycle_message.user_id` не существует).
-- `RuntimePatcher.apply_all`: `patch_turn_delivery_fail` теперь получает `agent_id`, резолвленный из `config.agents.defaults.name` (с fallback на `config.default_agent` / `agent.name` / `None`).
-- **Дублирование runtime patches в CLI**: в `cli_agent._run_patched()` после `ApplicationContext.create()` ещё раз вызывался `ctx.runtime_patcher.patch_assemble_outbound(ctx.agent, ctx.tool_audit_hook)` (`cli_agent.py:174`). Поскольку `RuntimePatcher.apply_all()` уже применяет `assemble_outbound` в `create()`, повторный вызов приводил к double-wrap (агент получал outbound, обёрнутый дважды — лишний слой metadata). Удалён; см. opencode change `runtime-patcher-composition-cleanup`.
-- **Drift между `_PATCH_SPECS` и реально вызываемыми patches**: `turn_delivery_fail` и `session_dir_watch` вызывались из `apply_all()` без `PatchSpec` (drift); `compact_tracking`/`compact_command`/`idle_guard` числились в `_PATCH_SPECS` как DEPRECATED, но не вызывались (drift в обратную сторону). Дрейф был невидим из-за subset-проверки `for key in expected: assert key in actual`. Добавлены спеки для двух отсутствующих патчей; удалены три DEPRECATED. Финальный inventory — 12 patches во всех трёх множествах (см. `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`).
-- `lib/hooks/{database_logging_hook,tool_audit_hook,terminal_tool_print_hook}.py`: три фреймворковых хука не наследовали `nanobot.agent.AgentHook` — bare-классы без базы. После апгрейда до nanobot 0.3.5 `CompositeHook` начал раскручивать `before_run`/`finalize_content` через `getattr(h, method_name)` (см. `nanobot/agent/hook.py:174,268`): все три хука ловили `AttributeError`. Для `before_run`/`before_iteration`/etc. ошибка проглатывалась `CompositeHook._for_each_hook_safe` (только ERROR-лог), но для `finalize_content` — без изоляции (доказанно в docstring upstream'а: «pipeline — no isolation, bugs should surface»), и `finalize_content` ВСПЛЫВАЛ и ронял оборот (`Error processing message … 'DatabaseLoggingHook' object has no attribute 'finalize_content'`). Теперь все три хука наследуют `AgentHook` + `super().__init__()` для инициализации `AgentHook._reraise`. Регрессия закрыта двумя тестами: `tests/contract/test_hook_subclass_contract.py::test_custom_hook_inherits_agent_hook` и `tests/contract/test_composite_hook_lifecycle.py::TestCompositeLifecycleWithRealNanobot` (полный lifecycle на реальном `CompositeHook` с реальными `LLMUsage`/`LLMResponse`/`ToolCallRequest` из nanobot).
-- `lib/hooks/database_logging_hook.py`: четыре сайта всё ещё трактовали `context.usage` как `dict` (`_store_iteration_usage`, `_make_run_event`, `after_iteration`, `_print_llm_tokens`) — после апгрейда nanobot 0.3.5 `AgentHookContext.usage` стал `LLMUsage` (frozen dataclass, имеет `to_turn_dict()`/`to_dict()`). Падало с `TypeError: 'LLMUsage' object is not iterable` в `_store_iteration_usage` и с `'LLMUsage' object has no attribute 'get'` в `_make_run_event`/`_print_llm_tokens`. Все четыре сайта переведены на `_usage_to_dict(getattr(context, "usage", None)) or {}` (тот же адаптер, что уже использовался в subagent-пути). Хранилище `_CONTEXT_BRIDGE[session_key]["usage"]` теперь ГАРАНТИРОВАННО содержит `dict` — downstream `get_context_window`/`get_iteration_usage`/`patch_assemble_outbound` могут безопасно звать `.get(...)`. Регрессия закрыта `tests/contract/test_usage_to_dict_contract.py` (type contract адаптера против реального `LLMUsage.reported(...)`) + `tests/test_database_logging_bridge.py::test_accepts_llm_usage_dataclass` и `test_compose_block_from_stored_llm_usage`. Доказательство, что без фикса падают оба регресс-теста, проверено `git stash` экспериментом: 12 (AgentHook) + 3 (LLMUsage) теста ловят именно эти регрессии.
-- `lib/hooks/tool_audit_hook.py::format_tool_params`: в nanobot 0.3.5 `ToolCallRequest.arguments: Any` стал dict, а не JSON-string (см. реальный dataclass в `nanobot/providers/base.py` — `arguments: Any`, фактически dict после парсинга provider'ом). Старый код `json.loads(p["arguments"])` падал в `except`, итог: `metadata._tool_audit` рендерил `_="{'path': '/x'}"` вместо `path='/x'`. Helper переписан под три формы: dict (0.3.5+ primary), JSON-string (legacy), None / прочее. Закрыто тестами `tests/test_hooks_tool_audit_hook.py::TestFormatToolParams::test_handles_dict_arguments_nanobot_035` (mock) и `tests/contract/test_usage_to_dict_contract.py::test_format_tool_params_handles_real_tool_call_request_dict_arguments` (реальный `ToolCallRequest`).
-- `lib/channels/priority_commands.py`: `CommandRouter._priority` в nanobot 0.3.5+ существует как **пустой** `{}` сразу после `CommandRouter()` (раньше атрибут был только при зарегистрированных handler'ах). Старый код на строке 48 делал `if hasattr(router, "_priority") and isinstance(router._priority, dict): return tuple(router._priority.keys())` → возвращал `()` вместо fallback `_DEFAULT_PRIORITY_COMMANDS`. Семантика изменена: `get_priority_commands()` теперь возвращает **объединение** defaults и router (без дублей), с floor из `("/stop", "/restart", "/status")`. Каналы `PostgresChannel`/`RedisChannel` снова фильтруют priority-polling правильно. Регрессия закрыта `tests/test_priority_commands.py` (6 кейсов).
-- `lib/utils/outbound_meta.py`: legacy fallback `outbound_event_from_message(msg)` (направление `msg → event`) удалён в nanobot 0.3.5 — заменён `outbound_message_for_event(event, *, channel, chat_id, ...) → msg` (обратное). Поскольку наш primary path `getattr(msg, "event", None)` уже возвращает типизированный ивент в 0.3.5, legacy-fallback был мёртвым кодом. Удалён; регресс-тест `tests/test_outbound_meta.py::TestTypedEvent::test_does_not_import_legacy_nanobot_function` фиксирует контракт.
-- `lib/hooks/database_logging_hook.py` + `lib/core/agent_factory.py`: `LLMResponse.model` удалён в nanobot 0.3.5 (модель теперь живёт на `AgentLoop.model` → `runtime_resolver.runtime.model`, см. `nanobot/agent/loop.py:218`). Старый `getattr(response, "model", None)` всегда `None`, `log_llm_call(name="llm", ...)` терял имя модели в `agent_gateway_logs`. Реализован closure `get_model: Callable[[], str | None]`, который `AgentFactory.create()` закрывает над `lambda: agent.model` через мутируемый контейнер `_agent_box[]` (заполняется ПОСЛЕ `AgentLoop.from_config`). Хук вызывает `get_model()` лениво в `after_iteration` — каждый оборот читает текущее имя модели, поддерживает runtime-смену через `set_runtime_model(...)`. При отсутствии/исключении — fail-soft на `None`. Регрессия закрыта `tests/contract/test_database_logging_get_model.py` (6 кейсов: capture, None-legacy, fail-soft, factory-plumbing, lazy-rebinding, сквозной интеграционный `AgentFactory.create()` → `hook_factories[0]` → `llm_call.model`).
-- `tools/audit_nanobot_contracts.py` — новый AST-аудит `nanobot.*` контрактов. Резолвит импорты (`from nanobot.X import Y`) и контекстный атрибут-доступ (`ctx.attr` где `ctx` — нанотип), опрашивает реальный nanobot через `importlib` + `getattr`. Сообщает MISSING. На момент написания показывал 23 MISSING, из них реальных ровно 4 — `_init_prompt_session`/`_is_exit_command`/`_read_interactive_input_async`/`_restore_terminal` в `lib/cli/console_loop.py` (с тех пор закрыто адаптером `lib/cli/nanobot_cli_compat.py`, коммит `f73be3a`); остальные 19 — false positives на defensive `hasattr(...)` / dataclass fields / private DI attrs (DI инжектируются `setattr`'ом в `ToolContext` инстансы в `project_tool_loader.py`).
-
-### Known Issue: снят — CLI-REPL восстановлен
-
-- ~~`lib/cli/console_loop.py` падал на `ImportError`~~ — **исправлено** в коммите `f73be3a`: добавлен
-  адаптер `lib/cli/nanobot_cli_compat.py`, который резолвит приватные REPL-хелперы
-  (`_init_prompt_session`, `_is_exit_command`, `_read_interactive_input_async`, `_restore_terminal`,
-  `_model_display`) по версии nanobot: `nanobot.cli.terminal` для 0.3.5+ (upstream-рефакторинг,
-  `nanobot/cli/agent.py`) с fallback на `nanobot.cli.commands` для ≤0.3.0. Модуль
-  fail-soft (`AttributeError` при отсутствии символа → `None`, без `ImportError`), поэтому
-  `lib/cli/console_loop.py` больше не импортирует приватные имена напрямую.
-  CLI (`cli_agent.py`, профиль `test`) стартует и доходит до REPL.
-  Раньше здесь же значился несуществующий warning «при импорте выпишется warning» — такого
-  warning в коде никогда не было, пункт удалён как неверный.
-
-### Removed
-
-- `RuntimePatcher.patch_project_tools` — перенесён в `lib/services/project_tool_loader.py::register_project_tools` (см. opencode change `runtime-patcher-composition-cleanup`, Phase 4). `RuntimePatcher` более **не** импортирует `workspace.tools.*`, **не** строит `ToolContext`, **не** вызывает `agent.tools.register(...)` — граница защищена AST-тестом `tests/test_runtime_patcher_no_project_tools_boundary.py`.
-- `PatchSpec` для `compact_tracking`, `compact_command`, `idle_guard` — DEPRECATED-остатки от `nanobot-035-upgrade` удалены из `_PATCH_SPECS` (без deprecation period). Реальный функционал перенесён:
-  - `compact_tracking` → `lib/services/compaction_event_subscriber.py` через `OutboundMessage.event: ContextCompactionEvent`;
-  - `compact_command` → upstream `nanobot.command.builtin.cmd_compact`;
-  - `idle_guard` → upstream `AutoCompact._is_expired` при `_ttl <= 0`.
+> **PATCH-релиз:** основное — порядок старта «данные → векторы →
+> каналы» (`lib/services/startup_gate.py`), in-process доступ агента
+> к аудиту (tool'ы `duckdb_query` / `vector_search` вместо вызова
+> CLI), разделение рабочей БД и снапшота кэша (`adopt_snapshot()`),
+> время жизни снапшота `gateway.cache.reuse_ttl_hours`, новый skill
+> `audit_formulation_strengthener`. Ниже — полный список изменений.
+>
+> Три BREAKING-изменения, требующих ручных действий при обновлении,
+> собраны в [`docs/MIGRATION.md`](docs/MIGRATION.md).
 
 > **MAJOR-релиз:** переход session hot-path на upstream `SessionManager`
 > (JSONL); PG остаётся как cold-storage mirror через
@@ -191,21 +60,135 @@
 > пользователя», а не «глобальная выборка». Tool API не изменился
 > (новых параметров нет).
 
-### Security
+### Added
 
-- **Cross-user isolation в `history_search`.** Закрыт gap №5 из
-  `docs/architecture/HISTORY_SEARCH_ANALYSIS.md`: фильтр
-  `(%s OR session_id = %s)` в `history_search_tool.py` заменён на две
-  взаимоисключающие ветви — `session_scope="current"` фильтрует по
-  `session_id`, `session_scope="all"` — по `user_id` из
-  `RequestContext.sender_id`. Никаких unscoped-fallback'ов
-  (`WHERE TRUE`, `OR TRUE`, `IS NULL OR user_id`). Добавлен
-  contract-тест на `RequestContext.sender_id`
-  (`tests/contract/test_history_search_identity_contract.py`) и
-  architecture guards (`tests/test_history_search_user_isolation_guards.py`).
+- **Время жизни снапшота кэша `gateway.cache.reuse_ttl_hours` (дефолт 23 ч)**:
+  Пока `cache.duckdb` моложе TTL, gateway **не удаляет снапшот и не грузит данные заново** — берёт готовый файл и пропускает фазу загрузки данных. `0` — всегда пересоздавать (прежнее поведение).
+  - `lib/core/application_context.py` → `evaluate_cache_snapshot(path, ttl_hours, now=…)` + `format_cache_age()`: чистое решение (один `stat`, без БД/DuckDB), покрытое тестами.
+  - **Считается по `mtime`, а не по дате создания.** `mtime` = момент последней публикации (`publish()` делает `os.replace` свежего файла поверх старого), то есть «сколько прошло с последней успешной публикации». Дата создания для свежести данных непригодна: на POSIX это `st_ctime` (меняется при правке метаданных), в Windows — другая семантика.
+  - `gateway.py`: решение о свежести связано с удалением снапшота — устаревший файл удаляется, свежие сохраняются. Пропуск возможен **только если store реально открыл файл** (`is_ready()`), иначе принудительный пересоздан: иначе «используем как есть» превратилось бы в молчаливую работу на пустом кэше (процесс жив, отвечает, данных нет).
+  - `ApplicationContext.skip_data_load` + `_start_sync_or_skip()`: при пропуске синхронизатор **не стартует вовсе**, а не «стартует без `initial_load`» — poll-цикл с пустым `_last_sync` на первом такте всё равно сделал бы полный `_fetch_all`, то есть «пропуск» не был бы пропуском.
+  - **Гейт не виснет:** `StartupGate` ждёт сигнал без таймаутов, а синк при пропуске его никогда не поставит — gateway доводит сигнал явно, после проверки готовности store.
+  - **Цена решения** (замерено на этой БД): вычитка всех 6 таблиц из PG — **63 мс** на холодном соединении и **35 мс** на прогретом, то есть выигрыш по времени близок к нулю; платим свежестью: пока кэш свежий, изменения в PG не видны (новые строки, новые predefined-скрипты, **удалённые** строки) и `full_resync_every` не сверяет удаления. Если это неприемлемо — `reuse_ttl_hours: 0`.
+  - **Tests**: `tests/test_cache_snapshot_ttl.py` (15) — решение TTL, границы, `ttl=0`, чтение по `mtime`, а не по `ctime`; `tests/test_gateway_startup_gate.py` (+6) — пропуск, пересоздание по TTL, сброс при неоткрытом снапошоте, отсутствие зависания гейта; `tests/test_application_context_skip_data_load.py` (8) — контракт `skip_data_load` на реальном `_start_sync_or_skip`. Все гарды проверены подсадкой дефекта в живой код.
+  - Проверено на живых прогонах gateway (роль OWNER подтверждалась по логу): протухший кэш → `decision=stale`, 6 таблиц загружено, 3 индекса; свежий → `decision=fresh reuse=True`, публикаций 0, 3 индекса собраны из файла, снапшот на месте. Отдельно подтверждено, что путь reuse **не пишет** в файл (mtime до/после совпадает) — иначе кэш омолаживался бы вечно и данные из PG не обновлялись бы никогда.
+- `lib/services/schema_validation.py` — `SchemaValidationService`, `MissingTable`, `SchemaValidationError` (наследник `ConfigurationError`). Pre-startup проверка наличия 6 runtime-таблиц (`channels.postgres.{table_name,messages_table,meta_table,claims_table}` + `logging.db.{table_name,question_runs_table}`) через один SELECT к `information_schema.tables`. Имена таблиц резолвятся из merged `SETTINGS` — **не зашиты в коде**. Спека: `openspec/specs/runtime/startup-schema-validation`.
+- Секция `gateway.startup.schema_validation.*` в `project.json`: `enabled: bool = true`, `timeout_sec: float = 5.0` (диапазон `0.1 ≤ value ≤ 60.0`). Позволяет временно отключить pre-startup проверку без правки кода.
+- `lib/services/runtime_inventory.py` — single source of truth для startup-инвентаря: канонические списки (`canonical_framework_hooks()` / `canonical_plugin_hooks()` / `canonical_project_tools()` / `canonical_runtime_patches()`) + diff-функции (`diff_hooks` / `diff_project_tools` / `diff_runtime_patches`). Используется в `ApplicationContext` для prominent-баннеров (`rich.Panel`, stderr) при missing-required / failed-required / unexpected — после `_log_connected_hooks()` и `apply_all()`, рядом с обычным loguru-логом. Тесты: `tests/test_runtime_inventory.py` (18 кейсов).
+- `tools/diagnose_startup.py` — CLI-парсер startup-лога gateway/CLI: извлекает секции `Hooks connected` / `Registered N tools` / `Custom (project) tools` / `Runtime patches`, сверяет с `runtime_inventory`, печатает таблицу OK / DRIFT / CRITICAL. Опции `--log PATH` или stdin; `--strict` (warning → exit 1); `--json` (для CI); `--no-color` (для log-файлов). Exit code: 0 — ОК, 1 — critical drift, 2 — только warning. Использование: `python gateway.py --profile=prod > gateway.log 2>&1 && python tools/diagnose_startup.py --log gateway.log`. Тесты: `tests/test_diagnose_startup.py` (7 кейсов, в т.ч. CLI через subprocess).
+- `lib/services/project_tool_loader.py` — новый stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(agent, workspace_dir, *, settings, cache_store, db_logging_service) -> ProjectToolsLoadResult`. Best-effort с частичным успехом; ``detail``-формат совместим с ``runtime_inventory.parse_project_tools_detail``. Вызывается из `ApplicationContext.create()` сразу после `RuntimePatcher.apply_all()` как независимый stage composition root'а (см. opencode change `runtime-patcher-composition-cleanup`, Decision 3).
+- `lib/services/runtime_patcher.py` — поле `PatchSpec.required: bool = False` (единый источник истины для criticality); явно проставлено `required=True` для 4 критичных: `assemble_outbound`, `save_turn`, `subagent_logging`, `context_governor`. `_PATCH_SPECS` расширен `PatchSpec` для `turn_delivery_fail` и `session_dir_watch` (раньше вызывались без спека — drift). Финальный inventory: **ровно 12 patches** в `apply_all()` / `_PATCH_SPECS` / `canonical_runtime_patches()` (попарно равны — exact-match тест `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`).
+- `lib/cli/hook_loader.py` — `scan_and_register` теперь **действительно блокирующий**: файл вне `_allowed_hook_names()` пропускается без импорта, без `exec_module`, без warning'а (только `logger.info("hook ... not in allowlist, skipped")`). Прежнее поведение «warn + продолжить» удалено.
+- `tests/test_runtime_patcher_no_project_tools_boundary.py` — AST-guard: `RuntimePatcher` не импортирует `workspace.tools.*` / `nanobot.agent.tools.base`, не строит `ToolContext`, не вызывает `.register(...)`. Защищает архитектурную границу.
+- `tests/test_hook_allowlist.py` — регрессионные тесты на `monkeypatch.setattr(_allowed_hook_names, ...)`: не-alwisted hook не выполняет module body; alwisted — инстанцируется.
+- `tests/test_application_context_single_application_point.py` — AST-guard `cli_agent.py` не вызывает `patch_*` методы `RuntimePatcher` после `ApplicationContext.create()`.
+- `tests/contract/test_hook_subclass_contract.py` — контракт на наследование `AgentHook`: параметризованно для `DatabaseLoggingHook` / `ToolAuditHook` / `TerminalToolPrintHook` (а) `issubclass(cls, AgentHook)`, (б) все 17 lifecycle-методов присутствуют на классе (через `getattr`), (в) `__init__` содержит `super().__init__()` (иначе `AgentHook._reraise` не инициализируется → `CompositeHook._for_each_hook_safe` теряет reraise-флаг). Ловит регрессию «nanobot добавил lifecycle-метод, наш хук — bare-класс» после любого апгрейда nanobot без изменения тестов.
+- `tests/contract/test_composite_hook_lifecycle.py` — интеграционный smoke `CompositeHook([DatabaseLoggingHook, ToolAuditHook, TerminalToolPrintHook])` с реальными нано-типами: `AgentHookContext` / `AgentRunHookContext` / `LLMUsage.reported(...)` / `LLMResponse(...)` / `ToolCallRequest(...)` из nanobot 0.3.5 (НЕ MagicMock). Прогоняются все public-lifecycle методы: `before_run` / `after_run` / `on_error` / `on_finally` / `before_iteration` / `after_iteration` / `finalize_content` (без isolation, ошибка должна всплывать) / `before_execute_tool` / `after_execute_tool` / `wants_streaming`. Каждый метод ассертит, что `CompositeHook` отрабатывает без `AttributeError`/`TypeError`. Защита от регресс-паттерна «mock-тест + upstream-тип поменялся».
+- `tests/contract/test_usage_to_dict_contract.py` — type contract для `_usage_to_dict`: `None` → `None`, `{}` → `None`, dict → копия (не deep-copy), `LLMUsage` → turn-shape dict (`prompt_tokens`/`completion_tokens`/`total_tokens`/`cached_tokens`/`cache_write_tokens`/etc.), dataclass с `to_turn_dict()` → нормализуется. Дополнительно: `_store_iteration_usage(session_key, LLMUsage)` пишет в `_CONTEXT_BRIDGE[session_key]["usage"]` строго `dict` (иначе downstream `get_context_window` упадёт на `.get(...)`). Закрывает регрессию `nanobot 0.3.5: usage стал LLMUsage-dataclass'ом вместо dict`.
+- `tests/contract/test_database_logging_get_model.py` — контаркт на closure `get_model: Callable[[], str | None]` в `DatabaseLoggingHook` (nanobot 0.3.5+: `LLMResponse.model` удалён → резолв модели идёт через `AgentLoop.model` → `runtime_resolver.runtime.model`). Кейсы: модель захвачена, без callable возвращается `None`, raise → `None`, factory пробрасывает callable в per-turn инстансы, lazy-rebinding при runtime-смене модели.
+- `tests/test_priority_commands.py` — регресс для `CommandRouter._priority` в nanobot 0.3.5 (атрибут существует как `{}` после `CommandRouter()`). Тесты: defaults floor, объединение с router, дедуп, поддержка dict/list/tuple/set атрибута `priority_commands`, mock-фильтр.
+- `tests/test_outbound_meta.py` — регресс для удалённого `outbound_event_from_message`: `_typed_event` возвращает `msg.event` напрямую без legacy-fallback (sanity-проверка API: `FINAL_TURN_KEY`, `OUTBOUND_DROPPED_KEYS`).
+- `tools/audit_nanobot_contracts.py` — AST-аудит `nanobot.*` контрактов: сканирует `lib/`/`workspace/`/`tools/`, репортит MISSING (False Positive на dataclass fields/private DI-attrs — annoted в выводе). Первая линия обороны при апгрейдах nanobot.
+- `tools/audit_nanobot_contracts.py` — новый AST-аудит `nanobot.*` контрактов. Резолвит импорты (`from nanobot.X import Y`) и контекстный атрибут-доступ (`ctx.attr` где `ctx` — нанотип), опрашивает реальный nanobot через `importlib` + `getattr`. Сообщает MISSING. На момент написания показывал 23 MISSING, из них реальных ровно 4 — `_init_prompt_session`/`_is_exit_command`/`_read_interactive_input_async`/`_restore_terminal` в `lib/cli/console_loop.py` (с тех пор закрыто адаптером `lib/cli/nanobot_cli_compat.py`, коммит `f73be3a`); остальные 19 — false positives на defensive `hasattr(...)` / dataclass fields / private DI attrs (DI инжектируются `setattr`'ом в `ToolContext` инстансы в `project_tool_loader.py`).
+- **DB safety net в polling**: фильтр `AND status != 'cancelled'` в
+  `_claim_one_single` (3 места: основной WHERE, подзапрос по соседним
+  задачам, финальный UPDATE) и в `_claim_one` (worker_pool) — если AW
+  пометил user-сообщение как `cancelled` ДО polling, polling его
+  пропускает (race-free).
+- **Race-check после claim**: повторный `fetchval` статуса в
+  `_poll_once` и `_poll_priority_once` — если между SELECT подзапроса
+  и UPDATE захвата AW пометил `cancelled`, polling не диспатчит и
+  освобождает claim + lease + локальный контекст.
+- **Drop response в `_finalize_turn`**: если user-сообщение стало
+  `cancelled` пока LLM работала, финальный ответ не публикуется;
+  освобождаются slot, claim, context bridge; assistant-placeholder
+  удаляется. Status user'а НЕ переписывается (он уже `cancelled` от AW).
+- **Priority polling contract** в `MessageExchange`:
+  `poll_priority_inbound` — опциональный async-хук канала, вызывается
+  в `_poll_loop` **до** `poll_inbound`. Если хук не реализован
+  каналом — default-поведение через `getattr(..., None)` (другие
+  каналы не ломаются).
+- **`lib.channels.priority_commands.get_priority_commands()`** —
+  единый источник списка priority-команд nanobot для транспорта.
+  Читает `CommandRouter._priority` (duck-typing через
+  `hasattr(..., 'priority_commands')` для будущей совместимости);
+  fallback — захардкоженный `_DEFAULT_PRIORITY_COMMANDS = (
+  '/stop', '/restart', '/status')`.
+- **Тесты**: `tests/test_user_stop_signal_priority.py` (19 тестов —
+  priority claim filter, dispatch без slot/chat_inflight/placeholder,
+  race-fix, структурные проверки `_poll_loop`); расширен
+  `tests/test_user_stop_signal.py` (DB safety net, finalize drop).
+- **Static-audit тест** `test_postgres_channel_static_audit.py::test_claim_one_routes_single_to_single_method`
+  обновлён под параметризованный `_claim_one_single(priority_contents=...)`.
+- `lib/services/session_cold_sync_service.py` —
+  `SessionColdSyncService`: фоновый daemon-поток, зеркалирующий
+  upstream JSONL → PG. Per-transaction advisory lock
+  (`pg_try_advisory_xact_lock`), батчи с сортировкой по
+  `session_key`, leader-election для multi-instance deploy,
+  экспоненциальный backoff при ошибках PG, per-iteration
+  `self._running` graceful-shutdown check. **D23 stale-detection**:
+  если `pg > jsonl + tolerance` — sync для этой сессии пропускается
+  с логированием `event_type="session_stale_detected"` (in-memory
+  dedup TTL 60s). **Reverse-lag detection**: если
+  `jsonl > pg + threshold` — логируется
+  `event_type="sync_lag_exceeded"`. Метрики
+  (`cycles_total`, `cycles_failed_total`, `cycles_skipped_lock_busy`,
+  `cycles_skipped_pool_busy`, `stale_detected_total`,
+  `sync_lag_exceeded_total`, `sync_skipped_stale_total`,
+  `stale_tolerance_seconds`, `sync_lag_threshold_seconds`,
+  `pool_size`, `pool_available`, `pool_wait_seconds` и др.)
+  экспортируются через `get_stats()`.
+- `lib/services/llm_usage_store_factory.py` —
+  `create_usage_store(config)`: фабрика upstream
+  `nanobot.llm_usage.store.LLMUsageStore` (SQLite WAL). Дефолтный
+  путь — `<get_runtime_subdir("usage")>/usage.db`. Возвращает
+  `None` при `enabled=false` / отсутствии конфигурации.
+- `lib/services/llm_observer.py` — `wrap_provider_snapshot_loader`,
+  `attach_llm_observer`, `attach_fallback_model_observer`. Единый
+  путь подключения observer-pipeline (через обёртку
+  `provider_snapshot_loader`); fail-soft при ошибке attach.
+- `lib/services/runtime_health.py` — `RuntimeHealth.get_stats()`
+  (базовый liveness: `started_at`, `uptime_seconds`, `stopped`).
+- Контрактные тесты на upstream API:
+  `tests/contract/test_session_manager_api.py` (14 методов),
+  `tests/contract/test_usage_store_api.py` (init/record/
+  record_many/recent_calls/usage_payload/count/close),
+  `tests/contract/test_llm_observer_api.py` (provider API +
+  `wrap_provider_snapshot_loader` + FallbackProvider).
+- Архитектурные гарды `tests/test_storage_hybridization.py`:
+  запрет прямых `INSERT/UPDATE/DELETE` в `agent_session_*`
+  вне `SessionColdSyncService`; запрет собственных psycopg2-пулов;
+  запрет `event_type="llm_usage"` в `DbLoggingService`; проверка
+  docstring `PGSessionManager`.
+- `tests/test_session_cold_sync_service.py` (16 mock-тестов:
+  lifecycle, batch sorting, staleness/lag detection, dedup TTL,
+  per-iteration graceful shutdown, архитектурный гард
+  `test_no_new_pool_created`); `tests/test_pg_session_manager.py`
+  (17 тестов под compatibility-layer роль);
+  `tests/test_storage_hybridization_factory.py`,
+  `tests/test_storage_hybridization_lifecycle.py`,
+  `tests/contract/test_session_manager_contract.py`
+  (4 контракта: `updated_at` обновляется при `save()`, `Session`
+  constructor, `try_log_event` sync, `utils.db.run` rollback
+  contract).
+- Документация: `docs/architecture/storage-layers.md`,
+  `docs/architecture/usage-tracking.md`, раздел «Storage
+  hybridization» в `docs/MIGRATION.md`.
 
 ### Changed
 
+- **Production entrypoints больше не передают deprecated kwargs в `ApplicationContext.create(...)`** — `cli_agent.py` (smoke/`_run_vanilla`/`_run_patched`), `gateway.py`, `benchmarks/runner.py`. Раньше каждый запуск CLI печатал 4× `DeprecationWarning` (`enable_db_logging` / `enable_audit` / `enable_cron` / `print_llm_calls`) и подставлял значения в обход конфига; теперь они берутся из `project.json::gateway` через `_resolve_enable_kwargs()` (fallback в `lib/core/application_context.py:77-82`: `enable_db_logging=True`, `enable_audit=True`, `enable_cron=False`, `print_llm_calls=False`). Поведенческое изменение одно: CLI создаёт cache runtime (`enable_audit` `False` → `True`), т.е. `CacheOwnershipCoordinator` claim + `DuckDbCacheStore` — это соответствует спеке (audit и cache lifecycle разделены, `enable_audit` не должен отключать кеш). Зафиксировано AST-guard тестом `tests/test_application_context_role.py::TestProductionCallersDoNotUseDeprecatedKwargs` (параметризован на 3 entrypoint'а). Побочный эффект: флаг `benchmarks/runner.py --no-audit` больше не влияет на `ApplicationContext` (compat-граница удалена из вызова); для возврата контроля нужен отдельный конфиг-ключ вместе с change `remove-deprecated-enable-kwargs`.
+- **CLI/Gateway теперь используют единый `ApplicationContext`** с typed signature `ApplicationContext.create(role=..., **kwargs)`. **BREAKING** для callers передающих `profile`/`enable_*` как named params — переход на `**kwargs` или `SETTINGS["gateway"].*`.
+- **CLI = фиксированный профиль `test`** (design D8). **BREAKING**: пользователи запускавшие `cli_agent.py --profile=prod` должны перейти на `gateway.py`. Спецификация: `openspec/changes/unify-cli-gateway-architecture/specs/runtime/entrypoints/spec.md`.
+- **Cron = gateway-only** (design D7). **BREAKING**: в CLI `CronService` НЕ создаётся, даже если `gateway.enable_cron=True`. Решает проблему «два процесса выполняют один jobs.json дважды».
+- `gateway.enable_db_logging/enable_audit/enable_cron/print_llm_calls` — deprecated в `**kwargs`-обработке (`DeprecationWarning` с stacklevel=2). После change `remove-deprecated-enable-kwargs` — `TypeError`.
+- `ApplicationContext.start()`: после `_start_db_pool()` и до `RuntimeEventsSubscriber.start()` добавлен вызов `_validate_runtime_schema()`. При отсутствии любой из 6 runtime-таблиц — старт блокируется `SchemaValidationError` → `exit 2` + `stderr` через `gateway.main()` / `cli_agent.main()`. **BREAKING** для развёртываний, где таблицы не созданы — нужно предварительно применить `tools/migrate.py --apply` (для prod) или `tools/apply_test_profile_tables.py` (для test).
+- Дефолтный текст fallback-ответа при internal-ошибке (`RuntimePatcher._DEFAULT_INTERNAL_ERROR_TEXT`): `"Произошла внутренняя ошибка. Попробуйте позже."` → `"Не справился с этим запросом. Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."` — мягче, дружелюбнее, предлагает действие.
+- **`RuntimePatcher.apply_all` теперь вызывается строго один раз** из `ApplicationContext.create()` (см. `application_context.py:339-346`); удалён повторный вызов `patch_assemble_outbound` из `cli_agent._run_patched()` (был `cli_agent.py:174`). Контракт держится архитектурно (отсутствие повторных call site'ов) — никаких `already_patched`-флагов.
+- **`RuntimePatcher` больше не отвечает за регистрацию project tools.** Раньше `patch_project_tools` жил в `runtime_patcher.py:2279-2509` и звался из `apply_all()`. Тело переехало в `lib/services/project_tool_loader.py::register_project_tools`; `apply_all` больше не вызывает его; `PatchReport.details["project_tools"]` удалён; результат хранится в `ctx.project_tools_result: ProjectToolsLoadResult`. Баннер `_emit_project_tools_inventory_banner` (`application_context.py`) читает `project_tools_result.detail`, а не `patch_report.details["project_tools"]`. Семантика best-effort с частичным успехом и `[INTERNAL_FAILED]`-маркер на детали сохранена без изменений; `parse_project_tools_detail()` в `runtime_inventory.py` не переписывалась.
+- **Канонический runtime-patch inventory** теперь **попарно равен** в трёх источниках: имёнa patches из `apply_all()` AST, ключи `_PATCH_SPECS`, имена `canonical_runtime_patches()`. Все три множества содержат ровно **12 имён**. Точное соответствие проверяется exact-match тестом `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`; sanity-check на количество — отдельный тест `test_inventory_size_is_12`. Прежняя subset-проверка (`for key in expected: assert key in actual`) удалена — она маскировала drift (DEPRECATED-остатки).
+- **`PatchSpec.required` — единственный источник истины для criticality.** Удалён локальный hardcoded set `high_risk_required` из `runtime_inventory.canonical_runtime_patches()`; проекция идёт через `spec.required`. Семантика: `required=True` — failed/missing патч подсвечивается в startup-баннере (`_emit_patch_inventory_banner`) и в `diff_runtime_patches` как `missing_required` / `failed_required`. **НЕ** триггер прерывания startup (см. `openspec/specs/runtime/context/spec.md`, `openspec/specs/runtime/runtime-patcher/spec.md`).
+- `lib/services/schema_validation.py`: сообщения `SchemaValidationError` и `_MissingConfigKeys` переведены на русский (имена таблиц / профиля / config-ключей остаются латиницей). Подсказка стала actionable: для профиля `prod` — `python tools/migrate.py --apply`, для `test` — `python tools/apply_test_profile_tables.py`, для остальных — generic-вариант «примените миграции для выбранного профиля». Выбор команды — helper `_hint_for_profile(profile)`. Спека: `openspec/specs/runtime/startup-schema-validation/spec.md` (MODIFIED requirement «Сообщение об ошибке содержит список недостающих таблиц» + ADDED requirement про `_MissingConfigKeys`), opencode change `i18n-schema-validation-error`. Заодно исправлен структурный заголовок спеки (`## Требования` → `## Requirements`) — ранее archive OpenSpec не проходил из-за несоответствия грамматике.
 - **`agent_gateway_logs.user_id` (security boundary).** Колонка
   `user_id VARCHAR(256)` рядом с `request_id`/`session_id`/`channel`/
   `actor`/`name` + индекс `(user_id, "timestamp" DESC)`. Миграция
@@ -237,26 +220,6 @@
   `context_compaction._record_event_log` прокидывает `user_id` через
   `record_event(user_id=...)`. `record_event` теперь пишет колонку
   `user_id` в INSERT.
-
-### Removed
-
-- **`workspace/utils/event_log.py` удалён целиком.** Раньше был
-  fallback-sync-fallback-INSERT (`record_event` /
-  `record_sync_event` / `emit_sync_event`) для случая, когда
-  `DbLoggingService` ещё не доступен. Теперь единый путь —
-  `DbLoggingService.try_log_event(...)` с no-op for business +
-  operational WARNING. Удалён и тест `tests/test_event_log.py`.
-  Тесты `test_context_compaction.py` / `test_preload_service.py`
-  адаптированы под новый API (моки на
-  `lib.services.db_logging_service.try_log_event`).
-- **Дублирующие concern-проверки в `record_external_compaction`.**
-  Ранний return `if not self.notify_in_history: return` удалён —
-  ответственность за разделение concerns (UI-notice vs event log)
-  перенесена в `_notify`. См. подробности в
-  `docs/ARCHITECTURE.md` § «Управление сжатием контекста».
-
-### Changed (logging pipeline)
-
 - **Единый logging pipeline через `DbLoggingService`.** Producer'ы
   (`ContextCompactionService`, `PgDuckDbSyncService`, `DuckDbCacheStore`,
   `PreloadService`, `ApplicationContext._record_sync_skipped`) передают
@@ -271,65 +234,6 @@
   `enabled=True`, observability-trail `history_search(event_type=
   "context_compacted")` не зависит от UI-уведомления (закрывает gap №1
   из `docs/architecture/HISTORY_SEARCH_ANALYSIS.md` + design D8).
-
-### Fixed
-
-- **Cancellation now reaches active nanobot task.** Команды `/stop`,
-  `/restart`, `/status` (все priority-команды из
-  `nanobot.command.router.CommandRouter`) теперь доходят до AgentLoop
-  даже когда все обычные слоты (`max_concurrent=1`/`2`/N) заняты
-  активной задачей той же сессии. Реализовано через **priority polling
-  path** в `MessageExchange._poll_loop` (новый опциональный хук канала
-  `poll_priority_inbound`), который вызывается до проверки
-  `is_slot_free()` и не зависит от обычного concurrency. Для
-  PostgresChannel добавлен метод `poll_priority_inbound` +
-  `_poll_priority_once`, использующий параметризованный
-  `_claim_one(priority_contents=...)`, где `priority_contents` —
-  список всех priority-команд из
-  `lib.channels.priority_commands.get_priority_commands()`
-  (читается из `CommandRouter._priority` с fallback на дефолт).
-  Фильтр в SQL: `AND content = ANY(%s)`. После доставки команды в
-  `bus.publish_inbound` работает штатный механизм nanobot:
-  `cmd_stop` → `_cancel_active_tasks(effective_key)` (или `cmd_restart`
-  / `cmd_status` для соответствующих команд). Подробности и
-  acceptance-матрица — в `docs/ARCHITECTURE.md` § «Priority polling
-  path (для priority-команд nanobot)».
-
-### Added
-
-- **DB safety net в polling**: фильтр `AND status != 'cancelled'` в
-  `_claim_one_single` (3 места: основной WHERE, подзапрос по соседним
-  задачам, финальный UPDATE) и в `_claim_one` (worker_pool) — если AW
-  пометил user-сообщение как `cancelled` ДО polling, polling его
-  пропускает (race-free).
-- **Race-check после claim**: повторный `fetchval` статуса в
-  `_poll_once` и `_poll_priority_once` — если между SELECT подзапроса
-  и UPDATE захвата AW пометил `cancelled`, polling не диспатчит и
-  освобождает claim + lease + локальный контекст.
-- **Drop response в `_finalize_turn`**: если user-сообщение стало
-  `cancelled` пока LLM работала, финальный ответ не публикуется;
-  освобождаются slot, claim, context bridge; assistant-placeholder
-  удаляется. Status user'а НЕ переписывается (он уже `cancelled` от AW).
-- **Priority polling contract** в `MessageExchange`:
-  `poll_priority_inbound` — опциональный async-хук канала, вызывается
-  в `_poll_loop` **до** `poll_inbound`. Если хук не реализован
-  каналом — default-поведение через `getattr(..., None)` (другие
-  каналы не ломаются).
-- **`lib.channels.priority_commands.get_priority_commands()`** —
-  единый источник списка priority-команд nanobot для транспорта.
-  Читает `CommandRouter._priority` (duck-typing через
-  `hasattr(..., 'priority_commands')` для будущей совместимости);
-  fallback — захардкоженный `_DEFAULT_PRIORITY_COMMANDS = (
-  '/stop', '/restart', '/status')`.
-- **Тесты**: `tests/test_user_stop_signal_priority.py` (19 тестов —
-  priority claim filter, dispatch без slot/chat_inflight/placeholder,
-  race-fix, структурные проверки `_poll_loop`); расширен
-  `tests/test_user_stop_signal.py` (DB safety net, finalize drop).
-- **Static-audit тест** `test_postgres_channel_static_audit.py::test_claim_one_routes_single_to_single_method`
-  обновлён под параметризованный `_claim_one_single(priority_contents=...)`.
-
-### Changed
-
 - **Vector-индекс собирается в памяти из DuckDB-снапшота** `gateway.vector.index.storage_table`
   (синхронизируется через `PgDuckDbSyncService`). `provider.preload_indexes`
   при старте gateway прогревает все индексы синхронно до сигнала `READY`;
@@ -347,9 +251,6 @@
   удалённой `agent_vector_index_store`; `stale` — из
   `loaded_items[i]["signature_status"]` (inline-вычисленный при прогреве),
   без чтения persisted `metadata.signature`.
-
-### Changed
-
 - **Профиль конфигурации теперь определяется только CLI-флагом
   `--profile`** (whitelist: `prod`, `test`). Все три `application
   entrypoint` (`gateway.py`, `cli_agent.py`, `streamlit_app.py`)
@@ -422,9 +323,55 @@
   `ApplicationContext` → `DbLoggingService.__init__`; вне диапазона —
   `pydantic.ValidationError` на старте `ApplicationContext.create`.
   Сервис НЕ читает конфиг напрямую. См. `AGENTS.md` § «Configuration».
+- `lib/session/pg_session_manager.py` — `PGSessionManager` стал
+  тонким compatibility layer поверх upstream `SessionManager`.
+  Hot-path методы (`get_or_create`, `save`, `list_sessions`,
+  `read_session_metadata`, `read_session_file`, `delete_session`)
+  делегируются в `super()`. Никаких прямых SQL-операций в
+  `agent_session_meta` / `agent_session_messages` в hot path.
+- `lib/core/application_context.py` — создание
+  `SessionColdSyncService` и `LLMUsageStore`, lifecycle
+  (start/stop), обёртка `provider_snapshot_loader` через
+  `AgentFactory.create(... usage_store=...)`.
+- `lib/core/project_settings.py` — `UsageStoreSettings`,
+  `SessionColdSyncSettings` под `gateway.usage_store.*` /
+  `gateway.session_cold_sync.*`.
+- `project.json` — секции `gateway.usage_store.*` (дефолт
+  `enabled=true`) и `gateway.session_cold_sync.*`
+  (`enabled=true`, `sync_interval_sec=30.0`, `batch_size=50`).
+- `tests/test_config_keys.py` — `REQUIRED_KEYS` записи для
+  `gateway.usage_store.enabled` и
+  `gateway.session_cold_sync.{enabled,sync_interval_sec,batch_size}`.
+- `lib/services/context_compaction.py` и
+  `tools/generate_comments_sql.py` — обновлены docstring /
+  комментарии: сессии живут в upstream JSONL (`SessionManager`),
+  mirror — через `SessionColdSyncService`.
+
+### Deprecated
+
+- Передача `enable_db_logging`/`enable_audit`/`enable_cron`/`print_llm_calls` как keyword arguments в `ApplicationContext.create(...)` — use `SETTINGS["gateway"].*`. Будет удалено в change `remove-deprecated-enable-kwargs`.
 
 ### Removed
 
+- `RuntimePatcher.patch_project_tools` — перенесён в `lib/services/project_tool_loader.py::register_project_tools` (см. opencode change `runtime-patcher-composition-cleanup`, Phase 4). `RuntimePatcher` более **не** импортирует `workspace.tools.*`, **не** строит `ToolContext`, **не** вызывает `agent.tools.register(...)` — граница защищена AST-тестом `tests/test_runtime_patcher_no_project_tools_boundary.py`.
+- `PatchSpec` для `compact_tracking`, `compact_command`, `idle_guard` — DEPRECATED-остатки от `nanobot-035-upgrade` удалены из `_PATCH_SPECS` (без deprecation period). Реальный функционал перенесён:
+  - `compact_tracking` → `lib/services/compaction_event_subscriber.py` через `OutboundMessage.event: ContextCompactionEvent`;
+  - `compact_command` → upstream `nanobot.command.builtin.cmd_compact`;
+  - `idle_guard` → upstream `AutoCompact._is_expired` при `_ttl <= 0`.
+- **`workspace/utils/event_log.py` удалён целиком.** Раньше был
+  fallback-sync-fallback-INSERT (`record_event` /
+  `record_sync_event` / `emit_sync_event`) для случая, когда
+  `DbLoggingService` ещё не доступен. Теперь единый путь —
+  `DbLoggingService.try_log_event(...)` с no-op for business +
+  operational WARNING. Удалён и тест `tests/test_event_log.py`.
+  Тесты `test_context_compaction.py` / `test_preload_service.py`
+  адаптированы под новый API (моки на
+  `lib.services.db_logging_service.try_log_event`).
+- **Дублирующие concern-проверки в `record_external_compaction`.**
+  Ранний return `if not self.notify_in_history: return` удалён —
+  ответственность за разделение concerns (UI-notice vs event log)
+  перенесена в `_notify`. См. подробности в
+  `docs/ARCHITECTURE.md` § «Управление сжатием контекста».
 - **Таблица `public.agent_vector_index_store`** (имя бралось из
   `gateway.vector.index.signature_table`) — DDL помечен DEPRECATED,
   миграция `sql/migrations/V003__drop_vector_index_store.sql` удаляет её.
@@ -460,17 +407,103 @@
   Деплои, использующие эту переменную, должны быть переведены на
   `command: python gateway.py --profile=prod` (см. `docs/PROFILES.md`
   § «Migration»).
-
-### Known Issues
-
-- **`tests/test_history_search_tool.py::test_search_current_session_filters_by_session`**:
-  order-dependent flake — патч `utils.db.fetch` ломается в полном прогоне
-  после `test_streamlit_app.py` (который переустанавливает `sys.modules["utils.db"]`
-  через собственный mock). Помечен `@pytest.mark.xfail(strict=False)` с TODO
-  на отдельный change. Pre-existing, не связан с config-profile-cli-flag.
+- `lib/commands/compact_command.py` — заменено upstream `cmd_compact`.
+- `lib/hooks/base_tool_tracking_hook.py` — обёртки над публичным
+  API перенесены inline в конкретные хуки.
+- `RuntimePatcher.patch_compaction_tracking`,
+  `RuntimePatcher.patch_compact_command`,
+  `RuntimePatcher.patch_auto_compact_idle_guard` — функционал
+  перенесён на upstream-механизмы (см. Upgrade выше).
+- `RuntimePatcher.patch_context_bridge_seed` сохранён как no-op для
+  совместимости `PatchReport`; реальный seed через
+  `bus.subscribe(TurnRuntimeAdmitted)`.
 
 ### Fixed
 
+- **Gateway больше не держит открытым файл кэша — снапшот стал отдельным от рабочей базы.** Symptom: skill не мог прочитать кэш при работающем gateway, получая «DuckDB-кеш не найден» при существующем файле.
+  - **Причина.** Начиная с `85e962c5` (Stage B+E) OWNER открывал рабочую БД **на самом файле снапшота** (`DuckDbCacheStore.open(path=publish_path, mode=READ_WRITE)`), и это делалось ради `reuse_ttl_hours` — чтобы «не грузить заново», нужен был доступ к данным из самого файла. DuckDB допускает ровно одно соединение на файл, поэтому второй процесс (CLI навыка, READER) получал `IOException: File is already open in <python> (PID ...)` даже с `read_only=True`. `open_cache()` глотал причину (`except Exception: return False`), а `_open_db()` превращал её в «файла нет / запустите gateway» — при том, что gateway как раз был запущен. Вектора при этом работали: `search_vector` читает то же самое уже открытое соединение, второго открытия он не делает.
+  - **Что сделано.** OWNER держит рабочую БД **в памяти** (`DuckDbCacheStore.open(path="")`), снапшот — отдельный файл, который открывается только на время публикации. Новая `DuckDbCacheStore.adopt_snapshot()` реализует reuse: `ATTACH <snapshot> (READ_ONLY)` → копирование таблиц и `__cache_meta` → `DETACH`, после чего файл свободен.
+  - **В `publish()`** удалён обход `close() → os.replace → reopen`, который существовал только из-за совпадения рабочей базы и снапшота (на Windows `os.replace` поверх файла с открытым handle даёт `WinError 5`). Такая конфигурация теперь **отвергается явно** вместо тихой поломки; `tests/test_duckdb_cache_store.py` закрепляет оба исхода.
+  - **В `gateway.py`** «переиспользовать» теперь означает «прочитать файл» (`adopt_snapshot`), а не «файл уже открыт»: прежний критерий `is_ready()` для in-memory базы был истинно при полном отсутствии данных и мог молча поднять gateway без кэша.
+  - **Доступ агента к аудиту** переведён с CLI на in-process tool'ы `duckdb_query` / `vector_search` (возвращены из `12bf1823^`): они исполняются в процессе gateway на его живом `CacheProvider` и файла не касаются. Документация агента (`AGENTS.md`, `workspace/TOOLS.md`, `skills/audit_analyzer/SKILL.md`) переведена с CLI на tool'ы; гард «этап 18» в `tests/test_skill_tool_integration.py` заменён на проверку «tool'ы есть И доки не отправляют агента в CLI».
+  - **Проверено на живых данных**: процесс-OWNER (рабочая БД в памяти, снапшот загружен через `adopt_snapshot`) и дочерний процесс с `cli.py --list-scripts` одновременно — `status=success`, 6 скриптов из `public.agent_predefined_scripts`.
+
+- **Агент больше не бросает много-минутный анализ документов на середине.** Symptom: `legal_summarizer` на большом документе (skill сам оценивает `estimated_total_sec ≈ 440`) бросался живьём, агент начинал заново, контекст оборота раздувался до `ContextWindowExceededError`.
+  - **Ограничение было не в shell.** Фактический бюджет задаётся `gateway.exec_timeout` (`project.json`), и он уже `0` — без лимита; `apply_timeouts` переносит его в `config.tools.exec.timeout`, поэтому правка последнего бесполезна. Потолок явного per-call `timeout=` поднимает `RuntimePatcher.patch_exec_timeout_cap` до `gateway.exec_timeout_cap_sec = 3600`.
+  - **А настоящее ограничение было в инструкции для агента:** ПРАВИЛО #5 в `skills/legal_summarizer/SKILL.md` разрешало «не более 2 попыток `write_stdin(wait_timeout_ms=120000)`» — это ≈4 минуты ожидания против ≈7-минутной оценки самого навыка. Живые фоновые процессы бросались, запуски дублировались, оборот раздувался.
+  - **ПРАВИЛА #4 и #5 переписаны:** ожидание строится по `estimated_total_sec` (+30% запаса), а потолок `wait_timeout_ms ≤ 120000` трактуется как ограничение **одного** вызова, а не всего ожидания. Перезапуск без `--operation-id` по-прежнему запрещён — он и был источником дублирования работы.
+  - **Мёртвый ключ помечен:** `project.json::cli.exec_timeout = 60` не читается ни кодом проекта, ни nanobot; в комментарии сказано, что реальный бюджет — `gateway.exec_timeout`.
+  - **Гард:** `tests/test_docs_consistency.py` — запрет возврата правила «не более 2 попыток» и требование, чтобы `gateway.exec_timeout` не убивал много-минутные навыки (`0` или ≥ 900). Проверено подсадкой старого правила: тест краснеет, файл восстанавливается побайтово.
+
+- **`gateway.py` больше не затирает PK-aware колбэк upsert.** `_make_sync_services` вешает `_upsert_with_pk`, которая передаёт `key_column=sync.key_column_for(table)`, но entrypoint переустанавливал колбэк на голый `cache_store.upsert_records` (`key_column=None`). Таблицы с PK не `id` (`public.agent_predefined_scripts`, PK `name`) уходили в ветку `CREATE OR REPLACE`, а батчи `_fetch_incremental` являются дельтой — несвязанные строки молча терялись. Симптом («нет ключа upsert») проявлялся только когда таблица уже была в DuckDB, то есть не на первом запуске, а на всех последующих — из-за чего дефект и выглядел не связанным с профилем.
+
+- **Порядок старта «DuckDB → векторы → каналы» (change `startup-vector-preload-gate`)**:
+  Каналы (приём вопросов) больше не стартуют, пока не загружены данные и не собраны FAISS-индексы. Раньше preload векторов уезжал в фоновую задачу, а `channels.start_all()` стартовал сразу — первые вопросы обслуживались с пустым FAISS-кэшем, что выглядело как «модель дурит».
+  - `lib/services/startup_gate.py` → `StartupGate`: два явных шага — `wait_for_cache(signal)` (ждёт сигнал `PgDuckDbSyncService` «данные в DuckDB + снапшот опубликован») и `load_vectors()` (ждёт завершения сборки индексов). Фазы `pending → cache_ready → vectors_ready | unavailable | skipped`; фаза читается readiness-проверкой `vector_search`.
+  - **Без таймаутов и ретраев**: готовность определяется сигналом, а не истечением времени — иначе процесс «незаметно» начинал бы отвечать без векторов. Гард — `tests/test_startup_gate.py::TestNoTimeoutsInGate` (AST-проверка вызовов `wait_for`/`sleep`/`timeout=` + проба подсаженным дефектом).
+  - `ThreadSafeSignal`: сигнал из worker-треда синхронизации будит ожидающий loop через `call_soon_threadsafe`. Наивный `asyncio.Event.set()` из чужого потока loop не будит — без таймаутов ожидание зависло бы навсегда уже после загрузки данных.
+  - `gateway.py`: фаза `_run_startup_preparation()` выполняется ДО `GatewayRunner.run_forever` (у подготовки своя семантика отказа — рестарт по backoff повторял бы ошибку по кругу). `_run(ctx)` поднимает каналы, уже зная, что векторы готовы. Сигнал готовности данных выставляется ПОСЛЕ `publish()` снапшота.
+  - Политика `gateway.startup.vector_preload.on_unavailable`: `warn` (дефолт) — degraded-старт с предупреждением; `fail` — `StartupGateError` → `FATAL` + `exit 2`, каналы не подняты. Плюс явные выключатели `enabled` и `await_ready` (старый режим «индексы в фоне»).
+  - Composition: `ApplicationContext.create()` публикует `ctx.startup_gate` (+ `ctx.cache_ready_signal`, `ctx.background_vector_preload`); конфиг типизирован через `StartupVectorPreloadSettings` и задокументирован в `project.json`. Результат фазы пишется событием `startup_vector_preload` в `agent_gateway_logs`.
+  - **Tests**: `tests/test_startup_gate.py` (33), `tests/test_gateway_startup_gate.py` (13) — приёмка проверяет наблюдаемый порядок в реальном `_entrypoint_main` (`cache.connect → sync.start → cache.publish → vector.preload → channels`) и то, что подсаженный дефект порядка её роняет.
+  - **Fix (попутно)**: фикстура fake-модулей в `tests/test_application_context.py` дополнена пакетом `nanobot.agent.tools` (`registry` + `base`) под nanobot 0.3.5 — чинит 8 ранее падавших тестов файла (`ModuleNotFoundError: nanobot.agent.tools`).
+
+- **`change `unify-cli-gateway-architecture` — Stage C/D/B/E/F/7 (композиция CLI/Gateway, CacheProvider mode + ownership, CLI = fixed test profile)**:
+  - `sql/migrations/V005__create_agent_cache_ownership.sql` — таблица `public.agent_cache_ownership` (`resource_key`, `owner_id`, `generation`, `acquired_at`, `last_heartbeat_at`, `expires_at`). Фиксированный `resource_key='local_cache'` идентифицирует логический cache resource. `generation` — монотонно растущий fencing token. TTL 60 сек. `INSERT ... ON CONFLICT` под `pg_advisory_xact_lock(hashtext(resource_key))`.
+  - `lib/services/cache_ownership.py` — `CacheOwnershipCoordinator` (`try_claim` / `heartbeat` / `release` / `acquire_write_fence`), `CacheAccessMode` (READ_WRITE/READ_ONLY), `ClaimResult` (frozen dataclass), `OwnershipLostError`. Атомарный PG-claim с инкрементом generation при takeover.
+  - `lib/services/cache_provider.py` — два новых exception: `UnsupportedSqlError` (DDL rejected в любом mode), `ReadOnlyAssertionError` (DML rejected в READ_ONLY). `CacheProvider` ABC MUST NOT иметь метода `open()` — это ответственность concrete factory (D14 layered architecture).
+  - `lib/services/duckdb_cache_store.py` — `@classmethod DuckDbCacheStore.open(path, mode)` — concrete factory. `mode=READ_ONLY` → DuckDB physical read-only connection (первый уровень защиты). `mode=READ_WRITE` → обычное открытие. `_reject_unsupported_filesystem(path)` — NFS/SMB/CIFS rejection через `/proc/mounts` (D11/D12). `query_sql()` — `_assert_query_sql_allowed_locked` (второй уровень защиты): DDL → UnsupportedSqlError, DML в READ_ONLY → ReadOnlyAssertionError. CREATE SCHEMA skipped в READ_ONLY mode (DuckDB физически запрещает). Instance method `open()` сохранён как alias `connect()` для back-compat с `gateway.py`/`runner.py`.
+  - `lib/services/pg_duckdb_sync_service.py` — fencing integration: `__init__` принимает `ownership_coordinator` + `cache_provider` (kw-only). `_sync_cycle_with_fence()` оборачивает `_poll_changes()` в `coord.acquire_write_fence()`. При `OwnershipLostError` — log + `_running=False` (worker останавливается, следующий takeover может перехватить ownership).
+  - `lib/core/application_context.py` — composition wiring:
+    * `ApplicationContext.create(role: Literal["gateway", "cli"], **kwargs)` — typed signature без `profile`/`enable_*` в named params; deprecated kwargs через `**kwargs` с `DeprecationWarning` + defaults из `SETTINGS["gateway"].*`.
+    * `ctx.role`, `ctx.enable_db_logging`, `ctx.enable_audit`, `ctx.enable_cron`, `ctx.print_llm_calls`, `ctx.ownership_coordinator`, `ctx.cache_provider` — новые поля.
+    * `_make_sync_services` создаёт `CacheOwnershipCoordinator`, делает `try_claim()`, открывает `DuckDbCacheStore.open(path, mode)` с mode из claim (READ_WRITE для OWNER, READ_ONLY для READER). `sync_service` создаётся ТОЛЬКО для OWNER.
+    * `CronService` создаётся только при `role="gateway"`. При `role="cli"` значение `gateway.enable_cron` MUST быть проигнорировано (D7 cron = gateway-only).
+    * `ctx.stop()` вызывает `ownership_coordinator.release()`.
+  - `cli_agent.py` (Stage F) — `CLI_FIXED_PROFILE = 'test'`; `--profile` MUST NOT приниматься; передача → `ConfigurationError` + `exit 2`. CLI не читает profile из окружения (D8).
+  - `config.py::PROFILE_OWNED_RUNTIME_KEYS` — явно документировано: `gateway.cache.local_path` MUST NOT быть profile-owned (shared runtime resource, D11).
+  - **Tests**: `test_cache_ownership_claim.py` (18), `test_cache_provider_mode.py` (21), `test_application_context_role.py` (10), `test_application_context_cache_lifecycle.py` (14), `test_cli_agent_profile.py` (11), `test_shared_cache_path_across_profiles.py` (6).
+- **CLI вывод в Windows-консоли: ANSI-стили (``[dim]→ LLM: ...``) рендерились как ``?[2m→ LLM: ...?[0m``.** Без `ENABLE_VIRTUAL_TERMINAL_PROCESSING` legacy Windows-консоль (cmd/PowerShell ISE) интерпретирует `\x1b` как непечатный символ и подменяет на `?` — все Rich-выводы (DB hook `→ LLM:`/`← LLM:`, `📊 Контекст:`, dim-italic reasoning) выглядели одинаково с plain-текстом и одновременно портили прокрутку. Современный Windows Terminal включает VT по умолчанию, классический cmd/ISE — нет. Добавлен `lib/utils/windows_terminal.py::enable_vt()` (`ctypes.SetConsoleMode(... | 0x4)` на STDOUT/STDERR) — вызывается на старте из `cli_agent.py` и `gateway.py` в самом начале импорта (ДО первого Rich-вывода и `Console()`-инициализации); fail-soft на не-Windows и на stdout-не-tty. Покрыто `tests/test_windows_terminal.py` (3 кейса: posix no-op, piped-stdout skip, win32-tty invokes SetConsoleMode дважды с флагом 0x4).
+- **`ApplicationContext.stop()` НЕ закрывал `cache_provider` → `cache.duckdb` оставался залоченным.** DuckDB-коннект OWNER-процесса не освобождал файл даже после явного `exit` — следующий инстанс (`python cli_agent.py` повторно или `gateway.py` на той же машине) падал с `IO Error: Cannot open file "cache.duckdb": Процесс не может получить доступ к файлу`. Добавлен `cache_provider.close()` в `stop()` между `usage_store.close()` и `ownership_coordinator.release()` — fail-soft. Покрыто `tests/test_application_context_role.py::TestStopClosesCacheProvider` (3 кейса: close вызывается, skip когда `cache_provider is None`, идемпотентность при `_started=False`).
+- **`DatabaseLoggingHook._print_llm_tokens` → plain `print()` вместо `Rich Console.print("[dim]...")`.** После включения `ENABLE_VIRTUAL_TERMINAL_PROCESSING` prompt_toolkit при инициализации сессии и при `_read_interactive_input_async()` откатывает `ConsoleMode` (line-input mode → VT сброшен) — последующий Rich-вывод уезжал с ANSI в legacy cmd/PowerShell ISE как ``?[2m→ LLM: ...?[0m`` (видим на 2+ turn). Двойная мера: (1) DB hook больше не использует Rich для этих строк — `print()` без ANSI, debug-вывод всегда читаем; (2) `lib/cli/console_loop.py::run_repl` после `_init_prompt_session()` и после каждого `_read_interactive_input_async()` повторно вызывает `enable_vt()` (fail-soft, no-op на POSIX). Покрыто: `tests/test_hooks_database_logging.py::test_after_iteration_prints_llm_tokens` (мок `builtins.print`), `tests/test_hooks_database_logging.py::test_after_iteration_does_not_print_when_disabled`. Параллельно убран неиспользуемый `from rich.console import Console; console = Console()` из модуля DB hook.
+- **Данные PG доходят до DuckDB-кэша: были потеряны колбэки `PgDuckDbSyncService`.** `_make_sync_services` создавал `PgDuckDbSyncService`, но никогда не вызывал `set_on_new_records_callback()` / `set_on_replace_records_callback()` / `set_on_sync_callback()`. `_dispatch()` при `_on_new_records=None` делает **молчаливый** `return` — строки из PG терялись без исключения и без traceback. Wiring жил в callers (`gateway.py`, `benchmarks/runner.py`) и потерялся при консолидации; теперь выставляется в composition root (`lib/core/application_context.py`), а callers, которым нужен свой хук, MUST chaining-ить предыдущий колбэк (как это делал прежний `benchmarks/runner.py` для `first_sync_event`).
+- **`DuckDbCacheStore.publish()` на Windows: `WinError 5` при `os.replace`.** Реальная конфигурация OWNER'а открывает живое RW-соединение DuckDB ровно на том файле, который `publish()` подменяет через `os.replace`. На Unix replace поверх открытого файла разрешён, поэтому баг был невидим; на Windows — `ERROR_SHARING_VIOLATION` («целевой файл занят читателем»). Теперь соединение закрывается → файл подменяется → соединение открывается заново. Порядок важен и для консистентности: DuckDB на `close()` делает checkpoint и **удаляет** `<target>.wal`, поэтому replace до close оставил бы осиротевший `cache.duckdb.wal` от старого файла. Покрыто `test_publish_works_when_cache_path_equals_publish_path` и `test_publish_leaves_no_tmp_files_behind` — остальные publish-тесты использовали `cache_path=""` (in-memory) и этот случай не покрывали.
+- **Устранена латентная потеря строк при инкрементальном sync для таблиц без колонки `id`.** `_upsert_locked()` дефолтно использовал колонку `id` как ключ upsert; для таблиц с другим PK (`public.agent_predefined_scripts` → PK `name`) он уходил в `CREATE OR REPLACE TABLE`. Поскольку `_fetch_incremental()` отдаёт **дельту** (`WHERE track_col > last`), несвязанные строки молча удалялись — при правке одного скрипта в кэше осталась бы одна строка вместо шести. Добавлен `PgDuckDbSyncService.key_column_for()` (резолв PK из `pg_index`/`pg_attribute`, кэш на таблицу, составной PK → `None`) и keyword `key_column` в `DuckDbCacheStore.upsert_records()`. Fallback-пересоздание сохранён, но его warning теперь прямо называет себя деструктивным для дельты.
+- **`lib/cli/console_loop.py` — интерактивный REPL CLI не запускался на nanobot 0.3.5.** `run_repl()` импортировал приватные REPL-хелперы из `nanobot.cli.commands`, но в 0.3.5 они переехали в `nanobot.cli.terminal` (upstream сам импортирует его как `cli_terminal` в `nanobot/cli/agent.py`): `_init_prompt_session`, `_is_exit_command`, `_read_interactive_input_async`, `_restore_terminal` отсутствовали → `ImportError: cannot import name '_init_prompt_session' from 'nanobot.cli.commands'` на каждом старте `python cli_agent.py` после баннера. Добавлен version-agnostic адаптер **`lib/cli/nanobot_cli_compat.py`** (именно он был предписан в `docs/architecture/nanobot-inventory.md:100` как RED-запись «изоляция: тонкий адаптер `lib/cli/nanobot_cli_compat.py`»): `get_repl_helpers()` резолвит 6 приватных хелперов по кандидатам `nanobot.cli.terminal` → `nanobot.cli.commands` и `nanobot.cli.runtime_config` → `nanobot.cli.commands` → `nanobot.cli.terminal`, выбирая модуль с наибольшим числом совпадений; при недоступном символе бросается `AttributeError` с поимённым списком отсутствующих имён (вместо невнятного `ImportError` на длинном кортеже); результат кэшируется в `_resolved`. `__logo__`/`__version__` берутся из публичного `nanobot` (`get_logo_version()`), `_model_display` обёрнут в `model_display()` со `str()`-coercion. `console_loop.run_repl()` больше не содержит ни одного version-specific импорта. Регрессия закрыта `tests/contract/test_nanobot_cli_compat.py` (8 кейсов, включая AST-guard «в `run_repl` нет прямых импортов `nanobot.cli.commands`/`nanobot.cli.terminal`» и проверку диагностического `AttributeError`).
+- **`cli_agent.py` — `python cli_agent.py` падал с `TypeError` ещё до REPL.** Оба call-site'а `run_repl()` (`_run_vanilla` и `_run_patched`) передавали несуществующий kwarg `db_logging_service=ctx.db_logging_service` → `TypeError: run_repl() got an unexpected keyword argument 'db_logging_service'`. Мёртвый kwarg удалён из обоих вызовов; 4 теста `TestParseArgs` в `tests/test_cli_agent.py` переведены на Stage F-контракт (CLI без `--profile`, `args.profile == "test"`).
+- `lib/services/schema_validation.py`: сервис не разворачивал `_LazySettings` proxy при извлечении 6 runtime-имён из `SETTINGS` — `isinstance(proxy, dict) == False`, поэтому обход по путям падал на первом уровне и `SchemaValidationService.expected_table_names()` поднимала `_MissingConfigKeys` со списком ВСЕХ 6 ключей (`<settings>.channels.postgres.table_name` …), блокируя старт gateway **даже когда таблицы есть в БД**. Добавлен `_unwrap_settings()` (тот же паттерн, что в `config.require_setting` / `config.get_setting`); формат сообщения для `_MissingConfigKeys` переработан — `MissingTable` тут неуместен (ключ конфига ≠ таблица БД).
+- `lib/hooks/database_logging_hook.py`: добавлен адаптер `_usage_to_dict(usage: Any) -> dict | None` для нормализации `LLMUsage` dataclass / `dict` / `None` → per-turn dict с полями `prompt_tokens`/`completion_tokens`/`total_tokens`/etc. Контракт по дизайну D2 opencode change `post-0-3-5-hook-migration` (см. `openspec/changes/archive/2026-09-27-post-0-3-5-hook-migration/design.md:36-66`). Без адаптера `RuntimePatcher.patch_subagent_logging` (`lib/services/runtime_patcher.py:1882`) падал с `ImportError: cannot import name '_usage_to_dict'` и подагент-логирование в `agent_gateway_logs` не работало — в startup-логе это проявлялось как warning `1 runtime patch(es) failed: ['subagent_logging']`. Адаптер fail-soft (на любом неожиданном типе или исключении — `None`).
+- `RuntimePatcher.patch_turn_delivery_fail`: исправлена отправка двойного outbound — пользователь получал и fallback-ответ, и upstream-литерал `"Sorry, I encountered an error."`. Теперь на время вызова оригинального `fail()` атрибут `self.bus` подменяется на per-instance прокси `_OutboundSilencer`, который подавляет `publish_outbound`, но пропускает остальные методы bus и сохраняет `turn_completed` runtime-event (`openspec/changes/fix-error-fallback-double-outbound`).
+- `RuntimePatcher.patch_turn_delivery_fail`: payload `turn_failed` в `agent_gateway_logs` дополнен полями `exception_type`, `exception_message`, `exception_available`, `sender_id`, `agent_id`. Захват исключения через `sys.exception()` (вызов идёт изнутри `except`-блока в `loop.py:1480-1482`); `session_key` теперь берётся из `TurnDelivery.session_key` (раньше всегда был `null` — `lifecycle_message.session_key` не существует), идентификатор пользователя — из `lifecycle_message.sender_id` (раньше `null` — `lifecycle_message.user_id` не существует).
+- `RuntimePatcher.apply_all`: `patch_turn_delivery_fail` теперь получает `agent_id`, резолвленный из `config.agents.defaults.name` (с fallback на `config.default_agent` / `agent.name` / `None`).
+- **Дублирование runtime patches в CLI**: в `cli_agent._run_patched()` после `ApplicationContext.create()` ещё раз вызывался `ctx.runtime_patcher.patch_assemble_outbound(ctx.agent, ctx.tool_audit_hook)` (`cli_agent.py:174`). Поскольку `RuntimePatcher.apply_all()` уже применяет `assemble_outbound` в `create()`, повторный вызов приводил к double-wrap (агент получал outbound, обёрнутый дважды — лишний слой metadata). Удалён; см. opencode change `runtime-patcher-composition-cleanup`.
+- **Drift между `_PATCH_SPECS` и реально вызываемыми patches**: `turn_delivery_fail` и `session_dir_watch` вызывались из `apply_all()` без `PatchSpec` (drift); `compact_tracking`/`compact_command`/`idle_guard` числились в `_PATCH_SPECS` как DEPRECATED, но не вызывались (drift в обратную сторону). Дрейф был невидим из-за subset-проверки `for key in expected: assert key in actual`. Добавлены спеки для двух отсутствующих патчей; удалены три DEPRECATED. Финальный inventory — 12 patches во всех трёх множествах (см. `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`).
+- `lib/hooks/{database_logging_hook,tool_audit_hook,terminal_tool_print_hook}.py`: три фреймворковых хука не наследовали `nanobot.agent.AgentHook` — bare-классы без базы. После апгрейда до nanobot 0.3.5 `CompositeHook` начал раскручивать `before_run`/`finalize_content` через `getattr(h, method_name)` (см. `nanobot/agent/hook.py:174,268`): все три хука ловили `AttributeError`. Для `before_run`/`before_iteration`/etc. ошибка проглатывалась `CompositeHook._for_each_hook_safe` (только ERROR-лог), но для `finalize_content` — без изоляции (доказанно в docstring upstream'а: «pipeline — no isolation, bugs should surface»), и `finalize_content` ВСПЛЫВАЛ и ронял оборот (`Error processing message … 'DatabaseLoggingHook' object has no attribute 'finalize_content'`). Теперь все три хука наследуют `AgentHook` + `super().__init__()` для инициализации `AgentHook._reraise`. Регрессия закрыта двумя тестами: `tests/contract/test_hook_subclass_contract.py::test_custom_hook_inherits_agent_hook` и `tests/contract/test_composite_hook_lifecycle.py::TestCompositeLifecycleWithRealNanobot` (полный lifecycle на реальном `CompositeHook` с реальными `LLMUsage`/`LLMResponse`/`ToolCallRequest` из nanobot).
+- `lib/hooks/database_logging_hook.py`: четыре сайта всё ещё трактовали `context.usage` как `dict` (`_store_iteration_usage`, `_make_run_event`, `after_iteration`, `_print_llm_tokens`) — после апгрейда nanobot 0.3.5 `AgentHookContext.usage` стал `LLMUsage` (frozen dataclass, имеет `to_turn_dict()`/`to_dict()`). Падало с `TypeError: 'LLMUsage' object is not iterable` в `_store_iteration_usage` и с `'LLMUsage' object has no attribute 'get'` в `_make_run_event`/`_print_llm_tokens`. Все четыре сайта переведены на `_usage_to_dict(getattr(context, "usage", None)) or {}` (тот же адаптер, что уже использовался в subagent-пути). Хранилище `_CONTEXT_BRIDGE[session_key]["usage"]` теперь ГАРАНТИРОВАННО содержит `dict` — downstream `get_context_window`/`get_iteration_usage`/`patch_assemble_outbound` могут безопасно звать `.get(...)`. Регрессия закрыта `tests/contract/test_usage_to_dict_contract.py` (type contract адаптера против реального `LLMUsage.reported(...)`) + `tests/test_database_logging_bridge.py::test_accepts_llm_usage_dataclass` и `test_compose_block_from_stored_llm_usage`. Доказательство, что без фикса падают оба регресс-теста, проверено `git stash` экспериментом: 12 (AgentHook) + 3 (LLMUsage) теста ловят именно эти регрессии.
+- `lib/hooks/tool_audit_hook.py::format_tool_params`: в nanobot 0.3.5 `ToolCallRequest.arguments: Any` стал dict, а не JSON-string (см. реальный dataclass в `nanobot/providers/base.py` — `arguments: Any`, фактически dict после парсинга provider'ом). Старый код `json.loads(p["arguments"])` падал в `except`, итог: `metadata._tool_audit` рендерил `_="{'path': '/x'}"` вместо `path='/x'`. Helper переписан под три формы: dict (0.3.5+ primary), JSON-string (legacy), None / прочее. Закрыто тестами `tests/test_hooks_tool_audit_hook.py::TestFormatToolParams::test_handles_dict_arguments_nanobot_035` (mock) и `tests/contract/test_usage_to_dict_contract.py::test_format_tool_params_handles_real_tool_call_request_dict_arguments` (реальный `ToolCallRequest`).
+- `lib/channels/priority_commands.py`: `CommandRouter._priority` в nanobot 0.3.5+ существует как **пустой** `{}` сразу после `CommandRouter()` (раньше атрибут был только при зарегистрированных handler'ах). Старый код на строке 48 делал `if hasattr(router, "_priority") and isinstance(router._priority, dict): return tuple(router._priority.keys())` → возвращал `()` вместо fallback `_DEFAULT_PRIORITY_COMMANDS`. Семантика изменена: `get_priority_commands()` теперь возвращает **объединение** defaults и router (без дублей), с floor из `("/stop", "/restart", "/status")`. Каналы `PostgresChannel`/`RedisChannel` снова фильтруют priority-polling правильно. Регрессия закрыта `tests/test_priority_commands.py` (6 кейсов).
+- `lib/utils/outbound_meta.py`: legacy fallback `outbound_event_from_message(msg)` (направление `msg → event`) удалён в nanobot 0.3.5 — заменён `outbound_message_for_event(event, *, channel, chat_id, ...) → msg` (обратное). Поскольку наш primary path `getattr(msg, "event", None)` уже возвращает типизированный ивент в 0.3.5, legacy-fallback был мёртвым кодом. Удалён; регресс-тест `tests/test_outbound_meta.py::TestTypedEvent::test_does_not_import_legacy_nanobot_function` фиксирует контракт.
+- `lib/hooks/database_logging_hook.py` + `lib/core/agent_factory.py`: `LLMResponse.model` удалён в nanobot 0.3.5 (модель теперь живёт на `AgentLoop.model` → `runtime_resolver.runtime.model`, см. `nanobot/agent/loop.py:218`). Старый `getattr(response, "model", None)` всегда `None`, `log_llm_call(name="llm", ...)` терял имя модели в `agent_gateway_logs`. Реализован closure `get_model: Callable[[], str | None]`, который `AgentFactory.create()` закрывает над `lambda: agent.model` через мутируемый контейнер `_agent_box[]` (заполняется ПОСЛЕ `AgentLoop.from_config`). Хук вызывает `get_model()` лениво в `after_iteration` — каждый оборот читает текущее имя модели, поддерживает runtime-смену через `set_runtime_model(...)`. При отсутствии/исключении — fail-soft на `None`. Регрессия закрыта `tests/contract/test_database_logging_get_model.py` (6 кейсов: capture, None-legacy, fail-soft, factory-plumbing, lazy-rebinding, сквозной интеграционный `AgentFactory.create()` → `hook_factories[0]` → `llm_call.model`).
+- **Cancellation now reaches active nanobot task.** Команды `/stop`,
+  `/restart`, `/status` (все priority-команды из
+  `nanobot.command.router.CommandRouter`) теперь доходят до AgentLoop
+  даже когда все обычные слоты (`max_concurrent=1`/`2`/N) заняты
+  активной задачей той же сессии. Реализовано через **priority polling
+  path** в `MessageExchange._poll_loop` (новый опциональный хук канала
+  `poll_priority_inbound`), который вызывается до проверки
+  `is_slot_free()` и не зависит от обычного concurrency. Для
+  PostgresChannel добавлен метод `poll_priority_inbound` +
+  `_poll_priority_once`, использующий параметризованный
+  `_claim_one(priority_contents=...)`, где `priority_contents` —
+  список всех priority-команд из
+  `lib.channels.priority_commands.get_priority_commands()`
+  (читается из `CommandRouter._priority` с fallback на дефолт).
+  Фильтр в SQL: `AND content = ANY(%s)`. После доставки команды в
+  `bus.publish_inbound` работает штатный механизм nanobot:
+  `cmd_stop` → `_cancel_active_tasks(effective_key)` (или `cmd_restart`
+  / `cmd_status` для соответствующих команд). Подробности и
+  acceptance-матрица — в `docs/ARCHITECTURE.md` § «Priority polling
+  path (для priority-команд nanobot)».
 - **Pre-existing regressions в legacy-тестах** (не связаны со спекой
   `config-profile-cli-flag`, но блокировали зелёный pytest — чиним отдельным
   commit'ом):
@@ -500,9 +533,6 @@
     загрузить чат из БД, отсутствующей в CI env) запускается только
     module-level до первого runtime-вызова
     (`db_messages = _load_chat_history`).
-
-### Fixed
-
 - **`config.py:load_env`** — `#`-строка без двоеточия (например, русскоязычный
   комментарий) больше не воспринимается как заголовок секции и не меняет
   prefix для последующих `KEY=VALUE`. Заголовком считается только строка,
@@ -516,18 +546,18 @@
   результат из LLM (например, `generated_sql` для «сколько проверок»
   → 10 строк, `vector` для «плановая проверка» → 3 результата).
 
-### Docs
+### Security
 
-- **`workspace/skills/audit_analyzer/SKILL.md` § «Два режима выдачи в
-  `--mode vector`»** — добавлено явное описание трёх сценариев
-  (top-K / threshold / комбинация), таблица выбора сценария и CLI-примеры,
-  согласованные с `docs/INTERNAL_API.md`.
-- **`docs/VECTOR_INDEXES.md` § «Два режима выдачи в `search_vector`»** —
-  то же описание продублировано на уровне инфраструктуры (рядом с §
-  «Алгоритм чанкования»), со ссылками на `cache_provider.py:98` и
-  `cache_provider_impl.py::search_vector`.
-- **Дизамбигуация `--threshold` CLI vs `threshold` из конфига индекса**
-  в SKILL.md (раньше формулировка могла ввести в заблуждение).
+- **Cross-user isolation в `history_search`.** Закрыт gap №5 из
+  `docs/architecture/HISTORY_SEARCH_ANALYSIS.md`: фильтр
+  `(%s OR session_id = %s)` в `history_search_tool.py` заменён на две
+  взаимоисключающие ветви — `session_scope="current"` фильтрует по
+  `session_id`, `session_scope="all"` — по `user_id` из
+  `RequestContext.sender_id`. Никаких unscoped-fallback'ов
+  (`WHERE TRUE`, `OR TRUE`, `IS NULL OR user_id`). Добавлен
+  contract-тест на `RequestContext.sender_id`
+  (`tests/contract/test_history_search_identity_contract.py`) и
+  architecture guards (`tests/test_history_search_user_isolation_guards.py`).
 
 ### Upgrade
 
@@ -583,103 +613,26 @@
   `tests/test_profile_lifecycle.py` (4), `tests/test_pg_session_manager.py`
   (TestPGSessionManagerPure + test_init_sets_framework_contract).
 
-### Removed
+### Docs
 
-### Added (storage-hybridization)
+- **`workspace/skills/audit_analyzer/SKILL.md` § «Два режима выдачи в
+  `--mode vector`»** — добавлено явное описание трёх сценариев
+  (top-K / threshold / комбинация), таблица выбора сценария и CLI-примеры,
+  согласованные с `docs/INTERNAL_API.md`.
+- **`docs/VECTOR_INDEXES.md` § «Два режима выдачи в `search_vector`»** —
+  то же описание продублировано на уровне инфраструктуры (рядом с §
+  «Алгоритм чанкования»), со ссылками на `cache_provider.py:98` и
+  `cache_provider_impl.py::search_vector`.
+- **Дизамбигуация `--threshold` CLI vs `threshold` из конфига индекса**
+  в SKILL.md (раньше формулировка могла ввести в заблуждение).
 
-- `lib/services/session_cold_sync_service.py` —
-  `SessionColdSyncService`: фоновый daemon-поток, зеркалирующий
-  upstream JSONL → PG. Per-transaction advisory lock
-  (`pg_try_advisory_xact_lock`), батчи с сортировкой по
-  `session_key`, leader-election для multi-instance deploy,
-  экспоненциальный backoff при ошибках PG, per-iteration
-  `self._running` graceful-shutdown check. **D23 stale-detection**:
-  если `pg > jsonl + tolerance` — sync для этой сессии пропускается
-  с логированием `event_type="session_stale_detected"` (in-memory
-  dedup TTL 60s). **Reverse-lag detection**: если
-  `jsonl > pg + threshold` — логируется
-  `event_type="sync_lag_exceeded"`. Метрики
-  (`cycles_total`, `cycles_failed_total`, `cycles_skipped_lock_busy`,
-  `cycles_skipped_pool_busy`, `stale_detected_total`,
-  `sync_lag_exceeded_total`, `sync_skipped_stale_total`,
-  `stale_tolerance_seconds`, `sync_lag_threshold_seconds`,
-  `pool_size`, `pool_available`, `pool_wait_seconds` и др.)
-  экспортируются через `get_stats()`.
-- `lib/services/llm_usage_store_factory.py` —
-  `create_usage_store(config)`: фабрика upstream
-  `nanobot.llm_usage.store.LLMUsageStore` (SQLite WAL). Дефолтный
-  путь — `<get_runtime_subdir("usage")>/usage.db`. Возвращает
-  `None` при `enabled=false` / отсутствии конфигурации.
-- `lib/services/llm_observer.py` — `wrap_provider_snapshot_loader`,
-  `attach_llm_observer`, `attach_fallback_model_observer`. Единый
-  путь подключения observer-pipeline (через обёртку
-  `provider_snapshot_loader`); fail-soft при ошибке attach.
-- `lib/services/runtime_health.py` — `RuntimeHealth.get_stats()`
-  (базовый liveness: `started_at`, `uptime_seconds`, `stopped`).
-- Контрактные тесты на upstream API:
-  `tests/contract/test_session_manager_api.py` (14 методов),
-  `tests/contract/test_usage_store_api.py` (init/record/
-  record_many/recent_calls/usage_payload/count/close),
-  `tests/contract/test_llm_observer_api.py` (provider API +
-  `wrap_provider_snapshot_loader` + FallbackProvider).
-- Архитектурные гарды `tests/test_storage_hybridization.py`:
-  запрет прямых `INSERT/UPDATE/DELETE` в `agent_session_*`
-  вне `SessionColdSyncService`; запрет собственных psycopg2-пулов;
-  запрет `event_type="llm_usage"` в `DbLoggingService`; проверка
-  docstring `PGSessionManager`.
-- `tests/test_session_cold_sync_service.py` (16 mock-тестов:
-  lifecycle, batch sorting, staleness/lag detection, dedup TTL,
-  per-iteration graceful shutdown, архитектурный гард
-  `test_no_new_pool_created`); `tests/test_pg_session_manager.py`
-  (17 тестов под compatibility-layer роль);
-  `tests/test_storage_hybridization_factory.py`,
-  `tests/test_storage_hybridization_lifecycle.py`,
-  `tests/contract/test_session_manager_contract.py`
-  (4 контракта: `updated_at` обновляется при `save()`, `Session`
-  constructor, `try_log_event` sync, `utils.db.run` rollback
-  contract).
-- Документация: `docs/architecture/storage-layers.md`,
-  `docs/architecture/usage-tracking.md`, раздел «Storage
-  hybridization» в `docs/MIGRATION.md`.
+### Known Issues
 
-### Changed (storage-hybridization)
-
-- `lib/session/pg_session_manager.py` — `PGSessionManager` стал
-  тонким compatibility layer поверх upstream `SessionManager`.
-  Hot-path методы (`get_or_create`, `save`, `list_sessions`,
-  `read_session_metadata`, `read_session_file`, `delete_session`)
-  делегируются в `super()`. Никаких прямых SQL-операций в
-  `agent_session_meta` / `agent_session_messages` в hot path.
-- `lib/core/application_context.py` — создание
-  `SessionColdSyncService` и `LLMUsageStore`, lifecycle
-  (start/stop), обёртка `provider_snapshot_loader` через
-  `AgentFactory.create(... usage_store=...)`.
-- `lib/core/project_settings.py` — `UsageStoreSettings`,
-  `SessionColdSyncSettings` под `gateway.usage_store.*` /
-  `gateway.session_cold_sync.*`.
-- `project.json` — секции `gateway.usage_store.*` (дефолт
-  `enabled=true`) и `gateway.session_cold_sync.*`
-  (`enabled=true`, `sync_interval_sec=30.0`, `batch_size=50`).
-- `tests/test_config_keys.py` — `REQUIRED_KEYS` записи для
-  `gateway.usage_store.enabled` и
-  `gateway.session_cold_sync.{enabled,sync_interval_sec,batch_size}`.
-- `lib/services/context_compaction.py` и
-  `tools/generate_comments_sql.py` — обновлены docstring /
-  комментарии: сессии живут в upstream JSONL (`SessionManager`),
-  mirror — через `SessionColdSyncService`.
-
-### Removed
-
-- `lib/commands/compact_command.py` — заменено upstream `cmd_compact`.
-- `lib/hooks/base_tool_tracking_hook.py` — обёртки над публичным
-  API перенесены inline в конкретные хуки.
-- `RuntimePatcher.patch_compaction_tracking`,
-  `RuntimePatcher.patch_compact_command`,
-  `RuntimePatcher.patch_auto_compact_idle_guard` — функционал
-  перенесён на upstream-механизмы (см. Upgrade выше).
-- `RuntimePatcher.patch_context_bridge_seed` сохранён как no-op для
-  совместимости `PatchReport`; реальный seed через
-  `bus.subscribe(TurnRuntimeAdmitted)`.
+- **`tests/test_history_search_tool.py::test_search_current_session_filters_by_session`**:
+  order-dependent flake — патч `utils.db.fetch` ломается в полном прогоне
+  после `test_streamlit_app.py` (который переустанавливает `sys.modules["utils.db"]`
+  через собственный mock). Помечен `@pytest.mark.xfail(strict=False)` с TODO
+  на отдельный change. Pre-existing, не связан с config-profile-cli-flag.
 
 ## [2.5.2] — 2026-09-14
 

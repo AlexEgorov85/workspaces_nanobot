@@ -161,7 +161,31 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | **workspace/skills/*/SKILL.md** | Документация навыков |
 | **workspace/AGENTS.md** | Инструкции для агента |
 
-## 🆕 Что нового в [Unreleased]
+## 🆕 Что нового в v2.5.4
+
+**PATCH, 2026-10-09.** Первое — из изменений этого релиза, дальше — накопленное
+с прошлых версий.
+
+**Каналы стартуют только после данных и векторов.** Новый
+`lib/services/startup_gate.py`: фазы `pending → cache_ready → vectors_ready`,
+готовность определяется сигналом, а не таймаутом. Политика
+`gateway.startup.vector_preload.on_unavailable`: `warn` (дефолт, degraded-старт)
+или `fail` (`StartupGateError` → `exit 2`). Первые вопросы больше не
+обслуживаются с пустым FAISS-кэшем.
+
+**Доступ агента к аудиту — tool'ами, а не CLI.** `duckdb_query` и
+`vector_search` выполняются в процессе gateway на его живом `CacheProvider`;
+вызывать `scripts/cli.py` из агента нельзя (второй процесс не откроет
+`cache.duckdb` — DuckDB допускает одно соединение на файл).
+
+**Кэш: рабочая БД и снапшот разведены.** OWNER держит рабочую DuckDB **в
+памяти**, `cache.duckdb` — отдельный snapshot-файл, который открывается только
+на время публикации и при reuse (`adopt_snapshot()`); gateway больше не держит
+файл открытым. Свежесть снимка — `gateway.cache.reuse_ttl_hours` (дефолт 23 ч,
+`0` — всегда пересоздавать; пока снимок свежий, правки в PG не видны).
+
+**Новый skill `audit_formulation_strengthener`** — оценка силы формулировок
+проверок, свои `SKILL.md` и тесты; прогон скилла добавлен в CI.
 
 **MAJOR.** Session hot-path переведён на upstream `SessionManager` (JSONL) —
 единственный source of truth; PostgreSQL остаётся cold-storage mirror
@@ -192,32 +216,7 @@ cross-user выдачи; без identity-store возвращается `missing
 `agent_question_runs`; `/compact` использует upstream-обработчик без обёртки
 (`ContextCompactionService`, наблюдение — через `CompactionEventSubscriber`).
 
-Полный changelog — в [CHANGELOG.md → Unreleased](CHANGELOG.md#unreleased).
-
-## 🆕 Что нового в v2.5.2
-
-**PATCH поверх v2.5.1, 2026-09-14.** Две группы доработок:
-
-**NFS / DuckDB cache.** Раньше gateway, развёрнутый на NFS-шаре, цикл
-sync-а падал с `IO Error: Could not set lock on file cache.duckdb.tmp:`
-Conflicting lock is held in PID 0`. Теперь единый механизм
-`resolve_publish_path()`, safe default `~/.cache/nanobot/duckdb/cache.duckdb`,
-единственный override — `gateway.cache.local_path`, startup WARNING при
-попадании снимка на NFS и защитный publish-слой с retry.
-
-**Observability sync-путей.** Единый конвейер
-`DbLoggingService.try_log_event` вместо ad-hoc `logger.warning`; ошибки
-`preload` векторов и `channel` lease-loop попадают в долговечный
-`agent_gateway_logs`.
-
-Плюс three-mode контракт `audit_analyzer` (без fallback), vector discovery
-declared-vs-runtime (`tools/check_indexes.py`) и preload health summary на
-старте gateway. Полный changelog — в
-[CHANGELOG.md → 2.5.2](CHANGELOG.md#252--2026-09-14).
-
-История предыдущих релизов: [2.5.1](CHANGELOG.md#251--2026-09-13) и
-[2.5.0](CHANGELOG.md#250--2026-09-11) — там же, в `CHANGELOG.md`;
-сводка breaking changes — в [docs/MIGRATION.md](docs/MIGRATION.md).
+Полный changelog — в [CHANGELOG.md → 2.5.4](CHANGELOG.md#254--2026-10-09).
 
 ## 🛡 Зависимости и лицензия
 

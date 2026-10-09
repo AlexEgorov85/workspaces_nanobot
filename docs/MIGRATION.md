@@ -6,7 +6,7 @@
 
 ---
 
-## Незарелизованное (`master`, CHANGELOG → [Unreleased](../CHANGELOG.md)) — векторные индексы и изоляция `history_search`
+## v2.5.3 → v2.5.4 — векторные индексы, изоляция `history_search`, порядок старта и кэш
 
 ⚠️ **Breaking change** в подсистеме векторных индексов: persisted FAISS-кеш
 удалён, таблица-сигнатура и настройка `signature_table` больше не существуют.
@@ -60,6 +60,64 @@
 4. **Аудит вызовов `history_search`**: агент, полагавшийся на глобальную выдачу
    по `session_scope="all"`, теперь получает события только своего пользователя
    либо `missing_user_identity`, если identity-store не заполнен.
+
+### Порядок старта и профиль CLI (change `unify-cli-gateway-architecture`)
+
+⚠️ **Три BREAKING-изменения в точке входа и lifecycle.** Полное описание — в
+[CHANGELOG.md → 2.5.4](../CHANGELOG.md#254--2026-10-09); здесь только ручные
+действия оператора.
+
+1. **`python cli_agent.py --profile=prod` больше не работает.** CLI имеет
+   фиксированный профиль `test` (`CLI_FIXED_PROFILE`); передача `--profile`
+   даёт `ConfigurationError` и `exit 2`. Прод-конфигурация запускается только
+   через `python gateway.py --profile=prod`.
+2. **Cron — только под gateway.** `CronService` не создаётся при `role="cli"`,
+   даже если `gateway.enable_cron = true` (design D7). Если cron-работа шла
+   вместе с CLI-инстансом, её надо перенести на gateway-инстанс: два процесса
+   больше не выполняют один `jobs.json`.
+3. **Старт блокируется при отсутствии runtime-таблиц.** Перед стартом
+   `SchemaValidationService` проверяет наличие всех 6 таблиц
+   (`channels.postgres.{table_name,messages_table,meta_table,claims_table}` и
+   `logging.db.{table_name,question_runs_table}`) одним SELECT'ом к
+   `information_schema.tables`. Нет любой из них → `SchemaValidationError` →
+   `exit 2` с actionable-подсказкой в stderr.
+
+**Ручные действия**:
+
+1. Применить миграции для прод-профиля:
+
+   ```bash
+   python tools/migrate.py --apply
+   ```
+
+   Для тестового профиля — `python tools/apply_test_profile_tables.py`.
+   Проверку можно временно отключить секцией
+   `gateway.startup.schema_validation.*` (`enabled`, `timeout_sec`).
+
+2. Перевести прод-деплой на явный `--profile` (см. также раздел
+   «v2.5.2 → v2.5.3»).
+
+### Новые ключи конфигурации (обратно совместимы, с дефолтами)
+
+- `gateway.cache.reuse_ttl_hours` (`float`, дефолт `23`) — пока снимок
+  `cache.duckdb` моложе TTL, gateway переиспользует файл вместо полной
+  перечитки из PG. **Свежесть против скорости:** выигрыш по времени близок к
+  нулю (вычитка 6 таблиц — десятки миллисекунд), зато пока снимок свежий,
+  изменения в PG не видны — включая **удалённые** строки. Если правки в PG
+  должны быть видны сразу, ставьте `reuse_ttl_hours: 0`.
+- `gateway.startup.vector_preload.enabled` / `.await_ready` / `.on_unavailable`
+  — политика готовности векторов до старта каналов: `enabled: false` не
+  готовит векторы вовсе, `await_ready: false` поднимает каналы сразу,
+  `on_unavailable: warn` (дефолт) даёт degraded-старт, `fail` — `exit 2`.
+
+### Кэш: рабочая БД и снапшот разведены
+
+**Автоматически.** OWNER держит рабочую DuckDB **в памяти**, `cache.duckdb` —
+отдельный snapshot-файл, открываемый только на время публикации и при reuse
+(`adopt_snapshot()`). Практическое следствие для оператора: файл снимка больше
+не залочен процессом gateway, его можно читать внешними процессами; конфигурация
+«рабочая БД = файл снапшота» отвергается явно, а не падает в
+`File is already open ... (PID ...)`.
 
 ---
 
