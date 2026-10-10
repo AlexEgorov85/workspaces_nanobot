@@ -19,15 +19,18 @@ subprocess-границы больше нет, домен вызывается �
 
 ## Scope
 
-`platform` — домен и операция живут в capability `legal_summarizer`; в агенте
-не осталось ни обёртки, ни её регистрации.
+`platform` — домен живёт в capability `legal_summarizer`, а сама операция
+чтения уехала на уровень платформы: читать состояние операции — работа с
+файлами сессии, а у capability-операции нет `ctx`. В агенте не осталось ни
+обёртки, ни её регистрации.
 
-Реализация: `mcp-platform/libs/legal_summarizer/`,
-`mcp-platform/servers/enterprise/capabilities/legal_summarizer/`.
+Реализация: `mcp-platform/libs/legal_summarizer/` (домен),
+`mcp-platform/servers/enterprise/tools/query_operation.py` (операция).
 
-Вызов: операция `query_operation`, модели — как
-`mcp_enterprise_query_operation` (объявлена в
-`config.json → tools.mcpServers.enterprise.enabled_tools`).
+Вызов: операция `platform.query_operation`, модели — как
+`mcp_enterprise_platform_query_operation` (объявлена в
+`config.json → tools.mcpServers.enterprise.enabled_tools` как
+`platform.query_operation`).
 
 Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены к
 тексту канона: 3 требования под `MODIFIED` взяты телом из
@@ -99,7 +102,9 @@ Capability SHALL различать ровно три причины недос�
 `manifest_corrupted` / `manifest_unsupported_version`, а capability SHALL
 переводить их в коды конверта `not_found` / `internal` /
 `upstream_unavailable` по таблице `_ERROR_CODES` в
-`mcp-platform/servers/enterprise/capabilities/legal_summarizer/service/main.py`.
+`mcp-platform/servers/enterprise/tools/query_operation.py:52` — путь поправлен по
+диску: словаря в `capabilities/legal_summarizer/service/main.py` в дереве нет,
+операция уехала из capability на платформенный уровень.
 
 Ключи таблицы SHALL совпадать со значениями `cli_query._MANIFEST_ERROR_TYPES`
 буквально: перевод идёт по строке `error_type`, и имя «почти то же самое» молча

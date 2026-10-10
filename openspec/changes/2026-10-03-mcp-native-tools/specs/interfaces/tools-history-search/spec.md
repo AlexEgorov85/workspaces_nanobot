@@ -7,7 +7,7 @@
 `session_scope`, который выбирал `current` или `all`.
 
 Tool снят (change `2026-10-03-mcp-native-tools`, п. D6). Модель получает ту же
-операцию как `mcp_enterprise_history_search`, область ей не выбирает и не
+операцию как `mcp_enterprise_data_history_search`, область ей не выбирает и не
 видит: её задаёт вызывающая сторона, платформа применяет её принудительно.
 
 Требования прежней спеки делились на три группы. Изоляция данных и её
@@ -25,7 +25,7 @@ Tool снят (change `2026-10-03-mcp-native-tools`, п. D6). Модель по�
 Реализация: `lib/hooks/mcp_identity_hook.py` (подстановка личности),
 `mcp-platform/servers/enterprise/capabilities/data/tools/history_search.py`,
 `mcp-platform/servers/enterprise/capabilities/data/service/main.py`.
-Вызов: `mcp_enterprise_history_search`.
+Вызов: `mcp_enterprise_data_history_search`.
 
 Операции дельт, нацеленные на требования, уже лежащие в каноне, приведены к
 тексту канона: 6 требований под `MODIFIED` взяты телом из
@@ -50,7 +50,7 @@ change'а не сделана. Причина — расхождение дел�
 
 #### Scenario: Выбор области вызовами невозможен
 
-- **WHEN** модель формирует аргументы `mcp_enterprise_history_search`
+- **WHEN** модель формирует аргументы `mcp_enterprise_data_history_search`
 - **THEN** в них SHALL NOT быть параметра, задающего область поиска
 - **AND** предикат по `session_id` SHALL применяться всегда
 
@@ -67,7 +67,7 @@ change'а не сделана. Причина — расхождение дел�
 
 #### Scenario: Снятие фильтра по сессии недоступно
 
-- **WHEN** модель формирует аргументы `mcp_enterprise_history_search`
+- **WHEN** модель формирует аргументы `mcp_enterprise_data_history_search`
 - **THEN** SHALL NOT существовать способа отключить предикат по `session_id`
 - **AND** SHALL NOT существовать способа отключить предикат по `user_id`
 
@@ -315,7 +315,7 @@ SHALL NOT использоваться как действующие.
 
 #### Scenario: Агент SQL не строит
 
-- **WHEN** модель вызывает `mcp_enterprise_history_search`
+- **WHEN** модель вызывает `mcp_enterprise_data_history_search`
 - **THEN** агент SHALL NOT строить SQL
 - **AND** агент SHALL NOT обращаться к таблице журнала напрямую
 

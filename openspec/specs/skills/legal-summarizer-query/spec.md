@@ -41,7 +41,9 @@ Capability SHALL различать ровно три причины недос�
 `manifest_corrupted` / `manifest_unsupported_version`, а capability SHALL
 переводить их в коды конверта `not_found` / `internal` /
 `upstream_unavailable` по таблице `_ERROR_CODES` в
-`mcp-platform/servers/enterprise/capabilities/legal_summarizer/service/main.py`.
+`mcp-platform/servers/enterprise/tools/query_operation.py:52` (операция уехала из
+capability `legal_summarizer` на платформенный уровень — файла
+`capabilities/legal_summarizer/service/main.py` с этим словарём в дереве нет).
 
 Ключи таблицы SHALL совпадать со значениями `cli_query._MANIFEST_ERROR_TYPES`
 буквально: перевод идёт по строке `error_type`, и имя «почти то же самое» молча

@@ -30,13 +30,13 @@ Capability `data` объявляет **23 операции**, и каждая и
 | `data.fail_task` | `fail_task` | `lib/channels/queue_ops.py:446` |
 | `data.append_reasoning` | `append_reasoning` | `lib/channels/queue_ops.py:473` |
 | `data.get_message` | `get_message` | `lib/channels/queue_ops.py:484` |
-| `data.append_history_notice` | `append_history_notice` | `lib/services/context_compaction.py:578` |
+| `data.append_history_notice` | `append_history_notice` | `lib/services/context_compaction.py:535` |
 | `data.mirror_session` | `mirror_session` | `lib/gateway/mirror/mirror_poller.py:394-395` — `self._call(self.write_operation, …)` (имя связано в `session_mirror.py:134`) |
 | `data.session_mirror_state` | `session_mirror_state` | `mirror_poller.py:363` — `self._call(self.state_operation, …)` (имя в `session_mirror.py:133`) |
 | `data.cleanup_session_mirror` | `cleanup_session_mirror` | `mirror_poller.py:420` — `self._call(self.cleanup_operation, …)` (имя в `session_mirror.py:135`) |
 | `data.log_events` | `log_events` | `lib/services/log_transport.py:325` (имя в `:72`) |
-| `data.upsert_question_run` | `upsert_question_run` | `log_transport.py:480` (имя в `:74`) |
-| `data.purge_logs` | `purge_logs` | `log_transport.py:414` (имя в `:76`) |
+| `data.upsert_question_run` | `upsert_question_run` | `log_transport.py:490` (имя в `:74`) |
+| `data.purge_logs` | `purge_logs` | `log_transport.py:424` (имя в `:76`) |
 | `data.history_search` | `history_search` | модель, `config.json:878` |
 | `data.schema_check` | `schema_check` | `gateway.py:363` **и** `cli_agent.py:457` — две независимые пробы при подъёме |
 | `data.log_event` | `log_event` | **никто** |
@@ -52,13 +52,13 @@ Capability `data` объявляет **23 операции**, и каждая и
 ### Видимость объявлена, но не обеспечена
 
 Вывод ниже **уже записан в документации проекта** — и это меняет его цену.
-`docs/TARGET-ARCHITECTURE.md:501-504`:
+`mcp-platform/docs/TARGET-ARCHITECTURE.md:515-518`:
 
 > «Двенадцать операций, а не три… Из них модель получает только
 > `data.history_search` и `data.schema_check` — остальные помечены
 > `AUDIENCE_RUNTIME` (см. §11: **фильтрации при публикации в MCP пока нет**)».
 
-`docs/MCP-CONTRACTS.md:1513-1525` говорит то же и называет причину:
+`mcp-platform/docs/MCP-CONTRACTS.md:1521-1533` говорит то же и называет причину:
 
 > «Модель, увидевшая сервер в discovery, может вызвать `data.purge_logs`… но
 > публикуется наравне со всем остальным. Почему это не «мелочь»: идея „операция
@@ -73,7 +73,7 @@ Capability `data` объявляет **23 операции**, и каждая и
 Как аргумент `audience=` у метода `DataService` это **класс работы в пуле**
 (`libs/enterprise_data/audience.py:28,31`): разделяет запись журнала и его чтение,
 чтобы `history_search` не писал в тот же журнал, который читает
-(`MCP-CONTRACTS.md:1519-1521`). В документации те же метки читаются уже как
+(`mcp-platform/docs/MCP-CONTRACTS.md:1527-1529`). В документации те же метки читаются уже как
 «операция не для модели» — а этого смысла у них **нет**, и перепутаны два
 множества: у пула `model`/`runtime`, у видимости добавляется `admin`.
 
@@ -83,11 +83,11 @@ Capability `data` объявляет **23 операции**, и каждая и
 вызвать любую, включая `data.purge_logs` (обслуживание журнала) и
 `data.finalize_turn` (запись оборота).
 
-Ещё одно расхождение, найденное при сверке: `TOOLS.md:283` называет
+Ещё одно расхождение, найденное при сверке: `workspace/TOOLS.md:275` называет
 `platform.analyze_document` «операцией capability `legal_summarizer`», тогда как
 объявление несёт `capability="platform"`
-(`servers/enterprise/tools/analyze_document.py:1164`). Для `platform.query_operation`
-тот же файл (`TOOLS.md:382`) отвечает верно, то есть внутри одного документа на
+(`mcp-platform/servers/enterprise/tools/analyze_document.py:1176`). Для
+`platform.query_operation` тот же файл (`workspace/TOOLS.md:372`) отвечает верно, то есть внутри одного документа на
 один вопрос два ответа. Причина та же — имя capability в тексте писалось руками и
 разошлось с объявлением.
 
@@ -108,7 +108,8 @@ Capability `data` объявляет **23 операции**, и каждая и
 - **идентичность.** `validate_handler` **отвергает** объявления параметров
   `session_id`/`user_id`/`request_id` (`registry.py:116`, `:145`): операция не
   может принять личность аргументом. Плоский transitional-адаптер для Nanobot
-  0.3.5 уже стоит на границе MCP — `execution/pipeline.py::_resolve_identity`,
+  0.3.5 уже стоит на границе MCP —
+  `mcp-platform/libs/enterprise_common/execution/pipeline.py::_resolve_identity`,
   то есть именно там, где его и предписывает постановка.
 - **пространство имён.** Канон не может ничего сказать о смысле capability, и
   это разобрано отдельно: см. требование «Проверка формы имени не судит о смысле
@@ -155,7 +156,7 @@ Skills и адаптеры в других местах — ни одно не �
 |---|---|---|
 | `data.history_search` | внешняя | в `enabled_tools`; изоляция по `session_id`+`user_id` |
 | `data.schema_check` | runtime | две пробы при подъёме, `gateway.py:363` и `cli_agent.py:457`; в `enabled_tools` её нет |
-| `data.purge_logs` | runtime | `log_transport.py:414`; обслуживание журнала, но вызывает его рантайм, не человек |
+| `data.purge_logs` | runtime | `log_transport.py:424`; обслуживание журнала, но вызывает его рантайм, не человек |
 | 18 остальных | runtime | перечисленный выше вызывающий модуль |
 | `data.log_event` | **внутренняя** | вызывающих нет; обёртка — единственный вызывающий метода |
 | `data.delete_assistant_message` | **внутренняя** | то же |
@@ -182,8 +183,9 @@ Skills и адаптеры в других местах — ни одно не �
 объявлений, оправданных существованием метода.
 
 **Расхождение с документацией по `schema_check`, закрытое решением.**
-`TARGET-ARCHITECTURE.md:502` и `MCP-CONTRACTS.md:684` относят её к тому, что
-получает модель, и помечают `AUDIENCE_MODEL`. Фактически её зовут только две
+`mcp-platform/docs/TARGET-ARCHITECTURE.md:516-517` и
+`mcp-platform/docs/MCP-CONTRACTS.md:690` относят её к тому, что получает
+модель, и помечают `AUDIENCE_MODEL`. Фактически её зовут только две
 пробы при подъёме — `gateway.py:363` и `cli_agent.py:457`, — и в
 `enabled_tools` её нет.
 
