@@ -241,7 +241,8 @@ CacheProvider отвечает за:
 - предоставление единого интерфейса доступа (`query_sql`, `get_schema`, `explain`, `search_vector`, `preload_indexes`, `is_ready`, `close`)
 - управление snapshot'ами кэша (атомарная публикация)
 - прогрев FAISS-индексов в память и выполнение vector search
-- контроль целостности векторных индексов (`IndexIntegrityError`)
+- контроль целостности векторных индексов — через владельца индексов
+  capability `vectors`, который и поднимает `IndexIntegrityError`
 
 ## Boundary
 
@@ -249,9 +250,11 @@ CacheProvider отвечает за:
 
 - DuckDB-файлом кэша на локальном ext4 storage
 - snapshot'ами таблиц из PostgreSQL
-- FAISS-индексами, загружаемыми по требованию
-- публичным API `CacheProvider` (ABC + DuckDB/FAISS-реализация)
-- протоколом обнаружения stale/невалидных индексов через `IndexIntegrityError`
+- публичным API `CacheProvider` (ABC + DuckDB-реализация)
+- делегацией прогрева и поиска по векторам владельцу индексов capability
+  `vectors` через `VectorIndexAccessor`; сами FAISS-индексы и протокол
+  обнаружения stale/невалидных индексов (`IndexIntegrityError`) принадлежат
+  capability `vectors`, а не этому слою
 
 ### Does Not Own
 
@@ -268,7 +271,7 @@ CacheProvider отвечает за:
   объявляет платформа (`mcp-platform/platform.json → data.snapshot_path`),
   а параметры индексов и таблица хранения векторов — capability `vectors`
   (`mcp-platform/platform.json → vectors`)
-- состава снимка, объявляемого платформой (`platform.json → data.snapshot_path`): реестра таблиц `TableRegistry` в проекте **не осталось**
+- состава снимка, объявляемого платформой (`platform.json → audit.tables`): реестра таблиц `TableRegistry` в проекте **не осталось**
 
 ### Must Not Depend On
 

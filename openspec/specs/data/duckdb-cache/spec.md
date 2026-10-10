@@ -347,8 +347,8 @@ SHALL перейти в его манифест. В зависимостях а�
 
 ### Does Not Own
 
-- составом таблиц снимка как таковым — его объявляет capability `data` в
-  конфигурации;
+- составом таблиц снимка как таковым — его объявляет capability `audit`
+  (`platform.json → audit.tables`), а читает загрузчик capability `data`;
 - сборкой FAISS-индексов: снимок отдаёт эмбеддинги, индексы строит capability
   `vectors`;
 - генерацией SQL — её пишет capability `audit` внутри платформы;
@@ -458,7 +458,7 @@ change'ом `drop-local-cache-read-from-pg` — в системе один write
 | Ключ | Назначение |
 |---|---|
 | `mcp-platform/platform.json → data.snapshot_path` | путь к файлу снимка; по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb` (`mcp-platform/platform.json:99`) |
-| `mcp-platform/platform.json → data.tables` | состав таблиц, попадающих в снимок |
+| `mcp-platform/platform.json → audit.tables` | состав таблиц, попадающих в снимок |
 
 Путь объявляет платформа, поэтому оба процесса — агентский клиент и процесс
 сервера — резолвят его в один и тот же физический файл. Ключа
@@ -496,7 +496,7 @@ change'ом `drop-local-cache-read-from-pg` — в системе один write
 
 | Код | Тип | Когда |
 |---|---|---|
-| `unsupported_filesystem` | `UnsupportedFilesystemError` (`mcp-platform/libs/enterprise_data/snapshot/store.py:122`) | путь на сетевой ФС — до открытия |
+| `unsupported_filesystem` | `UnsupportedFilesystemError` (`mcp-platform/libs/enterprise_data/snapshot/store.py:114`) | путь на сетевой ФС — до открытия |
 | `cache_busy` | `CacheBusyError` (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:140`) | файл держит другой процесс |
 | `cache_open_error` | `CacheOpenError` (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:168`) | файл не открылся |
 | `unsupported_sql` | `UnsupportedSqlError` (`mcp-platform/libs/enterprise_data/snapshot/contracts.py:105`) | DDL в любом режиме |
