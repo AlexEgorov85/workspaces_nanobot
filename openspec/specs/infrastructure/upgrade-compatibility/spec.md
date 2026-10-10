@@ -190,7 +190,7 @@
 
 В поток вызовов агента спека ничего не пишет: ни `OutboundMessage`, ни
 событий журнала, ни строк таблиц. Это отличает её, например, от спеки
-`tools/history-search`.
+`interfaces/tools-history-search`.
 
 ## State
 
@@ -417,7 +417,7 @@ runtime-инвариант.
   `tests/contract/test_session_manager_api.py`,
   `tests/contract/test_session_manager_contract.py` — контракт
   `SessionManager` (покрывает требование «Контрактные тесты на upstream
-  SessionManager API» из спеки `storage/session-hybridization`);
+  SessionManager API» из спеки `sessions/session-hybridization`);
 - `tests/contract/test_agent_loop_api.py`,
   `tests/contract/test_compaction_api.py`,
   `tests/contract/test_runtime_events_api.py`,

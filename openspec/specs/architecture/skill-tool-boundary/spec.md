@@ -167,7 +167,7 @@ CI), а не результат работы компонента. Что име
 
 ## Configuration
 
-Skills регистрируются декларативно в `config.json::skills.<name>` (валидация — `SkillSettings`, `extra="forbid"`):
+Skills регистрируются декларативно в `config.json::gateway.agent.skills.<name>` (валидация — `SkillSettings`, `extra="forbid"`):
 
 ```json
 {
@@ -189,7 +189,7 @@ Tools **не** перечисляются в реестре `config.json`: он�
 
 ## Lifecycle
 
-1. **Регистрация**: Skills объявляются в `config.json::skills.*`; Tools обнаруживаются по `workspace/tools/*.py`
+1. **Регистрация**: Skills объявляются в `config.json::gateway.agent.skills.*`; Tools обнаруживаются по `workspace/tools/*.py`
 2. **Инициализация**: agent runtime загружает оба набора при старте
 3. **Вызов**: агент выбирает capability; Tool вызывается агентом, Skill работает через свои scripts и runtime interfaces — Skill не вызывает Tool
 4. **Обновление**: новые Skills/Tools добавляются через change в `config.json` / `workspace/tools/`
@@ -228,7 +228,7 @@ Tools **не** перечисляются в реестре `config.json`: он�
 - превращать любую callable-функцию в Tool только на основании её generic-природы или того, что она «уже реализована»
 - считать shared runtime infrastructure (`lib/services`, `lib/core`, `lib/utils`) частью Tool-слоя
 - создавать fallback path, который bypass эту границу (нет «legacy Skill import» или «secondary Tool call» механизма)
-- создавать второй реестр Skills или Tools вне объявленного в `config.json::skills.*`
+- создавать второй реестр Skills или Tools вне объявленного в `config.json::gateway.agent.skills.*`
 - добавлять альтернативный execution path (например, Tool напрямую callable без tool-call interface)
 
 ## Consumers
