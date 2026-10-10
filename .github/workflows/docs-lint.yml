@@ -54,6 +54,22 @@ jobs:
         run: |
           python3 tools/change_ref_audit.py
 
+  spec-crosslink-audit:
+    name: Spec cross-refs resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ссылка на спеку в форме `категория/имя` читается гладко и уводит в
+      # никуда, если такой спеки нет. `check_spec_citations.py` такой класс
+      # не видит: он проверяет ссылки `путь:строка`, а не идентификаторы.
+      # Проверка узкая: категории берутся из дерева, исторические ссылки
+      # («удалён», «до правки») находкой не считаются, а свой H1 каждой спеки
+      # сверяется с её местом в дереве.
+      - name: Audit spec cross-references
+        run: |
+          python3 tools/spec_crosslink_audit.py
+
   code-blocks:
     name: Code blocks have language
     runs-on: ubuntu-latest
