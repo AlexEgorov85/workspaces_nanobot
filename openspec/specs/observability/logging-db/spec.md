@@ -807,7 +807,7 @@ The system SHALL принимать параметр `flush_interval_sec`
   - В обоих случаях — fail-fast, до старта сервиса.
 - Поведение worker'а (батчевый flush по `flush_interval_sec`
   или `batch_size`, дедлайн-цикл с таймаутом) SHALL остаться
-  как описано в `lib/services/db_logging_service.py:800-876`.
+  как описано в `lib/services/db_logging_service.py:1826-1903`.
 
 #### Scenario: Дефолтное значение
 - **WHEN** в `config.json` отсутствует `logging.db.flush_interval_sec`
@@ -1260,16 +1260,16 @@ The system SHALL разделять два concerns: (a) UI-уведомлени
 
 | Метод | Строка | Назначение |
 |---|---|---|
-| `start` / `stop` / `is_running` | `:869`, `:882`, `:931` | lifecycle фонового writer |
-| `log_event` | `:1004` | приём одного события |
-| `register_request` / `get_request_id` / `clear_request` / `finish_request` | `:1075`–`:1175` | личность запроса и сессии |
-| `log_inbound` / `log_outbound` | `:1242`, `:1285` | сообщения шины |
-| `log_tool_call` / `log_tool_result` | `:1338`, `:1361` | вызовы инструментов |
-| `log_llm_call` | `:1415` | обращения к модели |
-| `log_sync_event` | `:1457` | синхронизация |
-| `get_stats` / `report_stats` | `:1500`, `:1513` | наблюдаемость |
-| `purge_empty_outbound` / `purge_old` | `:2164`, `:2189` | очистка |
-| `attach_transport` | `:816` | подмена транспорта |
+| `start` / `stop` / `is_running` | `:871`, `:884`, `:933` | lifecycle фонового writer |
+| `log_event` | `:1006` | приём одного события |
+| `register_request` / `get_request_id` / `clear_request` / `finish_request` | `:1077`–`:1177` | личность запроса и сессии |
+| `log_inbound` / `log_outbound` | `:1244`, `:1287` | сообщения шины |
+| `log_tool_call` / `log_tool_result` | `:1340`, `:1363` | вызовы инструментов |
+| `log_llm_call` | `:1417` | обращения к модели |
+| `log_sync_event` | `:1459` | синхронизация |
+| `get_stats` / `report_stats` | `:1502`, `:1515` | наблюдаемость |
+| `purge_empty_outbound` / `purge_old` | `:2172`, `:2197` | очистка |
+| `attach_transport` | `:818` | подмена транспорта |
 
 Модульные: `try_log_event` (`:175`), `next_event_seq` (`:338`),
 `normalize_journal_level` (`:107`), `is_probe_event_type` (`:136`).
@@ -1286,8 +1286,8 @@ metadata, произвольные поля полезной нагрузки. �
 
 Две таблицы: `agent_gateway_logs` — журнал событий, `agent_question_runs` — прогон
 вопроса. Запись идёт **транспортом в операцию платформы**
-(`_flush_batch_via_mcp`, `:1983`), а не прямым SQL. При недоступности транспорта —
-файловый fallback (`_write_fallback`, `:1963`), и потеря считается, а не скрывается.
+(`_flush_batch_via_mcp`, `:1985`), а не прямым SQL. При недоступности транспорта —
+файловый fallback (`_write_fallback`, `:1965`), и потеря считается, а не скрывается.
 
 ## State
 

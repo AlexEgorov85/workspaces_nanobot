@@ -1,4 +1,4 @@
-# storage/usage-store Specification
+# observability/usage-store Specification
 
 ## Purpose
 Определяет нормативный контракт использования upstream
@@ -206,7 +206,7 @@ metadata-only LLM usage. `DbLoggingService` НЕ ДОЛЖЕН
 - **AND** если нужно записать content-rich вариант
   (например, tool-call с metadata о LLM-вызове) —
   используется `event_type="tool_call"` / `event_type="llm_call"`
-  с полным payload согласно спеке `logging-db`.
+  с полным payload согласно спеке `observability/logging-db`.
 
 ### Requirement: Контрактные тесты на LLMUsageStore API
 
@@ -305,9 +305,10 @@ upstream-библиотеке `nanobot.llm_usage.store`. Проект владе
   (`nanobot.llm_usage.store`: `MAX_CALLS_RETAINED`, `MAX_DAYS_RETAINED`);
 - **содержание `LLMCallRecord`** — контракт библиотеки; проект его не
   формирует и не валидирует;
-- **`DbLoggingService`** — соседний, но отдельный слой; спека
-  `tools/history-search` и `runtime/observability` владеют им. Смешивать
-  их записи запрещено (см. `## Invariants`);
+- **`DbLoggingService`** — соседний, но отдельный слой; им владеет спека
+  `observability/logging-db`, а поиск по тому же журналу —
+  `interfaces/tools-history-search`. Смешивать их записи запрещено
+  (см. `## Invariants`);
 - **`FallbackProvider` и `set_fallback_model_observer(bus)`** — подписка
   на смену модели, а не учёт usage. Она соседствует в том же месте
   кода, но предметом этой спеки не является;
@@ -641,7 +642,7 @@ None`. То есть битый раздел конфигурации приво
 
 - `lib/core/agent_factory.py` — `_wrap_provider_snapshot_loader` (строка
   286): единственное место подписки; строки 323-329 (usage) и 330-339
-  (fallback-об��искатель шины).
+  (fallback-обработчик шины).
 - `lib/core/application_context.py` — `_make_usage_store` (строка 1950):
   единственное место создания; строка 390 — вызов на шаге 4a; строки
   906-911 — закрытие.

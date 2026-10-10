@@ -1,4 +1,4 @@
-# storage/session-recovery Specification
+# sessions/session-recovery Specification
 
 ## Purpose
 Lets the runtime safely recover sessions whose JSONL source is older than the PostgreSQL cold mirror (volume restore, host migration, multi-instance misconfiguration). Provides explicit, opt-in recovery modes so the gateway never silently overwrites authoritative cold-storage data.
@@ -150,10 +150,11 @@ The admin tool SHALL list every session that would be recovered in the configure
 
 Поэтому различать надо три вещи:
 
-1. **Реализовано** — один требование из семи: «Reverse sync lag produces a
-   logged event» (порог `sync_lag_threshold_seconds`, дефолт 3600, событие
-   `sync_lag_exceeded`), и смежный stale-detection
-   (`stale_tolerance_seconds`, дефолт 120, `session_stale_detected`);
+1. **Реализовано** — одно требование из семи: «Reverse sync lag produces a
+   logged event» (порог `sync_lag_threshold_seconds`, дефолт 3600; признак
+   `sync_lag_exceeded` от операции, журналируется как `agent.degraded`), и
+   смежный stale-detection (`stale_tolerance_seconds`, дефолт 120; вердикт
+   `skipped_stale`, счётчик `skipped_stale_total`);
 2. **Не реализовано** — три режима восстановления, read-only маркер,
    атомарный swap, ограничение размера, ротация бэкапов, admin tool;
 3. **Назначение** — спека описывает слой **действий** поверх уже
@@ -214,15 +215,15 @@ The admin tool SHALL list every session that would be recovered in the configure
 
 Единственная наблюдаемая поверхность, которая относится к предмету по
 существу, — **детект**, и он принадлежит другой спеке
-(`storage/session-hybridization`). Здесь он цитируется как
+(`sessions/session-hybridization`). Здесь он цитируется как
 единственная реализованная точка:
 
 | Элемент | Где | Что это |
 |---|---|---|
 | порог расхождения | `sync_lag_threshold_seconds`, дефолт 3600 | `lib/core/application_context.py:1728-1730` |
 | порог устаревания | `stale_tolerance_seconds`, дефолт 120 | `lib/core/application_context.py:1727` |
-| событие расхождения | `sync_lag_exceeded` | `session_mirror.py:274-276` |
-| событие устаревания | `session_stale_detected` | `session_mirror.py:258-261` |
+| признак расхождения от операции | `sync_lag_exceeded` | `session_mirror.py:274-276` |
+| сообщение устаревания в журнале | текст `session_stale_detected` при `event_type="agent.degraded"` | `session_mirror.py:258-261` |
 
 Уточнение к формулировке сценария «Reverse lag is logged»: он требует, чтобы
 событие «называло ключ сессии и обе метки времени». По коду `payload`
@@ -260,15 +261,16 @@ The admin tool SHALL list every session that would be recovered in the configure
 (`_publish`, `mirror_poller.py:485`), тип `agent.degraded`, уровень
 `WARN`:
 
-- `sync_lag_exceeded` — `session_mirror.py:273-285`;
-- `session_stale_detected` — `session_mirror.py:246-271`.
+- признак расхождения `sync_lag_exceeded` — `session_mirror.py:273-285`;
+- устаревание (вердикт `skipped_stale`) — `session_mirror.py:246-271`.
 
-Оба события уходят в журнал через `_publish` и доступны оператору;
+Оба уходят в журнал как `event_type="agent.degraded"` через `_publish` и
+доступны оператору;
 побочно они читаются моделью через `data.history_search` — это тот случай,
 когда детект зеркала наблюдаем из оборота, хотя сам зеркалом не является.
 
 Выходов нереализованной части нет. Отдельно стоит зафиксировать
-**дедупликацию**: `session_stale_detected` публикуется не на каждый
+**дедупликацию**: сообщение устаревания публикуется не на каждый
 пропуск, а не чаще раза в `_STALE_LOG_DEDUP_TTL`
 (`session_mirror.py:254-257`) — иначе один устаревший файл заполнил бы
 журнал. У `sync_lag_exceeded` такого дедупа нет: событие публикуется
@@ -430,8 +432,9 @@ write to the stale session»: оно подразумевает, что подс
    вычисляются платформой, вердикт возвращается в `after_write`, и по
    нему принимается решение только о журналировании
    (`session_mirror.py:218-228`).
-3. **`sync_lag_exceeded` и `session_stale_detected` — разные события**
-   с разными порогами и разной дедупликацией.
+3. **Расхождение и устаревание — разные случаи** с разными порогами,
+   разными счётчиками и разной дедупликацией; в журнал оба уходят под
+   `event_type="agent.degraded"`.
 
 Нормативная часть (требования без реализации) — их следует считать
 целями, а не наблюдаемыми свойствами:
@@ -489,9 +492,9 @@ write to the stale session»: оно подразумевает, что подс
 
 | Потребитель | Что использует | Где |
 |---|---|---|
-| Оператор | события `sync_lag_exceeded` / `session_stale_detected` в `agent_gateway_logs` | через журнал и `runtime_health` |
-| Модель агента | те же события через `data.history_search` | косвенно, в пределах своей сессии |
-| Спека `storage/session-hybridization` | тот же детект как часть своей предметной области | — |
+| Оператор | записи `agent.degraded` о расхождении и устаревании в `agent_gateway_logs` | через журнал и `runtime_health` |
+| Модель агента | те же записи через `data.history_search` | косвенно, в пределах своей сессии |
+| Спека `sessions/session-hybridization` | тот же детект как часть своей предметной области | — |
 
 Потребителей нереализованной части нет: admin tool, режимы восстановления
 и бэкапы не имеют ни одного потребителя, потому что не существуют. Это
@@ -567,7 +570,7 @@ tools/recover_stale_sessions.py` пуст. То есть change закрыт к�
 - `tests/test_service_identity.py` — служебная личность вызовов зеркала.
 
 Существующие стражи **не** покрывают предмет: проверки порогов и событий
-относятся к зеркалу (`storage/session-hybridization`), а не к слою
+относятся к зеркалу (`sessions/session-hybridization`), а не к слою
 восстановления. Ни один из перечисленных тестов не может провалить
 требование о трёх режимах, потому что код, который их реализует, не
 существует.

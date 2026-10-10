@@ -1,4 +1,4 @@
-# storage/session-hybridization Specification
+# sessions/session-hybridization Specification
 
 ## Purpose
 Определяет нормативный контракт гибридной модели хранения сессий:
