@@ -79,9 +79,9 @@
 Факты делятся на два класса, и смешивать их запрещено:
 
 - **Класс А — пишется в журнал.** Это `agent.received`
-  (`db_logging_service.py:1026`), `agent.delivered` (`:1073`),
-  `agent.responded` (`lib/hooks/database_logging_hook.py:822`),
-  `agent.completed` (`lib/services/runtime_events_subscriber.py:393`), а также
+  (`lib/services/db_logging_service.py:1274`), `agent.delivered` (`:1325`),
+  `agent.responded` (`lib/hooks/database_logging_hook.py:810`),
+  `agent.completed` (`lib/services/runtime_events_subscriber.py:466`), а также
   `llm.*` и `tool.*`. Имя печатается как есть.
 - **Класс Б — в журнале его нет.** Это жизненный цикл задачи воркера и размер
   очереди (`lib/channels/postgres_channel.py:495-496`, `:1011-1013`,
@@ -136,7 +136,8 @@
 Ключ `channel` MUST сохранять своё значение **транспорта** в обоих местах, где
 он занят: в loguru (`nanobot/channels/base.py:44`,
 `logger.bind(channel=self.name)`) и в журнале (`LogEvent.channel`,
-`db_logging_service.py:1026`, `:1073`, `runtime_events_subscriber.py:398`).
+`lib/services/db_logging_service.py:1277`, `:1328`,
+`lib/services/runtime_events_subscriber.py:470`).
 Под «кто» он MUST NOT переиспользоваться.
 
 `TerminalToolPrintHook` MUST NOT биндить `channel="tools"`
@@ -146,7 +147,8 @@
 
 Ключ `source` для этого поля MUST NOT использоваться: в журнале
 `metadata.source` уже занят и означает `nanobot`/`enterprise_mcp`
-(`db_logging_service.py:795`). Третье написание того же смысла запрещено.
+(`lib/services/db_logging_service.py:312`, значение — `:1388`). Третье написание
+того же смысла запрещено.
 
 #### Scenario: колонка «кто» никогда не пуста
 
@@ -354,7 +356,9 @@ stdout намеренно, а не через `logger.info` — уровень �
 ### Requirement: Границы консоли — что в неё MUST NOT попадать
 
 - **Текст ответа печататься в консоль MUST NOT.** В журнале `agent.delivered`
-  несёт `summary=content[:200]` (`db_logging_service.py:1073`); у строки в
+  несёт `summary=content[: self._summary_max_chars]`, то есть первые
+  `logging.db.summary_max_chars` символов (дефолт 200)
+  (`lib/services/db_logging_service.py:1331`); у строки в
   консоли MUST быть задержка и размер, а не содержимое. Дублировать ответ в
   консоли — значит отдать пользователю две копии там, где он ждёт одну.
 - **Срабатывания защитника от повторов в консоль переноситься MUST NOT.**
@@ -630,7 +634,8 @@ CallToolRequest` на каждый запрос: строка называет �
 
 - **Внутри:** формат строки, глубины `quiet|turn|trace`, отбор по глубине,
   переход с булевых флагов, сбор факта из события журнала.
-- **Снаружи:** словарь имён событий журнала (принадлежит `runtime/db-logging`);
+- **Снаружи:** словарь имён событий журнала (принадлежит
+  `observability/logging-db`);
   настройка loguru — `lib/utils/logging_utils.py`; `rich` остаётся для
   таблиц и баннера, но не для построчной печати; terminal/CLI.
 

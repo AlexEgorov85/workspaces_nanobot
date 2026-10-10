@@ -168,7 +168,7 @@ THEN `OutboundMessage` SHALL сохранить все обязательные 
 - **Внутри:** текст ответа, признаки `_error_kind`/`_final_turn`, одна
   публикация outbound, запись `agent.failed`, runtime-событие `turn_completed`.
 - **Снаружи:** обработка исключения — `AgentLoop`; маршрутизация сообщений —
-  `TurnDeliveryFactory` upstream; схема и запись в журнал — `runtime/db-logging`.
+  `TurnDeliveryFactory` upstream; схема и запись в журнал — `observability/logging-db`.
 
 ## Public Contract
 

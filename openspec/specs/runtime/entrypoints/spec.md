@@ -1507,7 +1507,8 @@ capability.
 - **Внутри:** разбор argv, вызов `ApplicationContext.create`, порядок
   подъёма обязательных зависимостей, код возврата, shutdown.
 - **Снаружи:** сбор сервисов — `ApplicationContext`; поведение AgentLoop —
-  `runtime/agent-loop`; логика каналов и cron; рендер REPL —
+  upstream `nanobot`, его точки расширения — `runtime/agent-hooks` и
+  `runtime/error-fallback`; логика каналов и cron; рендер REPL —
   `runtime/operator-console`. Entrypoint не знает про устройство capability
   платформы, кроме имён проб в сводке здоровья.
 

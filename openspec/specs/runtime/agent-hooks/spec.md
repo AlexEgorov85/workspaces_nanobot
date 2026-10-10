@@ -85,7 +85,7 @@ keyword argument`), невозможен именно потому, что пр�
 - **Снаружи:** тела самих хуков (у `RepeatGuardHook` отдельная спека —
   `runtime/anti-loop`), загрузка плагинов `workspace/hooks/` с allowlist'ом
   (`lib/cli/hook_loader.py:31`, спека `runtime/context`), схема и запись в БД
-  (`runtime/db-logging`).
+  (`observability/logging-db`).
 
 ## Public Contract
 
