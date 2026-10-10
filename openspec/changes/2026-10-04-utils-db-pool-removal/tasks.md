@@ -13,9 +13,9 @@ python tools/validate_component_specs.py --strict
 
 ## 0. Инвентаризация (шаг 3, п. 1)
 
-- [x] 0.1 Перемерить `workspace/utils/db.py`: **1143 строки**, SQL-строк — 8,
+- [x] 0.1 Перемерить `lib/utils/db.py`: **1143 строки**, SQL-строк — 8,
       `.execute(`/`executemany(` — 13. Модуль — фабрика пула, не простыня SQL.
-- [x] 0.2 Перемерить потребителей: упоминаний `lib.utils.db` — **35 файлов**
+- [x] 0.2 Перемерить потребителей: упоминаний `lib.utils.db` — **34 файла**
       (в постановке было 7). Реальных импортов в продакшн-коде — **4**.
 - [x] 0.3 Разложить по категориям (реальный импорт / строковый patch /
       подставной `sys.modules` / docstring) — таблица в `proposal.md`.
@@ -27,58 +27,60 @@ python tools/validate_component_specs.py --strict
 
 - [x] 1.1 Проверить, что файлы — надгробия. Кода в них нет: только docstring.
 - [x] 1.2 Проверить, что операции живут в другом месте. `DataService.claim_task`
-      (`service/main.py:1606`) и `DataService.update_task_status`
-      (`service/main.py:1634`) на месте; живые операции —
+      (`capabilities/data/service/main.py:1606`) и `DataService.update_task_status`
+      (`capabilities/data/service/main.py:1634`) на месте; живые операции —
       `tools/claim_task.py`, `tools/update_task_status.py`; реестр —
       `service/registry.py:46,48`.
 - [x] 1.3 `git rm` обоих файлов. Выполнено, файлов нет на диске.
 - [x] 1.4 Проверить, что удаление — no-op для рантайма. **Проверено запуском:**
       `discover_tool_files` (capability `data`) → **23** файла операций, файлов
       на `_` в выборке загрузчика **ноль**, живые операции на месте. Плюс
-      чтением `loader.py:71` и независимым стражем в тестах
+      чтением `libs/enterprise_common/loader.py:105` и независимым стражем в тестах
       `tests/test_session_mirror_wire.py:67`, который тоже пропускает `_`.
 
-## 2. Шаг 3 — снос `workspace/utils/db.py`: НЕ ВЫПОЛНЕН
+## 2. Шаг 3 — снос `lib/utils/db.py`: НЕ ВЫПОЛНЕН
 
 - [ ] 2.1 `lib/core/application_context.py` → пул платформы/канала.
       **Заблокировано:** пула-переёмника в агенте нет; альтернатива —
       `schema_check` платформы, но `start()` выполняется до `asyncio.run`
-      (`gateway.py:179`, `cli_agent.py:244`), а клиент `async`
-      (`enterprise_mcp_client.py:998,1168,1207`). Перенос в живой loop =
+      (`gateway.py:179`, `cli_agent.py:249`), а клиент `async`
+      (`enterprise_mcp_client.py:957,1151,1206`). Перенос в живой loop =
       правка `gateway.py` и `cli_agent.py` → **оба вне владения**.
 - [ ] 2.2 `lib/services/session_storage.py`. Само по себе безопасно
       (`configure()` только пишет module-global `_dsn`, побочных эффектов нет,
-      `workspace/utils/db.py:912-918`; экспорт `os.environ["DATABASE_URL"]`
+      `lib/utils/db.py:912-918`; экспорт `os.environ["DATABASE_URL"]`
       независим и остаётся). **Сознательно не выполнено:** `configure(dsn)`
       задаёт пулу DSN из разрешённой секции `channels.postgres`, а
       `resolve_dsn()` без него читает сырой `config.SETTINGS`; равенство этих
       значений не проверено, а снятие `configure` изменило бы, к какому DSN
       подключится живой пул, — риск без пользы.
-- [ ] 2.3 Обновить тестовых потребителей. Фактически их не 5, а 8 файлов:
+- [ ] 2.3 Обновить тестовых потребителей. Фактически их не 5, а 4 файла:
       - `tests/test_utils_db.py` — собственный набор тестов модуля (15 ссылок),
         удаляется вместе с модулем;
-      - `tests/test_application_context.py:502,522` — строковый
+      - `tests/test_application_context.py:527,547` — строковый
         `monkeypatch.setattr("lib.utils.db.fetch_with_timeout", …)`;
       - `tests/test_application_context_schema_validation.py:114,132,146,157,172,202`
         — строковый `patch("lib.utils.db.fetch_with_timeout", …)`;
       - `tests/test_startup_schema_validation_live.py:64` — реальный импорт;
-      - `tests/test_turn_observability_events.py:146` — реальный импорт.
+      - `tests/test_turn_observability_events.py` — больше не импортирует
+        `lib.utils.db` (упоминаний в файле нет);
       Ещё 6 файлов подставляют `sys.modules["lib.utils.db"]`
       (`test_application_context.py`, `test_application_context_logging.py`,
       `test_cli_agent.py`, `test_gateway.py`, `test_runtime_health.py`,
       `test_session_storage.py`) — после удаления станут инертными.
       **Не выполнено** — следствие 2.1.
 - [ ] 2.3a **Коллизия владения подтвердилась.** `tests/test_turn_observability_events.py`
-      входит и в список потребителей `lib.utils.db` (стр. 146, реальный импорт),
+      входил в список потребителей `lib.utils.db` (стр. 146, реальный импорт
+      — на момент сессии; сегодня упоминаний `lib.utils.db` в файле нет),
       и в список файлов соседа. На момент начала сессии файл был чист, к
       концу работы уже модифицирован соседом (−220/+18 строк). Правки не
       вносились.
-- [ ] 2.4 `git rm workspace/utils/db.py`. **Не выполнено**, пока живут 2.1–2.3.
-      Промежуточно: сломаются `gateway.py:653` (отчёт о пуле станет постоянным
+- [ ] 2.4 `git rm lib/utils/db.py`. **Не выполнено**, пока живут 2.1–2.3.
+      Промежуточно: сломаются `gateway.py:750` (отчёт о пуле станет постоянным
       «не удалось подключиться») и `scripts/backfill_media_aw.py:37`.
 - [x] 2.5 Зафиксировать нормативное препятствие:
-      `openspec/specs/runtime/startup-schema-validation/spec.md:180-187`
-      требует пул `lib.utils.db`, `:55-59` запрещает ресурсы вне его.
+      `openspec/specs/runtime/startup-schema-validation/spec.md:114-126`
+      требует пул `lib.utils.db`, `:231-235` запрещает ресурсы вне его.
 
 ## 3. Коллизия change'ов (требует решения владельца)
 
@@ -114,12 +116,13 @@ python tools/validate_component_specs.py --strict
       Это весьмая поверхность: единственный тест, перечисляющий каталог
       операций платформы, — `test_session_mirror_wire.py`, и он пропускает
       имена на `_` (`tests/test_session_mirror_wire.py:67`), как и загрузчик
-      (`libs/enterprise_common/loader.py:71`). Правок в `lib/` я не вносил.
+      (`libs/enterprise_common/loader.py:105`). Правок в `lib/` я не вносил.
       Отдельно подтверждено запуском: `discover_tool_files` на capability
       `data` → 23 файла операций, файлов на `_` — ноль.
 - [x] 4.2 `npx --no-install openspec validate 2026-10-04-utils-db-pool-removal --strict`
       — см. отчёт агента.
 - [x] 4.3 `python tools/validate_component_specs.py --strict` — **ровно 3**
-      нарушения, все в `runtime/entrypoints`; база не изменилась.
+      нарушения, все в `runtime/entrypoints`; база не изменилась. На 2026-10-10
+      тот же прогон даёт 0 нарушений, exit 0.
 - [ ] 4.4 Прогон платформенных тестов — **НЕ ПРОВЕРЕНО** (по условию задачи
       не требовался: удалены два loader-невидимых файла).
