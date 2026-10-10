@@ -186,10 +186,11 @@
 - [ ] 3.9 **[A]** **Решение, а не правка по умолчанию:** определить, чем именно
   отвергается `gateway.vector.index` после удаления поля. Механизма в ветке
   `gateway.*` нет — `_StrictOptional` = `extra="allow"`
-  (`lib/core/project_settings.py:55-58`), `GatewaySettings` (`:237`) и
-  `ProjectSettings` (`:759`) своего `model_config` не имеют. Готовый образец в
-  дереве есть — валидатор `_reject_legacy_renamed_sections` (`:253-261`) поверх
-  `_LEGACY_GATEWAY_KEYS` (`:782-784`), но он знает только `gateway.vector_index`
+  (`lib/core/project_settings.py:55` — это `model_config = ConfigDict(extra="allow")`
+  в базовом `_StrictOptional`), `GatewaySettings` (`:176`) и
+  `ProjectSettings` (`:593`) своего `model_config` не имеют. Готовый образец в
+  дереве есть — валидатор `_reject_legacy_renamed_sections` (`:193`) поверх
+  `_LEGACY_GATEWAY_KEYS` (`:619`), но он знает только `gateway.vector_index`
   **без точки**, то есть legacy-путь, а не удаляемую секцию. **НЕ ПРОВЕРЕНО:**
   выбор между (а) внести текущий путь в legacy-guard как fail-fast и (б) иным
   способом запретить секцию — не принимался; без решения требование дельты
@@ -278,7 +279,7 @@
   **0 совпадений обязательно:** `gateway_vector_index_config`,
   `build_vectors`, `register_vector_storage` (в `lib/` остаётся ровно одно — в
   docstring'е `_reject_legacy_renamed_sections`,
-  `lib/core/project_settings.py:263`; вычистить, см. 3.7), `CacheProvider.search_vector`.
+  `lib/core/project_settings.py:201`; вычистить, см. 3.7), `CacheProvider.search_vector`.
 
   **Допустимые исключения, перечисленные явно. Список шире области обхода выше:**
   часть пунктов лежит внутри области, часть — вне неё; ниже они разделены, чтобы
@@ -289,7 +290,7 @@
   * docstring'и, описывающие legacy-путь: `project_settings.py:151,158,456,470,482`,
     `:651`, `:784` (последние две — обязательная правка по 3.7), `tools/legacy_audit.py:35`;
   * сам legacy-guard `_reject_legacy_renamed_sections` / `_LEGACY_GATEWAY_KEYS`
-    (`:253-261`, `:782-784`) — он существует именно чтобы называть старый путь;
+    (`:193`, `:619`) — он существует именно чтобы называть старый путь;
   * `tools/legacy_audit.py:377` — отчёт по legacy-ключам, перечисление путей
     назначения (решение «оставить или удалить» — 5.3);
   * `workspace/memory/history.jsonl:50` — 1 совпадение, `workspace/` в область

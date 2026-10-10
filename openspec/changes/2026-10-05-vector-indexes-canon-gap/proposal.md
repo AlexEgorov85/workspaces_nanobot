@@ -56,8 +56,9 @@
 `platform.json → vectors.indexes`, плюс `skills.audit_analyzer.tables`, совпадающее
 с `platform.json → audit.tables`. Потребителей в дереве агента нет:
 
-* `VectorInfrastructureSettings` объявлена в `lib/core/project_settings.py:186`, но
-  в `lib/` её никто не читает — grep даёт только объявления и docstring-комментарии;
+* `VectorInfrastructureSettings` была объявлена в `lib/core/project_settings.py`
+  и удалена задачей 3.2 — класса в файле больше нет, а в `lib/` её и не читал
+  никто: grep давал только объявления и docstring-комментарии;
 * `VectorIndexSettings` (`:141`) — модель, которая реально держит `storage_table`
   (`:182`) и `indexes: dict[str, VectorIndexConfig]` (`:183`) и docstring со
   ссылками на `gateway.vector.index.*` (`:151,158`; `:152` — это legacy-путь
@@ -65,9 +66,19 @@
   путь, поэтому в перечень ссылок на `gateway.vector.index.*` они не входят);
   вне этого своего docstring'а и объявления она тоже не используется, поэтому
   удаляется целиком вместе с остальными моделями;
-* `skills.audit_analyzer.*` читает только `tests/test_config_keys.py:90-101`;
-* `VectorIndexConfig` при этом называет свою секцию «единственным источником деталей
-  построения индекса» (`project_settings.py:484`).
+* `skills.audit_analyzer.*` в агентских тестах читает не `test_config_keys.py`
+  (там на `:90-101` лежит `gateway.sync.*`, а секции навыка нет вовсе), а три
+  других места: `tests/test_application_context.py:164`,
+  `tests/test_application_context_single_application_point.py:159`,
+  `tests/test_application_context_logging.py:184`;
+* `VectorIndexConfig` описывает свою секцию как **domain binding** навыка, а
+  составы таблиц и индексов прямо отдаёт платформе
+  (`lib/core/project_settings.py:475-482`): «Ни состава таблиц, ни состава
+  vector-индексов навык не объявляет», оба состава объявляет
+  `mcp-platform/platform.json → audit.tables` и `… → vectors.indexes`.
+  Прежний текст этого bullet'а называл здесь «единственный источник деталей
+  построения индекса» — формулировка снята вместе с `VectorIndexConfig` и
+  больше в файле не встречается.
 
 То есть мёртвая конфигурация не просто лежит — она **описана в коде как
 единственный источник истины** и **держится в живых тестах ассертами, печатающими
@@ -128,10 +139,10 @@
     (`config.json:733-735`);
   * `gateway.vector.index` отвергается **только после реализации этого change**.
     Сейчас этого механизма нет: `_StrictOptional` — это `extra="allow"`
-    (`:55-58`), `GatewaySettings` (`:237`) и `ProjectSettings` (`:759`) своего
+    (`:55`), `GatewaySettings` (`:176`) и `ProjectSettings` (`:593`) своего
     `model_config` не имеют, а единственный отвергатель в ветке `gateway.*` —
-    валидатор `_reject_legacy_renamed_sections` (`:253-261`) поверх
-    `_LEGACY_GATEWAY_KEYS` (`:782-784`), и он знает только legacy-путь
+    валидатор `_reject_legacy_renamed_sections` (`:193`) поверх
+    `_LEGACY_GATEWAY_KEYS` (`:619`), и он знает только legacy-путь
     `gateway.vector_index` **без точки**. Без явного решения секция будет принята
     как лишний ключ, то есть вернётся ровно тот дефект, который change закрывает.
   * `tests/test_config_keys.py` утверждает отсутствие обеих секций.

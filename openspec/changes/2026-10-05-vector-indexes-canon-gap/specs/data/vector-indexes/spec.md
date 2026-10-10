@@ -334,10 +334,10 @@ MUST подниматься и обслуживать остальные.
 > **Маршрут реализации — решение этого change, а не уже работающий механизм.**
 > В ветке `gateway.*` отвержения нет: `_StrictOptional` объявлен как
 > `extra="allow"` (`lib/core/project_settings.py:55-58`), `GatewaySettings`
-> (`:237`) своего `model_config` не имеет, а `ProjectSettings` (`:759`) —
+> (`:176`) своего `model_config` не имеет, а `ProjectSettings` (`:593`) —
 > тоже. Единственный действующий отвергатель в этой ветке —
-> валидатор `_reject_legacy_renamed_sections` (`:253-261`) поверх списка
-> `_LEGACY_GATEWAY_KEYS` (`:782-784`), и он знает ровно одну секцию —
+> валидатор `_reject_legacy_renamed_sections` (`:193`) поверх списка
+> `_LEGACY_GATEWAY_KEYS` (`:619`), и он знает ровно одну секцию —
 > `gateway.vector_index` **без точки** (legacy-путь, а не текущий
 > `gateway.vector.index`). Поэтому требование отвержения `gateway.vector.index`
 > невыполнимо в текущем виде: без явного решения (добавить путь в
