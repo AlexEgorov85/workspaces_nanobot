@@ -41,6 +41,19 @@ jobs:
             exit 1
           fi
 
+  change-ref-audit:
+    name: Change refs point at real lines
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ссылка `путь:строка` в change'е, ушедшая за пределы файла, читается
+      # гладко и молча вводит в заблуждение при разборе. Проверка узкая: только
+      # дрейф номера строки у однозначно резолвящегося пути.
+      - name: Audit path:line refs in openspec/changes
+        run: |
+          python3 tools/change_ref_audit.py
+
   code-blocks:
     name: Code blocks have language
     runs-on: ubuntu-latest
