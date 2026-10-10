@@ -61,6 +61,11 @@ REF = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)*\."
 # который ругается на верном тексте, хуже отсутствия инструмента: на него
 # перестают смотреть. Сокращённые ссылки считаются и печатаются, но не ругают.
 BARE_REF = re.compile(r"(?<![A-Za-z0-9_.])`:(\d+)(?:-(\d+))?`")
+# Ссылка на файл без каталога и без номера строки: (`cache_provider.py`).
+# Раньше такие ссылки не попадали даже в отчёт: класс «путь не резолвится»
+# срабатывал только при наличии `:номер`, а в change'ах удалённые модули
+# упоминаются именно голыми именами — и потому были не видны вовсе.
+BARE_FILE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_.-]*\." + EXT + r")`")
 
 # Маркеры прошлого. Список неполный, и это осознанно: лучше пропустить находку,
 # чем заблокировать работу на верном историческом тексте.
@@ -229,7 +234,7 @@ def unresolved() -> tuple[list[str], int]:
     for ch in sorted(d for d in CHANGES.iterdir() if d.is_dir() and d.name != "archive"):
         for doc in sorted(ch.rglob("*.md")):
             docrel = doc.relative_to(ROOT).as_posix()
-            for para, start in paragraphs(doc.read_text(encoding="utf-8")):
+            for para, start in items(doc.read_text(encoding="utf-8")):
                 for m in REF.finditer(para):
                     raw = m.group(1)
                     if "/" not in raw:
@@ -238,6 +243,12 @@ def unresolved() -> tuple[list[str], int]:
                     if resolve(raw, idx) is None:
                         rows.append(f"{docrel}:{start + para[:m.start()].count(chr(10))}"
                                     f"  {raw}")
+                for m in BARE_FILE.finditer(para):
+                    name = m.group(1)
+                    checked += 1
+                    if not idx.get(name):
+                        line_no = start + para[:m.start()].count(chr(10))
+                        rows.append(f"{docrel}:{line_no}  {name}  (голое имя)")
     return rows, checked
 
 
