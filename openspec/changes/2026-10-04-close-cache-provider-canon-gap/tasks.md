@@ -35,7 +35,7 @@
 ## 2. Открытые решения — НЕ в этом change
 
 - [ ] 2.1 **[P]** NFS-детектор работает только на Linux: на Windows и macOS
-  `reject_unsupported_filesystem()` — no-op (`store.py:150`, `:160-161`;
+  `reject_unsupported_filesystem()` — no-op (`store.py:145`, `:161-162`;
   закреплено тестом `::TestNoFileHold::test_non_linux_is_a_noop`). Требование
   «network/shared filesystem MUST быть отвергнуты» на этой машине не выполняется.
   Нужен отдельный change платформы: определить ФС на Windows/macOS и отвергать
@@ -72,9 +72,9 @@
   (проверено сплошным проходом по 59 ссылкам реестра). Настоящее расхождение
   было другим — строкой `Profiles`, объявлявшей `config.json::profiles` вместо
   `mcp-platform/platform.json::profiles`; исправлено коммитом `3bf1a8c`.
-  Пометка в `OWNERSHIP.md:92-95` описывала состояние до 2026-10-01.
+  Пометка в `OWNERSHIP.md:200-204` описывала состояние до 2026-10-01.
 - [ ] 2.5 **[P]** Текст ошибки `reject_unsupported_filesystem` советует настроить
-  `gateway.cache.local_path` (`store.py:193`) — настройки больше нет. Косметика,
+  `gateway.cache.local_path` (`store.py:194`) — настройки больше нет. Косметика,
   но вводит оператора в заблуждение.
 
 ## 3. Проверки, которые осталось сделать — НЕ ПРОВЕРЕНО

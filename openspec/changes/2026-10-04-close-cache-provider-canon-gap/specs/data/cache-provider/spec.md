@@ -8,7 +8,7 @@
 остался. Дыра старая, но после пересборки `unify-runtime-channels` она становится
 **вторым** противоречием между двумя канонами: `runtime/entrypoints` уже записал,
 чем именно снятые требования заменены
-(`openspec/specs/runtime/entrypoints/spec.md:815-820`), а `data/cache-provider`
+(`openspec/specs/runtime/entrypoints/spec.md:1486-1491`), а `data/cache-provider`
 по-прежнему требует `CacheOwnershipCoordinator.try_claim()` и
 `resolve_publish_path(role)`.
 
@@ -73,7 +73,7 @@ composition root платформы.
   владельца индексов capability `vectors`»).
 - Без подключённого владельца `preload_indexes()` MUST вернуть пустой список, а
   `search_vector` MUST поднять отказ с кодом `index_not_built`, а не `AttributeError`
-  (`store.py:803-808`, `:824-825`).
+  (`store.py:803-808`, `:830-831`).
 
 #### Scenario: Снимок не строит индекс и не импортирует FAISS
 
@@ -93,7 +93,7 @@ composition root платформы.
 - **THEN** MUST быть поднят `InfrastructureError` с кодом `index_not_built`
   (`store.py:803-808`)
 - **AND** `preload_indexes()` MUST вернуть пустой список, а не упасть
-  (`store.py:824-825`)
+  (`store.py:830-831`)
 - **AND** причина MUST доезжать до вызывающего как отказ операции, а не как
   `AttributeError`: неподключённый владелец — настроечное состояние, а не дефект
   кода (проверяется
@@ -124,11 +124,11 @@ composition root платформы.
 не отличил бы «снимка нет» от «снимок сломан».
 
 - Соединение MUST открываться и закрываться внутри вызова
-  (`_read_conn()` в `store.py:380`).
+  (`_read_conn()` в `store.py:383`).
 - Неудача открытия MUST классифицироваться: занятый файл, неоткрываемый файл,
   неподдерживаемая ФС — разные ошибки
-  (`_classify_open_error()` в `store.py:444`;
-  `UnsupportedFilesystemError` — `store.py:113`, `CacheBusyError`,
+  (`_classify_open_error()` в `store.py:447`;
+  `UnsupportedFilesystemError` — `store.py:114`, `CacheBusyError`,
   `CacheOpenError` — `snapshot/contracts.py:140,168`).
 - `CacheOpenError` MUST быть `ConfigurationError`, потому что провал открытия
   файла снимка — сбой startup-инфраструктуры, а не ошибка вызова
@@ -140,7 +140,7 @@ composition root платформы.
 - **WHEN** выполнено несколько `query_sql` подряд в режиме `READ_ONLY`
 - **THEN** соединение MUST открываться на время вызова и закрываться сразу после
   него, а не жить между вызовами
-  (`store.py:22-24` — докстринг; `store.py:380` — `_read_conn()`)
+  (`store.py:22-24` — докстринг; `store.py:383` — `_read_conn()`)
 - **AND** проверяется
   `mcp-platform/tests/test_snapshot_no_file_hold.py::TestNoFileHold::test_file_not_held_between_reads`
 - **AND** падение запроса MUST NOT оставлять соединение открытым
@@ -206,7 +206,7 @@ MUST писать через одну операцию полной замены
   содержимого таблицы»)
 - **AND** `upsert_records` MUST оставаться примитивом хранилища и MUST NOT
   становиться вторым runtime-путём записи
-  (`store.py:832`; `store.py:28-29`)
+  (`store.py:838`; `store.py:28-29`)
 
 #### Scenario: Загрузчик — единственный, кто открывает снимок на запись
 
@@ -258,7 +258,7 @@ MUST писать через одну операцию полной замены
 - **WHEN** `ENTERPRISE_SNAPSHOT_PATH` пуст
 - **THEN** сервер MUST подняться, а capability MUST отдать
   `UnavailableSnapshot` с текстом «снимок не настроен»
-  (`server.py:484-488`; `platform.json:95` и `data._about` — «Путь здесь OPTIONAL…
+  (`server.py:484-488`; `platform.json:99` и `data._about` — «Путь здесь OPTIONAL…
   пустое значение означает „снимок ненастроен"… а не „сервер не запустится"»)
 - **AND** остальные capability MUST работать как обычно: снимок от них не зависит
   (проверяется
@@ -282,14 +282,14 @@ MUST писать через одну операцию полной замены
 
 - **WHEN** определяется, где лежит файл снимка
 - **THEN** путь MUST читаться из `mcp-platform/platform.json → data.snapshot_path`
-  (`platform.json:95`), а не из `config.json` агента: секции `gateway.cache` в
+  (`platform.json:99`), а не из `config.json` агента: секции `gateway.cache` в
   `config.json` нет (0 совпадений)
 - **AND** `~` MUST разворачиваться платформой при чтении настройки
-  (`resolve_snapshot_setting()` в `store.py:213`; вызов — `server.py:480-482`)
+  (`resolve_snapshot_setting()` в `store.py:214`; вызов — `server.py:480-482`)
 - **AND** путь MUST приниматься как путь **к файлу**, а не как каталог: требование
   разбирать путь обратно на каталог завело бы второе место, где решается, где лежит
   снимок (`server.py:463-468`; форма «каталог» осталась только для
-  standalone-утилит — `resolve_snapshot_path()`, `store.py:258`)
+  standalone-утилит — `resolve_snapshot_path()`, `store.py:259`)
 
 ## MODIFIED Requirements
 
@@ -472,7 +472,7 @@ Concrete adapter `DuckDbSnapshotStore` сам реализует, как отк�
 `lib/`,
 `mcp-platform/libs/`, `mcp-platform/servers/`, `config.json`,
 `mcp-platform/platform.json`); имя класса осталось только в прозе —
-`snapshot/contracts.py:56` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:51`.
+`snapshot/contracts.py:56` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:58`.
 Пока компонент
 был, требование было честным; после снятия оно осталось правдой в прошедшем времени.
 
@@ -481,7 +481,7 @@ Concrete adapter `DuckDbSnapshotStore` сам реализует, как отк�
 (`mcp-platform/libs/enterprise_data/snapshot/contracts.py::CacheAccessMode`), и его
 роль ограничена свойством доступа к файлу, а не координацией между процессами. Это
 же зафиксировано в каноне `runtime/entrypoints`
-(`openspec/specs/runtime/entrypoints/spec.md:815-816`).
+(`openspec/specs/runtime/entrypoints/spec.md:1486`).
 
 Точное содержание снятого требования, чтобы снятие было проверяемым, а не
 «перепишем позже»:
@@ -513,7 +513,7 @@ Concrete adapter `DuckDbSnapshotStore` сам реализует, как отк�
 `mcp-platform/libs/enterprise_data/snapshot/contracts.py::CacheAccessMode`, объём
 его роли ограничен свойством доступа к файлу, а не координацией между
 процессами. Это же зафиксировано в каноне `runtime/entrypoints`
-(`openspec/specs/runtime/entrypoints/spec.md:815-816` — таблица «Снятые
+(`openspec/specs/runtime/entrypoints/spec.md:1486` — таблица «Снятые
 требования»).
 
 #### Scenario: Слоя владения, который можно было бы заменить, не существует
@@ -522,13 +522,13 @@ Concrete adapter `DuckDbSnapshotStore` сам реализует, как отк�
 - **THEN** `CacheOwnershipCoordinator` MUST NOT существовать ни в одном дереве
   (в коде 0 совпадений по `lib/`, `mcp-platform/libs/`, `mcp-platform/servers/`,
   `config.json`, `mcp-platform/platform.json`; имя класса осталось только в
-  прозе — `snapshot/contracts.py:56` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:51`,
+  прозе — `snapshot/contracts.py:56` и `mcp-platform/docs/TARGET-ARCHITECTURE.md:58`,
   и ни то ни другое кодом не является)
 - **AND** таблицы `agent_cache_ownership` MUST NOT существовать: fencing без
   takeover'а не имеет предмета
   (в `sql/**` — 0 совпадений: таблицу не создаёт ни одна миграция; имя осталось
   в комментариях `V006`/`V007` и в `sql/migrations/README.md`; канон
-  `runtime/entrypoints:816` фиксирует то же)
+  `runtime/entrypoints:1486` фиксирует то же)
 - **AND** режим доступа MUST определяться стадией жизненного цикла, а не
   координацией между процессами
   (`snapshot/contracts.py:46-58`)

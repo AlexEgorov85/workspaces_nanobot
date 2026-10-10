@@ -28,7 +28,7 @@
 уже приведён к коду (change
 `2026-10-04-session-hybridization-canon-gap`), и `runtime/entrypoints` уже
 зафиксировал в таблице «Снятые требования»
-(`openspec/specs/runtime/entrypoints/spec.md:815-820`), чем именно заменены
+(`openspec/specs/runtime/entrypoints/spec.md:1486-1491`), чем именно заменены
 кэш-требования. То есть **один канон говорит «этого нет», второй говорит
 «это есть»**. После пересборки `unify-runtime-channels` (его дельта трогает
 `runtime/entrypoints`) это станет прямое противоречие между двумя канонами
@@ -41,16 +41,16 @@
 
 | # | Требование канона | Что в коде | Расхождение | Решение | Код-основание |
 |---|---|---|---|---|---|
-| 1 | `PostgreSQL — источник истины` | `SnapshotLoadService` читает PG, отдаёт снимку строки; таблица заменяется целиком | `PgDuckDbSyncService` не существует; инкрементального sync по track-колонке нет | `MODIFIED` | `PgDuckDbSyncService` — **0 совпадений в коде**, два упоминания в докстрингах `lib/services/db_logging_service.py:209`, `:1504`; `loader.py:149-157`, `:321` |
-| 2 | `локальный ext4 storage` | `resolve_snapshot_path(cache_dir, filename)`; путь в `platform.json → data.snapshot_path`; NFS-отвергнение есть | `gateway.cache.local_path` нет в `config.json`; `resolve_publish_path` 0 совпадений; `role` 0; слой владения 0 | `MODIFIED` | `config.json` `"cache"`/`local_path` — **0 совпадений**; `profiles/test.jsonc` — **0 совпадений**; `store.py:258-270`, `:87`, `platform.json:95` |
+| 1 | `PostgreSQL — источник истины` | `SnapshotLoadService` читает PG, отдаёт снимку строки; таблица заменяется целиком | `PgDuckDbSyncService` не существует; инкрементального sync по track-колонке нет | `MODIFIED` | `PgDuckDbSyncService` — **0 совпадений в коде**, два упоминания в докстрингах `lib/services/db_logging_service.py:211`, `:1470`; `loader.py:149-157`, `:321` |
+| 2 | `локальный ext4 storage` | `resolve_snapshot_path(cache_dir, filename)`; путь в `platform.json → data.snapshot_path`; NFS-отвергнение есть | `gateway.cache.local_path` нет в `config.json`; `resolve_publish_path` 0 совпадений; `role` 0; слой владения 0 | `MODIFIED` | `config.json` `"cache"`/`local_path` — **0 совпадений**; `profiles/test.jsonc` — **0 совпадений**; `store.py:258-270`, `:87`, `platform.json:99` |
 | 3 | `единый интерфейс доступа` | Навык зовёт операции платформы (`mcp_enterprise_*`); `CacheProvider` — ABC платформы | Навык не может вызвать `query_sql()`: объекта нет в его процессе | `MODIFIED` | `config.json` `enterprise_mcp` (объявлен); `contracts.py:195`; `workspace/skills/audit_analyzer/SKILL.md` |
 | 4 | `vector search только через CacheProvider.search_vector` | FAISS принадлежит `libs/vectors`; `search_vector` делегирует `VectorIndexAccessor` | FAISS не может быть у владельца снимка; `index_path` не портирован намеренно | `MODIFIED` | `store.py:9-17`, `:273-295`, `:786-811`, `:798-801` |
-| 5 | `контроль целостности индексов` | `verify_index_signature()` → `IndexIntegrityError` `STALE`/`INVALID` до эмбеддинга | **Совпадает.** Поведение то же, владелец другой | `MODIFIED` (только владелец) | `libs/vectors/owner.py:344-351`; `signature.py:12` |
+| 5 | `контроль целостности индексов` | `verify_index_signature()` → `IndexIntegrityError` `STALE`/`INVALID` до эмбеддинга | **Совпадает.** Поведение то же, владелец другой | `MODIFIED` (только владелец) | `libs/vectors/owner.py:362-366`; `signature.py:12` |
 | 6 | `Storage implementation isolation` | `import duckdb` только в модуле снимка; FAISS только в `libs/vectors` | Из перечня потребителей мертвы `CacheSyncService`, `CacheOwnershipCoordinator` | `MODIFIED` | `store.py:1`, `:298`; `CacheSyncService` — **0 совпадений** |
-| 7 | `CacheProvider как интерфейс без конкретной СУБД` | `CacheProvider(ABC)` без `open()`; фабрика — модульная функция | Пункт «factory вызывает `ApplicationContext`» неверен: это composition root платформы | `MODIFIED` | `contracts.py:195,223-280`; `store.py:1408`; `application_context.py:761` |
-| 8 | `CacheOwnershipCoordinator как абстрагированный ownership` | **Ничего.** Класс, таблица, все методы отсутствуют | Требование целиком описывает несуществующий компонент | `REMOVED` | `CacheOwnershipCoordinator`, `try_claim`, `acquire_write_fence`, `ClaimResult`, `agent_cache_ownership` — **0 совпадений в коде**; имя класса осталось в прозе (`snapshot/contracts.py:56`, `docs/TARGET-ARCHITECTURE.md:51`) |
+| 7 | `CacheProvider как интерфейс без конкретной СУБД` | `CacheProvider(ABC)` без `open()`; фабрика — модульная функция | Пункт «factory вызывает `ApplicationContext`» неверен: это composition root платформы | `MODIFIED` | `contracts.py:195,223-280`; `store.py:1414`; `application_context.py:761` |
+| 8 | `CacheOwnershipCoordinator как абстрагированный ownership` | **Ничего.** Класс, таблица, все методы отсутствуют | Требование целиком описывает несуществующий компонент | `REMOVED` | `CacheOwnershipCoordinator`, `try_claim`, `acquire_write_fence`, `ClaimResult`, `agent_cache_ownership` — **0 совпадений в коде**; имя класса осталось в прозе (`snapshot/contracts.py:56`, `docs/TARGET-ARCHITECTURE.md:58`) |
 | 9 | `query_sql mode semantics` | `assert_query_allowed()`: DDL → `UnsupportedSqlError` в любом mode; DML при `read_only` → `ReadOnlyAssertionError`; SELECT проходит | **Совпадает дословно.** Не трогаем | оставить как есть | `sql_guard.py:101-120`; `contracts.py:105,122` |
-| 10 | `CacheAccessMode и двухуровневая защита` | `read_only=True` в `connect()` + assertion-guard `_assert_writable` | Двухуровневая защита **совпадает**. Ложна только строка выбора режима: `ClaimResult.acquired` → `READ_WRITE` | `MODIFIED` | `store.py:334`, `:427`, `:575-591`, `:1002-1020`; `contracts.py:46-58`; `ClaimResult` — **0 совпадений** |
+| 10 | `CacheAccessMode и двухуровневая защита` | `read_only=True` в `connect()` + assertion-guard `_assert_writable` | Двухуровневая защита **совпадает**. Ложна только строка выбора режима: `ClaimResult.acquired` → `READ_WRITE` | `MODIFIED` | `store.py:337`, `:430`, `:575-591`, `:1002-1020`; `contracts.py:46-58`; `ClaimResult` — **0 совпадений** |
 
 ### Два класса расхождения — смешаны не были
 
@@ -74,7 +74,7 @@
    `contracts.py:195,285,358`).
 4. **Ненастроенный/непригодный снимок отказывает операциям, а не роняет сервер** —
    `UnavailableSnapshot` с кодом причины (`server.py:484-504`;
-   `unavailable.py:28-32`; `platform.json:95` + `data._about`;
+   `unavailable.py:28-32`; `platform.json:99` + `data._about`;
    `mcp-platform/tests/test_snapshot_optional_startup.py`).
 
 ### Найдено сверх названного
@@ -93,7 +93,7 @@
   MISSING). Навык `legal_summarizer`, которого канон касается в тексте
   (`workspace/skills/legal_summarizer/SKILL.md`), — MISSING.
 - **`gateway.enable_audit` в `config.json` — 0 совпадений.** Поле
-  `ApplicationContext.enable_audit` осталось (`application_context.py:114`, `:186`),
+  `ApplicationContext.enable_audit` осталось (`application_context.py:116`, `:188`),
   но к снимку отношения не имеет. Канон строит на нём требование
   «cache lifecycle MUST быть отделён от `gateway.enable_audit`» — предпосылки нет.
 - **Ссылка на чужой канон устарела:** «См. подробный контракт в
@@ -164,25 +164,25 @@
 правка. Перечислены, чтобы не потерялись.
 
 - **Три упоминания снятых классов остались в прозе кода.** `PgDuckDbSyncService` —
-  дважды в докстрингах агента (`lib/services/db_logging_service.py:209`, `:1504`),
+  дважды в докстрингах агента (`lib/services/db_logging_service.py:211`, `:1470`),
   при этом самого класса нет; `CacheOwnershipCoordinator` — в докстринге
   `mcp-platform/libs/enterprise_data/snapshot/contracts.py:56` и в
-  `mcp-platform/docs/TARGET-ARCHITECTURE.md:51`. Кода там нет, но тот, кто ищет
+  `mcp-platform/docs/TARGET-ARCHITECTURE.md:58`. Кода там нет, но тот, кто ищет
   «кто такой `try_claim`», находит ссылку и не находит определения. Висячие
   ссылки на подсистему, снятую 2026-10-02, — то есть ровно тот класс расхождения,
   который этот change и закрывает, но уже в другом файле. Дельта их не трогает:
   это правка кода, три строки текста. **Нужен отдельный change.**
 - **Три упоминания снятых классов остались в прозе кода.** `PgDuckDbSyncService` —
-  дважды в докстрингах агента (`lib/services/db_logging_service.py:209`, `:1504`),
+  дважды в докстрингах агента (`lib/services/db_logging_service.py:211`, `:1470`),
   при этом самого класса нет; `CacheOwnershipCoordinator` — в докстринге
   `mcp-platform/libs/enterprise_data/snapshot/contracts.py:56` и в
-  `mcp-platform/docs/TARGET-ARCHITECTURE.md:51`. Кода там нет, но тот, кто ищет
+  `mcp-platform/docs/TARGET-ARCHITECTURE.md:58`. Кода там нет, но тот, кто ищет
   «кто такой `try_claim`», находит ссылку и не находит определения. Висячие
   ссылки на подсистему, снятую 2026-10-02, — то есть ровно тот класс расхождения,
   который этот change и закрывает, но уже в другом файле. Дельта их не трогает:
   это правка кода, три строки текста. **Нужен отдельный change.**
 - **NFS-детектор работает только на Linux.** `reject_unsupported_filesystem()`
-  завершается no-op на Windows и macOS (`store.py:150`, `:160-161`), и это
+  завершается no-op на Windows и macOS (`store.py:145`, `:161-162`), и это
   закреплено тестом `::TestNoFileHold::test_non_linux_is_a_noop`. То есть
   требование «network/shared filesystem MUST быть отвергнуты» на этой машине **не
   выполняется**. Требование в каноне оставлено как есть: ослаблять его под
@@ -197,9 +197,9 @@
   их не затрагивает. См. следующий раздел.
 - **`COMPONENTS.md` всё ещё перечисляет `CacheProvider` и `VectorIndexService` как
   компоненты агента** и указывает файлы, которых нет. Это уже зафиксировано в
-  `OWNERSHIP.md:92-95`; файл не `openspec/**`, здесь не правится.
+  `OWNERSHIP.md:200-204`; файл не `openspec/**`, здесь не правится.
 - **Сообщение `reject_unsupported_filesystem` советует настроить
-  `gateway.cache.local_path`** (`store.py:193`) — настройки, которая больше не
+  `gateway.cache.local_path`** (`store.py:194`) — настройки, которая больше не
   существует. Косметика, но оператору вводит в заблуждение. Правка кода
   платформы, мелкая.
 
