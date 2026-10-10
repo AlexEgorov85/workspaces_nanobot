@@ -21,15 +21,15 @@
 | configuration | 1 | 0 | 1 | 0 | 0 |
 | data | 9 | 1 | 8 | 0 | 0 |
 | documentation | 1 | 0 | 0 | 1 | 0 |
-| infrastructure | 1 | 0 | 1 | 0 | 0 |
-| interfaces | 2 | 0 | 2 | 0 | 0 |
+| infrastructure | 2 | 0 | 2 | 0 | 0 |
+| interfaces | 1 | 0 | 1 | 0 | 0 |
 | observability | 2 | 0 | 2 | 0 | 0 |
-| runtime | 20 | 0 | 19 | 1 | 0 |
+| runtime | 19 | 0 | 19 | 0 | 0 |
 | sessions | 2 | 0 | 1 | 1 | 0 |
 | skills | 1 | 0 | 1 | 0 | 0 |
 | testing | 1 | 0 | 1 | 0 | 0 |
 | validation | 1 | 0 | 0 | 1 | 0 |
-| **Итого** | **43** | **1** | **38** | **4** | **0** |
+| **Итого** | **42** | **1** | **38** | **3** | **0** |
 
 ## Компоненты
 
@@ -95,6 +95,7 @@
 | Компонент | Реализация | Спецификация | Статус |
 |-----------|------------|--------------|--------|
 | TestProfileTables | `tools/apply_test_profile_tables.py:main` | [`infrastructure/test-profile-tables`](infrastructure/test-profile-tables/spec.md) | partial |
+| UpgradeCompatibility | `lib/services/runtime_patcher.py`, `pyproject.toml` | [`infrastructure/upgrade-compatibility`](infrastructure/upgrade-compatibility/spec.md) | partial |
 
 ### Skills
 
@@ -139,7 +140,6 @@
 | Компонент | Реализация | Спецификация | Статус |
 |---|---|---|---|
 | HistorySearch | `mcp-platform/servers/enterprise/capabilities/data/tools/history_search.py` | [`interfaces/tools-history-search`](interfaces/tools-history-search/spec.md) | partial |
-| UpgradeCompatibility | `lib/services/runtime_patcher.py`, `pyproject.toml` | [`infrastructure/upgrade-compatibility`](infrastructure/upgrade-compatibility/spec.md) | partial |
 
 ## План заполнения
 
