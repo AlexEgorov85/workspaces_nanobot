@@ -241,7 +241,7 @@
 - [x] 4.2 **[A]** `tests/test_enterprise_mcp_config.py` — отдельно. Замечание:
   формулировка «схема `ProjectSettings`, `extra="forbid"`» была неверной —
   `ProjectSettings` объявлен `extra="allow"`
-  (`lib/core/project_settings.py:759`); файл проверяет разбор конфигурации, а не
+  (`lib/core/project_settings.py:596`); файл проверяет разбор конфигурации, а не
   отвержение неизвестных ключей на корне.
 - [x] 4.3 **[O]** `python tools/validate_component_specs.py --strict` — baseline
   = **ровно 3 нарушения, все три в

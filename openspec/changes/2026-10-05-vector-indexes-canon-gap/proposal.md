@@ -119,13 +119,13 @@
   из `lib/core/project_settings.py` и ассерты из `tests/test_config_keys.py`.
 * Запирает результат стражем, причём страж работает на разных механизмах для
   двух секций — различать их обязательно, иначе спека обещает то, чего кода нет:
-  * `skills.*.vector_indexes` (и `skills.*.tables`) отвергается **только после
-    удаления полей** `SkillSettings.tables`
-    (`lib/core/project_settings.py:666`) и `SkillSettings.vector_indexes`
-    (`:667`) — сегодня это **объявленные** поля модели, поэтому
-    `extra="forbid"` (`:663`) их типизирует, а не отвергает, и обе секции
-    сегодня валидируются (`config.json:817,835`). Удаление объявлено в
-    `tasks.md` п. 3.3;
+  * `skills.*.vector_indexes` (и `skills.*.tables`) отвергается полями, удалёнными
+    в п. 3.3: `SkillSettings.tables` и `SkillSettings.vector_indexes` в модели
+    больше нет — отсутствие зафиксировано докстрингом
+    `lib/core/project_settings.py:475-482`, — поэтому `extra="forbid"`
+    (`:500`) отвергает обе секции как неизвестный ключ. В `config.json` секций
+    тоже нет: `skills.audit_analyzer` объявляет только `enabled`
+    (`config.json:733-735`);
   * `gateway.vector.index` отвергается **только после реализации этого change**.
     Сейчас этого механизма нет: `_StrictOptional` — это `extra="allow"`
     (`:55-58`), `GatewaySettings` (`:237`) и `ProjectSettings` (`:759`) своего
